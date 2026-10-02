@@ -1,1 +1,20 @@
-# Story 32.6: per-coin chart layouts and the [default] template; written by data_api.
+["ETHUSDT-LINEAR.BYBIT"]
+v = 1
+bar_seconds = 60
+mode = "candles"
+volume = true
+crosshair = true
+visible_bars = 10
+
+["ETHUSDT-LINEAR.BYBIT".pane_heights]
+price = 515
+volume = 104
+
+["ETHUSDT-LINEAR.BYBIT".volume_profile]
+rows = 24
+kind = "fixed"
+hd = false
+session = "daily"
+value_area_pct = 70
+start = 1790699760
+end = 1790701440

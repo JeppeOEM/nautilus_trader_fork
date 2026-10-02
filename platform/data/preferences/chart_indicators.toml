@@ -1,3 +1,5 @@
+"ETHUSDT-LINEAR.BYBIT" = []
+
 [["SOL-USD-PERP.HYPERLIQUID"]]
 name = "HullMovingAverage"
 category = "native"

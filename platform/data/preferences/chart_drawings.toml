@@ -1,0 +1,36 @@
+["ETHUSDT-LINEAR.BYBIT"]
+v = 1
+
+[["ETHUSDT-LINEAR.BYBIT".items]]
+kind = "position"
+id = "position-1"
+side = "short"
+time = 1790694300
+entry = 2695.94
+stop = 2712.06
+target = 2664.03
+width_bars = 40
+
+[["ETHUSDT-LINEAR.BYBIT".items]]
+kind = "fib"
+id = "fib-1"
+anchors = [
+    { time = 1790686740, price = 2736.89 },
+    { time = 1790688900, price = 2707.84 },
+]
+levels = [
+    { ratio = 0, enabled = true, color = "#787b86" },
+    { ratio = 0.236, enabled = true, color = "#f23645" },
+    { ratio = 0.382, enabled = true, color = "#b26a00" },
+    { ratio = 0.5, enabled = true, color = "#089981" },
+    { ratio = 0.618, enabled = true, color = "#00838f" },
+    { ratio = 0.786, enabled = true, color = "#9c27b0" },
+    { ratio = 1, enabled = true, color = "#787b86" },
+    { ratio = 1.272, enabled = false, color = "#795548" },
+    { ratio = 1.618, enabled = false, color = "#2962ff" },
+    { ratio = 2.618, enabled = false, color = "#131722" },
+    { ratio = 4.236, enabled = false, color = "#f23645" },
+]
+extend_right = true
+label_side = "left"
+line_width = 1
