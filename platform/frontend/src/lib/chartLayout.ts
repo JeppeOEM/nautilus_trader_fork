@@ -30,6 +30,29 @@ export interface VolumeProfileLayout {
   end: number | null;
 }
 
+// Story 32.8: the volume footprint's settings, the optional `footprint` table of the layout. Mirrored
+// by `views/preferences.py` (`FOOTPRINT_MODES`, `FOOTPRINT_DEFAULT_IMBALANCE_RATIO`,
+// `MAX_FOOTPRINT_ROW_TICKS`; `test_footprint_settings_mirror_the_frontend` pins the pairs, so keep
+// the plain `export const NAME = N;` form it reads).
+export type FootprintMode = "bid_ask" | "delta" | "volume";
+export const FOOTPRINT_MODES: readonly FootprintMode[] = ["bid_ask", "delta", "volume"];
+export const FOOTPRINT_DEFAULT_IMBALANCE_RATIO = 3;
+export const MAX_FOOTPRINT_ROW_TICKS = 1000000;
+
+export interface FootprintSettings {
+  on: boolean;
+  /** Price ticks per row; 0 = auto (the server's smallest size giving at most 24 rows per bar). */
+  row_ticks: number;
+  mode: FootprintMode;
+  /** A diagonal imbalance is flagged at `side >= ratio * opposite` (>= 1). */
+  imbalance_ratio: number;
+  /** The cells' numbers and the per-bar footer; off = heat only. */
+  text: boolean;
+  /** Absent = the chart's `--chart-up` / `--chart-down` token (never stored as null). */
+  buy_color?: string;
+  sell_color?: string;
+}
+
 export interface ChartLayout {
   bar_seconds: number;
   mode: LayoutMode;
@@ -40,6 +63,7 @@ export interface ChartLayout {
   /** The zoom: how many bars are on screen. Never the absolute scroll position. */
   visible_bars: number;
   volume_profile: VolumeProfileLayout;
+  footprint: FootprintSettings;
 }
 
 export const BUILT_IN_LAYOUT: ChartLayout = {
@@ -60,6 +84,13 @@ export const BUILT_IN_LAYOUT: ChartLayout = {
     letters: false,
     start: null,
     end: null,
+  },
+  footprint: {
+    on: false,
+    row_ticks: 0,
+    mode: "bid_ask",
+    imbalance_ratio: FOOTPRINT_DEFAULT_IMBALANCE_RATIO,
+    text: true,
   },
 };
 
@@ -138,6 +169,36 @@ function profileOf(raw: unknown, fallbacks: string[]): VolumeProfileLayout {
   return profile;
 }
 
+const isColor = (value: unknown): value is string => typeof value === "string" && value.length > 0;
+
+/**
+ * The footprint table: absent (a layout saved before Story 32.8) is the default, silently; a present
+ * table's unusable fields fall back one by one, each named in `fallbacks`.
+ */
+function footprintOf(raw: unknown, fallbacks: string[]): FootprintSettings {
+  const base = BUILT_IN_LAYOUT.footprint;
+  if (raw === undefined) return { ...base };
+  if (!isRecord(raw)) {
+    fallbacks.push("footprint");
+    return { ...base };
+  }
+  const out: FootprintSettings = { ...base };
+  const take = <K extends keyof FootprintSettings>(key: K, ok: boolean): void => {
+    if (ok) out[key] = raw[key] as FootprintSettings[K];
+    else fallbacks.push(`footprint.${key}`);
+  };
+  take("on", typeof raw.on === "boolean");
+  take("row_ticks", isInt(raw.row_ticks, 0, MAX_FOOTPRINT_ROW_TICKS));
+  take("mode", FOOTPRINT_MODES.some((m) => m === raw.mode));
+  const ratio = raw.imbalance_ratio;
+  take("imbalance_ratio", typeof ratio === "number" && Number.isFinite(ratio) && ratio >= 1);
+  take("text", typeof raw.text === "boolean");
+  for (const key of ["buy_color", "sell_color"] as const) {
+    if (key in raw) take(key, isColor(raw[key]));
+  }
+  return out;
+}
+
 /**
  * The layout the server returned, made safe to render: any field this client cannot use (a
  * `bar_seconds` outside `TIMEFRAMES`, an unknown `mode`, a malformed number) falls back to the
@@ -166,6 +227,7 @@ export function normalizeLayout(raw: unknown): { layout: ChartLayout; fallbacks:
     pane_heights: copyHeights(source.pane_heights, fallbacks),
     visible_bars: barsOk ? bars : BUILT_IN_LAYOUT.visible_bars,
     volume_profile: profileOf(source.volume_profile, fallbacks),
+    footprint: footprintOf(source.footprint, fallbacks),
   };
   if (fallbacks.length > 0) {
     console.error(
@@ -176,12 +238,19 @@ export function normalizeLayout(raw: unknown): { layout: ChartLayout; fallbacks:
   return { layout, fallbacks };
 }
 
-/** The PUT body's layout: `start`/`end` are omitted while null (the table cannot store a null). */
+/** The PUT body's layout: `start`/`end` are omitted while null and the footprint colours while unset
+ * (the table cannot store a null, and the server refuses an empty colour). */
 export function layoutForSave(layout: ChartLayout): Record<string, unknown> {
   const { start, end, ...profile } = layout.volume_profile;
+  const { buy_color, sell_color, ...footprint } = layout.footprint;
   return {
     ...layout,
     volume_profile: { ...profile, ...(start === null ? {} : { start }), ...(end === null ? {} : { end }) },
+    footprint: {
+      ...footprint,
+      ...(isColor(buy_color) ? { buy_color } : {}),
+      ...(isColor(sell_color) ? { sell_color } : {}),
+    },
   };
 }
 

@@ -873,3 +873,9 @@ Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message h
 - source_spec: `_bmad-output/implementation-artifacts/spec-32-7-remaining-tradingview-profiles-auto-anchored-anchored-vp-anchored-vwap-and-tpo.md`
   summary: TPO overflow bar takes the colour of the last block, losing the up/down split of hidden touches.
   evidence: VolumeProfilePrimitive drawTpo overflow path.
+- source_spec: `_bmad-output/implementation-artifacts/spec-32-8-volume-footprint-bars-from-the-raw-trade-archive-toggled-from-the-indicators-menu.md`
+  summary: The views' other catalog readers (`kernel.catalog_files.query_second_ohlc` and its siblings behind `candle_page`) list files and then open them, so a nightly consolidation that removes minute files after writing their day file makes a concurrent read raise an unledgered `FileNotFoundError` (a bare 500).
+  evidence: `archive/consolidate_catalog.py` writes the merged day file and then removes its sources; no reader in `views/` or `kernel/catalog_files.py` other than the new `query_trade_columns` (Story 32.8 follow-up review) catches `FileNotFoundError` or lists again.
+- source_spec: `_bmad-output/implementation-artifacts/spec-32-8-volume-footprint-bars-from-the-raw-trade-archive-toggled-from-the-indicators-menu.md`
+  summary: `kernel.catalog_files.query_second_ohlc` and the other pre-existing catalog readers behind `candle_page` let a truncated or corrupt Parquet file's `pyarrow.ArrowInvalid`/`OSError` escape unmapped, so the chart request fails as a bare 500 that no `error_ledger.record` site counts (DATA-07).
+  evidence: Only the new `query_trade_columns` (Story 32.8 second follow-up review) maps an unreadable file to a ledgered error; `query_second_ohlc` and its siblings call `pq.read_table`/`pq.read_schema` with no handler, and `data_api/routes/candles.py` maps only `ImpossibleCandle`.

@@ -38,6 +38,8 @@ vi.mock("../api/client", () => ({
   saveCoinDrawings: (...args: unknown[]) => drawingsApi.save(...args),
   fetchCoinIndicatorConfig: vi.fn().mockResolvedValue([]),
   saveCoinIndicatorConfig: saveConfigMock,
+  // Story 32.8: never reached (useFootprint is mocked below); listed so a stray call fails loudly.
+  fetchFootprint: vi.fn(() => Promise.reject(new Error("fetchFootprint is not stubbed in this test"))),
   // IndicatorPicker (rendered by ChartPage) fetches the catalog on mount.
   fetchIndicatorCatalog: vi.fn().mockResolvedValue({
     SimpleMovingAverage: { params: {}, panel: "overlay", category: "native", source_selectable: true },
@@ -57,6 +59,7 @@ const hooks = vi.hoisted(() => ({
   liveBar: [] as number[],
   pickerBar: [] as number[],
   openGapTo: [] as number[],
+  footprint: [] as { enabled: boolean; rowTicks: number; barSeconds: number }[],
 }));
 // Stable references (a fresh array per render would churn useReplay's memo) that the
 // replay tests swap in.
@@ -81,6 +84,18 @@ vi.mock("../hooks/useCandles", () => ({
       precision: mocks.precision,
       openGapTo: (time: number) => hooks.openGapTo.push(time),
     };
+  },
+}));
+
+// Story 32.8: the footprint hook records what the page asks of it; `footprintResult` is what it
+// answers (a stable object, like the real hook's state).
+const footprintResult = vi.hoisted(() => ({
+  current: { items: [] as unknown[], precision: null as { price: number; size: number } | null, error: null as string | null },
+}));
+vi.mock("../hooks/useFootprint", () => ({
+  useFootprint: (_iid: string, _chart: unknown, barSeconds: number, enabled: boolean, rowTicks: number) => {
+    hooks.footprint.push({ enabled, rowTicks, barSeconds });
+    return footprintResult.current;
   },
 }));
 
@@ -178,6 +193,7 @@ interface ChartStubProps {
   markerTime?: number | null;
   anchorMarkerTime?: number | null;
   legendExtras?: { id: string; label: string; color: string; value: number | null; format: (value: number) => string }[];
+  footprint?: { items: { t: number }[]; precision: { price: number; size: number } | null; settings: Record<string, unknown> } | null;
   volumeProfiles?: {
     id: string;
     profile: { totalVolume: number; rows: unknown[] };
@@ -266,6 +282,8 @@ beforeEach(() => {
   hooks.liveBar = [];
   hooks.pickerBar = [];
   hooks.openGapTo = [];
+  hooks.footprint = [];
+  footprintResult.current = { items: [], precision: null, error: null };
   localStorage.clear();
   mocks.candles = [];
   mocks.volume = [];
@@ -3105,5 +3123,106 @@ describe("ChartPage anchored drawing past the newest bar (Story 32.7 review)", (
     await renderReady(page());
 
     expect(lastChartProps.current!.volumeProfiles![0].xAnchor).toEqual({ time: 200 });
+  });
+});
+
+describe("ChartPage volume footprint (Story 32.8)", () => {
+  const ITEMS = [{ t: 60_000 }, { t: 120_000 }];
+  const lastFootprintCall = () => hooks.footprint.at(-1)!;
+  async function openIndicators(): Promise<HTMLElement> {
+    render(page());
+    await act(async () => {}); // catalog load
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "Chart controls" })).getByRole("button", { name: "Indicators" }));
+    return screen.getByRole("dialog", { name: "Indicators" });
+  }
+  const legend = (action: "hide" | "settings" | "remove") => act(() => lastChartProps.current!.onLegendAction!(action, "footprint"));
+
+  it("is off by default: the hook is disabled (no request) and the chart gets no footprint", async () => {
+    const dialog = await openIndicators();
+
+    expect(within(dialog).getByRole("checkbox", { name: /Footprint/ })).not.toBeChecked();
+    expect(hooks.footprint.every((c) => !c.enabled)).toBe(true);
+    expect(lastChartProps.current!.footprint).toBeNull();
+  });
+
+  it("is pinned next to Volume, and switching it on fetches, draws and saves it in the coin's layout", async () => {
+    footprintResult.current = { items: ITEMS, precision: { price: 2, size: 6 }, error: null };
+    const dialog = await openIndicators();
+    const pinned = within(dialog).getByRole("checkbox", { name: "Volume" }).closest(".indicator-dialog-pinned")!;
+
+    fireEvent.click(within(pinned as HTMLElement).getByRole("checkbox", { name: /Footprint/ }));
+
+    expect(lastFootprintCall()).toEqual({ enabled: true, rowTicks: 0, barSeconds: 60 });
+    expect(lastChartProps.current!.footprint).toMatchObject({ items: ITEMS, precision: { price: 2, size: 6 }, settings: { on: true } });
+    cleanup(); // flushes the pending save
+    expect(lastSaved().footprint).toMatchObject({ on: true, row_ticks: 0, mode: "bid_ask" });
+  });
+
+  it("restores the on state from the layout, and the legend x turns it off with no further request", () => {
+    layoutApi.server[IID] = layoutOf({ footprint: { ...BUILT_IN_LAYOUT.footprint, on: true } });
+    render(page());
+    expect(lastFootprintCall().enabled).toBe(true);
+
+    legend("remove");
+
+    expect(lastFootprintCall().enabled).toBe(false);
+    expect(lastChartProps.current!.footprint).toBeNull();
+    cleanup();
+    expect(lastSaved().footprint.on).toBe(false);
+  });
+
+  it("is not fetched or drawn in Lines mode, and says so in the Indicators dialog", async () => {
+    layoutApi.server[IID] = layoutOf({ footprint: { ...BUILT_IN_LAYOUT.footprint, on: true } });
+    const dialog = await openIndicators();
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+
+    expect(lastFootprintCall().enabled).toBe(false);
+    expect(lastChartProps.current!.footprint).toBeNull();
+    expect(within(dialog).getByText("Candles mode only")).toBeInTheDocument();
+  });
+
+  it("opens its settings from the legend gear; a style-only Apply keeps the row size (no refetch)", () => {
+    layoutApi.server[IID] = layoutOf({ footprint: { ...BUILT_IN_LAYOUT.footprint, on: true } });
+    render(page());
+    legend("settings");
+    const dialog = screen.getByRole("dialog", { name: "Footprint settings" });
+
+    fireEvent.change(within(dialog).getByLabelText("Display mode"), { target: { value: "delta" } });
+    fireEvent.click(within(dialog).getByLabelText("Show numbers"));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+    expect(screen.queryByRole("dialog", { name: "Footprint settings" })).toBeNull();
+    expect(new Set(hooks.footprint.filter((c) => c.enabled).map((c) => c.rowTicks))).toEqual(new Set([0]));
+    expect(lastChartProps.current!.footprint!.settings).toMatchObject({ mode: "delta", text: false, row_ticks: 0 });
+    cleanup();
+    expect(lastSaved().footprint).toMatchObject({ on: true, mode: "delta", text: false, row_ticks: 0 });
+  });
+
+  it("refetches with the new row size when Apply changes it, and refuses a row size it cannot use", () => {
+    layoutApi.server[IID] = layoutOf({ footprint: { ...BUILT_IN_LAYOUT.footprint, on: true } });
+    render(page());
+    legend("settings");
+    const dialog = screen.getByRole("dialog", { name: "Footprint settings" });
+
+    fireEvent.change(within(dialog).getByLabelText("Row size"), { target: { value: "fixed" } });
+    fireEvent.change(within(dialog).getByLabelText("Ticks per row"), { target: { value: "0" } });
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("Row size must be a whole number of ticks");
+    expect(within(dialog).getByRole("button", { name: "Apply" })).toBeDisabled();
+
+    fireEvent.change(within(dialog).getByLabelText("Ticks per row"), { target: { value: "5" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+    expect(lastFootprintCall()).toMatchObject({ enabled: true, rowTicks: 5 });
+    cleanup();
+    expect(lastSaved().footprint.row_ticks).toBe(5);
+  });
+
+  it("shows the hook's error under the chart", () => {
+    layoutApi.server[IID] = layoutOf({ footprint: { ...BUILT_IN_LAYOUT.footprint, on: true } });
+    footprintResult.current = { items: [], precision: null, error: "Data API answered 500 -- footprint not loaded (see error bar)" };
+    render(page());
+
+    expect(screen.getByText(/Footprint: Data API answered 500/)).toBeInTheDocument();
   });
 });

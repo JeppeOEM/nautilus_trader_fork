@@ -14,7 +14,8 @@
 # -------------------------------------------------------------------------------------------------
 """
 Read-only catalog file helpers (DDD spine AD-D3): the read twin of `venue_http` -- file-span and
-leaf listing plus column-projected Parquet reads of the second-snapshot rows over the catalog root.
+leaf listing plus column-projected Parquet reads of the second-snapshot rows over the catalog root,
+and of the raw trade archive's integer columns (`query_trade_columns`, Story 32.8).
 
 Invariant: reading only. Nothing here writes, renames or deletes a catalog file, or constructs a
 `ParquetDataCatalog` (the catalog object's decoder turns every row's 20-level book into Python
@@ -23,7 +24,7 @@ from Nautilus's own `class_to_filename`, so they can never drift from what `writ
 Files are selected by their name's `ts_init` span (`kernel.clocks.CatalogFileSpan`) and rows by
 their exact `ts_event` (MEM-01: callers read one instrument, and the rebuilds one day, at a time).
 Only `query_second_ohlc` and `query_top_of_book` widen the span by `READ_SPAN_MARGIN_NS`
-(`query_index_prices` by `MAX_TS_INIT_SKEW_NS`);
+(`query_index_prices` and `query_trade_columns` by `MAX_TS_INIT_SKEW_NS`);
 `files_by_day` and `data_file_ranges` take the span as written, as their pre-kernel originals did --
 the rebuild re-reads a whole day, so a row whose `ts_init` lands in the neighbouring file is picked
 up there.
@@ -40,6 +41,7 @@ from typing import NamedTuple
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
@@ -59,6 +61,8 @@ from kernel.second_snapshot import require_integer_layout
 from kernel.second_snapshot import top_of_book_units
 from kernel.second_snapshot import trade_float_columns
 from nautilus_trader.model.data import IndexPriceUpdate
+from nautilus_trader.model.data import TradeTick
+from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.objects import FIXED_PRECISION
 from nautilus_trader.model.objects import FIXED_PRECISION_BYTES
 from nautilus_trader.model.objects import Price
@@ -343,3 +347,211 @@ def second_ohlc_arrays(paths: list[str]) -> dict[str, np.ndarray]:
     out["o"], out["h"], out["l"], out["c"] = (joined[k] for k in OHLC_UNIT_COLUMNS)
     out["v"] = joined["buy_volume"] + joined["sell_volume"]
     return out
+
+
+# -- raw trades (Story 32.8) -------------------------------------------------------------------------
+
+TRADE_DIRNAME = class_to_filename(TradeTick)  # "trade_tick"
+_TRADE_TICK_COLUMNS = ("price", "size", "aggressor_side", "ts_event", "trade_id")
+_TRADE_PRECISION_LABELS = (b"price_precision", b"size_precision")
+# `decimal128`'s widest precision: its 16-byte value layout is exactly a `binary(16)` raw's (an
+# i128, little-endian), which is what lets the decode reinterpret the buffers without a copy.
+_DECIMAL128_DIGITS = 38
+_DECIMAL128_BYTES = 16
+# A file listed for a read can be removed before it is opened: the nightly consolidation writes the
+# merged day file first and only then removes its minute sources. The read lists again this many
+# times; a listing that keeps losing files is refused (`TradeDecodeError`, ledgered by the caller).
+_TRADE_LISTING_ATTEMPTS = 2
+
+
+class TradeDecodeError(ValueError):
+    """
+    A stored trade that cannot be read exactly: a raw finer than the instrument's precision, a raw
+    outside int64 units, a null, a raw width this build does not write, a file without its
+    precision labels or one Parquet cannot read. Never rounded, never skipped: the caller fails the request (DATA-07).
+    """
+
+
+class TradeColumns(NamedTuple):
+    """
+    A window's archived trades as parallel arrays, sorted by `ts_event`: `price`/`size` are integer
+    counts of `10^-price_precision`/`10^-size_precision` at the precisions the read was asked for
+    (the instrument definition's), `buyer` is True for an `AggressorSide.BUYER` trade only.
+    """
+
+    price: np.ndarray  # int64 units
+    size: np.ndarray  # int64 units
+    buyer: np.ndarray  # bool
+    ts_event: np.ndarray  # int64 ns
+
+
+def trade_files(catalog_path: str, instrument_id: str) -> list[str]:
+    """Every `TradeTick` Parquet file of the instrument, sorted by name (a directory listing)."""
+    return sorted(
+        glob.glob(os.path.join(catalog_path, "data", TRADE_DIRNAME, instrument_id, "*.parquet"))
+    )
+
+
+def query_trade_columns(
+    catalog_path: str,
+    instrument_id: str,
+    start_ns: int,
+    end_ns: int,
+    price_precision: int,
+    size_precision: int,
+) -> TradeColumns:
+    """
+    Every archived trade of the instrument with `ts_event` in the half-open `[start_ns, end_ns)`,
+    as integer units (`TradeColumns`), read column-projected (`price`, `size`, `aggressor_side`,
+    `ts_event`, `trade_id`) straight from the Parquet files and never through `float`.
+
+    Files are chosen by their `ts_init` span widened by `MAX_TS_INIT_SKEW_NS` (the largest
+    `ts_init - ts_event` a writer may produce, the rebuild's own trade margin), consolidated day
+    files and live minute files alike. A trade stored twice (a restart replay, or a minute file
+    and the day file holding the same rows) shares its `ts_event` and `trade_id`, and is kept once;
+    two copies that disagree on price, size or side raise `TradeDecodeError`.
+    Units are taken at the precisions given, not each file's label, so history written under
+    different labels aggregates on one grid; a raw finer than them raises `TradeDecodeError`.
+    Known limit: after a venue coarsens an instrument's tick (or lot) the definition's precision
+    is coarser than the trades archived before the change, so every window holding those trades
+    is refused until they leave the trade retention. Upgrade path: decode each file at its own
+    label and aggregate on the finest precision of the window, served alongside the units.
+
+    A file removed between the listing and its read (the consolidation replacing minute files by
+    their day file) makes the read list again, up to `_TRADE_LISTING_ATTEMPTS` times.
+
+    MEM-01: the caller bounds the window; this reads all of it at once.
+    """
+    if not (0 <= price_precision <= FIXED_PRECISION and 0 <= size_precision <= FIXED_PRECISION):
+        raise TradeDecodeError(
+            f"{instrument_id}: precisions ({price_precision}, {size_precision}) are outside this "
+            f"build's 0..{FIXED_PRECISION}"
+        )
+    for attempt in range(1, _TRADE_LISTING_ATTEMPTS + 1):
+        try:
+            parts = [
+                _trade_part(path, start_ns, end_ns, price_precision, size_precision)
+                for path in trade_files(catalog_path, instrument_id)
+                if CatalogFileSpan.from_path(path).overlaps(start_ns, end_ns, MAX_TS_INIT_SKEW_NS)
+            ]
+            break
+        except FileNotFoundError as exc:
+            if attempt == _TRADE_LISTING_ATTEMPTS:
+                raise TradeDecodeError(
+                    f"{instrument_id}: trade files kept disappearing during the read "
+                    f"({_TRADE_LISTING_ATTEMPTS} listings): {exc}"
+                ) from exc
+    parts = [part for part in parts if len(part[0])]
+    if not parts:
+        empty = np.empty(0, dtype=np.int64)
+        return TradeColumns(empty, empty.copy(), np.empty(0, dtype=bool), empty.copy())
+    return _unique_sorted(instrument_id, parts)
+
+
+def _trade_part(
+    path: str, start_ns: int, end_ns: int, price_precision: int, size_precision: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, pa.Array]:
+    """
+    One file's trades in the window: `(price, size, aggressor_side, ts_event, trade_id)` arrays.
+    A file that is gone raises `FileNotFoundError` (the caller lists again); one that cannot be
+    read (truncated, corrupt) is an archive fault, `TradeDecodeError` naming it (DATA-07).
+    """
+    try:
+        metadata = pq.read_schema(path).metadata or {}
+        missing = [label.decode() for label in _TRADE_PRECISION_LABELS if label not in metadata]
+        if missing:
+            raise TradeDecodeError(f"{path}: no {', '.join(missing)} metadata, refused")
+        table = pq.read_table(
+            path,
+            columns=list(_TRADE_TICK_COLUMNS),
+            filters=[("ts_event", ">=", start_ns), ("ts_event", "<", end_ns)],
+        )
+    except FileNotFoundError:
+        raise
+    except (pa.ArrowInvalid, OSError) as exc:
+        raise TradeDecodeError(f"{path}: unreadable, refused: {exc}") from exc
+    for name in _TRADE_TICK_COLUMNS:
+        if table.column(name).null_count:
+            raise TradeDecodeError(f"{path}: a null {name}, refused")
+    return (
+        _raw_units(path, "price", table.column("price"), price_precision),
+        _raw_units(path, "size", table.column("size"), size_precision),
+        table.column("aggressor_side").to_numpy(),
+        table.column("ts_event").to_numpy().astype(np.int64),
+        table.column("trade_id").combine_chunks(),
+    )
+
+
+def _raw_units(path: str, name: str, column: pa.ChunkedArray, precision: int) -> np.ndarray:
+    """
+    Return the fixed-point raws of one column as int64 units at `precision`, exactly: the `binary(16)`
+    buffers reinterpreted as `decimal128(38, FIXED_PRECISION)`, rescaled by Arrow (which refuses a
+    lossy rescale), reinterpreted as `decimal128(38, 0)` and cast to int64 (overflow refused).
+    """
+    # The decode reinterprets the raws as `decimal128`, so it reads 16-byte raws only, whatever
+    # width this build writes (a 64-bit-precision build's 8-byte raws are refused, never misread).
+    if column.type != pa.binary(_DECIMAL128_BYTES) or FIXED_PRECISION_BYTES != _DECIMAL128_BYTES:
+        raise TradeDecodeError(
+            f"{path}: column {name} is {column.type}, this build reads "
+            f"{pa.binary(_DECIMAL128_BYTES)} raws"
+        )
+    raws = column.combine_chunks()
+    as_raw = pa.decimal128(_DECIMAL128_DIGITS, FIXED_PRECISION)
+    as_units = pa.decimal128(_DECIMAL128_DIGITS, 0)
+    try:
+        exact = pc.cast(_reinterpret(raws, as_raw), pa.decimal128(_DECIMAL128_DIGITS, precision))
+        units = pc.cast(_reinterpret(exact, as_units), pa.int64())
+    except pa.ArrowInvalid as exc:
+        raise TradeDecodeError(
+            f"{path}: column {name} is not exact in int64 units at precision {precision}: {exc}"
+        ) from exc
+    return units.to_numpy()
+
+
+def _reinterpret(array: pa.Array, to: pa.DataType) -> pa.Array:
+    return pa.Array.from_buffers(to, len(array), array.buffers(), offset=array.offset)
+
+
+def _unique_sorted(
+    instrument_id: str,
+    parts: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, pa.Array]],
+) -> TradeColumns:
+    """
+    Concatenate the files' parts, keep the first copy of each (`ts_event`, `trade_id`), sort. A
+    copy is the same trade only when its price, size and side agree too; two stored versions of one
+    trade that disagree are an archive fault, refused with `TradeDecodeError` (DATA-07), never one
+    of them silently picked. Sides compare as stored, so a SELLER and a NO_AGGRESSOR copy disagree
+    although both fold as a sell.
+    """
+    price, size, side, ts = (np.concatenate([part[i] for part in parts]) for i in range(4))
+    ids = pa.concat_arrays([part[4].cast(pa.large_string()) for part in parts])
+    codes = ids.dictionary_encode().indices.to_numpy()
+    order = np.lexsort((codes, ts))  # stable: the first copy in file order stays first
+    ts_sorted, codes_sorted = ts[order], codes[order]
+    first = np.ones(len(order), dtype=bool)
+    first[1:] = (ts_sorted[1:] != ts_sorted[:-1]) | (codes_sorted[1:] != codes_sorted[:-1])
+    _require_agreeing_copies(instrument_id, order, first, (price, size, side), ids)
+    keep = order[first]
+    return TradeColumns(price[keep], size[keep], side[keep] == int(AggressorSide.BUYER), ts[keep])
+
+
+def _require_agreeing_copies(
+    instrument_id: str,
+    order: np.ndarray,
+    first: np.ndarray,
+    values: tuple[np.ndarray, np.ndarray, np.ndarray],
+    ids: pa.Array,
+) -> None:
+    """Refuse a repeated (`ts_event`, `trade_id`) whose copy differs from the kept first copy."""
+    group_first = order[np.maximum.accumulate(np.where(first, np.arange(len(order)), 0))]
+    copies = order[~first]
+    kept = group_first[~first]
+    differs = np.zeros(len(copies), dtype=bool)
+    for column in values:
+        differs |= column[copies] != column[kept]
+    if differs.any():
+        bad = int(copies[np.argmax(differs)])
+        raise TradeDecodeError(
+            f"{instrument_id}: trade {ids[bad].as_py()!r} is stored twice with different "
+            f"price, size or side, refused"
+        )

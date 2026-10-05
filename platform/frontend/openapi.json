@@ -675,6 +675,84 @@
         }
       }
     },
+    "/api/coin/{instrument_id}/footprint": {
+      "get": {
+        "summary": "Get Footprint",
+        "operationId": "get_footprint_api_coin__instrument_id__footprint_get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          },
+          {
+            "name": "before_ns",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Before Ns"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 120,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "bar_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 60,
+              "title": "Bar Seconds"
+            }
+          },
+          {
+            "name": "row_ticks",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "auto",
+              "title": "Row Ticks"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FootprintResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/indicator-series/{instrument_id}": {
       "get": {
         "summary": "Get Indicator Series",
@@ -1902,6 +1980,134 @@
           "services"
         ],
         "title": "ErrorsResponse"
+      },
+      "FootprintItem": {
+        "properties": {
+          "t": {
+            "type": "integer",
+            "title": "T"
+          },
+          "row_ticks": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Row Ticks"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/FootprintRow"
+            },
+            "type": "array",
+            "title": "Rows"
+          },
+          "delta": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delta"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total"
+          },
+          "poc_row": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Poc Row"
+          },
+          "no_trades": {
+            "type": "boolean",
+            "title": "No Trades"
+          }
+        },
+        "type": "object",
+        "required": [
+          "t",
+          "row_ticks",
+          "rows",
+          "delta",
+          "total",
+          "poc_row",
+          "no_trades"
+        ],
+        "title": "FootprintItem"
+      },
+      "FootprintResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/FootprintItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "price_precision": {
+            "type": "integer",
+            "title": "Price Precision"
+          },
+          "size_precision": {
+            "type": "integer",
+            "title": "Size Precision"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "has_more",
+          "price_precision",
+          "size_precision"
+        ],
+        "title": "FootprintResponse"
+      },
+      "FootprintRow": {
+        "properties": {
+          "p": {
+            "type": "integer",
+            "title": "P"
+          },
+          "b": {
+            "type": "integer",
+            "title": "B"
+          },
+          "s": {
+            "type": "integer",
+            "title": "S"
+          }
+        },
+        "type": "object",
+        "required": [
+          "p",
+          "b",
+          "s"
+        ],
+        "title": "FootprintRow"
       },
       "HTTPValidationError": {
         "properties": {

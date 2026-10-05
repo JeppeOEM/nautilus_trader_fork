@@ -52,6 +52,8 @@ import {
 } from "../lib/sessionProfile";
 import { chartVar, fibLevelColor } from "../components/chart/chartTheme";
 import DrawingSettingsDialog from "../components/chart/DrawingSettingsDialog";
+import FootprintSettingsDialog from "../components/chart/FootprintSettingsDialog";
+import type { FootprintRenderSpec } from "../components/chart/primitives/FootprintPrimitive";
 import {
   type Drawing,
   type DragPoint,
@@ -75,7 +77,8 @@ import { assignPaneColor } from "../components/chart/paneColors";
 import type { IndicatorCatalogEntry, IndicatorConfigEntry } from "../api/schema";
 import { useCandles } from "../hooks/useCandles";
 import { TIMEFRAMES } from "../timeframes";
-import { type ChartLayout, type VolumeProfileLayout } from "../lib/chartLayout";
+import { type ChartLayout, type FootprintSettings, type VolumeProfileLayout } from "../lib/chartLayout";
+import { useFootprint } from "../hooks/useFootprint";
 import { useChartLayout } from "../hooks/useChartLayout";
 import { useReplay } from "../hooks/useReplay";
 import { useSessionCandles } from "../hooks/useSessionCandles";
@@ -649,11 +652,39 @@ function ChartInner({
     [volumeOn, volumeHidden, volume, pickerSeriesKeys, pickerValues, catalog, entriesById, cutoffTime],
   );
 
+  // Story 32.8: the volume footprint, a field of the coin's layout (on/off and its settings). It is
+  // fetched only while on AND in Candles mode (its primitive draws on the candle series); off, no
+  // request is issued and the chart gets no footprint. Only a row-size change refetches.
+  const [footprint, setFootprint] = useState<FootprintSettings>(initialLayout.footprint);
+  useEffect(() => patchLayout({ footprint }), [footprint, patchLayout]);
+  const [footprintDialogOpen, setFootprintDialogOpen] = useState(false);
+  const changeFootprintOn = useCallback((on: boolean): void => setFootprint((prev) => ({ ...prev, on })), []);
+  const footprintActive = footprint.on && mode === "candles";
+  const footprintData = useFootprint(instrumentId, chart, barSeconds, footprintActive, footprint.row_ticks);
+  const footprintSpec = useMemo<FootprintRenderSpec | null>(
+    () =>
+      footprintActive
+        ? {
+            // Replay hides the bars after its cursor; their footprints with them.
+            items: cutoffTime === null ? footprintData.items : footprintData.items.filter((b) => b.t / 1000 <= cutoffTime),
+            precision: footprintData.precision,
+            settings: footprint,
+          }
+        : null,
+    [footprintActive, footprintData.items, footprintData.precision, footprint, cutoffTime],
+  );
+
   // The legend's eye / gear / x. Picker indicators go through the picker's own persist path (the
-  // same one an add uses); Volume is page state (eye) and the Indicators dialog's toggle (x).
+  // same one an add uses); Volume is page state (eye) and the Indicators dialog's toggle (x); the
+  // Footprint row has the gear (its settings modal) and the x (off).
   const pickerRef = useRef<IndicatorPickerHandle>(null);
   const handleLegendAction = useCallback(
     (action: LegendAction, group: string): void => {
+      if (group === "footprint") {
+        if (action === "settings") setFootprintDialogOpen(true);
+        else if (action === "remove") changeFootprintOn(false);
+        return;
+      }
       if (group === "volume") {
         if (action === "hide") setVolumeHidden((h) => !h);
         else if (action === "remove") {
@@ -666,7 +697,7 @@ function ChartInner({
       else if (action === "settings") picker?.openSettings(group);
       else picker?.remove(group);
     },
-    [changeVolumeOn],
+    [changeVolumeOn, changeFootprintOn],
   );
   // Seeded with what the chart draws while the entry stores nothing: the palette colour, which a
   // histogram also paints both signs with (and the side whose colour is not set keeps).
@@ -1456,6 +1487,7 @@ function ChartInner({
             markerTime={replay.markerTime}
             anchorMarkerTime={autoView.markerTime}
             legendExtras={anchored.legend}
+            footprint={footprintSpec}
           />
         </div>
       </div>
@@ -1477,6 +1509,19 @@ function ChartInner({
           onApply={applyDrawing}
           onRemove={() => handleDrawingDelete(settingsDrawing.id)}
           onClose={() => setSettingsId(null)}
+        />
+      )}
+      {footprintActive && footprintData.error !== null && (
+        <p role="alert" className="chart-load-error">
+          Footprint: {footprintData.error}
+        </p>
+      )}
+      {footprintDialogOpen && (
+        <FootprintSettingsDialog
+          settings={footprint}
+          onApply={setFootprint}
+          onRemove={() => changeFootprintOn(false)}
+          onClose={() => setFootprintDialogOpen(false)}
         />
       )}
       {Object.entries(indicatorErrors).map(([id, message]) => (
@@ -1569,6 +1614,9 @@ function ChartInner({
         multiInstance
         volumeOn={volumeOn}
         onVolumeChange={changeVolumeOn}
+        footprintOn={footprint.on}
+        onFootprintChange={changeFootprintOn}
+        footprintCandlesOnly={mode !== "candles"}
       />
       </div>
     </div>

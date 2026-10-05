@@ -47,6 +47,19 @@ describe("DocsPage", () => {
     expect(screen.getAllByText(/chart_drawings\.toml/).length).toBeGreaterThan(0);
   });
 
+  it("documents the footprint's modes, imbalances and historical-only limit (Story 32.8)", () => {
+    render(
+      <MemoryRouter initialEntries={["/docs/kb/chart-footprint"]}>
+        <DocsPage />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole("heading", { name: /Volume Footprint/ })).toBeInTheDocument();
+    for (const name of ["Display modes", "Imbalances", "Known limits"]) {
+      expect(screen.getByRole("heading", { name })).toBeInTheDocument();
+    }
+    expect(screen.getByText(/Historical only\./)).toBeInTheDocument();
+  });
+
   it("lists all nine profile tools with what each anchors to and counts (Story 32.7)", () => {
     render(
       <MemoryRouter initialEntries={["/docs/kb/chart-profiles"]}>

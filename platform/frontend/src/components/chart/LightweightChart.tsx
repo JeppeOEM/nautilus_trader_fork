@@ -40,6 +40,8 @@ import { FibPrimitive } from "./primitives/FibPrimitive";
 import { PositionPrimitive } from "./primitives/PositionPrimitive";
 import { AnchoredVpPrimitive } from "./primitives/AnchoredVpPrimitive";
 import { AnchoredVwapPrimitive } from "./primitives/AnchoredVwapPrimitive";
+import { FootprintPrimitive, type FootprintRenderSpec } from "./primitives/FootprintPrimitive";
+import { footprintLegendText } from "../../lib/footprint";
 import { BarGrid, type DrawingPrimitive } from "./primitives/drawingPrimitive";
 import type { VwapPoint } from "../../lib/anchoredVwap";
 import {
@@ -342,8 +344,13 @@ interface LightweightChartProps {
    * before the live socket's first message, or synchronously reset on instrument/bar-size
    * change) and is a no-op, not a clear of the last-drawn bar. */
   liveBar?: LiveBar | null;
+  /** Story 32.8: the volume footprint of the closed bars, drawn by one `FootprintPrimitive` on the
+   * candle series (Candles mode only) with a "Footprint" legend row (gear and x) on the price pane;
+   * `null`/omitted removes both. */
+  footprint?: FootprintRenderSpec | null;
   /** Story 32.3: a legend eye / gear / x was pressed; `group` is the indicator instance id (the
-   * spec's `group`) or "volume". The page persists the change; this component only reports. */
+   * spec's `group`), "volume" or "footprint". The page persists the change; this component only
+   * reports. */
   onLegendAction?: (action: LegendAction, group: string) => void;
   /** Story 32.6: the pane heights (px, by pane group id; "price" for the main pane) a saved layout
    * restores. Read once at mount, then kept as the last known heights. */
@@ -615,6 +622,7 @@ export default function LightweightChart({
   markerTime = null,
   anchorMarkerTime = null,
   legendExtras = [],
+  footprint = null,
   crosshairVisible = true,
   viewCommand = null,
   volumeProfiles = [],
@@ -678,6 +686,7 @@ export default function LightweightChart({
   const latestRef = useRef({ volumeProfiles, onRangeSelect, onProfileEdgeDrag, onProfileEdgeCommit });
   const markerRef = useRef<VerticalMarkerPrimitive | null>(null);
   const anchorMarkerRef = useRef<VerticalMarkerPrimitive | null>(null);
+  const footprintRef = useRef<FootprintPrimitive | null>(null);
   const drawingRegistryRef = useRef<Map<string, DrawingEntry>>(new Map());
   // Story 32.5: the bar times every drawing primitive snaps its anchors to (one grid per chart).
   const gridRef = useRef(new BarGrid());
@@ -691,6 +700,9 @@ export default function LightweightChart({
   // its host series) and on every non-overlay pane (unlabelled, PaneEntry.gap) alike, and
   // looked up by slot time for the legend's crosshair readout.
   const liveTime = liveBar ? (liveBar.time as unknown as number) : undefined;
+  // Story 32.8: a string, so the legend effect re-runs on a settings change, never on new bars.
+  const footprintLegend =
+    footprint && mode === "candles" ? footprintLegendText(footprint.settings.mode, footprint.settings.row_ticks) : null;
   const gapRuns = useMemo(() => priceGapRuns(mode, data, linesData, liveTime), [mode, data, linesData, liveTime]);
   const gapRunsRef = useRef(gapRuns);
   gapRunsRef.current = gapRuns;
@@ -808,6 +820,7 @@ export default function LightweightChart({
       lineSeriesRef.current = null;
       // The gap primitives die with the chart below (chart.remove()), like the panes.
       priceGapRef.current = null;
+      footprintRef.current = null;
       panes.clear();
       collapsedHeights.clear();
       // Story 18.1: the price lines die with the chart here, same as the panes -- the
@@ -924,6 +937,8 @@ export default function LightweightChart({
     markerRef.current = null;
     // Story 32.7: the Auto Anchored marker lived on the old host too; re-attach it on the new one.
     anchorMarkerRef.current = null;
+    // Story 32.8: the footprint lives on the candle series only, re-attached on a return to Candles.
+    footprintRef.current = null;
     // Story 32.1: the price gap painter is detached from the old host while that series still
     // exists; the [gapRuns, mode] effect below attaches a fresh one to the new host.
     const priceGap = priceGapRef.current;
@@ -1166,6 +1181,23 @@ export default function LightweightChart({
 
     // Legend rows follow the panes prop's order (= stacking order), including a collapsed
     // indicator, whose row is kept -- crossed -- on the price pane's legend (`pane: null`).
+    // Story 32.8: the Footprint row reads its mode and row size; it has a gear and an x, no eye.
+    const footprintRows: LegendSeries[] =
+      footprintLegend === null
+        ? []
+        : [
+            {
+              group: "footprint",
+              groupLabel: "Footprint",
+              outputLabel: "Footprint",
+              color: chartVar("--chart-text-dim"),
+              series: null,
+              data: [],
+              pane: null,
+              hideable: false,
+              text: footprintLegend,
+            },
+          ];
     const extraRows = legendExtras.map(
       (extra): LegendSeries => ({
         group: extra.id,
@@ -1193,7 +1225,7 @@ export default function LightweightChart({
         configurable: spec.configurable !== false,
         actionable: spec.actionable !== false,
       };
-    }).concat(extraRows);
+    }).concat(footprintRows, extraRows);
     // A new pane's element only exists after the library's next paint: retry per frame
     // (bounded) until every pane has one.
     let frame = 0;
@@ -1204,7 +1236,7 @@ export default function LightweightChart({
     };
     draw();
     return () => cancelAnimationFrame(frame);
-  }, [panes, legendExtras, handleLegendAction]);
+  }, [panes, legendExtras, footprintLegend, handleLegendAction]);
 
   useEffect(() => {
     // Story 32.1: the price pane's labelled gap painter lives on the current host series (the
@@ -1385,6 +1417,23 @@ export default function LightweightChart({
     anchorMarkerRef.current = new VerticalMarkerPrimitive(anchorMarkerTime, chartVar("--chart-drawing"));
     host.attachPrimitive(anchorMarkerRef.current);
   }, [anchorMarkerTime, mode]);
+
+  useEffect(() => {
+    // Story 32.8: add / update / remove the footprint, on the same discipline as the markers above.
+    const host = seriesRef.current;
+    if (!host || mode !== "candles") return;
+    if (!footprint) {
+      if (footprintRef.current) host.detachPrimitive(footprintRef.current);
+      footprintRef.current = null;
+      return;
+    }
+    if (footprintRef.current) {
+      footprintRef.current.update(footprint);
+      return;
+    }
+    footprintRef.current = new FootprintPrimitive(footprint);
+    host.attachPrimitive(footprintRef.current);
+  }, [footprint, mode]);
 
   useEffect(() => {
     latestRef.current = { volumeProfiles, onRangeSelect, onProfileEdgeDrag, onProfileEdgeCommit };

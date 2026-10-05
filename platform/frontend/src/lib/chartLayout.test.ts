@@ -1,7 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AUTO_ANCHOR_PRESETS } from "./autoAnchor";
-import { BUILT_IN_LAYOUT, PROFILE_KINDS, layoutForSave, normalizeLayout } from "./chartLayout";
+import {
+  BUILT_IN_LAYOUT,
+  FOOTPRINT_DEFAULT_IMBALANCE_RATIO,
+  FOOTPRINT_MODES,
+  MAX_FOOTPRINT_ROW_TICKS,
+  PROFILE_KINDS,
+  layoutForSave,
+  normalizeLayout,
+} from "./chartLayout";
 
 // The wire of a layout saved before Story 32.7: the profile table has none of the three new keys.
 function oldProfile() {
@@ -64,5 +72,69 @@ describe("the volume profile layout's Story 32.7 keys", () => {
 
     expect(fallbacks).toContain("volume_profile.session");
     expect(layout.volume_profile.session).toBe("daily");
+  });
+});
+
+describe("the footprint layout table (Story 32.8)", () => {
+  const { footprint: _f, ...preFootprint } = BUILT_IN_LAYOUT;
+  const withFootprint = (footprint: unknown) => ({ ...BUILT_IN_LAYOUT, footprint });
+
+  it("has the server's modes, default ratio and row-size cap (views/preferences.py mirrors them)", () => {
+    expect(FOOTPRINT_MODES).toEqual(["bid_ask", "delta", "volume"]);
+    expect(FOOTPRINT_DEFAULT_IMBALANCE_RATIO).toBe(3);
+    expect(MAX_FOOTPRINT_ROW_TICKS).toBe(1_000_000);
+    expect(BUILT_IN_LAYOUT.footprint).toEqual({ on: false, row_ticks: 0, mode: "bid_ask", imbalance_ratio: 3, text: true });
+  });
+
+  it("loads a layout saved before it with Footprint off, silently", () => {
+    const { layout, fallbacks } = normalizeLayout(preFootprint);
+
+    expect(fallbacks).toEqual([]);
+    expect(errors).not.toHaveBeenCalled();
+    expect(layout.footprint).toEqual(BUILT_IN_LAYOUT.footprint);
+  });
+
+  it("round-trips every setting, colours included", () => {
+    const footprint = { on: true, row_ticks: 5, mode: "delta", imbalance_ratio: 2.5, text: false, buy_color: "#00ff00", sell_color: "#ff0000" };
+    const { layout, fallbacks } = normalizeLayout(withFootprint(footprint));
+
+    expect(fallbacks).toEqual([]);
+    expect(layout.footprint).toEqual(footprint);
+    expect(layoutForSave(layout).footprint).toEqual(footprint);
+  });
+
+  it("saves no colour key while the colours are unset", () => {
+    expect(layoutForSave(BUILT_IN_LAYOUT).footprint).toEqual(BUILT_IN_LAYOUT.footprint);
+    expect(Object.keys(layoutForSave(BUILT_IN_LAYOUT).footprint as object)).not.toContain("buy_color");
+  });
+
+  it("falls back field by field, loudly and once, for values it cannot use", () => {
+    const bad = { on: "yes", row_ticks: -1, mode: "bidask", imbalance_ratio: 0.5, text: 1, buy_color: "", sell_color: "#ff0000" };
+    const { layout, fallbacks } = normalizeLayout(withFootprint(bad));
+
+    expect(fallbacks).toEqual([
+      "footprint.on",
+      "footprint.row_ticks",
+      "footprint.mode",
+      "footprint.imbalance_ratio",
+      "footprint.text",
+      "footprint.buy_color",
+    ]);
+    expect(layout.footprint).toEqual({ ...BUILT_IN_LAYOUT.footprint, sell_color: "#ff0000" });
+    expect(errors).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the good fields of a partly bad table", () => {
+    const { layout, fallbacks } = normalizeLayout(withFootprint({ ...BUILT_IN_LAYOUT.footprint, on: true, row_ticks: 2.5 }));
+
+    expect(fallbacks).toEqual(["footprint.row_ticks"]);
+    expect(layout.footprint).toMatchObject({ on: true, row_ticks: 0 });
+  });
+
+  it("falls back to the defaults for a footprint that is not a table", () => {
+    const { layout, fallbacks } = normalizeLayout(withFootprint(true));
+
+    expect(fallbacks).toEqual(["footprint"]);
+    expect(layout.footprint).toEqual(BUILT_IN_LAYOUT.footprint);
   });
 });

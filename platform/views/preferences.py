@@ -536,6 +536,7 @@ MAX_PANE_ID_LENGTH = 512
 MAX_VISIBLE_BARS = 100_000
 MIN_PROFILE_ROWS = 2
 MAX_PROFILE_ROWS = 500
+# Required in every layout; `footprint` (Story 32.8) is optional, see `FOOTPRINT_DEFAULTS`.
 _LAYOUT_KEYS = frozenset(
     {"bar_seconds", "mode", "volume", "crosshair", "pane_heights", "visible_bars", "volume_profile"}
 )
@@ -566,6 +567,27 @@ PROFILE_SESSIONS = ("4h", "daily", "weekly", "monthly")
 PROFILE_ANCHORS = ("session", "week", "month", "highest_high", "lowest_low", "auto")
 MIN_IB_MINUTES = 1
 MAX_IB_MINUTES = 1440
+
+# Story 32.8: the optional `footprint` table (the volume footprint primitive's settings). Mirrors the
+# frontend's `lib/chartLayout.ts` (`FOOTPRINT_MODES`, `FOOTPRINT_DEFAULT_IMBALANCE_RATIO`,
+# `MAX_FOOTPRINT_ROW_TICKS`); `test_footprint_settings_mirror_the_frontend` pins the pairs. A layout
+# saved before it has no table and loads with `FOOTPRINT_DEFAULTS` (Footprint off).
+FOOTPRINT_MODES = ("bid_ask", "delta", "volume")
+FOOTPRINT_DEFAULT_IMBALANCE_RATIO = 3
+# `row_ticks` 0 = auto (the read model's smallest size giving at most 24 rows per bar). The cap only
+# bounds a hostile value: a million ticks is already wider than any bar of a collected instrument.
+MAX_FOOTPRINT_ROW_TICKS = 1_000_000
+FOOTPRINT_DEFAULTS: dict[str, Any] = {
+    "on": False,
+    "row_ticks": 0,
+    "mode": "bid_ask",
+    "imbalance_ratio": FOOTPRINT_DEFAULT_IMBALANCE_RATIO,
+    "text": True,
+}
+# Absent = the chart's `--chart-up`/`--chart-down` token; never written as null.
+_FOOTPRINT_COLOR_KEYS = frozenset({"buy_color", "sell_color"})
+_FOOTPRINT_KEYS = frozenset(FOOTPRINT_DEFAULTS) | _FOOTPRINT_COLOR_KEYS
+
 BUILTIN_DEFAULT_LAYOUT: dict[str, Any] = {
     "bar_seconds": 60,
     "mode": "candles",
@@ -585,6 +607,7 @@ BUILTIN_DEFAULT_LAYOUT: dict[str, Any] = {
         "start": None,
         "end": None,
     },
+    "footprint": dict(FOOTPRINT_DEFAULTS),
 }
 
 
@@ -661,6 +684,32 @@ def _validate_profile(profile: Any) -> dict[str, Any]:
     return out
 
 
+def _validate_footprint(footprint: Any) -> dict[str, Any]:
+    """
+    Return the footprint settings (`FOOTPRINT_DEFAULTS` when the table is absent), else raise
+    `LayoutError` naming `footprint.<key>`: a present table carries every setting, the two colours
+    are optional strings, any other key is refused.
+    """
+    if footprint is None:
+        return dict(FOOTPRINT_DEFAULTS)
+    if not isinstance(footprint, dict):
+        raise LayoutError("footprint", "must be an object")
+    _check_keys(footprint, frozenset(FOOTPRINT_DEFAULTS), _FOOTPRINT_KEYS, "footprint.")
+    for key in ("on", "text"):
+        if not isinstance(footprint[key], bool):
+            raise LayoutError(f"footprint.{key}", "must be a boolean")
+    _layout_int("footprint.row_ticks", footprint["row_ticks"], 0, MAX_FOOTPRINT_ROW_TICKS)
+    if footprint["mode"] not in FOOTPRINT_MODES:
+        raise LayoutError("footprint.mode", f"must be one of {list(FOOTPRINT_MODES)}")
+    ratio = footprint["imbalance_ratio"]
+    if not _is_number(ratio) or ratio < 1:
+        raise LayoutError("footprint.imbalance_ratio", "must be a number of at least 1")
+    for key in _FOOTPRINT_COLOR_KEYS & set(footprint):
+        if not isinstance(footprint[key], str) or not footprint[key]:
+            raise LayoutError(f"footprint.{key}", "must be a non-empty string")
+    return dict(footprint)
+
+
 def _check_keys(
     table: dict[str, Any],
     required: frozenset[str] | set[str],
@@ -703,8 +752,9 @@ def _check_pane_heights(heights: Any) -> None:
 def validate_layout(layout: Any, *, tolerant: bool = False) -> dict[str, Any]:
     """
     Return a normalized copy of `layout` (the optional fixed-range anchors always present, `None`
-    when unset), else raise `LayoutError` naming the key. Strict by design (DATA-07): an unknown or
-    missing key or a wrong type is refused rather than dropped or defaulted.
+    when unset; the optional `footprint` table always present, `FOOTPRINT_DEFAULTS` when absent),
+    else raise `LayoutError` naming the key. Strict by design (DATA-07): an unknown or missing key
+    or a wrong type is refused rather than dropped or defaulted.
 
     `tolerant=True` is for coin tables read back from disk: a `bar_seconds` outside
     `LAYOUT_BAR_SECONDS` (any positive integer) or a `mode` outside `LAYOUT_MODES` (any string) is
@@ -714,7 +764,7 @@ def validate_layout(layout: Any, *, tolerant: bool = False) -> dict[str, Any]:
     """
     if not isinstance(layout, dict):
         raise LayoutError("layout", "must be an object")
-    _check_keys(layout, _LAYOUT_KEYS, _LAYOUT_KEYS)
+    _check_keys(layout, _LAYOUT_KEYS, _LAYOUT_KEYS | {"footprint"})
     _check_timeframe_and_mode(layout, tolerant=tolerant)
     for key in ("volume", "crosshair"):
         if not isinstance(layout[key], bool):
@@ -731,6 +781,7 @@ def validate_layout(layout: Any, *, tolerant: bool = False) -> dict[str, Any]:
         "pane_heights": dict(layout["pane_heights"]),
         "visible_bars": bars,
         "volume_profile": _validate_profile(layout["volume_profile"]),
+        "footprint": _validate_footprint(layout.get("footprint")),
     }
 
 

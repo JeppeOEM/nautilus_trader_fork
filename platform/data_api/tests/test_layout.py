@@ -44,6 +44,7 @@ _LAYOUT_KEYS = {
     "pane_heights",
     "visible_bars",
     "volume_profile",
+    "footprint",  # optional on the wire, always served (Story 32.8)
 }
 
 
@@ -277,3 +278,34 @@ def test_an_id_without_an_instrument_definition_is_a_404_and_writes_nothing(
     assert client.post(f"/api/coin/{_UNKNOWN}/layout/reset-to-default").status_code == 404
     assert not (tmp_path / "chart_layouts.toml").exists()
     assert not (tmp_path / "chart_indicators.toml").exists()
+
+
+def test_put_with_an_unknown_footprint_key_is_a_422_naming_it(
+    client: TestClient, tmp_path: Path
+) -> None:
+    footprint = {**preferences.FOOTPRINT_DEFAULTS, "glow": True}
+    response = client.put(f"/api/coin/{_IID}/layout", json={"layout": _layout(footprint=footprint)})
+    assert response.status_code == 422
+    assert response.json()["detail"].startswith("footprint.glow:")
+    assert not (tmp_path / "chart_layouts.toml").exists()
+
+
+def test_put_without_a_footprint_serves_footprint_off(client: TestClient) -> None:
+    layout = _layout()
+    del layout["footprint"]
+    response = client.put(f"/api/coin/{_IID}/layout", json={"layout": layout})
+    assert response.status_code == 200
+    assert response.json()["layout"]["footprint"]["on"] is False
+
+
+def test_put_roundtrips_footprint_settings(client: TestClient) -> None:
+    footprint = {
+        "on": True,
+        "row_ticks": 5,
+        "mode": "delta",
+        "imbalance_ratio": 2.5,
+        "text": False,
+        "buy_color": "#26a69a",
+    }
+    client.put(f"/api/coin/{_IID}/layout", json={"layout": _layout(footprint=footprint)})
+    assert client.get(f"/api/coin/{_IID}/layout").json()["layout"]["footprint"] == footprint

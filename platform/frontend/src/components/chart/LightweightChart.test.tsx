@@ -29,6 +29,7 @@ import {
   newPosition,
 } from "../../lib/drawings";
 import { GapPrimitive } from "./primitives/GapPrimitive";
+import { FootprintPrimitive, type FootprintRenderSpec } from "./primitives/FootprintPrimitive";
 
 const addSeriesMock = vi.fn();
 const seriesUpdateMock = vi.fn();
@@ -2197,5 +2198,75 @@ describe("anchored drawings and the Auto Anchored marker (Story 32.7)", () => {
       .filter((p) => p.constructor.name === "VerticalMarkerPrimitive");
     expect(markers).toHaveLength(1);
     expect(markers[0]).toMatchObject({ time: 100 });
+  });
+});
+
+describe("the volume footprint (Story 32.8)", () => {
+  const settings = { on: true, row_ticks: 0, mode: "bid_ask" as const, imbalance_ratio: 3, text: true };
+  const spec = (over: Partial<FootprintRenderSpec> = {}): FootprintRenderSpec => ({
+    items: [],
+    precision: { price: 2, size: 3 },
+    settings,
+    ...over,
+  });
+  const footprints = () => attachPrimitiveMock.mock.calls.map((c) => c[0]).filter((p) => p instanceof FootprintPrimitive);
+  const pricePane = (): HTMLElement => {
+    const paneEl = document.createElement("div");
+    document.body.appendChild(paneEl);
+    const base = createChartMock.getMockImplementation()!;
+    createChartMock.mockImplementation((...args: unknown[]) => ({
+      ...base(...args),
+      panes: () => [{ ...pricePaneMock, getHTMLElement: () => paneEl }],
+    }));
+    return paneEl;
+  };
+
+  it("attaches one primitive on the candle series, updates it in place and detaches it when off", () => {
+    const first = spec();
+    const { rerender } = render(<LightweightChart data={[]} onChartApi={() => {}} footprint={first} />);
+    expect(footprints()).toHaveLength(1);
+    const [primitive] = footprints();
+    const update = vi.spyOn(primitive, "update");
+
+    const next = spec({ settings: { ...settings, mode: "delta" } });
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} footprint={next} />);
+    expect(footprints()).toHaveLength(1);
+    expect(update).toHaveBeenCalledWith(next);
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} footprint={null} />);
+    expect(detachPrimitiveMock).toHaveBeenCalledWith(primitive);
+  });
+
+  it("draws nothing in Lines mode and re-attaches on the return to Candles", () => {
+    const footprint = spec();
+    const { rerender } = render(<LightweightChart mode="lines" data={[]} onChartApi={() => {}} footprint={footprint} />);
+    expect(footprints()).toHaveLength(0);
+
+    rerender(<LightweightChart mode="candles" data={[]} onChartApi={() => {}} footprint={footprint} />);
+    rerender(<LightweightChart mode="lines" data={[]} onChartApi={() => {}} footprint={footprint} />);
+    rerender(<LightweightChart mode="candles" data={[]} onChartApi={() => {}} footprint={footprint} />);
+
+    expect(footprints()).toHaveLength(2);
+    expect(footprints()[0]).not.toBe(footprints()[1]);
+  });
+
+  it("has a price-pane legend row with its mode and row size, a gear and an x, reported as 'footprint'", () => {
+    const onLegendAction = vi.fn();
+    const paneEl = pricePane();
+    const { rerender } = render(
+      <LightweightChart data={[]} onChartApi={() => {}} footprint={spec()} onLegendAction={onLegendAction} />,
+    );
+
+    const row = paneEl.querySelector('.chart-legend-row[data-group="footprint"]')!;
+    expect(row.textContent).toBe("Footprintbid×ask · auto rows");
+    expect([...row.querySelectorAll("button")].map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Settings for Footprint",
+      "Remove Footprint",
+    ]);
+    (row.querySelector('button[aria-label="Settings for Footprint"]') as HTMLElement).click();
+    expect(onLegendAction).toHaveBeenCalledWith("settings", "footprint");
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} footprint={null} onLegendAction={onLegendAction} />);
+    expect(paneEl.querySelector('.chart-legend-row[data-group="footprint"]')).toBeNull();
   });
 });
