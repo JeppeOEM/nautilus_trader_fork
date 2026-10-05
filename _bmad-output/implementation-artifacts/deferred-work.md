@@ -1306,7 +1306,9 @@ resolution: already resolved: platform/data_api.dockerfile:27-33 now copies obse
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: troll/scripts/capture_hl_ws.py
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-22-8-spine-rules-and-docs-updated-for-the-multi-venue-core.md` summary: `troll/scripts/capture_hl_ws.py` cannot capture a venue it does not already know — `--venue` is `choices=("hyperliquid", "bybit")` (`:118`) and the subscribe payload is a hard two-way branch (`:41`), so a new venue's `--url` is sent Hyperliquid's subscribe JSON. evidence: Verified by reading the script. `troll/CLAUDE.md`'s "Adding a venue" step 1 makes a raw-frame capture mandatory and DATA-08's rule depends on that evidence, so the harness needs a third branch before a fourth venue can be investigated. Secondary: `_BYBIT_URL` is `/public/linear` only, so it also cannot close the Bybit-spot `u` gap DATA-08 flags as an open DATA-02 question. Story 22.8 documents the limitation in step 1 but cannot fix it (docs-only).
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-capture-script-and-docs
+resolution-undo: 9077e58b03eea8f8c9d2570018bc9c06100b365969d0b85199174491807bf96f 2026-10-05 7374617475733a206f70656e
 
 ### DW-170: `data_api/routes/snapshots.py:129-133` re-implements the gate's empty-top-of-book and crossed-book checks in a reader (`if bp >= ap: continue`), which AD-3 …
 
@@ -1329,7 +1331,9 @@ resolution: already resolved: platform/ranking/infrastructure/volume_bybit.py an
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: troll/frontend/src/pages/docs/kbData.ts:143,195,202
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-22-8-spine-rules-and-docs-updated-for-the-multi-venue-core.md` summary: `troll/frontend/src/pages/docs/kbData.ts:143,195,202` — the knowledge-base page `data_api` serves at `/docs` — still cites the deleted module constant `_CROSSED_RESYNC_NS` and `troll/ml_signals/dashboard.py` as live references, and `troll/docs/DATA_DICTIONARY.md` still names `dashboard` in seven places while its own `:309` records that Story 15.10 retired it. evidence: Verified by grep in this worktree. `_CROSSED_RESYNC_NS` became `CoreConfig.crossed_resync_seconds` in story 22.2 and `dashboard.py` was deleted by 15.10. The `.ts` file is frontend source, not a `.md` document of record, so both it and the wider `DATA_DICTIONARY` sweep fall outside a docs-only story whose acceptance criterion is "only `.md` files appear in the diff".
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-capture-script-and-docs
+resolution-undo: 9077e58b03eea8f8c9d2570018bc9c06100b365969d0b85199174491807bf96f 2026-10-05 7374617475733a206f70656e
 
 ### DW-173: `troll/bot_tui/coin_detail_state.py:24`'s docstring states "snapshots:raw carries every currently-published instrument's batch every tick", an invariant that …
 
@@ -1403,7 +1407,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-23-2-kernel-shared-kernel.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-23-2-kernel-shared-kernel.md` summary: `kernel.archive_markers.decode`/`ArchiveGap.encode`'s new inverted-span refusal (this story's third pass) has no companion check-before-rollout: if any already-deployed `_archive_gaps/<iid>.jsonl` was written by the pre-fix `record_gap` (which this same story found could emit an inverted span on a backward wall-clock step), the nightly rebuild will now hard-refuse that instrument-day on the first read instead of the old silent tolerance. evidence: triage log pass 2 item 1 (`spec-23-2-kernel-shared-kernel.md`) confirms the pre-fix write path was capable of the inverted span this decode now refuses. No `_archive_gaps` file exists in this worktree's `platform/data/` (pre-rollout, per `DEPLOY_CHECKLIST.md` §5 / Epic 22 memory), so nothing is known to be affected today, but this wasn't checked against the actual VPS collector's historical files before merge, and should be a one-line grep (`decode` every line, catch `ValueError`) added to the rollout checklist rather than discovered by a failed rebuild.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-capture-script-and-docs
+resolution-undo: 9077e58b03eea8f8c9d2570018bc9c06100b365969d0b85199174491807bf96f 2026-10-05 7374617475733a206f70656e
 
 ### DW-183: the catalog read helpers list files and then open them in a second step with no guard for a file that vanished in between …
 
@@ -1684,7 +1690,9 @@ resolution: already resolved: f7c9e3ea38 (Story 31.3) deleted the mark-price fal
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-2-ranking-context-rankingboard-replaces-module-globals.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-2-ranking-context-rankingboard-replaces-module-globals.md` summary: The in-app knowledge base's "One paragraph" overview still says a web dashboard and a terminal UI both read the two Redis feeds and names dYdX only, though Story 25.1a made rankings web-only and the collectors cover three venues. evidence: platform/frontend/src/pages/docs/kbData.ts line 9 ("A web dashboard and a terminal UI both read the same two Redis feeds"); unchanged by 25.2, stale since 25.1a (a046e0839a).
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-capture-script-and-docs
+resolution-undo: 9077e58b03eea8f8c9d2570018bc9c06100b365969d0b85199174491807bf96f 2026-10-05 7374617475733a206f70656e
 
 ### DW-222: The bots' `fills.db` reads run synchronously on the TradingNode's one event loop -- every 30 s each bot's history refresh runs 4 ranges x 4 queries (two …
 
@@ -1814,7 +1822,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: frontend/src/pages/docs/kbData.ts
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-26-2-capture-package-and-venue-packages-with-entrypoints.md` summary: The in-app docs (`frontend/src/pages/docs/kbData.ts`) show `bar_intervals = ["1-MINUTE"]` under the dYdX `[[instruments]]` example, a key the strict loader rejects (`_DYDX_ENTRY_KEYS` is id/store_order_book_deltas/retain_hours), so an operator copying it gets a collector that refuses to start. evidence: platform/frontend/src/pages/docs/kbData.ts line 50; identical at baseline 7fbdb4fe76; loader in platform/capture/infrastructure/config.py.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-capture-script-and-docs
+resolution-undo: 9077e58b03eea8f8c9d2570018bc9c06100b365969d0b85199174491807bf96f 2026-10-05 7374617475733a206f70656e
 
 ### DW-240: `archive/tools/measure_lag.py` `_default_instruments` reads fixed in-tree paths: for dYdX inside a container that is the bind-mounted live plan whose …
 
@@ -2147,3 +2157,7 @@ status: open
 - source_spec: `_bmad-output/implementation-artifacts/spec-chart-edge-coordinates.md`
   summary: An FRVP whose range (placement or edge drag) ends on the forming live bar builds its profile from `candles`/`fullVolume`, which exclude that bar, and is not rebuilt once the bar closes, so the profile silently stops one bar short of its drawn range.
   evidence: `ChartPage.tsx` `handleRangeSelect`/`handleEdgeCommit` call `buildRangeProfile(candles, fullVolume, ...)`; the refill at ~806 only rebuilds profiles that are not `filled`; the live bar was already reachable through `coordinateToTime` before DW-143/DW-150, which only made the margin drag land there more easily.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-dw-capture-script-and-docs.md`
+  summary: The in-app knowledge base's "Redis channel reference" table (`platform/frontend/src/pages/docs/kbData.ts`) lists only five channels (`snapshots:raw`, `rankings:live`, `ranking:control`, `bots:status`, `bots:control`), while the module map beside it names `collector:status`, `archive:status`, `markets:live` and `collector:control`, and `archive:control` is live too, so a reader who takes the table as the channel contract misses five live channels.
+  evidence: `bot_tui/collector_pane.py`/`collector_state.py` (collector:status/control), `archive/infrastructure/redis_bus.py` + `archive/scheduler.py` (archive:status/control), `bot_tui/markets_state.py` (markets:live); the table predates this bundle, which only corrected the module-map prose.

@@ -1414,3 +1414,67 @@ now answers 404 for an instrument with no definition in the catalog and carries 
       a horizontal line drawn in the browser before the deploy appears once (it is imported from
       that browser's `localStorage` on the first load) and survives a reload in another browser,
       and `GET /api/candles/<a collected id>` carries both precision fields.
+
+### DW-182 archive-gap markers decode under the strict reader (Story 23.2; commit: 3f8328d048)
+
+Story 23.2 made `kernel.archive_markers.decode` refuse an inverted span (`from_ns > to_ns`), and the
+pre-23.2 `record_gap` could write one when the wall clock stepped backward mid-gap. A marker file
+already on the VPS may therefore hold a line the new reader refuses:
+`archive.infrastructure.gap_markers.load_gaps` raises on it, so the nightly rebuild refuses that
+instrument-day until the line is repaired.
+
+- [ ] On the VPS, before the first nightly run on a tree at or after Story 23.2 (and once now if that
+      run already happened), run this read-only check in the `archive` image. It decodes every
+      non-blank line of every `_archive_gaps/*.jsonl`, prints `path:line: error` for each refused
+      one (line numbers as `load_gaps` counts them), prints the total, and exits 1 if any was
+      refused (no `_archive_gaps` directory = 0 lines, exit 0; a missing catalog root itself
+      fails with exit 1 naming the path, so a wrong mount never passes as "0 checked"):
+
+```bash
+cd ~/nautilus_trader_fork/platform && docker compose run --rm --no-deps -T archive python3 - <<'PY'
+import sys
+from pathlib import Path
+from kernel.archive_markers import GAPS_DIRNAME
+from kernel.archive_markers import decode
+catalog = Path("/app/catalog")
+if not catalog.is_dir():
+    sys.exit(f"{catalog} is not a directory: is the catalog mounted?")
+root = catalog / GAPS_DIRNAME
+checked = refused = 0
+for path in sorted(root.glob("*.jsonl")):
+    try:
+        lines = path.read_text().splitlines()
+    except ValueError as e:  # not UTF-8: the reader refuses the whole file
+        refused += 1
+        print(f"{path}: unreadable: {e}")
+        continue
+    for number, text in enumerate(lines, start=1):
+        if not text.strip():
+            continue
+        checked += 1
+        try:
+            decode(text)
+        except ValueError as e:
+            refused += 1
+            print(f"{path}:{number}: {e}")
+print(f"{checked} archive-gap marker line(s) checked, {refused} refused")
+sys.exit(1 if refused else 0)
+PY
+```
+
+- [ ] For each inverted line: stop that venue's writer and the archive service, by the
+      instrument id's venue suffix (`.DYDX` -> `collector`, `.BYBIT` -> `bybit_collector`,
+      `.HYPERLIQUID` -> `hyperliquid_collector`: `docker compose stop <service> archive`), and run
+      no manual archive tool meanwhile (`make nightly`/`consolidate`/`prune`: `prune` appends
+      `pruned` markers to these same files). Copy the file out of the catalog first
+      (`mkdir -p ~/archive-gaps-backup && cp data/catalog/_archive_gaps/<iid>.jsonl
+      ~/archive-gaps-backup/<iid>.jsonl.$(date +%F)`), then edit the line swapping the `from_ns`
+      and `to_ns` values, keeping the key order `instrument_id`, `from_ns`, `to_ns`, `reason`,
+      `count`. That is exactly what the post-23.2 `record_gap` writes for the same input (it
+      ledgers `archive_gaps.inverted_span` and records the ordered span, which still covers the
+      rows the marker protects). Re-run the check until it exits 0, then `docker compose start`
+      the services you stopped. Any other refused line or file (not an inverted span) is a
+      DATA-02 question: record it in `docs/DATA_INTEGRITY_AUDIT.md` rather than delete it.
+- [ ] Record the result here with the date: lines checked, and each repaired line's original text
+      and file (a repaired line is a backward wall-clock step on that collector's host, the same
+      evidence an `archive_gaps.inverted_span` ledger entry carries today).

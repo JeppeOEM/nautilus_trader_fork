@@ -2355,8 +2355,9 @@ dYdX L2 deltas have no order IDs, so a shrinking level can't be told apart from 
 cancel vs. a fill; see the module's own caveat, `footprint.py`) into
 per-candle, per-price-band cells (`bands_per_candle`, default 4). Each cell tracks
 gross `bid_added`/`bid_removed`/`ask_added`/`ask_removed` size (not just net, so a
-churning level is visible). Input: `OrderBookDelta`s + `Candle`s (§2.5). Used by the
-web dashboard's footprint chart only — no ranking/live-tick consumer.
+churning level is visible). Input: `OrderBookDelta`s + `Candle`s (§2.5). No consumer since
+Story 15.10 retired the aiohttp dashboard, whose footprint chart was not ported to the React UI;
+kept as a tested `views` function — no ranking/live-tick consumer either.
 
 ### 2.5 Candles (the `candles/` context, Story 24.1)
 
@@ -2891,7 +2892,7 @@ Every `db_write_interval_seconds` (60s), `RankingEngine.slow_loop_once` merges t
 `SqliteMetricsStore`, the store's only writer; other processes read it through
 `ranking.application.queries` (`history`/`nearest`, read-only connections), columns: `price`, `pct_1h`, `pct_24h`, `pct_1w`, `pct_1m`,
 `volatility`, `ofi`, `microprice`, `spread`, `rank`, `volume24h` — a 31-day rolling
-history used by the dashboard's per-coin history page. Its `price` column is the slow loop's
+history used by the web UI's per-coin history page. Its `price` column is the slow loop's
 latest trade close (the `pct_1w`/`pct_1m` base), not the rank entry's live mid. `nearest(ts)`
 (`/api/metrics/nearest/{symbol}`) returns the row closest to `ts` only within
 `NEAREST_TOLERANCE_S` = 120 s (two write intervals); a farther row is another time, so the answer is
@@ -2908,7 +2909,7 @@ order and column values unchanged (the web page is the only renderer since Story
 `platform/bots/` (the bots context, the actual trading bots) imports `ranking` or reads
 `rankings:live` — bots are configured independently, not auto-selected from the live
 ranking. The ranking's current, only
-confirmed consumer is the human-facing web dashboard's coin-picker UI, not an automated
+confirmed consumer is the human-facing web UI's rankings page, not an automated
 trading decision.
 
 ### 3.6 The published `markets:live` message (Story 29.5)

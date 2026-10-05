@@ -273,13 +273,13 @@ export const INDICATORS: Indicator[] = [
   {
     id: "footprint", group: "chart", name: "Footprint (resting order-book flow)", cadence: "static", window: "per-candle, per-price-band buckets",
     owner: "views/chart_series.py (build_footprint; moved there in Story 24.2)",
-    shownIn: ["Web dashboard footprint chart only"],
+    shownIn: ["No current view (the retired dashboard's footprint chart was not ported to the React UI)"],
     tagline: "Buckets resting order-book size changes — not executed trades — into per-candle, per-price-band cells.",
     formula: null,
     notes: [
       "dYdX's L2 deltas carry no order IDs, so a shrinking price level can't be told apart from a cancel vs. a fill — this is resting-size flow, explicitly not a trade footprint, by the module's own documented caveat.",
       "Each cell tracks gross <code>bid_added</code> / <code>bid_removed</code> / <code>ask_added</code> / <code>ask_removed</code> size (not just the net), so a churning level stays visible instead of netting to zero.",
-      "No ranking/live-tick consumer — dashboard footprint chart only.",
+      "No ranking/live-tick consumer and, since the dashboard's retirement (Story 15.10), no chart either.",
     ],
     refs: ["views/chart_series.py (Footprint section, build_footprint)"],
     related: ["book_features"],
