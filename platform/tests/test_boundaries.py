@@ -922,6 +922,7 @@ KERNEL_MODULES = frozenset(
         "dydx_http",
         "fold",
         "indicators",
+        "liquidation",
         "open_interest",
         "parquet_compat",
         "performance_metrics",
@@ -2020,6 +2021,8 @@ VERIFICATION_DENIED_MODULES = (
     # Story 31.6: the derivs tool reads the stored open interest and catalog files raw.
     "kernel.open_interest",
     "kernel.catalog_files",
+    # Story 33.1: the liquidations tool reads `custom_liquidation` raw, never the type it checks.
+    "kernel.liquidation",
 )
 _PYO3 = "nautilus_pyo3"
 # The allowlist behind the denylist: the only in-repo modules outside `verification` a non-test
@@ -2047,6 +2050,7 @@ VERIFICATION_ROOTS = frozenset(
         "verification.candles",
         "verification.bot_parity",
         "verification.chaos",
+        "verification.liquidations",
     }
 )
 # Story 31.7's subject package: the code under test, driven (never the reference). Only the catalog
@@ -2179,6 +2183,7 @@ def test_importing_the_verification_roots_loads_no_denied_module() -> None:
         "import verification.conservation, verification.tools.cut_snapshot_fixtures\n"
         "import verification.trades, verification.book, verification.derivs\n"
         "import verification.candles, verification.bot_parity, verification.chaos\n"
+        "import verification.liquidations\n"
         "print('\\n'.join(sorted(sys.modules)))\n"
     )
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(PLATFORM_DIR)}

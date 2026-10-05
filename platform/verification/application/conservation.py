@@ -69,6 +69,7 @@ from verification.domain.conservation import CoverageEntry
 from verification.domain.conservation import DayReport
 from verification.domain.conservation import Explanations
 from verification.domain.conservation import InstrumentReport
+from verification.domain.conservation import LiquidationWindow
 from verification.domain.conservation import ReferenceHour
 from verification.domain.conservation import ReferenceTrade
 from verification.domain.conservation import SecondsRun
@@ -182,8 +183,10 @@ def _file_entry(
     span: tuple[int, int],
 ) -> None:
     iid = entry.instrument_id
-    if iid not in runs:
-        return  # another instrument's line: not this report's subject
+    if iid not in runs or isinstance(entry, LiquidationWindow):
+        # Another instrument's line, or a liquidation window (Story 33.1), which explains no trade
+        # and no second: not this report's subject.
+        return
     if isinstance(entry, Backfilled):
         backfilled[iid].update(entry.trade_ids)
     elif not _overlaps(entry, *span):

@@ -34,6 +34,13 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
 - Bybit **spot** yields trades and book only. `capture/venues/bybit/client.py` subscribes the
   ticker for `LINEAR` alone, so a spot id produces no mark/index price and no funding rate,
   and `capture/venues/bybit/open_interest.py` builds `-LINEAR.BYBIT` ids only.
+- Bybit **linear liquidations** (Story 33.1): every `allLiquidation.{symbol}` entry of a
+  collected LINEAR id, over a second, generic `nautilus_pyo3.WebSocketClient` (the Rust Bybit
+  handler drops the topic), as the shared `kernel.liquidation.Liquidation` (`custom_liquidation/`:
+  liquidated side, size and **bankruptcy** price in exact integer units at the definition's
+  precisions), published on `liquidations:raw`. Spot has no liquidation stream. A window the socket
+  missed is recorded as coverage `liquidations_unrecoverable`, never filled (Bybit has no
+  liquidation history). Hyperliquid has no market-wide liquidation feed (Story 33.2).
 
 ### Constraints
 

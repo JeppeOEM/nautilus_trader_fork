@@ -57,6 +57,16 @@ verdict, failing count, failing instruments and missing raw files); an unexpecte
 ledgered at the same site and gives `"verification": "error"`. The step's own ledger file is
 `error_ledger.job_service("verify_day", "archive", venue)`.
 
+Liquidations (Story 33.1): for a venue of `verification.domain.verdict.LIQUIDATION_VENUES` (Bybit),
+`python -m verification.liquidations --venue V --day D --json --catalog C` runs as one more child
+on *both* paths -- after the six tools, and alone when there is no reference data, since it reads
+only the catalog and the coverage record. Its report is reduced by `summarise_liquidations` and
+kept under the result key `liquidations` (`{"report": "reported", "applicable", "total",
+"matched", "share", "unrecoverable_seconds", "instruments"}`, or `{"report": "refused",
+"reason"}`, ledgered at `archive.verify_day`), never in `types` and never in `verification`: a
+matched share is a self-check, and a venue without the feed must still be able to verify. It
+never changes the exit code.
+
 Known limit: the step runs after the night's consolidation, so the catalog tool's consolidation
 rehearsal finds day D already consolidated and reports `not_exercised` (D-116), which is not
 failing: the rehearsal is exercised only by a manual `verification.catalog` run before the
@@ -92,6 +102,7 @@ from pathlib import Path
 from typing import Any
 
 from observability import error_ledger
+from verification.domain.verdict import LIQUIDATION_VENUES
 from verification.domain.verdict import REFUSED
 from verification.domain.verdict import TOOLS
 from verification.domain.verdict import VERIFIED
@@ -99,6 +110,7 @@ from verification.domain.verdict import TypeVerdict
 from verification.domain.verdict import day_verdict
 from verification.domain.verdict import parse_report
 from verification.domain.verdict import summarise
+from verification.domain.verdict import summarise_liquidations
 
 from archive.domain.reconciliation import VENUES
 from archive.infrastructure.catalog_files import write_json_atomic
@@ -180,16 +192,45 @@ def run_tool(
     there as `<tool>.json` (the evidence behind a verdict, for a by-hand run; the nightly keeps
     only the reduction).
     """
+    code, report, why = _child_report(argv, runner, reports_dir, tool)
+    return summarise(tool, code, report, reason=why)
+
+
+def _child_report(
+    argv: list[str], runner: ToolRunner, reports_dir: Path | None, name: str
+) -> tuple[int, dict[str, Any] | None, str]:
+    """Run one child: its exit code, its report (kept in `reports_dir` too) and why it has none."""
     try:
         code, stdout = runner(argv, TOOL_TIMEOUT_S)
     except OSError as exc:
-        return summarise(tool, 1, None, reason=f"not started: {exc!r}")
+        return 1, None, f"not started: {exc!r}"
     if code == TIMED_OUT and not stdout:
-        return summarise(tool, code, None, reason=f"killed after {TOOL_TIMEOUT_S} s")
+        return code, None, f"killed after {TOOL_TIMEOUT_S} s"
     report = parse_report(stdout)
     if reports_dir is not None and report is not None:
-        write_json_atomic(reports_dir / f"{tool}.json", dict(report))
-    return summarise(tool, code, report)
+        write_json_atomic(reports_dir / f"{name}.json", dict(report))
+    return code, None if report is None else dict(report), ""
+
+
+def run_liquidations(
+    args: argparse.Namespace, runner: ToolRunner, reports_dir: Path | None
+) -> dict[str, Any]:
+    """
+    Return the day's liquidation summary for the result's `liquidations` key (`{}` for a venue without
+    the feed): a report beside the verdict, never in it. A refused one is ledgered.
+    """
+    if args.venue not in LIQUIDATION_VENUES:
+        return {}
+    argv = [sys.executable, "-m", "verification.liquidations", "--venue", args.venue]
+    argv += ["--day", args.day, "--json", "--catalog", args.catalog]
+    code, report, why = _child_report(argv, runner, reports_dir, "liquidations")
+    summary = summarise_liquidations(code, report, why)
+    logger.info("verify_day %s %s liquidations: %s", args.venue, args.day, summary["report"])
+    if summary["report"] == REFUSED:
+        error_ledger.record(
+            SITE, f"{args.venue} {args.day} liquidations: refused ({summary['reason']})"
+        )
+    return {"liquidations": summary}
 
 
 def _names(names: tuple[str, ...]) -> str:
@@ -215,15 +256,16 @@ def verify(
 ) -> tuple[dict[str, Any], int]:
     """Judge the venue-day: its result body and exit code (0 verified or no data, else 2)."""
     head = {"venue": args.venue, "day": args.day}
-    reason = no_reference(args.venue, args.day, environ)
-    if reason is not None:
-        logger.info("verify_day %s %s: %s (%s)", args.venue, args.day, NO_REFERENCE, reason)
-        return {**head, "verification": NO_REFERENCE, "reason": reason}, 0
-    raw_root = Path(environ["VERIFY_DATA_DIR"])
-    api_url = environ.get("VERIFY_DATA_API_URL") or None
     reports_dir = Path(args.reports_dir) if args.reports_dir else None
     if reports_dir is not None:  # a by-hand run names a fresh directory (an OSError is a crash)
         reports_dir.mkdir(parents=True, exist_ok=True)
+    reason = no_reference(args.venue, args.day, environ)
+    if reason is not None:
+        logger.info("verify_day %s %s: %s (%s)", args.venue, args.day, NO_REFERENCE, reason)
+        liquidations = run_liquidations(args, runner, reports_dir)
+        return {**head, "verification": NO_REFERENCE, "reason": reason, **liquidations}, 0
+    raw_root = Path(environ["VERIFY_DATA_DIR"])
+    api_url = environ.get("VERIFY_DATA_API_URL") or None
     types = []
     for tool in TOOLS:
         argv = tool_argv(tool, args, raw_root, api_url)
@@ -232,9 +274,10 @@ def verify(
         if not verdict.passed:
             ledger_type(args.venue, args.day, verdict)
         types.append(verdict)
+    liquidations = run_liquidations(args, runner, reports_dir)
     checked_at = clock().astimezone(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     body = day_verdict(types, checked_at)
-    return {**head, **body}, 0 if body["verification"] == VERIFIED else FINDINGS
+    return {**head, **body, **liquidations}, 0 if body["verification"] == VERIFIED else FINDINGS
 
 
 def _parser() -> argparse.ArgumentParser:

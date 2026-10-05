@@ -17,8 +17,9 @@ The verification context's error-ledger sites (DATA-07), the reference recorder'
 (`verification.recorder.*`), the conservation tool's (`verification.conservation.*`), the
 trades tool's (`verification.trades.*`), the book tool's (`verification.book.*`), the derivs
 tool's (`verification.derivs.*`), the catalog tool's (`verification.catalog.*`), the candles
-tool's (`verification.candles.*`), the bot parity tool's (`verification.bot_parity.*`) and the
-fault injection tool's (`verification.chaos.*`): every
+tool's (`verification.candles.*`), the bot parity tool's (`verification.bot_parity.*`), the
+fault injection tool's (`verification.chaos.*`) and the liquidations tool's
+(`verification.liquidations.*`, Story 33.1): every
 failure either survives or refuses on is recorded at one of these through
 `observability.error_ledger.record`, never a bare log line.
 
@@ -97,3 +98,7 @@ CHAOS_REFUSED = "verification.chaos.refused"
 CHAOS_FAULT_FAILED = "verification.chaos.fault_failed"
 # An undo command did not return 0: the fault may still be in place -- check the target by hand.
 CHAOS_UNDO_FAILED = "verification.chaos.undo_failed"
+# The liquidations tool refused to run: a day not closed, a missing catalog, a malformed coverage
+# line, a stored liquidation row with a null column or an unknown side, a file that vanished
+# mid-run; or it crashed (the detail says `crashed`; the exception is then re-raised).
+LIQUIDATIONS_REFUSED = "verification.liquidations.refused"

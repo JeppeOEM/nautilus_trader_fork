@@ -32,6 +32,7 @@ _PREFIXES = (
     "verification.candles.",
     "verification.bot_parity.",
     "verification.chaos.",
+    "verification.liquidations.",
 )
 
 

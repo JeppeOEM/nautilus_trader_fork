@@ -34,6 +34,7 @@ from capture.domain.trade_intake import REST_FEED_NAME
 __all__ = [
     "MAIN_FEED",
     "REST_FEED_NAME",
+    "ChannelRetry",
     "Feed",
     "OptionalStepFailed",
     "optional_feed_send",
@@ -80,6 +81,17 @@ class OptionalStepFailed(Exception):
     A trades-only socket step failed and was already ledgered (`optional_feed_send`). Raised so a
     wire bookkeeping call (`wire_channels.WireChannels`) does not count the channel held and runs
     its undo; the client then suppresses it, since that socket's failure is never fatal.
+    """
+
+
+class ChannelRetry(Exception):
+    """
+    An optional channel of an id failed on the wire and was already ledgered (Story 33.1: the
+    liquidation topic, `collector.liquidation_feed`). Raised by a client's `subscribe` after every
+    required channel of the id is held, so `CaptureService._subscribe_one` keeps the id applied,
+    keeps its book, and only queues it for the retry loop -- whose repeated `subscribe` sends just
+    the channels not yet held. A plain exception would un-apply the id and forget its book, losing
+    trades and seconds over an optional channel's hiccup.
     """
 
 

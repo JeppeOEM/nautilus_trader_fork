@@ -1414,3 +1414,41 @@ now answers 404 for an instrument with no definition in the catalog and carries 
       a horizontal line drawn in the browser before the deploy appears once (it is imported from
       that browser's `localStorage` on the first load) and survives a reload in another browser,
       and `GET /api/candles/<a collected id>` carries both precision fields.
+
+### 33-1-bybit-liquidations-captured-over-a-second-socket-into-one-shared-liquidation-type (commit: this story's)
+
+The Bybit collector opens a second, generic WebSocket to the public linear stream for
+`allLiquidation.{symbol}` of every collected LINEAR id (`capture/venues/bybit/liquidations.py`),
+archives the rows to `data/custom_liquidation/<iid>/`, publishes them on the new Redis channel
+`liquidations:raw`, appends `liquidations` (`connected`/`reconnecting`/`down`) as the last key of
+the Bybit `collector:status` aggregate and writes `liquidations_unrecoverable` lines to
+`data/coverage/bybit.jsonl` (per id; one short line per id at every start, from its subscribe to
+Bybit's ack, is expected) (`docs/DATA_DICTIONARY.md` §1.26). The nightly `verify_day` also runs
+`verification.liquidations` for BYBIT and keeps its summary under `liquidations` in
+`archive:status` `verification_days`. No config key, env var, compose service or bind mount
+changed; the coverage record's existing mount already carries the new kind.
+
+- [ ] On the VPS, pull this commit and rebuild/restart the Bybit collector and the archive service:
+      `cd ~/nautilus_trader_fork/platform && make up` (or `docker compose up -d --build
+      bybit_collector archive`).
+- [ ] Within a minute, confirm the Bybit aggregate on `collector:status` ends in
+      `"liquidations": "connected"`: `redis-cli SUBSCRIBE collector:status` and wait for the next
+      publish (or restart `bot_tui` to see the fresh one), and that `docker compose logs
+      bybit_collector | grep "liquidation socket"` shows `None -> connected`.
+- [ ] Check the ledger shows no `collector.liquidation_feed`, `collector.liquidation_publish` or
+      `collector.unencodable` line since the restart (`GET /api/errors`, or
+      `platform/data/errors/bybit_collector.jsonl`); a `collector.unencodable` naming a liquidation
+      is a precision finer than the definition and is a DATA-04 finding, not noise.
+- [ ] After the first liquidation (minutes on any active hour), confirm rows arrive:
+      `redis-cli SUBSCRIBE liquidations:raw` shows a JSON array of rows with integer
+      `price_units`/`size_units`, and `ls data/catalog/data/custom_liquidation/` lists the ids
+      after the next flush (60 s).
+- [ ] After the next nightly run, confirm `archive:status` `verification_days.BYBIT.<day>` carries
+      a `liquidations` object and that the day's `verification` did not change because of it. It
+      holds `report` (`reported`, or `refused` with a `reason`), `applicable`, `coverage_present`
+      (`false` means the unrecoverable seconds are unknown, not 0), the day's `total`, `matched`,
+      `share` and `unrecoverable_seconds`, and per instrument only counts (`total`, `matched`,
+      `unmatched`, `unrecoverable_seconds`) -- no unmatched ids. The full report (the first 20
+      unmatched ids per instrument) comes from a by-hand run: `python3 -m archive.verify_day ...
+      --reports-dir DIR` writes `DIR/liquidations.json`, or run `python3 -m
+      verification.liquidations --venue BYBIT --day <day> --json --catalog <catalog>` directly.

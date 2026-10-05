@@ -16,8 +16,8 @@
 The shared kernel (DDD spine AD-D3): the single copy of every type, fold, parser, constant,
 transport and read helper more than one bounded context uses.
 
-Invariant: one copy. `DydxSecondSnapshot`/`SecondOHLC`/`OpenInterest` (`second_snapshot`,
-`open_interest`), the trades -> second fold (`fold`), the pure indicators (`indicators`,
+Invariant: one copy. `DydxSecondSnapshot`/`SecondOHLC`/`OpenInterest`/`Liquidation`
+(`second_snapshot`, `open_interest`, `liquidation` -- Story 33.1), the trades -> second fold (`fold`), the pure indicators (`indicators`,
 `performance_metrics`), the only `InstrumentId` parser (`venues`), the two clocks and the one
 skew bound `MAX_TS_INIT_SKEW_NS` (`clocks`), the archive-gap marker format (`archive_markers`),
 the venue REST transport (`venue_http`, standard library only; the dYdX indexer's pyo3-derived

@@ -74,7 +74,15 @@ class VenueFeed(Protocol):
     dYdX markets); `fetch_book_snapshot(iid) -> BookSnapshot` (the aligned REST cross-check,
     22.5/D-64); `resync_orderbook(iid)` (force a fresh snapshot -- only a venue whose local book can
     drift; a full-snapshot venue must not have it); `feed_states() -> dict[Feed, bool]`
-    (*synchronous*: each connection's `is_active()`, polled every 0.1 s for reconnects).
+    (*synchronous*: each connection's `is_active()`, polled every 0.1 s for reconnects). Story
+    33.1, both synchronous: `liquidation_state() -> str | None` (the liquidation socket's
+    `connected`/`reconnecting`/`down`, carried on `CaptureStatus.liquidations`; None for a client
+    built without the feed) and
+    `note_liquidation_restart(iid, from_ns, to_ns)` (an id's `restart` span on its first verdict in
+    the process: the client's liquidation feed writes it as a `not_running` window when the id has
+    a liquidation topic, held yet or not). A `subscribe` may raise
+    `capture.application.feed.ChannelRetry` after its required channels are held: the id stays
+    applied and is retried.
     """
 
     async def fetch_instruments(self) -> list: ...
@@ -335,3 +343,6 @@ class CaptureStatus:
     lingering: frozenset[str] = frozenset()
     last_applied: Applied | None = None
     last_applied_ns: int = 0
+    # Story 33.1: the liquidation socket's state, `connected`/`reconnecting`/`down`, from the
+    # client's `liquidation_state()`; None for a client without the feed (a venue without one).
+    liquidations: str | None = None

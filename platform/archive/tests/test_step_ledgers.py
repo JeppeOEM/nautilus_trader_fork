@@ -138,5 +138,6 @@ def test_verify_day_opens_its_own_durable_ledger_per_venue(
 
     assert code == 2
     sites = _sites(errors_dir / "archive.verify_day_bybit.jsonl")
-    assert sites == ["process_start", *["archive.verify_day"] * len(verify_day.TOOLS)]
+    # Each refused type, then the refused liquidations report (Story 33.1: a BYBIT day has one).
+    assert sites == ["process_start", *["archive.verify_day"] * (len(verify_day.TOOLS) + 1)]
     assert not (errors_dir / "archive.jsonl").exists()

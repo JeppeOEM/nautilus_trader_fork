@@ -57,6 +57,16 @@ appended (fsync'd) after each flush's catalog writes to `<catalog>/../coverage/<
 failed append is ledgered (`collector.coverage_write`) and retried at the next flush, bounded, so
 `python -m verification.conservation` can prove every missing second and trade is explained.
 
+Rows outside the gate (Story 33.1): a venue loop's ungated rows -- the REST open-interest poll, the
+Bybit liquidation socket -- go straight into the flush buffer through `ingest_rows` (the plan's ids
+only, never `_on_data`, so never feed liveness and never the hot path); its coverage windows
+(`liquidations_unrecoverable`) are queued through `note_coverage`, and a restart's `restart` span
+is handed to the client (`note_liquidation_restart`), whose feed writes it `not_running` for an
+id with a liquidation topic, and a failed liquidation write is a `write_failed` window. A client
+`subscribe` raising `ChannelRetry` (an optional channel failed, already ledgered) leaves the id
+applied with its book and queues it for the retry loop; `capture_status()` carries the client's
+`liquidation_state()`.
+
 Trades (story 22.13): every accepted `TradeTick` is both kept for the live second (folded once
 per sample by `kernel.fold.fold_trades`) and archived raw to `data/trade_tick/<iid>/` with both
 clocks untouched (`ts_event` = venue, `ts_init` = arrival). The live snapshot is provisional and
@@ -148,6 +158,7 @@ from kernel.catalog_files import query_second_ohlc
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import NS_PER_S
 from kernel.clocks import READ_SPAN_MARGIN_NS
+from kernel.liquidation import Liquidation
 from kernel.second_snapshot import BOOK_DEPTH
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import ohlc_outside_book
@@ -162,6 +173,7 @@ from capture.application.book_check import BookSnapshot
 from capture.application.book_check import persistent
 from capture.application.book_check import top_levels_mismatch
 from capture.application.config import CoreConfig
+from capture.application.feed import ChannelRetry
 from capture.application.hotpath_metrics import HotPathWindow
 from capture.application.ports import Applied
 from capture.application.ports import ArchiveWriter
@@ -181,6 +193,7 @@ from capture.application.trade_backfill import BackfillReport
 from capture.application.trade_backfill import admit_backfill
 from capture.domain import coverage
 from capture.domain.coverage import CoverageLine
+from capture.domain.coverage import LiquidationsUnrecoverable
 from capture.domain.coverage import SecondCoverage
 from capture.domain.coverage import TradesBackfilled
 from capture.domain.coverage import TradesDropped
@@ -581,6 +594,9 @@ class CaptureService:
         self._coverage_trades: list[CoverageLine] = []
         self._coverage_unwritten: list[str] = []
         self._verdict_seen: set[str] = set()
+        # Ids whose first verdict this process has noted: kept when an id leaves the plan, so only
+        # a real restart's span is noted `not_running` for its liquidations (Story 33.1).
+        self._first_verdict_noted: set[str] = set()
         # Per plan id, its last archived snapshot second (None: none), read by `_prepare_ids` when
         # the id entered the plan; forgotten with its verdict state when it leaves.
         self._last_archived: dict[str, int | None] = {}
@@ -1045,6 +1061,8 @@ class CaptureService:
                     self._mark_lost_trades(key[1], items, now_ns)
                 elif key[0] is DydxSecondSnapshot:
                     self._note_lost_rows(key[1], items)
+                elif key[0] is Liquidation:
+                    self._note_lost_liquidations(key[1], items)
                 continue
             self._hotpath.note_write(elapsed_ns)
             if key[0] is DydxSecondSnapshot:
@@ -1148,6 +1166,17 @@ class CaptureService:
         """
         for second in sorted({row.ts_event // S_NS for row in lost}):
             self._coverage.note(iid, second, coverage.WRITE_FAILED)
+
+    def _note_lost_liquidations(self, iid: str, lost: list[Liquidation]) -> None:
+        """
+        Note a liquidation batch that failed to write as a `write_failed` window over its rows'
+        `ts_event` span (Story 33.1): received, ledgered (`collector.flush_write`) and lost, so the
+        coverage record must say so -- Bybit has no liquidation history to fetch them back from.
+        """
+        ts = [row.ts_event for row in lost]
+        self._coverage_trades.append(
+            LiquidationsUnrecoverable(iid, coverage.WRITE_FAILED, min(ts), max(ts))
+        )
 
     def _mark_lost_trades(self, iid: str, lost: list[TradeTick], now_ns: int) -> None:
         """
@@ -1348,19 +1377,54 @@ class CaptureService:
         every such id and span: what no process wrote. Noted before `second`'s own note, so the
         runs of one id stay in order and never overlap.
         """
+        new_ids = sorted(set(iids) - self._verdict_seen)
+        if not new_ids:
+            return  # the common case, every second: nothing to note, nothing to ask the client
         gaps: list[str] = []
-        for iid in sorted(set(iids) - self._verdict_seen):
+        for iid in new_ids:
             self._verdict_seen.add(iid)
             last = _latest(self._last_archived.get(iid), self._last_noted.get(iid))
             if last is not None and last + 1 < second:
                 self._coverage.note_span(iid, last + 1, second - 1, coverage.RESTART)
                 gaps.append(f"{iid} {last + 1}..{second - 1} ({second - 1 - last} s)")
+                if iid not in self._first_verdict_noted:
+                    self._note_liquidations_not_running(iid, last + 1, second - 1)
+            self._first_verdict_noted.add(iid)
         if gaps:
             self._ledger(
                 sites.RESTART_GAP,
                 "seconds between the last archived row and this process's first verdict, no row "
                 f"(coverage `restart`): {'; '.join(gaps)}",
             )
+
+    def _note_liquidations_not_running(self, iid: str, first_s: int, last_s: int) -> None:
+        """
+        Hand an id's `restart` seconds to the client as a `not_running` liquidation window too
+        (Story 33.1): for an id with a liquidation topic -- the client's feed decides, held yet or
+        not (a subscribe failed at start is retried later, its window running on until then) --
+        they are also seconds no process received its liquidations: the same span, as an
+        inclusive `ts_event` window.
+        The newest archived snapshot second is the signal, because a quiet hour archives no
+        liquidation at all, so the last archived liquidation cannot say when the collector stopped.
+        Only for the id's first verdict in this process (a real restart): an in-process re-add's
+        absence is covered by the liquidation feed's own per-id gap, opened at its subscribe.
+
+        Known limit: an upper bound. The span starts after the last archived *snapshot* second, so
+        a book that went stale before the stop (no rows while the socket still delivered) widens
+        the window over liquidations that may be archived; and an id restarted after a long
+        absence from the plan gets a window covering that absence (it was not collected either).
+        Upgrade path: a durable per-id "liquidation feed confirmed through" watermark.
+        """
+        if hasattr(self._client, "note_liquidation_restart"):
+            self._client.note_liquidation_restart(iid, first_s * S_NS, (last_s + 1) * S_NS - 1)
+
+    def note_coverage(self, lines: Iterable[CoverageLine]) -> None:
+        """
+        Queue coverage lines a venue loop produced (Story 33.1: the liquidation feed's `feed_down`
+        windows) for the next flush's append, behind this process's own: the one writer of the
+        coverage record stays this service.
+        """
+        self._coverage_trades.extend(lines)
 
     def _note_skipped(self, first_s: int, last_s: int, reason: str, why: str) -> None:
         """
@@ -2246,10 +2310,21 @@ class CaptureService:
         `capture.application.wire_channels.WireChannels` (Story 29.4). Upgrade path: surface the
         venue's subscribe acknowledgement from the Rust clients (outside this fork's `platform/`
         boundary).
+
+        A `ChannelRetry` (Story 33.1) is a success that leaves work: the client held every
+        required channel and ledgered the optional one that failed, so the id stays applied, its
+        book is kept, and it is queued for `_retry_subscriptions`, whose repeated `subscribe`
+        sends only what is still missing (the clients are idempotent per channel).
         """
         self._applied.add(iid)
         try:
             await self._client.subscribe(iid)
+        except ChannelRetry:
+            # An optional channel failed, already ledgered by the client: the id's required
+            # channels are held, so it stays applied with its book; the retry resends the rest.
+            self._retry_subscribe.add(iid)
+            logger.info(f"Subscribed {iid}; an optional channel is retried")
+            return True
         except Exception as e:
             self._applied.discard(iid)
             # A message booked during the await must not show a pending id with a book or a
@@ -2319,6 +2394,11 @@ class CaptureService:
             trade_backfill={iid: i.backfilled for iid, i in self._intakes.items() if i.backfilled},
             last_applied=self._last_applied,
             last_applied_ns=self._last_applied_ns,
+            liquidations=(
+                self._client.liquidation_state()
+                if hasattr(self._client, "liquidation_state")
+                else None
+            ),
         )
 
     # -- composition -------------------------------------------------------------------------
@@ -2361,6 +2441,7 @@ class CaptureService:
         continues (DATA-07). Invariant: for ungated venue values only (open interest); rows skip
         the book/trade gate (`TradeIntake`, `SecondSampler`), so a composition root never polls
         a book or trade type through it.
+        The rows go in through `ingest_rows`, shared with the liquidation feed (Story 33.1).
         Known limit: the first fetch waits one period, so a process restarting faster than
         `every_seconds` records no poll at all (unchanged from the per-venue loops it replaced);
         upgrade path: fetch once before the first sleep.
@@ -2368,15 +2449,41 @@ class CaptureService:
         while not self._stop.is_set():
             await asyncio.sleep(every_seconds)
             try:
-                wanted = set(self._plan_ids) if plan_only else None
                 polled = await fetch()
-                for item in polled.rows:
-                    iid = str(item.instrument_id)
-                    if wanted is None or iid in wanted:
-                        self._buffer[(type(item), iid)].append(item)
-                self._report_malformed(polled.malformed, wanted, site)
+                self.ingest_rows(polled.rows, site, plan_only=plan_only, malformed=polled.malformed)
             except Exception as e:
                 self._ledger(site, failure, e)
+
+    def ingest_rows(
+        self,
+        rows: Iterable[Any],
+        site: str,
+        *,
+        plan_only: bool = True,
+        malformed: Iterable[tuple[str | None, str]] = (),
+    ) -> list[Any]:
+        """
+        Put ungated `Data` rows (each carrying an `instrument_id`) straight into the flush buffer
+        and return the ones kept: with `plan_only` the plan's ids only -- the plan, not the applied
+        set -- otherwise every row. `malformed` rows (`PolledRows.malformed`) are ledgered at `site`
+        in one line (with `plan_only`, the planned ids and the unidentifiable ones).
+
+        The one path for rows that skip the book/trade gate (`TradeIntake`, `SecondSampler`):
+        `poll_loop`'s REST rows and, since Story 33.1, the liquidation socket's rows. They never
+        pass through `_on_data`/`_process_data`, so they never count as WS feed liveness (a quiet
+        hour without a liquidation must not read as a dead feed, nor a REST poll as a live one) and
+        never touch the hot path (`tests/test_hotpath.py`). Synchronous, on the event loop: the
+        buffer is the flush loop's, which only takes it between awaits.
+        """
+        wanted = set(self._plan_ids) if plan_only else None
+        kept = []
+        for item in rows:
+            iid = str(item.instrument_id)
+            if wanted is None or iid in wanted:
+                self._buffer[(type(item), iid)].append(item)
+                kept.append(item)
+        self._report_malformed(list(malformed), wanted, site)
+        return kept
 
     def _report_malformed(
         self, malformed: list[tuple[str | None, str]], wanted: set[str] | None, site: str

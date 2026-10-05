@@ -35,6 +35,7 @@ from verification import catalog
 from verification import chaos
 from verification import conservation
 from verification import derivs
+from verification import liquidations
 from verification import trades
 
 
@@ -45,6 +46,7 @@ _ROOTS: dict[str, Callable[[list[str]], int]] = {
     "chaos": chaos.main,
     "conservation": conservation.main,
     "derivs": derivs.main,
+    "liquidations": liquidations.main,
     "trades": trades.main,
 }
 _FUTURE_DAY = ["--venue", "BYBIT", "--day", "2099-01-05"]  # never closed: the cheapest refusal

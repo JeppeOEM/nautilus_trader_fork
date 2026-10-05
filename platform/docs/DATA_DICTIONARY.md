@@ -9,7 +9,7 @@ Every "error ledger" site named below (`collector.late_trade`, `collector.trade_
 (Story 23.1; formerly `ml_signals.error_ledger`, whose shim Story 24.1 deleted). The sites, their
 names and what they count are unchanged `[re-cited 2026-09-21: Story 23.1]`, with one addition:
 `archive_gaps.inverted_span` counts a gap marker whose `from_ns > to_ns` — a backward wall-clock
-step between a lost trade's arrival and the flush. Since Story 26.1 every capture site is a constant in `capture/application/sites.py` and `CaptureService._ledger` is capture's only `record` call; it added `collector.empty_top` (a book with no best bid or ask: seconds skipped, one WARNING and one ledger line per instrument per minute) `[amended 2026-09-26: Story 26.1]`, and Story 30.2 `collector.unencodable` (a second whose row cannot be stored exactly at the instrument definition's precisions: skipped, one ERROR and one ledger line per instrument per minute). Story 31.2 ledgered every site that only logged or skipped before. Per flush: `collector.stale_trade` (§1.1) and `collector.second_rejected` (gate rejections per instrument and reason, `not_collected` excluded). Per event: `collector.skipped_seconds`, `collector.restart_gap` and `collector.coverage_write` (§1.16), `collector.ohlc_outside_book` (every occurrence, the row kept), `collector.snapshot_publish` (a failed `snapshots:raw` publish, Parquet unaffected), `collector.crash` (`run()` raised; restarted with backoff), `collector.unknown_message` (a client message no branch decodes, repr bounded to 300 chars; dYdX's `block_height` and `new_instrument_discovered` dicts are ignored by name), `collector.candle_store_behind` and `collector.book_crosscheck_unconfirmed`. A REST poll's unparseable rows (a missing symbol or `openInterest`, a non-decimal value) go to its own poll site, `collector.open_interest_poll` `[amended 2026-09-29: Story 31.2]`. Story 28.1 added one per-flush site, `collector.hotpath_publish` (a failed `capture:hotpath` publish of the flush's hot-path figures, §1.25: once per failed publish, after a periodic flush or the final flush of a stop or crash, Parquet unaffected) `[amended 2026-09-30: Story 28.1]`. The marker is written as the ordered span and
+step between a lost trade's arrival and the flush. Since Story 26.1 every capture site is a constant in `capture/application/sites.py` and `CaptureService._ledger` is capture's only `record` call; it added `collector.empty_top` (a book with no best bid or ask: seconds skipped, one WARNING and one ledger line per instrument per minute) `[amended 2026-09-26: Story 26.1]`, and Story 30.2 `collector.unencodable` (a second whose row cannot be stored exactly at the instrument definition's precisions: skipped, one ERROR and one ledger line per instrument per minute). Story 31.2 ledgered every site that only logged or skipped before. Per flush: `collector.stale_trade` (§1.1) and `collector.second_rejected` (gate rejections per instrument and reason, `not_collected` excluded). Per event: `collector.skipped_seconds`, `collector.restart_gap` and `collector.coverage_write` (§1.16), `collector.ohlc_outside_book` (every occurrence, the row kept), `collector.snapshot_publish` (a failed `snapshots:raw` publish, Parquet unaffected), `collector.crash` (`run()` raised; restarted with backoff), `collector.unknown_message` (a client message no branch decodes, repr bounded to 300 chars; dYdX's `block_height` and `new_instrument_discovered` dicts are ignored by name), `collector.candle_store_behind` and `collector.book_crosscheck_unconfirmed`. A REST poll's unparseable rows (a missing symbol or `openInterest`, a non-decimal value) go to its own poll site, `collector.open_interest_poll` `[amended 2026-09-29: Story 31.2]`. Story 28.1 added one per-flush site, `collector.hotpath_publish` (a failed `capture:hotpath` publish of the flush's hot-path figures, §1.25: once per failed publish, after a periodic flush or the final flush of a stop or crash, Parquet unaffected) `[amended 2026-09-30: Story 28.1]`. Story 33.1 added two Bybit liquidation sites (§1.26): `collector.liquidation_feed` (a liquidation subscribe that failed or Bybit refused, the liquidation socket that did not open, went `down`, or whose monitor round raised) and `collector.liquidation_publish` (a failed `liquidations:raw` publish, the rows archived regardless); an inexact liquidation entry is `collector.unencodable` and a malformed liquidation frame `collector.unknown_message` `[amended 2026-10-05: Story 33.1]`. The marker is written as the ordered span and
 still protects its rows, so the count is the only signal that the clock stepped back
 `[added 2026-09-22: Story 23.2]`.
 
@@ -25,7 +25,9 @@ everything through `ParquetDataCatalog.write_data()` — no hand-rolled schemas
 (`platform/CLAUDE.md` NAUT-02). Nine distinct types land in the catalog. Six are native
 Nautilus types decoded straight from the Rust adapter; two (`DydxSecondSnapshot`,
 `OpenInterest`) are custom `Data` subclasses this collector defines because the
-PyO3 bindings don't expose the fields another way.
+PyO3 bindings don't expose the fields another way. A tenth, the custom `Liquidation` (§1.26), is
+written by the Bybit collector from a second socket the Rust handler cannot decode
+`[amended 2026-10-05: Story 33.1]`.
 
 **The collected set** (the committed plans, venue cutover Story 29.3, operator decision
 2026-09-26: BTC/ETH on Bybit, SOL on Hyperliquid; reversible by config). Since Story 29.4 every
@@ -34,7 +36,7 @@ venue's plan file, so on a running box the file, not this table, is the current 
 
 | Venue | Instrument ids | Market | What each yields |
 |---|---|---|---|
-| Bybit (`capture/venues/bybit/config.toml`) | `BTCUSDT-LINEAR.BYBIT`, `ETHUSDT-LINEAR.BYBIT` | linear perp | trades, book (`DydxSecondSnapshot`), mark/index price, funding rate, open interest (REST poll) |
+| Bybit (`capture/venues/bybit/config.toml`) | `BTCUSDT-LINEAR.BYBIT`, `ETHUSDT-LINEAR.BYBIT` | linear perp | trades, book (`DydxSecondSnapshot`), mark/index price, funding rate, open interest (REST poll), liquidations (a second socket, §1.26, Story 33.1) |
 | Bybit | `BTCUSDT-SPOT.BYBIT`, `ETHUSDT-SPOT.BYBIT` | spot | trades and book only: no mark/index price, no funding rate (the ticker is subscribed for `LINEAR` alone), no open interest (spot has none) |
 | Hyperliquid (`capture/venues/hyperliquid/config.toml`) | `SOL-USD-PERP.HYPERLIQUID` | perp | trades, book, mark/index price, funding rate, open interest (over the WebSocket) |
 | dYdX (`platform/data/dydx_config.toml`) | operator data (the live plan file, hot-reloaded) | perp | trades, book, mark/index price, funding rate, open interest (indexer REST poll); raw `OrderBookDeltas` per opt-in |
@@ -609,6 +611,14 @@ Bybit's and Hyperliquid's since Story 29.4). Published language, frozen
     is also republished within `STATUS_CHANGE_POLL_SECONDS` if its own publish failed.
     `[amended 2026-09-29: Story 29.5 -- appended after `last_apply`; every earlier key and byte is
     unchanged, `collection_control/tests/test_status_replay.py`'s `_APPENDED_KEYS`]`
+  - `liquidations` — the venue's liquidation socket (§1.26): `"connected"` (`is_active()`),
+    `"reconnecting"` (the Rust client is reconnecting) or `"down"` (no socket: the connect failed,
+    or it is closed), from `CaptureService.capture_status().liquidations`, i.e. the client's
+    `liquidation_state()`; `null` for a venue without the feed (Hyperliquid, dYdX). Always present,
+    always the aggregate's last key. It is the socket's state, never row arrival: a quiet hour
+    with no liquidation still reads `connected`. Each transition to `down` is also ledgered
+    `collector.liquidation_feed`. `[amended 2026-10-05: Story 33.1 -- appended after
+    `last_refusal`; every earlier key and byte is unchanged, `_APPENDED_KEYS`]`
   And on `stop`/`unpin` a `{"id": ..., "removed": true}` tombstone.
 - **`collector:control`** — `{action, id, venue}` published by `bot_tui` (only for a plan whose
   aggregate says `accepts_commands` and is fresh), consumed by every venue's collector.
@@ -922,6 +932,7 @@ and recreates it with the rest (`VERIFY_DATA_DIRS`).
 {"kind":"trades_dropped","instrument_id":"…","reason":"stale","first_ns":…,"last_ns":…,"count":3}
 {"kind":"trades_backfilled","instrument_id":"…","count":2,"trade_ids":["…","…"]}
 {"kind":"trades_unrecoverable","instrument_id":"…","reason":"depth","from_ns":…,"to_ns":…}
+{"kind":"liquidations_unrecoverable","instrument_id":"…","reason":"feed_down","from_ns":…,"to_ns":…}
 ```
 
 - `seconds`: seconds `first_s..last_s` (inclusive, epoch seconds; `count = last_s - first_s +
@@ -938,6 +949,30 @@ and recreates it with the rest (`VERIFY_DATA_DIRS`).
   abandoned the backfill before it fetched the instrument (then the window ends at shutdown).
   The window runs from the instrument's last archived trade to the fetch time, or to where the
   venue's history began.
+- `liquidations_unrecoverable`: an inclusive `ts_event` window `from_ns..to_ns` (venue time, ns)
+  of one instrument whose liquidations were never received, or received and lost (§1.26). Each
+  reason is an **upper bound**: a window may overlap archived rows, it never understates a gap.
+  `feed_down`: one per
+  id, from the instant the id's topic stopped being confirmed live (its subscribe; or, on a
+  reconnect or a socket not `connected`, the last connected monitor tick minus one tick) minus
+  `WIRE_LAG_NS` (3 s: arrival - `T` measured up to 2,867 ms), to Bybit's success ack for that id
+  on the live socket (the request's echoed `req_id`) -- never merely `is_active()` turning true.
+  A refused subscribe keeps the window open while the monitor resends it; an unsubscribe and a
+  shutdown write the open window up to then; a window open longer than 60 s is written up to now
+  and restarted (`CHECKPOINT_NS`), so a SIGKILL loses at most ~60 s of an open window's head,
+  which the next process's `not_running` window covers in part (Known limit). `not_running`: the
+  same span as the id's `restart` seconds run, `first_s * 1 s - WIRE_LAG_NS .. (last_s + 1) * 1 s
+  - 1`, handed by `CaptureService._note_restart_gaps` to the client (`note_liquidation_restart`)
+  and written by its feed for an id with a liquidation topic (a LINEAR definition), held yet or
+  not, on its first verdict in the process only (an in-process re-add is the feed's own
+  `feed_down` window from its subscribe) -- the newest archived *snapshot* second is the signal,
+  since a quiet hour archives no liquidation at all; a book that went stale before the stop
+  widens it. `write_failed`: the `ts_event` span of a liquidation batch whose catalog write failed
+  (ledgered `collector.flush_write`). Bybit has no liquidation history, so nothing ever fills these
+  windows; they are the record (audit D-149). The conservation, trades, book, derivs, candles,
+  catalog and bot-parity readers parse the line as strictly as the others and ignore it: it
+  explains no trade and no second. Only `verification.liquidations` reads it.
+  `[amended 2026-10-05: Story 33.1 -- a fifth kind appended; the four existing kinds unchanged]`
 
 **Seconds reasons.** At every sample tick each plan id gets exactly one verdict: a row, a
 rejection reason, or `not_collected`.
@@ -2079,7 +2114,8 @@ classed, and where each piece is documented. `docs/VERIFICATION_REPORT.md` holds
 | `verification.candles` | stored, served and reference candles on every width; kline pass rates | §1.21 |
 | `verification.bot_parity` | a dummy bot's live signal log against its catalog replay | §1.22 |
 | `verification.chaos` | injected production failures, each judged by windowed conservation | §1.23 |
-| `archive.verify_day` (the nightly step) | the six day tools above, reduced to one verdict per type | this section, §6 |
+| `verification.liquidations` (`--day`, catalog only, no recorder) | each archived liquidation's same-size forced-side trade within 2 s, as a matched share per instrument, plus the day's unrecoverable liquidation seconds -- a self-check, never a verdict | §1.26 |
+| `archive.verify_day` (the nightly step) | the six day tools above, reduced to one verdict per type; and, for a venue with a liquidation feed (Bybit), the liquidations report kept beside the verdict under `liquidations`, on the no-reference path too, never in `types` or `verification` `[amended 2026-10-05: Story 33.1]` | this section, §6 |
 
 **Verdict classes.** A verdict states its window, its numbers, the code revision and a repro.
 - `VERIFIED`: 0 unexplained in the window. Explained losses are allowed and are named.
@@ -2238,6 +2274,155 @@ ingest-queue backlog (D-07) can be told apart from host contention (D-146)
   contract on a 30 s/1800 s cadence, and `/api/errors` reads ledger files. A dedicated channel
   plus a latest-value key on capture's own Redis client gives the same visibility without an
   endpoint and without coupling to another context's contract.
+
+### 1.26 `Liquidation` (custom `Data` type, `kernel/liquidation.py`, Story 33.1)
+
+One forced liquidation, one type for every venue that publishes them; Bybit linear since Story
+33.1 (Hyperliquid has no market-wide feed: Story 33.2) `[amended 2026-10-05: Story 33.1 -- new
+type, channel and coverage kind]`.
+
+- **Catalog directory:** `data/custom_liquidation/<iid>/` (the class name, registered for Arrow once,
+  `tests/test_namespace.py`), written by capture's flush through `ParquetDataCatalog.write_data`.
+- **Fields** (Arrow schema, in order):
+  - `instrument_id` (`dictionary<int8,string>`);
+  - `side` (`dictionary<int8,string>`, `"long"` | `"short"`) -- the **liquidated position's**
+    side, `LiquidatedSide`. `long` means a long was force-closed, so the forced order that hit the
+    book was a **sell**; `short` a forced **buy**. Bybit's wire `S` names the position: `S ==
+    "Buy"` is `long`, `"Sell"` is `short` (audit D-147; the kernel docstring and a test on a
+    recorded frame pin it);
+  - `size_units` (`int64`) -- the liquidated size in units of `10^-size_precision` (base asset);
+  - `price_units` (`int64`) -- the **bankruptcy price** in units of `10^-price_precision`. Bybit's
+    `p` is the price at which the position's margin is exhausted, **not the price the forced order
+    filled at** (audit D-148): never read it as a trade price;
+  - `price_precision`, `size_precision` (`uint8`, per row) -- the instrument definition's own
+    precisions (the pyo3 instrument's `price_precision`/`size_precision`, e.g. BTCUSDT tickSize
+    `"0.10"` -> 2, qtyStep `"0.001"` -> 3), never the value's digit count (DATA-04);
+  - `venue_event_id` (`string`) -- the venue's own key when it has one; Bybit has none, so the
+    dedup key `"{T}:{S}:{v}:{p}"` of the wire texts, with `#k` on the k-th identical entry of one
+    frame (two equal entries in one push are two liquidations, both kept);
+  - `ts_event` (`uint64`) -- the venue's `T` (ms) in ns; `ts_init` (`uint64`) -- capture's receive
+    time.
+- **Units, exact:** wire text -> `Decimal` -> raw at `FIXED_PRECISION` (`Decimal.scaleb`, NAUT-01)
+  -> `kernel.second_snapshot.units_of`. A value finer than the definition's precision raises
+  `SnapshotEncodingError`: that entry is ledgered `collector.unencodable` and not archived, the
+  frame's other entries are -- never rounded. No `float` anywhere. Properties `price`/`size`
+  return the exact `Price`/`Quantity` (`from_raw`); `notional_units()` is `size_units *
+  price_units` in units of `10^-(price_precision + size_precision)` of the quote currency: size x
+  **bankruptcy** price, an approximation of the fill notional, never the fill.
+- **Source (Bybit):** `allLiquidation.{symbol}` on the public **linear** stream
+  (`kernel.venue_http.bybit_ws_url(env, "linear")`), every collected LINEAR id. The Rust Bybit
+  handler drops this topic (`BybitWsFrame::Unknown`), so `capture/venues/bybit/liquidations.py`'s
+  `BybitLiquidationFeed` owns a second, generic `nautilus_pyo3.WebSocketClient` (Rust reconnect
+  with backoff; `{"op":"ping"}` heartbeat every 20 s; `idle_timeout_ms` 60,000, so a half-open
+  socket that delivers nothing, not even pongs, reconnects; a `post_reconnection` that
+  resubscribes every held topic in requests of at most 10 args, each with a `req_id`; a reopened
+  socket closes the previous one first) and decodes in Python
+  (`parse_liquidation_frame`, pure, fixture-tested on recorded frames). Spot has no liquidation
+  stream and inverse ids are not collected: the client refuses both, the reason logged once per
+  id. Subscribes go through the feed's own `WireChannels` at `BYBIT_WS_FRAMES_PER_SECOND`; a
+  failed one is ledgered `collector.liquidation_feed` and raised as `ChannelRetry`, so capture
+  keeps the id applied with its book and its 30 s retry loop resends only the topic; a subscribe
+  while the socket is not connected only holds the id (the reconnect's resubscribe or the
+  monitor's resend sends it), and a request is registered only when its frame goes out. Acks:
+  `success: true` confirms the request's ids (by its echoed `req_id`); `already subscribed` (a
+  resubscribe after a reconnect, or the socket's replay of a request sent while it reconnected)
+  confirms only the topics its `ret_msg` names (a dated future's `-` included), or, naming none, a
+  request sent with one topic -- the rest are released and resent one by one; any other refusal
+  (`handler not found`, ...) is ledgered `collector.liquidation_feed` and releases those topics,
+  the ones it names (all, when it names none) resent after a per-id backoff doubling from 10 s to
+  600 s (a delisted symbol must not ledger every 10 s forever), the others at the next monitor
+  round; a release only unmarks the topic, no frame and no pacing wait; a request
+  left unanswered for 30 s (`ACK_TIMEOUT_NS`: the ack or the frame died with a socket) is ledgered
+  the same way and released, its ids' windows still open, and a reconnect forgets every request
+  in flight (its resubscribe covers their ids). A failed unsubscribe is ledgered and the topic
+  forgotten, so a re-add subscribes it again. An id with no LINEAR definition
+  is ledgered once and never retried. A frame that is not JSON, not the documented shape (missing
+  `data`, an entry lacking one of `T/s/S/v/p` -- extra keys are kept, with one WARNING per new key
+  set --, a side other than `Buy`/`Sell`, an entry symbol other than the topic's) or of an unknown
+  topic is ledgered `collector.unknown_message` and nothing of it is archived; an entry whose `T`
+  lies more than 300 s (`kernel.clocks.MAX_TS_INIT_SKEW_NS`) from its arrival (a wrong unit, or an
+  overflow of the stored `uint64`) is `collector.unencodable`; any other failure while handling a
+  frame is ledgered `collector.liquidation_feed`.
+- **Path:** decoded rows go through `LiquidationDedup`, then `CaptureService.ingest_rows` -- straight
+  into the flush buffer, the plan's ids only, never `_on_data`/`_process_data` (so never WS feed
+  liveness, never the trade gate, never the hot path) -- then the kept rows are published.
+- **Dedup rule:** a row whose `(instrument_id, venue_event_id)` was already let through within 5 s
+  of arrival (the monotonic clock) is dropped (`DEDUP_WINDOW_NS`). Measured repeat rate: 0 (below), so the window drops
+  nothing on a healthy stream; it guards a resubscribe or a socket replay. Known limit (audit
+  D-150): two distinct liquidations with the same `T`, side, size and price in different frames
+  within 5 s would be kept as one.
+- **Channel:** Redis `liquidations:raw`, one JSON array of `Liquidation.to_dict` rows per decoded
+  frame (`instrument_id`, `side`, `size_units`, `price_units`, `price_precision`,
+  `size_precision`, `venue_event_id`, `ts_event`, `ts_init` -- integers and precisions, never
+  floats), the rows the archive buffer took, on the collector's `RedisLiveStream`. A failed publish
+  is ledgered `collector.liquidation_publish`; the rows are archived regardless. No consumer yet
+  (Stories 33.4 and 33.14).
+- **Liveness and status:** the socket's state, never row arrival (a quiet hour has none):
+  `connected` (`is_active()`), `reconnecting`, `down` (no socket, closed or closing), on
+  `collector:status`'s aggregate as its last key `liquidations` (§1.12); each transition to `down`
+  is ledgered `collector.liquidation_feed`; a socket that failed to open is reopened every 10 s,
+  the outage's first failed open ledgered and the repeats logged.
+- **Coverage rule:** a window with no liquidation received is recorded, never filled -- Bybit has no
+  liquidation history endpoint (audit D-149). `liquidations_unrecoverable` lines (§1.16), upper
+  bounds: `feed_down` per id from the instant its topic stopped being confirmed (the socket's last
+  message of any kind -- a pong at least every 20 s --, so a half-open socket's silence before its
+  idle-timeout reconnect is inside the window; minus the 3 s wire lag) to Bybit's ack for it,
+  checkpointed every 60 s and written at unsubscribe or shutdown, a reopened window never starting
+  before the end of that id's last written line; at shutdown every held id gets one, a confirmed
+  id's covering its last 3 s, whose frames may still be in flight (no frame is handled after the
+  close);
+  `not_running` for an id's `restart` span on its first verdict in a process (the newest archived
+  snapshot second, minus the 3 s wire lag, to the first verdict of the next process), for every id
+  with a LINEAR definition, its topic held yet or not -- one whose subscribe failed at start gets a
+  `feed_down` window from that span's end until its retried subscribe is acknowledged (or its
+  unsubscribe, or the shutdown);
+  `write_failed` over the `ts_event` span of a received batch whose catalog write failed
+  (`collector.flush_write`). Known limit: an active socket whose server silently
+  stopped pushing one topic is indistinguishable from a quiet market; only the nightly match below
+  would show it.
+- **Nightly self-check:** `python3 -m verification.liquidations --venue BYBIT --day D --json`
+  (§1.24) reads `custom_liquidation` and `trade_tick` raw (pyarrow, never this type) and matches
+  each liquidation to an archived trade of the same instrument and size whose aggressor is the
+  forced side (a liquidated long to a seller-aggressor trade), within 2 s, each trade used once.
+  It reports per instrument the total, matched, share, unmatched ids (first 20) and
+  the day's unrecoverable seconds from the coverage record (the instruments: those with a
+  liquidation that day or a window overlapping it; the coverage file is streamed, only the day's
+  windows kept; the match gives each liquidation, earliest first, the earliest unused eligible
+  trade, a maximum matching for equal-width windows); a venue other than Bybit is
+  `applicable: false`. It never asserts 100 % and never gates: a forced order that fills against
+  several resting orders prints several smaller trades, none of the full size. `archive.verify_day`
+  keeps the summary under `liquidations` beside the day's verdict.
+
+**Capture findings** (the wire investigation, `platform/CLAUDE.md` "Adding a venue" step 1). Method:
+`PYTHONPATH=. python3 scripts/capture_hl_ws.py --venue bybit --topic allLiquidation [--topic
+publicTrade] --coin <list>` against `wss://stream.bybit.com/v5/public/linear` from the dev box,
+every frame written verbatim with its receive time, then `--summarize` (precisions from Bybit's
+`/v5/market/instruments-info` text, as the adapter derives them). Date 2026-10-05; both windows on
+an active afternoon (BTC liquidations in bursts of up to 10 entries per push).
+
+| Figure | A: 5 liquid symbols, liquidations + trades | B: top 60 linear symbols, liquidations |
+|---|---|---|
+| Window (UTC) | 15:21:34-16:06:33 (45 min) | 15:31:56-16:11:45 (40 min) |
+| Symbols | BTC, ETH, SOL, XRP, DOGE USDT | 60 (38 had a liquidation) |
+| Frames | 73 (1.72/min; BTCUSDT 33) | 264 (7.12/min) |
+| Entries | 119 | 347 |
+| Entries per frame | 1 x49, 2 x16, 3 x2, 4 x3, 5 x2, 10 x1 | 1 x216, 2 x33, 3 x6, 4 x4, 5 x3, 6 x1, 10 x1 |
+| Frames per (topic, 500 ms window) | always 1 | always 1 |
+| Distinct `T` per frame | = entries per frame (every entry its own `T`) | = entries per frame |
+| Identical entries in one frame / repeats across frames | 0 / 0 | 0 / 0 |
+| Busiest second | 6 frames | 6 frames |
+| `S` | `Buy` 119 | `Buy` 301, `Sell` 46 |
+| `p` finer than `price_precision` / `v` finer than `size_precision` | 0/119 / 0/119 | 0/347 / 0/347 |
+| Arrival - `T` (ms) min / median / max | 112 / 496 / 2,867 | 110 / 393 / 1,951 |
+| First frame after subscribe | 0.6 s old (no subscribe-time replay, DATA-06) | 0.4 s old |
+| Same-size forced-side `publicTrade` within 2 s | 83/119 (69.7 %); 55/119 on `S`'s own side | (no trades captured) |
+| Subscribe acks | 1, success | 6 (10 args each), success |
+
+Read: the wire matches the epic's facts (every entry has `T/s/S/v/p`; one push per symbol per
+500 ms window; a long liquidated is `S=Buy`), integer units at the definition's precision hold
+every entry exactly, there is no subscribe-time replay to filter, and about 30 % of liquidations
+have no single trade of their full size -- why the nightly match reports a share and never asserts
+one.
 
 ---
 

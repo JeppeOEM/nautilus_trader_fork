@@ -39,6 +39,7 @@ from capture.application.capture_service import run_forever
 from capture.application.ports import PlanChange
 from capture.application.trade_backfill import BackfillReport
 from capture.domain import coverage
+from capture.domain.coverage import LiquidationsUnrecoverable
 from capture.domain.coverage import SecondCoverage
 from capture.domain.coverage import SecondsRun
 from capture.domain.coverage import TradesBackfilled
@@ -953,3 +954,21 @@ def test_a_candle_store_a_day_behind_is_ledgered(tmp_path: Path) -> None:
     c._second_sink._through[_BYBIT] = 0  # type: ignore[union-attr]  # watermark at the epoch
     c._catch_up_candle_store()
     assert "more than a day behind" in error_ledger.last_details()["collector.candle_store_behind"]
+
+
+def test_a_liquidation_window_line_is_its_documented_shape() -> None:
+    line = LiquidationsUnrecoverable("BTCUSDT-LINEAR.BYBIT", "feed_down", 5, 9).to_json_line()
+    assert json.loads(line) == {
+        "kind": "liquidations_unrecoverable",
+        "instrument_id": "BTCUSDT-LINEAR.BYBIT",
+        "reason": "feed_down",
+        "from_ns": 5,
+        "to_ns": 9,
+    }
+
+
+def test_a_liquidation_window_refuses_an_unknown_reason_or_an_inverted_span() -> None:
+    with pytest.raises(ValueError, match="not a liquidation coverage reason"):
+        LiquidationsUnrecoverable("X-LINEAR.BYBIT", "restart", 5, 9)
+    with pytest.raises(ValueError, match="inverted"):
+        LiquidationsUnrecoverable("X-LINEAR.BYBIT", "not_running", 9, 5)

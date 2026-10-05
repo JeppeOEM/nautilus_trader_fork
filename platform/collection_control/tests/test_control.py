@@ -239,7 +239,7 @@ def test_a_refused_start_is_recorded_and_published_at_once() -> None:
     rig.handle("start", "NEW-USD-PERP.DYDX")
     aggregate = rig.payloads()[-1]
     refusal = aggregate["last_refusal"]
-    assert list(aggregate)[-2:] == ["last_apply", "last_refusal"]
+    assert list(aggregate)[-3:] == ["last_apply", "last_refusal", "liquidations"]
     assert list(refusal) == ["ts", "action", "id", "reason"]
     assert (refusal["action"], refusal["id"]) == ("start", "NEW-USD-PERP.DYDX")
     assert "at 30-instrument cap" in refusal["reason"]
