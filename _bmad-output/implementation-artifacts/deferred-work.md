@@ -908,7 +908,9 @@ resolution: already resolved: platform/frontend/src/components/chart/IndicatorPi
 origin: migrated from legacy ledger ("Deferred from: code review of spec-15-6-per-coin-indicator-configuration.md (2026-09-16)"), 2026-10-05
 location: PUT /api/coin/{iid}/indicators
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-15-6-per-coin-indicator-configuration.md` summary: `PUT /api/coin/{iid}/indicators` deliberately reads the raw request body (`Request.json()`, not a typed Pydantic body parameter) to preserve a `400` instead of FastAPI's automatic `422` for a malformed payload -- a documented, correct tradeoff, but it means this endpoint's request-body shape never appears in the generated `openapi.json`/`schema.ts`, so `client.ts`'s hand-maintained `saveCoinIndicatorConfig` request type has nothing in the codegen pipeline to catch future drift from the Python handler. evidence: `troll/data_api/routes/indicators.py`'s `put_coin_indicator_config` docstring explains the tradeoff explicitly; confirmed against the live `openapi.json` that no `requestBody` is generated for this operation. Surfaced by Blind Hunter review of this story's diff.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-data-api-input-validation
+resolution-undo: 91b47c52cc0253ee68fc7a1fe5a9d3fd9432e6964681548c0f72e9cd0679be68 2026-10-05 7374617475733a206f70656e
 
 ### DW-121: `PUT /api/coin/{iid}/indicators` persists any `name`/`category` string without checking it against `_merged_indicator_catalog()` -- a typo'd or stale entry …
 
@@ -1012,7 +1014,9 @@ resolution: already resolved: platform/views/preferences.py:251 _write_atomic (t
 origin: migrated from legacy ledger ("Deferred from: code review of epic 17 (2026-09-19)"), 2026-10-05
 location: n/a
 reason: PUT technicals-columns validates param type only, not values (e.g. period 0); the bad config makes GET technicals-values 400 until fixed in the picker.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-data-api-input-validation
+resolution-undo: 91b47c52cc0253ee68fc7a1fe5a9d3fd9432e6964681548c0f72e9cd0679be68 2026-10-05 7374617475733a206f70656e
 
 ### DW-134: technicals-values cache is single-key with no single-flight; 60s client poll > 30s TTL means little hit-rate.
 
@@ -1861,7 +1865,9 @@ resolution-undo: 89c508f4086e6130fe63c3b8c7df6e501f431e414611a6838c2e01ff0641c80
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: PUT /api/rankings/technicals-columns
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-27-7-candlestick-pattern-detector-kernel-chart-screener-scanner.md` summary: `PUT /api/rankings/technicals-columns` (and the chart-indicator PUT) validate only indicator names, never enum param values, so a saved column with `"pattern": "hammer"` or an unknown `ma_type` is accepted with 200 and then makes every `technicals-values` GET return 400, blanking the whole Technicals tab until the file is hand-edited. evidence: `data_api/routes/rankings.py` PUT checks `_require_known_indicators` names only; `views.indicator_picker._resolve_enum_params` raises on the bad name only at replay time; predates 27.7 (`ma_type`/`price_type` had the same gap), 27.7's `choices` now makes the valid set available for server-side validation.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-data-api-input-validation
+resolution-undo: 91b47c52cc0253ee68fc7a1fe5a9d3fd9432e6964681548c0f72e9cd0679be68 2026-10-05 7374617475733a206f70656e
 
 ### DW-250: The chart and Technicals replay (`views.indicator_picker.replay_native` over `queries.window`) feeds only traded candles, so an untraded or missing bucket is …
 
@@ -2086,7 +2092,9 @@ resolution: already resolved: platform/frontend/src/pages/ChartPage.tsx:838-841 
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: chart_indicators.toml
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-32-6-chart-layout-restored-on-return-and-default-setup-for-a-new-coin.md` summary: A corrupt `chart_indicators.toml` (a server-side condition) is answered 400 "invalid indicator config payload" by the indicators PUT, while the layout routes answer the same condition 500. evidence: `data_api/routes/indicators.py` `_store_entries` maps `KeyError`/`TypeError` from `load_chart_indicators` to 400; `data_api/routes/layout.py` `_file_errors` maps them to 500.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-data-api-input-validation
+resolution-undo: 91b47c52cc0253ee68fc7a1fe5a9d3fd9432e6964681548c0f72e9cd0679be68 2026-10-05 7374617475733a206f70656e
 
 ### DW-281: A `[default]` indicator later dropped from the catalog makes the first-open GET of every coin without an indicator list a 500, so no new coin draws a chart …
 
@@ -2109,3 +2117,7 @@ location: platform/views/archive_status_bus.py, platform/views/rankings_bus.py, 
 source_spec: `_bmad-output/implementation-artifacts/bmad-dev-auto-result-live-channel-hardening.md`
 reason: The heartbeat-silence `_receive` loop is now copied in four modules (`views/archive_status_bus.py`, `views/rankings_bus.py`, `bot_tui/archive_state.py`, `bot_tui/collector_state.py`) and two more subscribers (`bot_tui/bots_state.py`, `bot_tui/bot_history_state.py`) still need it, so it should become one shared helper taking an ingest callback. evidence: The four `_receive` bodies are line-for-line the same poll/`heard`/`ConnectionError` loop with differently named constants (`STALE_AFTER_SECONDS`, `SILENCE_RESUBSCRIBE_SECONDS`, `_SILENCE_RESUBSCRIBE_SECONDS`); a shared home has to respect `tests/test_boundaries.py`'s context edges (views and bot_tui may not import each other).
 status: open
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-dw-data-api-input-validation.md`
+  summary: `GET /api/coin/{iid}/indicator-values` builds whatever params its `entries` query carries with no magnitude cap, so a request for `HullMovingAverage {period: 10**9}` still stalls `data_api` for ~16 s per entry; save-time validation (`check_params`) now covers both PUTs and the technicals-values GET, but not this read path.
+  evidence: `data_api/routes/indicators.py` `get_indicator_values` runs only `_parse_entries` + `_check_sources` before `chart_series.indicator_values_page`; the fix must keep the route's per-entry `errors` contract (one bad entry must not blank the others), e.g. by calling `indicator_picker.check_params` inside the per-entry replay and reporting its `ValueError` per entry. Predates the input-validation bundle.

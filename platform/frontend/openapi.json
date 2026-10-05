@@ -557,8 +557,21 @@
       },
       "put": {
         "summary": "Put Technicals Columns",
-        "description": "Persist the FULL screener-wide column list (add/remove/reorder/param change).",
+        "description": "Persist the FULL screener-wide column list (add/remove/reorder/param change). The body is a\nJSON array of `TechnicalsColumn`, read raw so a malformed one is a 400, never a 422.",
         "operationId": "put_technicals_columns_api_rankings_technicals_columns_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/TechnicalsColumn"
+                },
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -902,7 +915,7 @@
       },
       "put": {
         "summary": "Put Coin Indicator Config",
-        "description": "Persist this instrument's current indicator selection (explicit Save/change, never\nauto-save-per-keystroke -- matches today's handler's docstring).\n\nReads the raw JSON body itself (rather than a typed Pydantic body parameter) so a\nmalformed entry -- missing `name`/`category`, or invalid JSON outright -- degrades to a\nreal `400` with a message, never FastAPI's automatic `422`, matching the pre-existing\nhandler's contract exactly (DATA-02: never a silent/opaque failure for a client-input\nproblem).",
+        "description": "Persist this instrument's current indicator selection (explicit Save/change, never\nauto-save-per-keystroke -- matches today's handler's docstring). The body is a JSON array of\n`IndicatorConfigEntry` (declared through `openapi_extra`).\n\nReads the raw JSON body itself (rather than a typed Pydantic body parameter) so a\nmalformed entry -- missing `name`/`category`, or invalid JSON outright -- degrades to a\nreal `400` with a message, never FastAPI's automatic `422`, matching the pre-existing\nhandler's contract exactly (DATA-02: never a silent/opaque failure for a client-input\nproblem). An unknown name or params the indicator refuses are 400 too, a source the\nindicator cannot take 422; nothing is written then. A corrupt or unreadable stored file is\n500.",
         "operationId": "put_coin_indicator_config_api_coin__instrument_id__indicators_put",
         "parameters": [
           {
@@ -936,6 +949,19 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/IndicatorConfigEntry"
                 }
               }
             }
