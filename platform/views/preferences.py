@@ -29,7 +29,8 @@ added `chart_drawings.toml`, Story 32.6 `chart_layouts.toml`). All four live in 
   regenerated fresh on every load.
 - `chart_drawings.toml`: per-instrument chart drawings (Story 32.5), a table per instrument id
   holding `v = 1` and an `items` array of tables, each tagged with a `kind` (`hline`,
-  `trendline`, `fib`, `position`) -- `load_chart_drawings`/`save_chart_drawings`. Each item is
+  `trendline`, `fib`, `position`, `anchored_vp`, `anchored_vwap`) --
+  `load_chart_drawings`/`save_chart_drawings`. Each item is
   checked by `validate_drawing`, which names the offending field (`DrawingError`): a malformed
   item is refused, never dropped, so a saved drawing is never silently lost on a round trip.
 - `chart_layouts.toml`: per-instrument chart layout (Story 32.6), a table per instrument id holding
@@ -42,11 +43,17 @@ added `chart_drawings.toml`, Story 32.6 `chart_layouts.toml`). All four live in 
   `pane_heights` (pane id, at most `MAX_PANE_ID_LENGTH` characters -> height, an integer of
   1..10000 px; written on a divider drag, for the panes on screen then),
   `visible_bars` (a finite number in (0, 100000], the zoom; never a scroll position) and
-  `volume_profile`, a table of `kind` (`off`|`visible`|`fixed`|`session`), `rows` (integer 2..500),
+  `volume_profile`, a table of `kind` (`off`|`visible`|`fixed`|`session`|`auto`|`tpo`: `auto` and
+  `tpo` are session-type, so exclusive with `session` -- the frontend holds one session-type
+  profile), `rows` (integer 2..500),
   `value_area_pct` (number in (0, 100]), `session` (one of `PROFILE_SESSIONS`, the frontend's
   SESSION_PERIODS), `hd` (bool) and the fixed range's anchors `start`/`end` (integers, UTC
   seconds, both required and in order when `kind = "fixed"`; omitted on disk when unset, `None`
-  in memory). Unknown keys are refused, never dropped. Coin tables are loaded tolerantly for
+  in memory) and, since Story 32.7, three OPTIONAL keys that default when absent (a file saved
+  before it loads unchanged): `anchor` (one of `PROFILE_ANCHORS`, the frontend's
+  AUTO_ANCHOR_PRESETS; default `auto`), `ib_minutes` (the TPO's initial balance, integer
+  1..`MAX_IB_MINUTES`; default 60 = 2 x 30m) and `letters` (bool, default false). Unknown keys are
+  refused, never dropped. Coin tables are loaded tolerantly for
   `bar_seconds` and `mode` only (a value outside the supported set is returned as stored, so a
   timeframe retired later never fails the GET; the frontend falls back with one `console.error`),
   while the PUT validation and the `[default]` table stay strict. Drawings are never part of it.
@@ -80,7 +87,11 @@ DEFAULT_BAR_SECONDS = 3600
 
 # `chart_drawings.toml` (Story 32.5): the table layout version and the closed set of item kinds.
 DRAWINGS_VERSION = 1
-DRAWING_KINDS = ("hline", "trendline", "fib", "position")
+DRAWING_KINDS = ("hline", "trendline", "fib", "position", "anchored_vp", "anchored_vwap")
+# Story 32.7: mirrors of the frontend's `VWAP_SOURCES` (`lib/anchoredVwap.ts`); the Anchored VP's
+# row bounds are the layout's `MIN_PROFILE_ROWS`..`MAX_PROFILE_ROWS` (one engine, one row limit).
+# `test_*_mirror_the_frontend` in `views/tests/test_chart_drawings.py` pins the pair.
+VWAP_SOURCES = ("hlc3", "close", "ohlc4")
 FIB_LABEL_SIDES = ("left", "right")
 POSITION_SIDES = ("long", "short")
 MAX_DRAWING_LINE_WIDTH = 4
@@ -381,6 +392,29 @@ def _check_position(item: dict[str, Any]) -> None:
         raise DrawingError("risk_pct", "account and risk_pct are set together or not at all")
 
 
+def _check_anchored_vp(item: dict[str, Any]) -> None:
+    """An Anchored VP: the anchor bar, the engine's row count and value area, the two colours."""
+    _check_time(item.get("time"), "time")
+    _require_int(item, "rows", MIN_PROFILE_ROWS, MAX_PROFILE_ROWS)
+    _require_number(item, "value_area_pct")
+    if not 0 < item["value_area_pct"] <= 100:
+        raise DrawingError("value_area_pct", "must be above 0 and at most 100")
+    for key in ("up_color", "down_color"):
+        if not isinstance(item.get(key), str):
+            raise DrawingError(key, "must be a string")
+
+
+def _check_anchored_vwap(item: dict[str, Any]) -> None:
+    """An Anchored VWAP: the anchor bar, the source, the bands switch and the band colour."""
+    _check_time(item.get("time"), "time")
+    if item.get("source") not in VWAP_SOURCES:
+        raise DrawingError("source", f"must be one of {list(VWAP_SOURCES)}")
+    if not isinstance(item.get("bands"), bool):
+        raise DrawingError("bands", "must be a boolean")
+    if not isinstance(item.get("band_color"), str):
+        raise DrawingError("band_color", "must be a string")
+
+
 # Per kind: the keys beyond `kind`/`id`/`color` it may carry; any other key is refused.
 _DRAWING_KEYS: dict[str, frozenset[str]] = {
     "hline": frozenset({"price"}),
@@ -389,6 +423,8 @@ _DRAWING_KEYS: dict[str, frozenset[str]] = {
     "position": frozenset(
         {"side", "time", "entry", "stop", "target", "width_bars", "account", "risk_pct"}
     ),
+    "anchored_vp": frozenset({"time", "rows", "value_area_pct", "up_color", "down_color"}),
+    "anchored_vwap": frozenset({"time", "source", "bands", "band_color"}),
 }
 
 
@@ -417,8 +453,12 @@ def validate_drawing(item: Any) -> dict[str, Any]:
     elif kind == "fib":
         _check_anchors(item)
         _check_fib_options(item)
-    else:
+    elif kind == "position":
         _check_position(item)
+    elif kind == "anchored_vp":
+        _check_anchored_vp(item)
+    else:
+        _check_anchored_vwap(item)
     return item
 
 
@@ -488,7 +528,7 @@ LAYOUT_VERSION = 1
 LAYOUT_DEFAULT_KEY = "default"
 LAYOUT_BAR_SECONDS = (60, 300, 900, 3600, 14400, 86400, 604800)
 LAYOUT_MODES = ("candles", "lines")
-PROFILE_KINDS = ("off", "visible", "fixed", "session")
+PROFILE_KINDS = ("off", "visible", "fixed", "session", "auto", "tpo")
 MAX_PANE_HEIGHT_PX = 10_000
 # A pane id is an indicator instance id (`indicator_id`: the catalog name plus every parameter, and
 # `:source`), which reaches ~160 characters for `CandlePattern`; the cap only bounds a hostile key.
@@ -499,13 +539,33 @@ MAX_PROFILE_ROWS = 500
 _LAYOUT_KEYS = frozenset(
     {"bar_seconds", "mode", "volume", "crosshair", "pane_heights", "visible_bars", "volume_profile"}
 )
-_PROFILE_KEYS = frozenset({"kind", "rows", "value_area_pct", "session", "hd", "start", "end"})
+_PROFILE_KEYS = frozenset(
+    {
+        "kind",
+        "rows",
+        "value_area_pct",
+        "session",
+        "hd",
+        "anchor",
+        "ib_minutes",
+        "letters",
+        "start",
+        "end",
+    }
+)
 _PROFILE_ANCHORS = ("start", "end")
+# Story 32.7: absent from a file saved before it, so optional on the wire, filled with defaults.
+_PROFILE_OPTIONAL_DEFAULTS: dict[str, Any] = {"anchor": "auto", "ib_minutes": 60, "letters": False}
 
 # Mirrors the frontend's `SESSION_PERIODS` (the volume profile's session length); a change there
 # must change this tuple too (`test_session_periods_mirror_the_frontend` pins the pair). Story 32.7
 # adds auto-anchored and TPO settings to the `volume_profile` table.
 PROFILE_SESSIONS = ("4h", "daily", "weekly", "monthly")
+# Mirrors the frontend's `AUTO_ANCHOR_PRESETS` (`lib/autoAnchor.ts`);
+# `test_profile_anchors_mirror_the_frontend` pins the pair.
+PROFILE_ANCHORS = ("session", "week", "month", "highest_high", "lowest_low", "auto")
+MIN_IB_MINUTES = 1
+MAX_IB_MINUTES = 1440
 BUILTIN_DEFAULT_LAYOUT: dict[str, Any] = {
     "bar_seconds": 60,
     "mode": "candles",
@@ -519,6 +579,9 @@ BUILTIN_DEFAULT_LAYOUT: dict[str, Any] = {
         "value_area_pct": 70,
         "session": "daily",
         "hd": False,
+        "anchor": "auto",
+        "ib_minutes": 60,
+        "letters": False,
         "start": None,
         "end": None,
     },
@@ -562,6 +625,11 @@ def _check_profile_scalars(profile: dict[str, Any]) -> None:
         raise LayoutError("volume_profile.session", f"must be one of {list(PROFILE_SESSIONS)}")
     if not isinstance(profile["hd"], bool):
         raise LayoutError("volume_profile.hd", "must be a boolean")
+    if profile["anchor"] not in PROFILE_ANCHORS:
+        raise LayoutError("volume_profile.anchor", f"must be one of {list(PROFILE_ANCHORS)}")
+    _layout_int("volume_profile.ib_minutes", profile["ib_minutes"], MIN_IB_MINUTES, MAX_IB_MINUTES)
+    if not isinstance(profile["letters"], bool):
+        raise LayoutError("volume_profile.letters", "must be a boolean")
 
 
 def _check_profile_anchor(key: str, value: Any) -> None:
@@ -576,7 +644,9 @@ def _check_profile_anchor(key: str, value: Any) -> None:
 def _validate_profile(profile: Any) -> dict[str, Any]:
     if not isinstance(profile, dict):
         raise LayoutError("volume_profile", "must be an object")
-    _check_keys(profile, _PROFILE_KEYS - set(_PROFILE_ANCHORS), _PROFILE_KEYS, "volume_profile.")
+    required = _PROFILE_KEYS - set(_PROFILE_ANCHORS) - set(_PROFILE_OPTIONAL_DEFAULTS)
+    _check_keys(profile, required, _PROFILE_KEYS, "volume_profile.")
+    profile = {**_PROFILE_OPTIONAL_DEFAULTS, **profile}
     _check_profile_scalars(profile)
     out = {key: profile[key] for key in _PROFILE_KEYS - set(_PROFILE_ANCHORS)}
     for key in _PROFILE_ANCHORS:

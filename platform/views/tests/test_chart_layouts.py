@@ -17,6 +17,7 @@ names the offending key, the tolerant read of a stale coin timeframe and the `[d
 """
 
 import copy
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,8 @@ import pytest
 from views.preferences import BUILTIN_DEFAULT_LAYOUT
 from views.preferences import LAYOUT_BAR_SECONDS
 from views.preferences import MAX_PANE_ID_LENGTH
+from views.preferences import PROFILE_ANCHORS
+from views.preferences import PROFILE_KINDS
 from views.preferences import PROFILE_SESSIONS
 from views.preferences import ChartLayouts
 from views.preferences import IndicatorEntry
@@ -108,6 +111,30 @@ def test_default_is_never_an_instrument_id(tmp_path: Path) -> None:
         ({"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "kind": "x"}}, "kind"),
         ({"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "rows": 1}}, "rows"),
         ({"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "hd": 0}}, "hd"),
+        (
+            {"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "anchor": "day"}},
+            "anchor",
+        ),
+        (
+            {"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "ib_minutes": 0}},
+            "ib_minutes",
+        ),
+        (
+            {"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "ib_minutes": 1441}},
+            "ib_minutes",
+        ),
+        (
+            {"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "ib_minutes": 30.5}},
+            "ib_minutes",
+        ),
+        (
+            {"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "ib_minutes": True}},
+            "ib_minutes",
+        ),
+        (
+            {"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "letters": 1}},
+            "letters",
+        ),
         ({"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "start": 1.5}}, "start"),
         (
             {"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "z": 1}},
@@ -230,3 +257,58 @@ def test_a_file_error_carries_the_bare_reason(tmp_path: Path) -> None:
         load_chart_layouts(path)
     assert exc.value.key == f"{_IID}.volume_profile.hd"
     assert exc.value.reason == "must be a boolean"
+
+
+def test_profile_anchors_mirror_the_frontend() -> None:
+    source = (Path(__file__).parents[2] / "frontend/src/lib/autoAnchor.ts").read_text()
+    match = re.search(r"AUTO_ANCHOR_PRESETS = \[([^\]]*)\]", source)
+    assert match is not None
+    assert tuple(re.findall(r'"(\w+)"', match.group(1))) == PROFILE_ANCHORS
+
+
+def test_profile_kinds_mirror_the_frontend() -> None:
+    source = (Path(__file__).parents[2] / "frontend/src/lib/chartLayout.ts").read_text()
+    match = re.search(r"PROFILE_KINDS: readonly ProfileKind\[\] = \[([^\]]*)\]", source)
+    assert match is not None
+    assert tuple(re.findall(r'"(\w+)"', match.group(1))) == PROFILE_KINDS
+
+
+def test_the_new_session_type_kinds_are_accepted_and_keep_their_settings() -> None:
+    for kind in ("auto", "tpo"):
+        profile = {
+            **BUILTIN_DEFAULT_LAYOUT["volume_profile"],
+            "kind": kind,
+            "anchor": "highest_high",
+            "ib_minutes": 90,
+            "letters": True,
+        }
+        out = validate_layout(_layout(volume_profile=profile))["volume_profile"]
+        assert (out["kind"], out["anchor"], out["ib_minutes"], out["letters"]) == (
+            kind,
+            "highest_high",
+            90,
+            True,
+        )
+
+
+def test_a_profile_saved_before_story_32_7_loads_with_the_defaults() -> None:
+    old = {
+        key: value
+        for key, value in BUILTIN_DEFAULT_LAYOUT["volume_profile"].items()
+        if key not in ("anchor", "ib_minutes", "letters")
+    }
+    out = validate_layout(_layout(volume_profile=old))["volume_profile"]
+    assert (out["anchor"], out["ib_minutes"], out["letters"]) == ("auto", 60, False)
+
+
+def test_the_new_profile_keys_round_trip_through_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    profile = {
+        **BUILTIN_DEFAULT_LAYOUT["volume_profile"],
+        "kind": "tpo",
+        "ib_minutes": 30,
+        "letters": True,
+    }
+    layout = validate_layout(_layout(volume_profile=profile))
+    save_chart_layouts(ChartLayouts(layouts={_IID: layout}), path)
+    assert load_chart_layouts(path).layouts[_IID] == layout

@@ -221,3 +221,18 @@ describe("period grouping for PVP (Story 18.9)", () => {
     expect(build(times, "weekly", 2).map((e) => e.periodStart)).toEqual([utc(2024, 1, 8), utc(2024, 1, 15)]);
   });
 });
+
+describe("timedBars weights (Story 32.7 review)", () => {
+  const candles = [
+    { time: 1 as never, open: 1, high: 2, low: 1, close: 2 },
+    { time: 2 as never, open: 1, high: 2, low: 1, close: 2 },
+  ];
+  const volume = [{ time: 1 as never, value: 5 }];
+
+  it("drops a candle with no volume datum under the volume weight, keeps it (volume 0) under the time weight", async () => {
+    const { timedBars } = await import("./sessionProfile");
+
+    expect(timedBars(candles, volume).map((b) => b.time)).toEqual([1]);
+    expect(timedBars(candles, volume, "time").map((b) => [b.time, b.volume])).toEqual([[1, 5], [2, 0]]);
+  });
+});

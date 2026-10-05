@@ -33,6 +33,9 @@ export interface LegendSeries {
   hidden?: boolean;
   /** False for Volume: eye and x only, no settings. Default true. */
   configurable?: boolean;
+  /** How the row's number is printed, where the plain readout would lose the instrument's precision
+   * (Story 32.7's Anchored VWAP prints through `lib/units.ts`). */
+  format?: (value: number) => string;
   /** False when no configured entry owns the row: no buttons at all. Default true. */
   actionable?: boolean;
 }
@@ -132,7 +135,9 @@ function rowSignature(row: RowModel, actions: boolean): string {
 }
 
 function valueText(member: LegendSeries, param: MouseEventParams<Time> | null, gap: GapRun | undefined): string {
-  return gap && !member.hidden ? gapLabel(gap) : formatLegendValue(valueAt(member, param));
+  if (gap && !member.hidden) return gapLabel(gap);
+  const value = valueAt(member, param);
+  return value !== null && member.format ? member.format(value) : formatLegendValue(value);
 }
 
 function legendRow(row: RowModel, param: MouseEventParams<Time> | null, gap: GapRun | undefined, actions: boolean): HTMLElement {

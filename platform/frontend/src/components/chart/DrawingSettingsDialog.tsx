@@ -1,6 +1,10 @@
 import { useState } from "react";
 
+import { VWAP_SOURCES, type VwapSource } from "../../lib/anchoredVwap";
 import {
+  type AnchoredVpDrawing,
+  type AnchoredVpForm,
+  type AnchoredVwapDrawing,
   type Drawing,
   type FibDrawing,
   type FibLevel,
@@ -9,13 +13,15 @@ import {
   MAX_LINE_WIDTH,
   type PositionDrawing,
   type PositionForm,
+  anchoredVpToForm,
+  parseAnchoredVpForm,
   parsePositionForm,
   positionToForm,
 } from "../../lib/drawings";
 import SettingsDialogShell from "./SettingsDialogShell";
 
 interface Props {
-  drawing: FibDrawing | PositionDrawing;
+  drawing: FibDrawing | PositionDrawing | AnchoredVpDrawing | AnchoredVwapDrawing;
   precision: InstrumentPrecision;
   /** Receives the drawing as edited; the page persists it through the one drawings resource. */
   onApply: (next: Drawing) => void;
@@ -182,19 +188,167 @@ function PositionSettings({
   );
 }
 
+function Footer({ onApply, onRemove, onClose }: { onApply: () => void; onRemove: () => void; onClose: () => void }) {
+  return (
+    <div className="indicator-settings-footer">
+      <button type="button" onClick={onApply}>
+        Apply
+      </button>
+      <button type="button" onClick={onClose}>
+        Cancel
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          onRemove();
+          onClose();
+        }}
+      >
+        Remove
+      </button>
+    </div>
+  );
+}
+
+function AnchoredVpSettings({ drawing, onApply, onRemove, onClose }: Omit<Props, "drawing" | "precision"> & { drawing: AnchoredVpDrawing }) {
+  const [form, setForm] = useState<AnchoredVpForm>(() => anchoredVpToForm(drawing));
+  const [refusal, setRefusal] = useState<string | null>(null);
+  function apply(): void {
+    const next = parseAnchoredVpForm(drawing, form);
+    if (typeof next === "string") {
+      setRefusal(next);
+      return;
+    }
+    onApply(next);
+    onClose();
+  }
+  return (
+    <>
+      <h2>Anchored volume profile</h2>
+      <section aria-label="Inputs">
+        <h3>Inputs</h3>
+        <label>
+          Rows:
+          <input
+            type="text"
+            inputMode="numeric"
+            aria-label="Rows"
+            value={form.rows}
+            onChange={(e) => setForm((f) => ({ ...f, rows: e.target.value }))}
+          />
+        </label>
+        <label>
+          Value area %:
+          <input
+            type="text"
+            inputMode="decimal"
+            aria-label="Value area %"
+            value={form.valueAreaPct}
+            onChange={(e) => setForm((f) => ({ ...f, valueAreaPct: e.target.value }))}
+          />
+        </label>
+      </section>
+      <section aria-label="Style">
+        <h3>Style</h3>
+        <label>
+          Up volume:
+          <input
+            type="color"
+            aria-label="Up volume colour"
+            value={asHex(form.upColor)}
+            onChange={(e) => setForm((f) => ({ ...f, upColor: e.target.value }))}
+          />
+        </label>
+        <label>
+          Down volume:
+          <input
+            type="color"
+            aria-label="Down volume colour"
+            value={asHex(form.downColor)}
+            onChange={(e) => setForm((f) => ({ ...f, downColor: e.target.value }))}
+          />
+        </label>
+      </section>
+      {refusal && <p role="alert">{refusal}</p>}
+      <Footer onApply={apply} onRemove={onRemove} onClose={onClose} />
+    </>
+  );
+}
+
+function AnchoredVwapSettings({ drawing, onApply, onRemove, onClose }: Omit<Props, "drawing" | "precision"> & { drawing: AnchoredVwapDrawing }) {
+  const [source, setSource] = useState<VwapSource>(drawing.source);
+  const [bands, setBands] = useState(drawing.bands);
+  const [color, setColor] = useState(drawing.color ?? "");
+  const [bandColor, setBandColor] = useState(drawing.band_color);
+  return (
+    <>
+      <h2>Anchored VWAP</h2>
+      <section aria-label="Inputs">
+        <h3>Inputs</h3>
+        <label>
+          Source:
+          <select value={source} aria-label="Source" onChange={(e) => setSource(e.target.value as VwapSource)}>
+            {VWAP_SOURCES.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <input type="checkbox" aria-label="Bands on" checked={bands} onChange={(e) => setBands(e.target.checked)} />
+          Bands (±1σ, ±2σ)
+        </label>
+      </section>
+      <section aria-label="Style">
+        <h3>Style</h3>
+        <label>
+          Line:
+          <input type="color" aria-label="Line colour" value={asHex(color)} onChange={(e) => setColor(e.target.value)} />
+        </label>
+        <label>
+          Bands:
+          <input type="color" aria-label="Band colour" value={asHex(bandColor)} onChange={(e) => setBandColor(e.target.value)} />
+        </label>
+      </section>
+      <Footer
+        onApply={() => {
+          onApply({ ...drawing, source, bands, band_color: bandColor, ...(color === "" ? {} : { color }) });
+          onClose();
+        }}
+        onRemove={onRemove}
+        onClose={onClose}
+      />
+    </>
+  );
+}
+
 /**
  * The settings modal of a Fibonacci retracement (each ratio on/off and colour, extend right, label
- * side, line width) or a position (entry / stop / target prices, width in bars, and the optional
+ * side, line width), an Anchored VP (rows, value area, colours), an Anchored VWAP (source, bands,
+ * colours) or a position (entry / stop / target prices, width in bars, and the optional
  * account size and risk % behind the "Size:" label), on the shared `SettingsDialogShell` Story 32.3
  * introduced for the legend gear. Esc, Cancel or a backdrop click change nothing.
  */
+const DIALOG_TITLES: Record<Props["drawing"]["kind"], string> = {
+  fib: "Fibonacci settings",
+  position: "Position settings",
+  anchored_vp: "Anchored volume profile settings",
+  anchored_vwap: "Anchored VWAP settings",
+};
+
 export default function DrawingSettingsDialog({ drawing, precision, onApply, onRemove, onClose }: Props) {
   return (
-    <SettingsDialogShell title={drawing.kind === "fib" ? "Fibonacci settings" : "Position settings"} onClose={onClose}>
-      {drawing.kind === "fib" ? (
-        <FibForm drawing={drawing} onApply={onApply} onRemove={onRemove} onClose={onClose} />
-      ) : (
+    <SettingsDialogShell title={DIALOG_TITLES[drawing.kind]} onClose={onClose}>
+      {drawing.kind === "fib" && <FibForm drawing={drawing} onApply={onApply} onRemove={onRemove} onClose={onClose} />}
+      {drawing.kind === "position" && (
         <PositionSettings drawing={drawing} precision={precision} onApply={onApply} onRemove={onRemove} onClose={onClose} />
+      )}
+      {drawing.kind === "anchored_vp" && (
+        <AnchoredVpSettings drawing={drawing} onApply={onApply} onRemove={onRemove} onClose={onClose} />
+      )}
+      {drawing.kind === "anchored_vwap" && (
+        <AnchoredVwapSettings drawing={drawing} onApply={onApply} onRemove={onRemove} onClose={onClose} />
       )}
     </SettingsDialogShell>
   );

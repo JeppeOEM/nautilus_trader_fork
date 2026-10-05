@@ -279,3 +279,33 @@ describe("legend CSS (Story 32.3)", () => {
     expect(css).toMatch(/@media \(hover: none\)\s*\{\s*\.chart-legend-actions\s*\{\s*opacity:\s*1;/);
   });
 });
+
+describe("a legend row with its own number format (Story 32.7)", () => {
+  it("prints the value through the row's format, not the plain readout", () => {
+    const { chart, els } = makeChart(1);
+    const vwap = makeItem({
+      pane: null,
+      series: null,
+      group: "avwap-1",
+      groupLabel: "AVWAP (hlc3)",
+      data: [{ time: 0 as Time, value: 14.6 }],
+      format: (value) => value.toFixed(4), // the instrument's precision
+      actionable: false,
+    });
+
+    renderLegends(chart, [vwap], null);
+
+    const [row] = rows(els[0]);
+    expect(text(row)).toEqual(["AVWAP (hlc3)", "14.6000"]);
+    expect(row.querySelector(".chart-legend-actions")).toBeNull();
+  });
+
+  it("falls back to the dash while the row has no value", () => {
+    const { chart, els } = makeChart(1);
+    const vwap = makeItem({ pane: null, series: null, data: [], format: () => "never" });
+
+    renderLegends(chart, [vwap], null);
+
+    expect(text(rows(els[0])[0])).toEqual(["G", "—"]);
+  });
+});

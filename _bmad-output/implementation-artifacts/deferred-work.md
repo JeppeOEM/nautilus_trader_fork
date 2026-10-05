@@ -866,3 +866,10 @@ Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message h
 - source_spec: `_bmad-output/implementation-artifacts/spec-32-6-chart-layout-restored-on-return-and-default-setup-for-a-new-coin.md`
   summary: The session volume profile's session count and the Periodic-vs-Session preset are not in the layout's field list, so a Periodic profile on "daily" comes back as the Session Volume Profile and the count resets to 5.
   evidence: `pages/ChartPage.tsx` `initialSessionConfig` derives the preset from `session`/`hd` and sets `sessionCount: DEFAULT_SESSION_COUNT`; the spec's enumerated `volume_profile` keys have no field for either.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-32-7-remaining-tradingview-profiles-auto-anchored-anchored-vp-anchored-vwap-and-tpo.md`
+  summary: Auto Anchored and TPO profile colours are not persisted in the layout (spec said colours persist); needs colour keys in `volume_profile` on both wires.
+  evidence: Story 32.7 wire has no colour keys; existing profiles' colours are session-only too.
+- source_spec: `_bmad-output/implementation-artifacts/spec-32-7-remaining-tradingview-profiles-auto-anchored-anchored-vp-anchored-vwap-and-tpo.md`
+  summary: TPO overflow bar takes the colour of the last block, losing the up/down split of hidden touches.
+  evidence: VolumeProfilePrimitive drawTpo overflow path.

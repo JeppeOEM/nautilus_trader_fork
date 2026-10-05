@@ -1,4 +1,6 @@
+import { AUTO_ANCHOR_PRESETS, type AutoAnchorPreset, DEFAULT_AUTO_ANCHOR } from "./autoAnchor";
 import { SESSION_PERIODS } from "./sessionProfile";
+import { DEFAULT_IB_MINUTES, MAX_IB_MINUTES, MIN_IB_MINUTES } from "./tpo";
 import { TIMEFRAMES } from "../timeframes";
 
 // Story 32.6: one coin's chart layout, the shape of `GET/PUT /api/coin/{iid}/layout`
@@ -6,7 +8,9 @@ import { TIMEFRAMES } from "../timeframes";
 // so this file is the one place the client states its shape and checks what comes back.
 
 export type LayoutMode = "candles" | "lines";
-export type ProfileKind = "off" | "visible" | "fixed" | "session";
+// Story 32.7: `auto` (the Auto Anchored profile) and `tpo` are session-type kinds: the one session
+// slot holds at most one of svp / pvp / auto / tpo.
+export type ProfileKind = "off" | "visible" | "fixed" | "session" | "auto" | "tpo";
 
 export interface VolumeProfileLayout {
   kind: ProfileKind;
@@ -15,6 +19,12 @@ export interface VolumeProfileLayout {
   /** A session profile's period, one of `SESSION_PERIODS` whatever the kind (the server refuses others). */
   session: string;
   hd: boolean;
+  /** Story 32.7: the Auto Anchored preset (one of `AUTO_ANCHOR_PRESETS`, the server refuses others). */
+  anchor: AutoAnchorPreset;
+  /** Story 32.7: the TPO's initial balance length in minutes, `MIN_IB_MINUTES`..`MAX_IB_MINUTES`. */
+  ib_minutes: number;
+  /** Story 32.7: the TPO shows the touching candles' letters instead of blocks. */
+  letters: boolean;
   /** The fixed range's anchors (UTC seconds), `null` while the kind is not "fixed". */
   start: number | null;
   end: number | null;
@@ -45,12 +55,15 @@ export const BUILT_IN_LAYOUT: ChartLayout = {
     value_area_pct: 70,
     session: "daily",
     hd: false,
+    anchor: DEFAULT_AUTO_ANCHOR,
+    ib_minutes: DEFAULT_IB_MINUTES,
+    letters: false,
     start: null,
     end: null,
   },
 };
 
-const PROFILE_KINDS: readonly ProfileKind[] = ["off", "visible", "fixed", "session"];
+export const PROFILE_KINDS: readonly ProfileKind[] = ["off", "visible", "fixed", "session", "auto", "tpo"];
 const MAX_ROWS = 500;
 
 type Raw = Record<string, unknown>;
@@ -87,20 +100,31 @@ function profileOf(raw: unknown, fallbacks: string[]): VolumeProfileLayout {
   const rows = isInt(raw.rows, 2, MAX_ROWS) ? raw.rows : null;
   const area = typeof raw.value_area_pct === "number" && raw.value_area_pct > 0 && raw.value_area_pct <= 100 ? raw.value_area_pct : null;
   const session = typeof raw.session === "string" && raw.session.length > 0 ? raw.session : null;
+  // The three Story 32.7 keys are optional on the wire (a file saved before it has none): absent is
+  // the default, silently; present but unusable falls back loudly like every other field.
+  const anchorPreset = AUTO_ANCHOR_PRESETS.find((a) => a === raw.anchor);
+  const ibMinutes = isInt(raw.ib_minutes, MIN_IB_MINUTES, MAX_IB_MINUTES) ? raw.ib_minutes : null;
+  const absent = (key: string): boolean => !(key in raw);
   for (const [name, ok] of [["kind", kind], ["rows", rows], ["value_area_pct", area], ["session", session]] as const) {
     if (ok === null || ok === undefined) fallbacks.push(`volume_profile.${name}`);
   }
+  if (anchorPreset === undefined && !absent("anchor")) fallbacks.push("volume_profile.anchor");
+  if (ibMinutes === null && !absent("ib_minutes")) fallbacks.push("volume_profile.ib_minutes");
+  if (typeof raw.letters !== "boolean" && !absent("letters")) fallbacks.push("volume_profile.letters");
   const profile: VolumeProfileLayout = {
     kind: kind ?? base.kind,
     rows: rows ?? base.rows,
     value_area_pct: area ?? base.value_area_pct,
     session: session ?? base.session,
     hd: typeof raw.hd === "boolean" ? raw.hd : base.hd,
+    anchor: anchorPreset ?? base.anchor,
+    ib_minutes: ibMinutes ?? base.ib_minutes,
+    letters: typeof raw.letters === "boolean" ? raw.letters : base.letters,
     start: anchor(raw.start),
     end: anchor(raw.end),
   };
-  // A session profile whose period this client does not know would silently draw nothing.
-  if (profile.kind === "session" && !(SESSION_PERIODS as readonly string[]).includes(profile.session)) {
+  // A session-type profile whose period this client does not know would silently draw nothing.
+  if ((profile.kind === "session" || profile.kind === "tpo") && !(SESSION_PERIODS as readonly string[]).includes(profile.session)) {
     fallbacks.push("volume_profile.session");
     profile.session = "daily";
   }

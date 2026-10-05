@@ -19,6 +19,7 @@
  * precision on the candles response and snap to it here.
  */
 
+import { DEFAULT_VWAP_SOURCE, type VwapSource } from "./anchoredVwap";
 import { formatDecimal, roundToPrecision } from "./units";
 
 export interface Anchor {
@@ -90,7 +91,41 @@ export interface PositionDrawing {
   color?: string;
 }
 
-export type Drawing = HlineDrawing | TrendlineDrawing | FibDrawing | PositionDrawing;
+/**
+ * An Anchored Volume Profile (Story 32.7): one click at a bar; the one engine's profile
+ * (`buildVolumeProfile`) from that bar to the latest, growing rightward from the anchor and
+ * following new bars. Nothing but the anchor and the look is stored: the rows are recomputed.
+ */
+export interface AnchoredVpDrawing {
+  kind: "anchored_vp";
+  id: string;
+  /** UTC seconds of the anchor bar. */
+  time: number;
+  rows: number;
+  value_area_pct: number;
+  up_color: string;
+  down_color: string;
+}
+
+/** An Anchored VWAP (Story 32.7): one click at a bar; the line (and optional bands) from that bar on. */
+export interface AnchoredVwapDrawing {
+  kind: "anchored_vwap";
+  id: string;
+  time: number;
+  source: VwapSource;
+  /** The ±1σ and ±2σ bands. */
+  bands: boolean;
+  color?: string;
+  band_color: string;
+}
+
+export type Drawing =
+  | HlineDrawing
+  | TrendlineDrawing
+  | FibDrawing
+  | PositionDrawing
+  | AnchoredVpDrawing
+  | AnchoredVwapDrawing;
 export type DrawingKind = Drawing["kind"];
 
 /** The decimals the catalog's instrument definition prescribes (`GET /api/candles`). */
@@ -100,6 +135,30 @@ export interface InstrumentPrecision {
 }
 
 export const MAX_LINE_WIDTH = 4;
+
+/** The bounds of an Anchored VP's row count (the layout's `MIN_PROFILE_ROWS`/`MAX_PROFILE_ROWS`). */
+export const MIN_AVP_ROWS = 2;
+export const MAX_AVP_ROWS = 500;
+export const DEFAULT_AVP_ROWS = 24;
+export const DEFAULT_AVP_VALUE_AREA_PCT = 70;
+
+/** A new Anchored VP at the clicked bar; the colours are the page's chart tokens. */
+export function newAnchoredVp(id: string, time: number, upColor: string, downColor: string): AnchoredVpDrawing {
+  return {
+    kind: "anchored_vp",
+    id,
+    time: storedTime(time),
+    rows: DEFAULT_AVP_ROWS,
+    value_area_pct: DEFAULT_AVP_VALUE_AREA_PCT,
+    up_color: upColor,
+    down_color: downColor,
+  };
+}
+
+/** A new Anchored VWAP at the clicked bar: `hlc3`, bands off. */
+export function newAnchoredVwap(id: string, time: number, color: string, bandColor: string): AnchoredVwapDrawing {
+  return { kind: "anchored_vwap", id, time: storedTime(time), source: DEFAULT_VWAP_SOURCE, bands: false, color, band_color: bandColor };
+}
 
 // -- Fibonacci ------------------------------------------------------------------------------------
 
@@ -318,6 +377,7 @@ function safeRound(value: number, precision: number | null): number {
 /**
  * The drawing after its `handle` is dragged to `point`. Pure: the chart reports the pointer, this
  * decides what it means.
+ * - anchored VP and VWAP `anchor`: the anchor moves to the pointer's bar (the price is not stored).
  * - hline `price`; trendline and fib `a`/`b`: the anchor moves to the pointer's bar and price.
  * - position `entry`: the whole box moves (stop and target keep their distance from the entry);
  *   `target`/`stop`: only that price moves, and a drag past the entry is refused -- it stops one
@@ -345,6 +405,9 @@ export function applyHandleDrag(
     }
     case "position":
       return dragPosition(drawing, handle, point, price, pricePrecision);
+    case "anchored_vp":
+    case "anchored_vwap":
+      return handle === "anchor" && point.time !== null ? { ...drawing, time: storedTime(point.time) } : drawing;
   }
 }
 
@@ -412,7 +475,7 @@ export function nextDrawingId(drawings: readonly Drawing[], kind: DrawingKind): 
   return `${prefix}${max + 1}`;
 }
 
-const KINDS: readonly string[] = ["hline", "trendline", "fib", "position"];
+export const DRAWING_KIND_NAMES: readonly string[] = ["hline", "trendline", "fib", "position", "anchored_vp", "anchored_vwap"];
 
 /**
  * The drawings a `GET /api/coin/{iid}/drawings` answered. The server validated every item
@@ -421,7 +484,7 @@ const KINDS: readonly string[] = ["hline", "trendline", "fib", "position"];
  */
 export function parseDrawings(items: readonly Record<string, unknown>[]): Drawing[] {
   return items.map((item) => {
-    if (typeof item.kind !== "string" || !KINDS.includes(item.kind)) {
+    if (typeof item.kind !== "string" || !DRAWING_KIND_NAMES.includes(item.kind)) {
       throw new Error(`unknown drawing kind ${JSON.stringify(item.kind)}`);
     }
     return item as unknown as Drawing;
@@ -525,4 +588,29 @@ export function parsePositionForm(
   const risk = parsePositive(riskText, "Risk %");
   if (typeof risk === "string") return risk;
   return { ...next, account, risk_pct: risk };
+}
+
+/** The Anchored VP settings form's text fields, as typed. */
+export interface AnchoredVpForm {
+  rows: string;
+  valueAreaPct: string;
+  upColor: string;
+  downColor: string;
+}
+
+export function anchoredVpToForm(d: AnchoredVpDrawing): AnchoredVpForm {
+  return { rows: String(d.rows), valueAreaPct: String(d.value_area_pct), upColor: d.up_color, downColor: d.down_color };
+}
+
+/** The Anchored VP the form describes (rows a whole number in range, value area in (0, 100]), or the first refusal. */
+export function parseAnchoredVpForm(base: AnchoredVpDrawing, form: AnchoredVpForm): AnchoredVpDrawing | string {
+  const rows = Number(form.rows);
+  if (form.rows.trim() === "" || !Number.isInteger(rows) || rows < MIN_AVP_ROWS || rows > MAX_AVP_ROWS) {
+    return `Rows must be a whole number, ${MIN_AVP_ROWS} to ${MAX_AVP_ROWS}`;
+  }
+  const area = Number(form.valueAreaPct);
+  if (form.valueAreaPct.trim() === "" || !Number.isFinite(area) || area <= 0 || area > 100) {
+    return "Value area must be above 0 and at most 100 %";
+  }
+  return { ...base, rows, value_area_pct: area, up_color: form.upColor, down_color: form.downColor };
 }

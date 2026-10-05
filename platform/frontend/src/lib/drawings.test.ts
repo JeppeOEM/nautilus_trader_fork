@@ -4,6 +4,7 @@ import {
   type DragPoint,
   type FibDrawing,
   type PositionDrawing,
+  anchoredVpToForm,
   applyHandleDrag,
   defaultFibLevels,
   fibLabel,
@@ -11,8 +12,11 @@ import {
   formatPercent,
   importLegacyHlines,
   MAX_WIDTH_BARS,
+  newAnchoredVp,
+  newAnchoredVwap,
   newPosition,
   nextDrawingId,
+  parseAnchoredVpForm,
   parseDrawings,
   parsePositionForm,
   positionLabels,
@@ -309,5 +313,67 @@ describe("legacy import (Story 32.5)", () => {
   it("skips a line the resource can't store (price at or below zero)", () => {
     const raw = [{ price: 0 }, { price: -3 }, { price: 5 }];
     expect(importLegacyHlines(raw, []).map((l) => l.price)).toEqual([5]);
+  });
+});
+
+describe("anchored drawings (Story 32.7)", () => {
+  const avp = newAnchoredVp("anchored_vp-1", 600, "#25a399", "#ef5350");
+  const avwap = newAnchoredVwap("anchored_vwap-1", 600, "#2962ff", "#b26a00");
+
+  it("a new Anchored VP stores only the anchor and the look; a new Anchored VWAP is hlc3 with bands off", () => {
+    expect(avp).toEqual({
+      kind: "anchored_vp",
+      id: "anchored_vp-1",
+      time: 600,
+      rows: 24,
+      value_area_pct: 70,
+      up_color: "#25a399",
+      down_color: "#ef5350",
+    });
+    expect(avwap).toEqual({
+      kind: "anchored_vwap",
+      id: "anchored_vwap-1",
+      time: 600,
+      source: "hlc3",
+      bands: false,
+      color: "#2962ff",
+      band_color: "#b26a00",
+    });
+  });
+
+  it("stores a mid-second pointer time as whole seconds", () => {
+    expect(newAnchoredVp("a", 600.4, "#000000", "#000000").time).toBe(601);
+  });
+
+  it("the anchor handle moves the anchor to the pointer's bar and nothing else", () => {
+    const moved = applyHandleDrag(avp, "anchor", drag(1, { time: 900 }), 2);
+    expect(moved).toEqual({ ...avp, time: 900 });
+    expect(applyHandleDrag(avwap, "anchor", drag(1, { time: 1200 }), 2)).toEqual({ ...avwap, time: 1200 });
+  });
+
+  it("ignores an unknown handle and a drag with no bar under the pointer", () => {
+    expect(applyHandleDrag(avp, "price", drag(5), 2)).toBe(avp);
+    expect(applyHandleDrag(avwap, "anchor", drag(5, { time: null }), 2)).toBe(avwap);
+  });
+
+  it("numbers each kind apart and narrows both kinds from the wire", () => {
+    expect(nextDrawingId([avp, avwap], "anchored_vp")).toBe("anchored_vp-2");
+    expect(nextDrawingId([avp], "anchored_vwap")).toBe("anchored_vwap-1");
+    expect(parseDrawings([avp as never, avwap as never])).toHaveLength(2);
+  });
+
+  it("the Anchored VP form refuses rows outside 2..500 and a value area outside (0, 100]", () => {
+    const form = anchoredVpToForm(avp);
+    expect(parseAnchoredVpForm(avp, { ...form, rows: "48", valueAreaPct: "60" })).toEqual({ ...avp, rows: 48, value_area_pct: 60 });
+    for (const rows of ["1", "501", "2.5", "", "abc"]) {
+      expect(parseAnchoredVpForm(avp, { ...form, rows })).toMatch(/Rows must be/);
+    }
+    for (const valueAreaPct of ["0", "100.5", "", "x"]) {
+      expect(parseAnchoredVpForm(avp, { ...form, valueAreaPct })).toMatch(/Value area/);
+    }
+    expect(parseAnchoredVpForm(avp, { ...form, upColor: "#111111", downColor: "#222222" })).toMatchObject({
+      up_color: "#111111",
+      down_color: "#222222",
+    });
   });
 });

@@ -17,12 +17,15 @@ strict validation that names the offending field (a malformed item is refused, n
 """
 
 import copy
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from views.preferences import DRAWING_KINDS
+from views.preferences import VWAP_SOURCES
 from views.preferences import DrawingError
 from views.preferences import load_chart_drawings
 from views.preferences import save_chart_drawings
@@ -73,9 +76,41 @@ def _position(side: str = "long") -> dict[str, Any]:
     }
 
 
+def _anchored_vp() -> dict[str, Any]:
+    return {
+        "kind": "anchored_vp",
+        "id": "anchored_vp-1",
+        "time": 1_800_000_000,
+        "rows": 24,
+        "value_area_pct": 70,
+        "up_color": "#25a399",
+        "down_color": "#ef5350",
+    }
+
+
+def _anchored_vwap() -> dict[str, Any]:
+    return {
+        "kind": "anchored_vwap",
+        "id": "anchored_vwap-1",
+        "time": 1_800_000_000,
+        "source": "hlc3",
+        "bands": True,
+        "color": "#2962ff",
+        "band_color": "#b26a00",
+    }
+
+
 def test_every_kind_round_trips_through_the_file_unchanged(tmp_path: Path) -> None:
     path = tmp_path / "chart_drawings.toml"
-    items = [_hline(), _trendline(), _fib(), _position("long"), {**_position("short"), "id": "p5"}]
+    items = [
+        _hline(),
+        _trendline(),
+        _fib(),
+        _position("long"),
+        {**_position("short"), "id": "p5"},
+        _anchored_vp(),
+        _anchored_vwap(),
+    ]
     save_chart_drawings({_IID: items}, path)
     assert load_chart_drawings(path) == {_IID: items}
 
@@ -199,6 +234,26 @@ def _without(item: dict[str, Any], key: str) -> dict[str, Any]:
         ({**_position(), "width_bars": 0}, "width_bars"),
         (_without(_position(), "risk_pct"), "risk_pct"),
         ({**_position(), "account": -1.0}, "account"),
+        ({**_anchored_vp(), "time": 1.5}, "time"),
+        ({**_anchored_vp(), "time": -1}, "time"),
+        (_without(_anchored_vp(), "time"), "time"),
+        ({**_anchored_vp(), "rows": 1}, "rows"),
+        ({**_anchored_vp(), "rows": 501}, "rows"),
+        ({**_anchored_vp(), "rows": True}, "rows"),
+        ({**_anchored_vp(), "value_area_pct": 0}, "value_area_pct"),
+        ({**_anchored_vp(), "value_area_pct": 100.5}, "value_area_pct"),
+        (_without(_anchored_vp(), "value_area_pct"), "value_area_pct"),
+        ({**_anchored_vp(), "up_color": 3}, "up_color"),
+        (_without(_anchored_vp(), "down_color"), "down_color"),
+        ({**_anchored_vp(), "price": 1.0}, "price"),  # not a field of an anchored_vp
+        ({**_anchored_vwap(), "source": "open"}, "source"),
+        (_without(_anchored_vwap(), "source"), "source"),
+        ({**_anchored_vwap(), "bands": 1}, "bands"),
+        (_without(_anchored_vwap(), "bands"), "bands"),
+        ({**_anchored_vwap(), "band_color": None}, "band_color"),
+        ({**_anchored_vwap(), "time": "now"}, "time"),
+        ({**_anchored_vwap(), "color": 3}, "color"),
+        ({**_anchored_vwap(), "rows": 24}, "rows"),  # not a field of an anchored_vwap
     ],
 )
 def test_a_malformed_item_is_refused_naming_the_field(item: dict[str, Any], field: str) -> None:
@@ -214,3 +269,22 @@ def test_an_item_list_error_names_the_item_and_a_repeated_id_is_refused() -> Non
         validate_drawings([_hline(), _hline()])
     with pytest.raises(DrawingError, match="items"):
         validate_drawings({"kind": "hline"})
+
+
+def test_the_closed_sets_mirror_the_frontend() -> None:
+    root = Path(__file__).parents[2] / "frontend/src/lib"
+    drawings = (root / "drawings.ts").read_text()
+    kinds = re.search(r"DRAWING_KIND_NAMES: readonly string\[\] = \[([^\]]*)\]", drawings)
+    assert kinds is not None
+    assert tuple(re.findall(r'"(\w+)"', kinds.group(1))) == DRAWING_KINDS
+    vwap = (root / "anchoredVwap.ts").read_text()
+    sources = re.search(r"VWAP_SOURCES = \[([^\]]*)\]", vwap)
+    assert sources is not None
+    assert tuple(re.findall(r'"(\w+)"', sources.group(1))) == VWAP_SOURCES
+
+
+def test_an_old_file_of_the_four_original_kinds_loads_unchanged(tmp_path: Path) -> None:
+    path = tmp_path / "chart_drawings.toml"
+    items = [_hline(), _trendline(), _fib(), _position()]
+    save_chart_drawings({_IID: items}, path)
+    assert load_chart_drawings(path) == {_IID: items}
