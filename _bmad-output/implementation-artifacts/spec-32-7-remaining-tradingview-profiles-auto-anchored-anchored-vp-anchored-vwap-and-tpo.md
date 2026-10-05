@@ -4,9 +4,9 @@ type: 'feature'
 created: '2026-09-30'
 status: 'done'
 baseline_revision: '4b7bac0a9304fbfce83c0d589c7fde2e27a2243d'
-final_revision: '96d70b1d83ca69a98c7b098244d89282d90850fa'
+final_revision: '7b03e9add262975ed4d1d5563ac49044e12e85f2'
 review_loop_iteration: 0
-followup_review_recommended: true
+followup_review_recommended: false
 context:
   - '{project-root}/_bmad-output/implementation-artifacts/epic-32-context.md'
   - '{project-root}/platform/CLAUDE.md'
@@ -139,10 +139,26 @@ Live anchors (verified at plan time on branch `epic-32`, after 32.6):
   - `[low]` `[patch]` The Anchored VP's settings could not open before the instrument precision loaded though its dialog prints no price; now it opens (other kinds still dropped) + test.
   - `[low]` `[patch]` The AVWAP line-colour picker showed black when no colour was stored; it now shows the drawing token the line is drawn in + test.
 
+### 2026-10-05 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 8: (high 0, medium 4, low 4)
+- defer: 0
+- reject: 13
+- addressed_findings:
+  - `[medium]` `[patch]` The anchored memo copied the whole history (`withFormingBar`, `timedBars`) on every forming-bar tick even on a coin with no Anchored VP/VWAP; it now returns the shared empties first (restored from the power-cut prior attempt `32-7-prior-attempt`, re-verified).
+  - `[medium]` `[patch]` An Anchored VP placed on the newest/forming bar, and an Auto Anchored profile whose span is one bar (a period whose first bar just closed), resolved to a 0 px `{toTime}` width and drew nothing; `VolumeProfileRenderSpec.throughEndBar` adds the end bar's slot (one bar spacing) for both + primitive and page tests.
+  - `[medium]` `[patch]` On a coarse chart (1W, month anchor) the Auto Anchored span and marker started on the first bar opening after the anchor (up to six days late) and the marker stood in at it; the span now starts at the bar holding the anchor and the marker only sits on a bar at or before the anchor + test (fails without the fix).
+  - `[medium]` `[patch]` The Anchored VWAP line was drawn across gap slots; `breakAtGaps` marks the first point after a gap so the line and its hit test break there, plus a `Known limit:` on the bar-size-dependent source (restored from the prior attempt, re-verified with its tests).
+  - `[low]` `[patch]` The Anchored VWAP anchor handle sat on the first bar with volume, not the stored anchor bar; it is now on the snapped anchor bar (the spec carries it, like the AVP) at the line's first value + test.
+  - `[low]` `[patch]` The Anchored VWAP settings dialog (no price printed) could not open before the precision loaded; the prior attempt changed `requestSettings` but not the render guard, so its own test failed; both now admit `anchored_vwap`.
+  - `[low]` `[patch]` `MIN/MAX/DEFAULT_IB_MINUTES`, `MIN/MAX_AVP_ROWS` and `MAX_PROFILE_ROWS` claimed to mirror Python but were unpinned; `test_profile_option_bounds_and_defaults_mirror_the_frontend`.
+  - `[low]` `[patch]` The Docs tagline said all nine tools are "computed by one engine"; the Anchored VWAP has its own maths, reworded to eight profiles on one engine plus the VWAP line.
+
 ## Auto Run Result
 
-- **Summary:** Follow-up review of Story 32.7 (Auto Anchored VP, Anchored VP, Anchored VWAP, TPO on the one `buildVolumeProfile` engine). Seven patches applied; no spec or intent changes.
-- **Files changed in this pass:** `lib/sessionProfile.ts` (+test: `withFormingBar`), `pages/ChartPage.tsx` (+test: anchored memo includes the forming bar and hands the AVP its snapped bar; per-profile TPO detail cache; AVP settings without precision), `lib/tpo.ts` (+test: clocked letters, time-based initial balance, `Known limit:`), `components/chart/DrawingSettingsDialog.tsx` (nullable precision for the AVP; AVWAP colour default), `pages/docs/kbData.ts` (TPO letters/IB wording, forming-bar note).
-- **Review:** 7 patches, 0 deferred, 11 rejected (AVWAP legend not following the crosshair: spec says current value; highest/lowest-high over the loaded set: as specified; IB intermediate keystrokes: save is debounced; AVP full-height hit line; letter wrap past 52 periods; overflow-bar colour; Python default duplication and colour-format checks: existing patterns; a zero-volume-since-anchor AVWAP having no hit area: spec'd "line undefined until first volume"; 1W bars with month/session anchors; Auto Anchored rollover waiting for the first new bar to close: the session family's closed-bar convention).
-- **Verification:** `npm test` 43 files / 810 passed; `npm run build` clean; `npm run lint` 3 warnings, all pre-existing (`useCandles.ts`, `TrustedHtml.tsx`); `python3 -m pytest views/tests -q` 362 passed.
-- **Residual risks:** the anchored memo and legend now recompute on each forming-bar tick (~1/s, documented in the memo's `Known limit:`); Auto Anchored re-anchors at a session rollover once the new session's first bar closes, not on its first tick (session profiles share this closed-bar convention); a TPO session with no bar in its first `ib_minutes` draws no initial balance.
+- **Summary:** Second follow-up review of Story 32.7 (Auto Anchored VP, Anchored VP, Anchored VWAP, TPO on the one `buildVolumeProfile` engine), resuming the review cut off by a power loss: its pinned WIP (`32-7-prior-attempt`) was restored for the code files only (not `sprint-status.yaml`), re-verified (one of its tests failed and was completed), and extended. Eight patches; no spec or intent changes.
+- **Files changed in this pass:** `pages/ChartPage.tsx` (+test: early return without anchored drawings, `breakAtGaps`, AVWAP snapped anchor, `throughEndBar` for AVP and Auto Anchored, Auto span from the bar holding the anchor, AVWAP dialog without precision), `primitives/VolumeProfilePrimitive.ts` (+test: `throughEndBar`), `primitives/AnchoredVwapPrimitive.ts` (+test: gap breaks, handle on the anchor bar), `lib/anchoredVwap.ts` (+test: `breakAtGaps`, source `Known limit:`), `pages/docs/kbData.ts` (tagline), `views/tests/test_chart_layouts.py` (mirror test for the option bounds/defaults).
+- **Review:** 8 patches, 0 deferred, 13 rejected (AVWAP legend not following the crosshair: spec says current value; identical `AVWAP (hlc3)` labels: cosmetic; anchor older than the loaded history: documented `Known limit:`; TPO letter wrap on long periods and an IB longer than the period: operator settings, letters off by default; Auto extremes over the loaded set and closed bars only: as specified / the session family's closed-bar convention; IB intermediate keystrokes: save debounced; colour-string validation and the Python defaults literal: existing patterns; legend rebuild per tick: covered by the memo's `Known limit:`; dead `??` fallbacks: harmless; a zero-volume-since-anchor AVWAP having no hit area: spec'd "undefined until first volume"; "1W month anchor draws nothing for days": not reproducible, the anchor resolves from the last closed bar, so the span always holds it).
+- **Verification:** `npm test` 43 files / 816 passed; `npm run build` clean; `npm run lint` 3 warnings, all pre-existing (`useCandles.ts`, `TrustedHtml.tsx`); `python3 -m pytest views/tests -q` 363 passed; `ruff check`/`ruff format` clean on the changed test. The new 1W Auto Anchored test was confirmed to fail with the old span rule.
+- **Residual risks:** `throughEndBar` widens the AVP and Auto Anchored ranges by one bar spacing (a deliberate visual change, the other profiles unchanged); the anchored memo still recomputes each forming-bar tick when an anchored drawing exists (documented); Auto Anchored still re-anchors at a rollover once the new period's first bar closes.
