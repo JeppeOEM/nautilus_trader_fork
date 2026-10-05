@@ -56,7 +56,14 @@ def run(
 ) -> BacktestResult:
     """`start`/`end` are required: the window is materialised in memory (MEM-01)."""
     catalog = ParquetDataCatalog(catalog_path)
-    instrument = catalog.instruments(instrument_ids=[symbol])[0]
+    instruments = catalog.instruments(instrument_ids=[symbol])
+    if not instruments:
+        # As `backtest_snapshot.run`: a bare IndexError named neither the symbol nor the catalog.
+        raise ValueError(
+            f"instrument {symbol!r} not found in the catalog at {catalog_path!r} -- "
+            "check catalog_path/CATALOG_PATH and that the collector has written its definition",
+        )
+    instrument = instruments[0]
     venue = str(instrument.id.venue)
     # Level 0 only, never the decoded 20-level book (MEM-01). A row with an empty side is already
     # omitted: it has no top of book to quote.

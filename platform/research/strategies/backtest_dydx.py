@@ -80,6 +80,7 @@ from nautilus_trader.model.enums import AccountType
 from nautilus_trader.model.enums import OmsType
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from research.strategies.catalog_location import default_catalog_path
 from research.watchlist import fetch_watchlist
 
 
@@ -136,19 +137,8 @@ def _build_run_config(
     )
 
 
-def run(
-    symbols: list[str] | None = None,
-    catalog_path: str = "platform/data/catalog",
-    bar_interval: str = "1-MINUTE",
-    buy_threshold: float = 0.6,
-    sell_threshold: float = 0.4,
-) -> dict[str, BacktestResult]:
-    if not re.fullmatch(r"\d+-[A-Z]+", bar_interval):
-        raise ValueError(
-            f"invalid bar_interval {bar_interval!r} -- expected Nautilus bar-spec step-aggregation "
-            f'form, e.g. "1-SECOND", "1-MINUTE", "5-MINUTE"',
-        )
-
+def _resolve_symbols(symbols: list[str] | None) -> list[str]:
+    """Return the explicit coin-set, or the live Watchlist when None, deduplicated in order."""
     if symbols is not None and isinstance(symbols, str):
         raise TypeError(
             f"symbols must be a list[str], not a bare str ({symbols!r}) -- "
@@ -165,8 +155,25 @@ def run(
                 "list to bypass the live Watchlist entirely.",
             ) from exc
 
-    symbols = list(dict.fromkeys(symbols))  # dedupe, preserve order (see module docstring)
+    return list(dict.fromkeys(symbols))  # dedupe, preserve order (see module docstring)
 
+
+def run(
+    symbols: list[str] | None = None,
+    catalog_path: str | None = None,
+    bar_interval: str = "1-MINUTE",
+    buy_threshold: float = 0.6,
+    sell_threshold: float = 0.4,
+) -> dict[str, BacktestResult]:
+    if not re.fullmatch(r"\d+-[A-Z]+", bar_interval):
+        raise ValueError(
+            f"invalid bar_interval {bar_interval!r} -- expected Nautilus bar-spec step-aggregation "
+            f'form, e.g. "1-SECOND", "1-MINUTE", "5-MINUTE"',
+        )
+
+    symbols = _resolve_symbols(symbols)
+    if catalog_path is None:
+        catalog_path = default_catalog_path()
     catalog = ParquetDataCatalog(catalog_path)
     instrument_by_id = {str(i.id): i for i in catalog.instruments(instrument_ids=symbols)}
 

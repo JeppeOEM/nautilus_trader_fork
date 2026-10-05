@@ -21,15 +21,12 @@ window through the `BacktestRunner` port (`NodeRunner`: `BacktestNode` + `Backte
     python -m research.strategies.backtest_candle_pattern   # from platform/
 """
 
-from pathlib import Path
-
 from research.application.backtest_runner import NodeRunner
 from research.application.ports import RunResult
 from research.application.ports import RunSpec
+from research.strategies.catalog_location import default_catalog_path
 
 
-# The collectors' shared catalog root (as `backtest_ofi.py`).
-_CATALOG = str(Path(__file__).resolve().parents[2] / "data" / "catalog")
 _S = "research.strategies.candle_pattern_strategy:"
 
 
@@ -37,7 +34,7 @@ def run(
     symbol: str = "BTC-USD-PERP.DYDX",
     start: str = "2026-09-05",
     end: str = "2026-09-06",
-    catalog_path: str = _CATALOG,
+    catalog_path: str | None = None,
     **params: object,
 ) -> RunResult:
     """
@@ -45,6 +42,8 @@ def run(
     `trend_condition="any"`, `trade_size="0.01"`; an unknown one fails the build.
     """
     params.setdefault("trade_size", "0.01")
+    if catalog_path is None:
+        catalog_path = default_catalog_path()
     spec = RunSpec(
         catalog_path=catalog_path,
         instrument_ids=(symbol,),

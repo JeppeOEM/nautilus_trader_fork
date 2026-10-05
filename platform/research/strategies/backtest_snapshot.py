@@ -42,18 +42,29 @@ from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AccountType
 from nautilus_trader.model.enums import OmsType
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from research.strategies.catalog_location import default_catalog_path
 
 
 def run(
     symbol: str = "BTC-USD-PERP.DYDX",
-    catalog_path: str = "platform/data/catalog",
+    catalog_path: str | None = None,
     buy_threshold: float = 5.0,
     sell_threshold: float = -5.0,
     start: str | None = None,
     end: str | None = None,
 ) -> list[BacktestResult]:
+    if catalog_path is None:
+        catalog_path = default_catalog_path()
     catalog = ParquetDataCatalog(catalog_path)
-    instrument = catalog.instruments(instrument_ids=[symbol])[0]
+    instruments = catalog.instruments(instrument_ids=[symbol])
+    if not instruments:
+        # A bare IndexError here (DW-200's symptom) named neither the symbol nor the catalog,
+        # so a wrong cwd or CATALOG_PATH looked like a code bug.
+        raise ValueError(
+            f"instrument {symbol!r} not found in the catalog at {catalog_path!r} -- "
+            "check catalog_path/CATALOG_PATH and that the collector has written its definition",
+        )
+    instrument = instruments[0]
     venue = instrument.id.venue
 
     config = BacktestRunConfig(

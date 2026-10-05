@@ -19,14 +19,12 @@ Backtest OFIStrategy on locally collected dYdX 1s snapshots. See snapshot_backte
 """
 
 from decimal import Decimal
-from pathlib import Path
 
 from nautilus_trader.backtest.results import BacktestResult
+from research.strategies.catalog_location import default_catalog_path
 from research.strategies.snapshot_backtest import run as run_snapshot_backtest
 
 
-# The collectors' shared catalog root; the dYdX-only catalog path predates commit 18c12eedf4.
-_CATALOG = str(Path(__file__).resolve().parents[2] / "data" / "catalog")
 _S = "research.strategies.ofi_strategy:"
 
 
@@ -34,11 +32,13 @@ def run(
     symbol: str = "BTC-USD-PERP.DYDX",
     start: str = "2026-09-05",
     end: str = "2026-09-06",
-    catalog_path: str = _CATALOG,
+    catalog_path: str | None = None,
     **params: object,
 ) -> BacktestResult:
     """`params` are OFIStrategyConfig fields, e.g. ofi_threshold=2.0, trade_size=Decimal("0.01")."""
     params.setdefault("trade_size", Decimal("0.01"))
+    if catalog_path is None:
+        catalog_path = default_catalog_path()
     return run_snapshot_backtest(
         catalog_path, symbol, start, end, _S + "OFIStrategy", _S + "OFIStrategyConfig", params
     )

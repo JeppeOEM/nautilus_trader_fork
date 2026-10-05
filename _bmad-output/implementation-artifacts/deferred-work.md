@@ -255,7 +255,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of 1-3-expose-the-live-watchlist-as-a-queryable-backtest-consumable-coin-set (2026-07-15)"), 2026-10-05
 location: troll/ml_signals/watchlist.py:36-38
 reason: `fetch_watchlist` (`troll/ml_signals/watchlist.py:36-38`) has no error handling around `urlopen`/`json.load` — a strategy script calling it while the dashboard is down gets a raw `URLError`/`JSONDecodeError` rather than a clear diagnostic. Mirrors `_fetch_volume_24h_json`'s identical shape, but that helper's only caller (`_volume_loop_task`) wraps it in `try/except Exception`; `fetch_watchlist` is a new external-facing entry point with no equivalent safety net elsewhere. Worth a small hardening pass alongside other deferred staleness/error-signaling items.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-research-test-and-path-fixes
+resolution-undo: 89c508f4086e6130fe63c3b8c7df6e501f431e414611a6838c2e01ff0641c80a 2026-10-05 7374617475733a206f70656e
 
 ### DW-36: `_is_fresh` (`troll/ml_signals/dashboard.py:151-154`) treats a `_LIVE_FAST` entry with a future timestamp as fresh indefinitely — if the system clock ever …
 
@@ -381,7 +383,9 @@ resolution: already resolved: platform/research/tests/conftest.py:_keep_nautilus
 origin: migrated from legacy ledger ("Resolved: root cause of the BacktestEngine/BacktestNode native abort (2026-07-17)"), 2026-10-05
 location: test_snapshot_strategy.py
 reason: The existing per-file "one `BacktestEngine` construction per file" / filename-ordering mitigations (Story 2.2/2.3 test files) are now redundant safety margin, not load-bearing — left in place since removing them (e.g. restoring `test_snapshot_strategy.py`'s dropped negative-case test) is separate test-coverage work, not part of this fix.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-research-test-and-path-fixes
+resolution-undo: 89c508f4086e6130fe63c3b8c7df6e501f431e414611a6838c2e01ff0641c80a 2026-10-05 7374617475733a206f70656e
 
 ### DW-53: `metrics_store.latest()/history()/nearest()` lack the `_lock` guard `write()` has.
 
@@ -1492,7 +1496,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: "platform/data/catalog"
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-24-4-research-pure-consumer-and-broken-tests-repaired.md` summary: `research.strategies.backtest_dydx.run` and `backtest_snapshot.run` default `catalog_path` to the cwd-relative `"platform/data/catalog"`, while `docs/BOT_OPERATIONS.md` tells the user to `cd platform` first, so the documented call resolves `platform/platform/data/catalog`: `backtest_dydx` then skips every symbol and returns `{}`, and `backtest_snapshot` raises `IndexError` on `instruments(...)[0]`. evidence: both defaults are literal relative strings, and `backtest_ofi` alone derives its path from `__file__`. Pre-existing: the baseline `ml_signals.strategies.backtest_*` had the same defaults, and the baseline BOT_OPERATIONS.md had the same `cd platform` instruction. This story only renamed the module paths. The fix (one `__file__`-anchored default shared by all three runners, plus how the collector image's `/app/catalog` mount is addressed) spans the runners and the image layout, so it belongs with Story 27.8's research-in-image work.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-research-test-and-path-fixes
+resolution-undo: 89c508f4086e6130fe63c3b8c7df6e501f431e414611a6838c2e01ff0641c80a 2026-10-05 7374617475733a206f70656e
 
 ### DW-201: A `pruned` archive-gap marker spans the deleted file's `ts_init` name range, but the rebuild tests gaps on the row's `ts_event`, so rows in `[start …
 
@@ -1836,7 +1842,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: research/strategies/ofi_strategy.py
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-27-3-microstructure-notebook.md` summary: `research/strategies/ofi_strategy.py`'s `OFIStrategy.on_data` evaluates its carried pre-gap OFI z-score on the first row after a gap over `MAX_GAP_NS`: `clear_prev_state()` makes `MultiLevelOFI.update_raw` return without a new reading, yet `self._ofi.initialized` stays True, so `_evaluate` can enter on a signal from before the outage (and stores it as `_prev_ofi`). evidence: `on_data` calls `clear_prev_state()`, then `update_raw` (which returns early when `_prev_bid_prices is None`, leaving `value` untouched), then `_evaluate(self._ofi.value, ...)` gated only on `initialized` and warm-up; predates 27.3, which only renamed `_MAX_GAP_NS`; 27.3's replay shows that row as NaN and documents the divergence as a `Known limit:`.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-research-test-and-path-fixes
+resolution-undo: 89c508f4086e6130fe63c3b8c7df6e501f431e414611a6838c2e01ff0641c80a 2026-10-05 7374617475733a206f70656e
 
 ### DW-249: `PUT /api/rankings/technicals-columns` (and the chart-indicator PUT) validate only indicator names, never enum param values, so a saved column with `"pattern" …
 
@@ -1939,7 +1947,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: research/tests/test_backtest_runner.py::test_an_order_fills_at_the_top_of_book_after_its_latency
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-31-3-derived-signals-against-independent-reference-implementations.md` summary: `research/tests/test_backtest_runner.py::test_an_order_fills_at_the_top_of_book_after_its_latency` (5 parametrizations) errors with `TypeError: DydxSecondSnapshot.__init__() missing 2 required positional arguments`: its fixture builder at `:427` still calls the pre-Story-30.2 constructor. evidence: the same `DydxSecondSnapshot(` call is at line 426 of the baseline revision 5e324bbb8e, and the 5 errors show in both 31.3 review passes' full pytest runs, so the fixture was never updated for 30.2's precision arguments. It is pre-existing and not caused by 31.3.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-research-test-and-path-fixes
+resolution-undo: 89c508f4086e6130fe63c3b8c7df6e501f431e414611a6838c2e01ff0641c80a 2026-10-05 7374617475733a206f70656e
 
 ### DW-263: Bybit prints BTCUSDT spot trades below the instrument's 0.1 tick (e.g. `84528.67`), and capture archives them rounded (`84528.7`) with no trace, so the stored …
 
