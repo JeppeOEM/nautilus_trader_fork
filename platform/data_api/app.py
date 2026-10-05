@@ -15,13 +15,16 @@
 """
 Read-only FastAPI service exposing catalog/metrics data over the network.
 
-`dashboard.py` reads catalog/metrics data straight off local disk, which only
-works when it runs on the same box as the collector's data. This service is a
-thin network-reachable wrapper around the same existing functions
-`dashboard.py` already calls -- no reimplemented query/aggregation logic here
-(NAUT-02). Every route is a plain sync `def`; FastAPI runs sync handlers in
-its own threadpool automatically, which offloads the blocking SQLite/Parquet
-reads without hand-rolled `asyncio.to_thread`.
+A thin network-reachable wrapper around the catalog/metrics reads -- no reimplemented
+query/aggregation logic here (NAUT-02). The bare `/metrics/*` and `/catalog/*` routes were the
+remote-mode targets of the old `dashboard.py` (retired by Story 15.10) and have no caller left
+in this repo; they are kept as legacy read routes beside their `/api/*` successors. Their inputs
+are bounded (a `/catalog` window is under `/api/snapshots`' row cap, rejected rather than
+clamped; `days` is metrics.db's retention), and a failed catalog read is ledgered and answered
+500 with its cause.
+Every route is a plain sync `def`; FastAPI runs sync handlers in its own threadpool
+automatically, which offloads the blocking SQLite/Parquet reads without hand-rolled
+`asyncio.to_thread`.
 
 Every value served is computed by the `views` context (Story 24.2): this app and its routes
 format and transport only -- they pass their own env-derived paths in, build the pydantic
@@ -34,15 +37,20 @@ service (`network_mode: host` + `uvicorn --host 127.0.0.1`), no `ports:` entry.
 
 import asyncio
 import os
+from collections.abc import AsyncIterator
+from collections.abc import Callable
 from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import AsyncIterator
+from typing import Annotated
 
 from fastapi import FastAPI
 from fastapi import HTTPException
+from fastapi import Query
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from kernel.clocks import NS_PER_S
+from kernel.clocks import READ_SPAN_MARGIN_NS
 from kernel.venues import MalformedInstrumentId
+from kernel.venues import venue_of
 from observability import error_ledger
 from pydantic import BaseModel
 from views import chart_series
@@ -60,17 +68,26 @@ from data_api.routes import layout as layout_routes
 from data_api.routes import metrics as metrics_routes
 from data_api.routes import rankings as rankings_routes
 from data_api.routes import snapshots as snapshots_routes
+from data_api.routes.snapshots import MAX_SNAPSHOTS_LIMIT
 from data_api.settings import CATALOG_PATH
 from data_api.settings import ERROR_LEDGER_DIR
+from data_api.settings import METRICS_DB_PATH
 from data_api.settings import REDIS_URL
 from data_api.ws import live as live_ws
 
 
-# Default mirrors dashboard.py:85-86 exactly.
-METRICS_DB_PATH: str = os.environ.get(
-    "METRICS_DB_PATH",
-    str(Path(CATALOG_PATH).parent / "metrics" / "metrics.db"),
-)
+# Both legacy /catalog routes materialise one dict per archived second of the window, so they take
+# the same per-request bound as `/api/snapshots` (MEM-01): the closed window `[start_ns, end_ns]`
+# must be shorter than the cap, so it holds at most `MAX_SNAPSHOTS_LIMIT` whole seconds. A wider
+# window is rejected, never clamped: a truncated answer would be passed off as the complete window.
+# Known limit: `views.catalog_reads.query_second_snapshots` widens the read's end by
+# `READ_SPAN_MARGIN_NS` (60 s) before its exact ts_event filter, so one request transiently loads
+# up to cap + 60 rows; upgrade path: a reader that filters on ts_event inside the catalog query.
+_MAX_CATALOG_SPAN_NS = MAX_SNAPSHOTS_LIMIT * NS_PER_S
+# The read adds `READ_SPAN_MARGIN_NS` to `end_ns` and the catalog filters in int64, so a larger
+# bound would overflow inside the read and be misreported as a server fault, not a bad request.
+_MAX_TS_NS = 2**63 - 1 - READ_SPAN_MARGIN_NS
+_Timestamp = Annotated[int, Query(ge=0, le=_MAX_TS_NS)]
 
 # Where platform/data_api.dockerfile's Node build stage COPYs platform/frontend/dist -- keep this
 # default in sync with that Dockerfile's COPY destination (Story 15.1 AC #5).
@@ -121,7 +138,13 @@ app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
 @app.get("/metrics/history/{symbol}")
-def metrics_history(symbol: str, days: int = 31) -> list[dict]:
+def metrics_history(
+    symbol: str,
+    # metrics.db's own retention (see routes/metrics.py's twin): wider would silently shorten.
+    days: Annotated[int, Query(ge=1, le=coin_detail.METRICS_HISTORY_MAX_DAYS)] = (
+        coin_detail.METRICS_HISTORY_MAX_DAYS
+    ),
+) -> list[dict]:
     return coin_detail.metrics_history(symbol, METRICS_DB_PATH, days)
 
 
@@ -130,17 +153,60 @@ def metrics_nearest(symbol: str, ts_ns: int) -> dict | None:
     return coin_detail.metrics_nearest(symbol, ts_ns, METRICS_DB_PATH)
 
 
-@app.get("/catalog/chart-series/{symbol}")
-def catalog_chart_series(symbol: str, start_ns: int, end_ns: int) -> dict[str, list[dict]]:
+def _check_catalog_window(instrument_id: str, start_ns: int, end_ns: int) -> None:
+    """Refuse a request before any catalog read: no venue (400), reversed or over-wide (422)."""
+    venue_of(instrument_id)
+    if start_ns > end_ns:
+        raise HTTPException(
+            status_code=422, detail=f"start_ns ({start_ns}) is after end_ns ({end_ns})"
+        )
+    if end_ns - start_ns >= _MAX_CATALOG_SPAN_NS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"end_ns - start_ns must be under the {MAX_SNAPSHOTS_LIMIT} s window cap",
+        )
+
+
+def _read_catalog[T](route: str, instrument_id: str, read: Callable[[], T]) -> T:
+    """
+    Run one views catalog read, mapping its failures to HTTP. `EmptyTopOfBook` is views' own
+    ledgered malfunction (500 with its message, unchanged); anything else unexpected -- an Arrow
+    schema/precision conflict, an I/O error -- is ledgered here (DATA-07) and answered 500 with its
+    cause, never a detail-less 500.
+    """
     try:
-        return chart_series.compute_chart_series(CATALOG_PATH, symbol, start_ns, end_ns)
+        return read()
     except chart_series.EmptyTopOfBook as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        error_ledger.record(
+            "data_api.catalog_read", f"{route} read failed for {instrument_id}", exc
+        )
+        raise HTTPException(
+            status_code=500, detail=f"failed to read catalog: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
+@app.get("/catalog/chart-series/{symbol}")
+def catalog_chart_series(
+    symbol: str, start_ns: _Timestamp, end_ns: _Timestamp
+) -> dict[str, list[dict]]:
+    _check_catalog_window(symbol, start_ns, end_ns)
+    return _read_catalog(
+        "/catalog/chart-series",
+        symbol,
+        lambda: chart_series.compute_chart_series(CATALOG_PATH, symbol, start_ns, end_ns),
+    )
 
 
 @app.get("/catalog/snapshots/{iid}")
-def catalog_snapshots(iid: str, start_ns: int, end_ns: int) -> list[dict]:
-    return coin_detail.catalog_snapshot_rows(CATALOG_PATH, iid, start_ns, end_ns)
+def catalog_snapshots(iid: str, start_ns: _Timestamp, end_ns: _Timestamp) -> list[dict]:
+    _check_catalog_window(iid, start_ns, end_ns)
+    return _read_catalog(
+        "/catalog/snapshots",
+        iid,
+        lambda: coin_detail.catalog_snapshot_rows(CATALOG_PATH, iid, start_ns, end_ns),
+    )
 
 
 class HealthResponse(BaseModel):

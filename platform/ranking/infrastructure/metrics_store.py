@@ -56,6 +56,11 @@ CREATE INDEX IF NOT EXISTS idx_iid_ts ON snapshots(instrument_id, ts);
 
 _NS_PER_DAY = 86_400 * 1_000_000_000
 
+# How many days of snapshots metrics.db keeps: `write` prunes everything older, so a history read
+# reaching further back can only return what this retention left. Readers bound their `days` by
+# it (`ranking.application.queries.HISTORY_MAX_DAYS`) instead of repeating the number.
+RETAIN_DAYS = 31
+
 
 def _migrate(db: sqlite3.Connection) -> None:
     """
@@ -139,7 +144,7 @@ class SqliteMetricsStore:
                 self._db.close()
                 self._db = None
 
-    def write(self, rows: list[dict], retain_days: int = 31) -> None:
+    def write(self, rows: list[dict], retain_days: int = RETAIN_DAYS) -> None:
         """Upsert snapshots and prune rows older than retain_days."""
         cutoff = time.time_ns() - retain_days * _NS_PER_DAY
         placeholders = ", ".join("?" * (2 + len(COLS)))
@@ -177,7 +182,7 @@ class SqliteMetricsStore:
         keys = ("instrument_id", *COLS)
         return [dict(zip(keys, r, strict=True)) for r in rows]
 
-    def history(self, instrument_id: str, days: int = 31) -> list[dict]:
+    def history(self, instrument_id: str, days: int = RETAIN_DAYS) -> list[dict]:
         """All snapshots for one instrument over the last `days` days, ordered by ts."""
         with self._lock:
             return _history_rows(self._conn(), instrument_id, days)
@@ -225,7 +230,7 @@ def _has_table(db: sqlite3.Connection) -> bool:
     return found is not None
 
 
-def read_history(db_path: str, instrument_id: str, days: int = 31) -> list[dict]:
+def read_history(db_path: str, instrument_id: str, days: int = RETAIN_DAYS) -> list[dict]:
     """Return a reader's `history`: [] while the writer has written nothing (no file or table)."""
     if not Path(db_path).exists():
         return []

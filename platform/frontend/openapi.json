@@ -25,6 +25,8 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "maximum": 31,
+              "minimum": 1,
               "default": 31,
               "title": "Days"
             }
@@ -136,6 +138,8 @@
             "required": true,
             "schema": {
               "type": "integer",
+              "maximum": 9223371976854775807,
+              "minimum": 0,
               "title": "Start Ns"
             }
           },
@@ -145,6 +149,8 @@
             "required": true,
             "schema": {
               "type": "integer",
+              "maximum": 9223371976854775807,
+              "minimum": 0,
               "title": "End Ns"
             }
           }
@@ -201,6 +207,8 @@
             "required": true,
             "schema": {
               "type": "integer",
+              "maximum": 9223371976854775807,
+              "minimum": 0,
               "title": "Start Ns"
             }
           },
@@ -210,6 +218,8 @@
             "required": true,
             "schema": {
               "type": "integer",
+              "maximum": 9223371976854775807,
+              "minimum": 0,
               "title": "End Ns"
             }
           }
@@ -1255,6 +1265,8 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "maximum": 31,
+              "minimum": 1,
               "default": 31,
               "title": "Days"
             }

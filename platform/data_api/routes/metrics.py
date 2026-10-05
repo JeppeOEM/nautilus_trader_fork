@@ -25,31 +25,25 @@ endpoint... without exception" language, not an oversight. The ranking query ser
 already a small, fixed-size 31-day window (one row per instrument per polling tick, not
 per-second order-book depth), fetched once per page load, with no scroll-back concept.
 
-These are NEW routes under `/api/metrics/...`, coexisting with the existing bare
-`/metrics/history/{symbol}`/`/metrics/nearest/{symbol}` routes in `app.py`
-(`dashboard.py`'s remote-mode call targets, untouched) -- same "old vs. new namespace
-coexist" pattern Story 15.3 established for `/catalog/candles` vs. `/api/candles`.
+These routes under `/api/metrics/...` coexist with the bare legacy
+`/metrics/history/{symbol}`/`/metrics/nearest/{symbol}` routes in `app.py` (the remote-mode
+targets of the old `dashboard.py`, retired by Story 15.10, kept as legacy read routes) -- same
+"old vs. new namespace coexist" pattern Story 15.3 established for `/catalog/candles` vs.
+`/api/candles`.
 
-Own module-level `METRICS_DB_PATH` constant, same pattern as `routes/candles.py`'s own
-`CATALOG_PATH` -- `routes/metrics.py` cannot `from data_api.app import METRICS_DB_PATH`
-without a circular import, since `app.py` imports this module.
+`METRICS_DB_PATH` is defined once in `data_api.settings` and imported as a module-level name of
+this module, so tests keep monkeypatching `routes.metrics.METRICS_DB_PATH`.
 """
 
-import os
-from pathlib import Path
+from typing import Annotated
 
 from fastapi import APIRouter
+from fastapi import Query
 from pydantic import BaseModel
 from views import coin_detail
 
-from data_api.settings import CATALOG_PATH
+from data_api.settings import METRICS_DB_PATH
 
-
-# Default mirrors data_api/app.py's own METRICS_DB_PATH default exactly (dashboard.py:85-86).
-METRICS_DB_PATH: str = os.environ.get(
-    "METRICS_DB_PATH",
-    str(Path(CATALOG_PATH).parent / "metrics" / "metrics.db"),
-)
 
 router = APIRouter()
 
@@ -80,7 +74,14 @@ class MetricsHistoryResponse(BaseModel):
 
 
 @router.get("/api/metrics/history/{symbol}")
-def get_metrics_history(symbol: str, days: int = 31) -> MetricsHistoryResponse:
+def get_metrics_history(
+    symbol: str,
+    # Bounded by metrics.db's own retention: a wider window would silently return fewer days than
+    # asked, and an unbounded one overflowed SQLite's int64 cutoff into an opaque 500.
+    days: Annotated[int, Query(ge=1, le=coin_detail.METRICS_HISTORY_MAX_DAYS)] = (
+        coin_detail.METRICS_HISTORY_MAX_DAYS
+    ),
+) -> MetricsHistoryResponse:
     rows = coin_detail.metrics_history(symbol, METRICS_DB_PATH, days)
     return MetricsHistoryResponse(items=[MetricHistoryItem(**row) for row in rows])
 

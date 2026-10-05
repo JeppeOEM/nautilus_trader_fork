@@ -231,7 +231,7 @@ def test_limit_far_above_max_never_returns_more_than_max_snapshots_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     catalog_path = str(tmp_path / "catalog")
-    max_limit = snapshots_routes._MAX_SNAPSHOTS_LIMIT
+    max_limit = snapshots_routes.MAX_SNAPSHOTS_LIMIT
     # A handful more real rows than the server-enforced max, all one second apart -- keep
     # this small enough to run fast (the route's own query window/limit clamp is what's
     # under test, not raw row-count scaling).

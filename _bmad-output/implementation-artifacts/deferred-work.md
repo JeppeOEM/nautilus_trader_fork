@@ -741,28 +741,36 @@ resolution: already resolved: platform/ranking/infrastructure/metrics_store.py r
 origin: migrated from legacy ledger ("Deferred from: code review of spec-12-1-read-only-data-api-fastapi-service.md (2026-09-12)"), 2026-10-05
 location: /catalog/chart-series/{symbol}
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-12-1-read-only-data-api-fastapi-service.md` summary: `/catalog/chart-series/{symbol}` and `/catalog/snapshots/{iid}` accept caller-supplied `start_ns`/`end_ns` with no maximum window enforced, so a client can request an unbounded time range in one call -- the exact anti-pattern troll/CLAUDE.md MEM-01 warns against ("never load full catalog slices into memory... always use time-bounded queries"). evidence: `troll/data_api/app.py:catalog_chart_series`/`catalog_snapshots` pass `start_ns`/`end_ns` straight through to `ml_signals.chart_data.compute_chart_series()`/`ml_signals.catalog_stats.query_second_snapshots()` with no range-width check; this characteristic pre-exists in the wrapped functions themselves (this story calls them verbatim per NAUT-02) but is now reachable over the network for the first time. Surfaced by both Blind Hunter and Edge Case Hunter review of this story's diff.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-data-api-legacy-routes
+resolution-undo: 0494e1d5631fbe7841cf0d7cfefba53aa18067a35474cd982d05d4012b815cd0 2026-10-05 7374617475733a206f70656e
 
 ### DW-100: No route in `data_api/app.py` catches exceptions from the underlying catalog/metrics reads (e.g. Arrow schema/precision conflicts that …
 
 origin: migrated from legacy ledger ("Deferred from: code review of spec-12-1-read-only-data-api-fastapi-service.md (2026-09-12)"), 2026-10-05
 location: data_api/app.py
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-12-1-read-only-data-api-fastapi-service.md` summary: No route in `data_api/app.py` catches exceptions from the underlying catalog/metrics reads (e.g. Arrow schema/precision conflicts that `ml_signals/catalog_stats.py`'s own `coverage()`/`price_series()` already special-case elsewhere for the same data paths) -- an unhandled exception becomes a generic 500 with no client-meaningful 404/400 translation, and no test exercises this path. evidence: `troll/data_api/app.py` -- all 4 route handlers call their wrapped function directly with no `try`/`except`; `troll/data_api/tests/test_data_api.py` only covers happy-path plus one "no data" branch (`nearest` returning `null`), never an exception path. Surfaced by both Blind Hunter and Edge Case Hunter review of this story's diff.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-data-api-legacy-routes
+resolution-undo: 0494e1d5631fbe7841cf0d7cfefba53aa18067a35474cd982d05d4012b815cd0 2026-10-05 7374617475733a206f70656e
 
 ### DW-101: `data_api/app.py`'s `METRICS_DB_PATH` default is computed by an independent expression that a code comment merely asserts "mirrors `dashboard.py:85-86` …
 
 origin: migrated from legacy ledger ("Deferred from: code review of spec-12-1-read-only-data-api-fastapi-service.md (2026-09-12)"), 2026-10-05
 location: data_api/app.py
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-12-1-read-only-data-api-fastapi-service.md` summary: `data_api/app.py`'s `METRICS_DB_PATH` default is computed by an independent expression that a code comment merely asserts "mirrors `dashboard.py:85-86` exactly" -- nothing enforces the two stay identical if one is edited later (no shared constant/import, no test comparing them). evidence: `troll/data_api/app.py:44-46` vs `troll/ml_signals/dashboard.py:85-86` -- both compute `str(Path(CATALOG_PATH).parent / "metrics" / "metrics.db")` independently; a future edit to one's default with no compiler/lint/test signal to update the other. Surfaced by Blind Hunter review of this story's diff.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-data-api-legacy-routes
+resolution-undo: 0494e1d5631fbe7841cf0d7cfefba53aa18067a35474cd982d05d4012b815cd0 2026-10-05 7374617475733a206f70656e
 
 ### DW-102: Minor unvalidated inputs with low-probability, non-crashing failure modes: `/metrics/history/{symbol}?days=` accepts zero/negative/absurdly large `days` (the …
 
 origin: migrated from legacy ledger ("Deferred from: code review of spec-12-1-read-only-data-api-fastapi-service.md (2026-09-12)"), 2026-10-05
 location: /metrics/history/{symbol}?days=
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-12-1-read-only-data-api-fastapi-service.md` summary: Minor unvalidated inputs with low-probability, non-crashing failure modes: `/metrics/history/{symbol}?days=` accepts zero/negative/absurdly large `days` (the underlying store's 31-day retention already bounds the real answer regardless); `start_ns > end_ns` on the two `/catalog/*` routes is never rejected (naturally yields an empty result rather than an error); no route has a `/health` check despite `restart: always`; routes declare no `response_model` so a NaN/Infinity value from upstream book-imbalance math would serialize as non-standard JSON tokens; no test exercises an unknown/never-subscribed instrument ID or malformed symbol path segment. evidence: `troll/data_api/app.py` (all 4 routes, no input validation beyond FastAPI's own type coercion); `troll/data_api/tests/test_data_api.py` (every test seeds exactly the data it then reads back). Surfaced by Blind Hunter and Edge Case Hunter review of this story's diff; each individually low severity, grouped here as one entry since none block real functionality today.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-data-api-legacy-routes
+resolution-undo: 0494e1d5631fbe7841cf0d7cfefba53aa18067a35474cd982d05d4012b815cd0 2026-10-05 7374617475733a206f70656e
 
 ### DW-103: `make test` (inside the `troll-collector` image) now emits a new `StarletteDeprecationWarning: Using httpx with starlette.testclient is deprecated; install …
 
@@ -979,7 +987,9 @@ resolution: already resolved: platform/views/chart_series.py:477 reader no longe
 origin: migrated from legacy ledger ("Deferred from: code review of 17-2-unpark-and-complete-story-15-8-31-day-metrics-history (2026-09-17)"), 2026-10-05
 location: data_api/app.py
 reason: source_spec: `_bmad-output/implementation-artifacts/17-2-unpark-and-complete-story-15-8-31-day-metrics-history.md` summary: `data_api/app.py`'s own `METRICS_DB_PATH` default comment ("mirrors dashboard.py:85-86 exactly") cites the wrong line numbers -- `dashboard.py`'s actual `METRICS_DB_PATH` assignment is at lines 96-98 -- and this story's new `data_api/routes/metrics.py` copied the same stale citation verbatim into its own comment. evidence: Confirmed by grepping `ml_signals/dashboard.py` for `METRICS_DB_PATH`, which resolves to lines 96-98, not 85-86. The inaccurate citation predates this story (already wrong in `app.py` before this diff); this story's own file only inherited it. Surfaced by Blind Hunter review of this story's diff.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-data-api-legacy-routes
+resolution-undo: 0494e1d5631fbe7841cf0d7cfefba53aa18067a35474cd982d05d4012b815cd0 2026-10-05 7374617475733a206f70656e
 
 ### DW-131: `HistoryPage.tsx`'s `toMetricDatum` treats only `null`/`undefined` as a gap; a `NaN`/`Infinity` metric value (were one ever to reach the route from an upstream …
 
