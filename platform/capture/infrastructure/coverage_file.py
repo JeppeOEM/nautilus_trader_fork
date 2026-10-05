@@ -17,13 +17,12 @@ The coverage record's file (Story 31.2): `<catalog>/../coverage/<venue lower>.js
 object per line in the format `capture.domain.coverage` encodes, appended by the one collector of
 that venue and read by `python -m verification.conservation`.
 
-The append is `gap_markers.record_gap`'s pattern (open for append, write, flush, `fsync`) with three
-differences, so the file only ever holds whole lines, each once:
+The append, like `gap_markers.record_gap`'s, writes, `fsync`s and on failure truncates the file
+back to its size before the write (so a retry neither duplicates a line nor leaves a torn one),
+with two differences, so the file only ever holds whole lines, each once:
 
 - a failure raises instead of being ledgered here, so the `CaptureService` ledgers it
   (`collector.coverage_write`) and keeps the lines for its next flush;
-- a failed append first truncates the file back to its size before the write, so the retry
-  neither duplicates a line nor leaves a torn one;
 - a torn tail a killed process left (the last line without its newline) is cut back to the last
   newline before the first append of a process (`repair_torn_tail`), and the caller reports how
   many bytes it cut: a strict reader refuses a torn line, so it must not stay in the file forever.

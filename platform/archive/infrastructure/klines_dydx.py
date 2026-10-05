@@ -28,13 +28,18 @@ from kernel.venue_http import get_request
 from kernel.venue_http import http_json
 
 from archive.domain.reconciliation import DAY_MS
+from archive.domain.reconciliation import MINUTE_MS
 from archive.domain.reconciliation import Kline
 from archive.domain.reconciliation import kline_from_text
+from archive.domain.reconciliation import next_kline_cursor
 from archive.domain.reconciliation import unique_traded_in_day
 from nautilus_trader.model.instruments import Instrument
 
 
 _PAGE = 1000
+# A non-final page is a full `_PAGE` rows of distinct minutes, so a day's 1440 minutes need at most
+# ceil(1440 / _PAGE) pages; one more is margin. Beyond it the venue is not paging as verified.
+_MAX_PAGES = -(-(DAY_MS // MINUTE_MS) // _PAGE) + 1
 
 
 def _iso_ms(text: str) -> int:
@@ -76,10 +81,14 @@ class DydxKlines:
 
         Verified (live 2026-09-21 on 2026-09-20 data): `fromISO` inclusive, `toISO` exclusive,
         newest first, `limit` at most 1000.
+
+        A page that does not move the cursor, or a day needing more than `_MAX_PAGES` pages (what
+        `_PAGE` implies), is a `KlineError` (`next_kline_cursor`): a venue repeating or barely
+        advancing a full page is never looped on.
         """
         ticker = urllib.parse.quote(inst.raw_symbol.value)
         out: list[Kline] = []
-        to_ms = day_ms + DAY_MS
+        to_ms, pages = day_ms + DAY_MS, 0
         while True:
             url = dydx_indexer_url(
                 self._network,
@@ -90,6 +99,10 @@ class DydxKlines:
                 self._http(get_request(url)), inst.price_precision, inst.size_precision
             )
             out += page
+            pages += 1
             if len(page) < _PAGE or min(k.t_ms for k in page) <= day_ms:
                 return unique_traded_in_day(out, inst.id.value, day_ms)
-            to_ms = min(k.t_ms for k in page)
+            oldest = min(k.t_ms for k in page)
+            to_ms = next_kline_cursor(
+                inst.id.value, pages, to_ms, oldest, backwards=True, max_pages=_MAX_PAGES
+            )

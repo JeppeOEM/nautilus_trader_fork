@@ -113,3 +113,52 @@ def test_the_query_service_reads_a_store_that_predates_the_table_as_unverified(
     with open_store(tmp_path, "BYBIT") as db:
         assert db is not None
         assert verified_status(db, _IID, _DAY) is None
+
+
+# -- clear_verified (DW-203): a writer that changes a closed day's seconds drops its verdict ------
+
+
+def test_clearing_a_verdict_leaves_the_day_unverified_and_others_untouched(tmp_path: Path) -> None:
+    store = VerifiedDaysStore(str(tmp_path / "candles_bybit.db"))
+    store.mark_verified(_IID, _DAY, "pass", 0, 1_000)
+    store.mark_verified(_IID, "2026-09-19", "fail", 2, 1_000)
+    store.clear_verified(_IID, _DAY)
+    assert store.verified_status(_IID, _DAY) is None
+    assert store.verified_status(_IID, "2026-09-19") == "fail"
+    store.clear_verified(_IID, _DAY)  # nothing left to clear: a no-op, not an error
+
+
+def test_clearing_on_an_absent_store_creates_no_file(tmp_path: Path) -> None:
+    path = Path(db_path_for_venue(tmp_path, "BYBIT"))
+    VerifiedDaysStore(str(path)).clear_verified(_IID, _DAY)
+    with VerifiedDaysDir(tmp_path) as verified:
+        verified.clear_verified(_IID, _DAY)
+    assert not path.exists()
+
+
+def test_clearing_on_a_store_that_predates_the_table_is_a_no_op(tmp_path: Path) -> None:
+    path = tmp_path / "candles_bybit.db"
+    with closing(sqlite3.connect(path)) as old:
+        old.execute("CREATE TABLE candles (t INTEGER)")
+        old.commit()
+    VerifiedDaysStore(str(path)).clear_verified(_IID, _DAY)
+    with closing(sqlite3.connect(path)) as db:
+        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert tables == {"candles"}  # no schema written into it either
+
+
+def test_a_clear_is_visible_to_the_directory_adapters_cached_reader(tmp_path: Path) -> None:
+    """The cached read-only connection must not keep serving the verdict the clear removed."""
+    with VerifiedDaysDir(tmp_path) as verified:
+        verified.mark_verified(_IID, _DAY, "pass", 0, 1_000)
+        assert verified.verified_status(_IID, _DAY) == "pass"  # opens and caches the reader
+        verified.clear_verified(_IID, _DAY)
+        assert verified.verified_status(_IID, _DAY) is None
+
+
+def test_the_candle_store_clears_its_own_verdict(tmp_path: Path) -> None:
+    store = CandleStore(db_path_for_venue(tmp_path, "BYBIT"))
+    store.mark_verified(_IID, _DAY, "fail", 1, 1_000)
+    store.clear_verified(_IID, _DAY)
+    assert store.verified_status(_IID, _DAY) is None
+    store.close()

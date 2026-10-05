@@ -270,15 +270,34 @@ def verified_status(db: sqlite3.Connection, iid: str, day: str) -> str | None:
     Return that instrument-day's last verdict ("pass"/"fail"), or None when never verified -- also for a
     store opened read-only that predates the table (no reconciliation ever ran against it).
     """
-    has_table = db.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'verified_days'"
-    ).fetchone()
-    if has_table is None:
+    if not _has_verified_days(db):
         return None
     row = db.execute(
         "SELECT status FROM verified_days WHERE instrument_id = ? AND day = ?", (iid, day)
     ).fetchone()
     return None if row is None else str(row[0])
+
+
+def _has_verified_days(db: sqlite3.Connection) -> bool:
+    return (
+        db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'verified_days'"
+        ).fetchone()
+        is not None
+    )
+
+
+def clear_verified(db: sqlite3.Connection, iid: str, day: str) -> None:
+    """
+    Delete one instrument-day's verdict, leaving the day unverified (provisional): a writer that
+    changes that closed day's seconds (the rebuild, the repair) calls it before the change lands,
+    because the verdict judged seconds that no longer exist. A store that predates the table has no
+    verdict to clear.
+    """
+    if not _has_verified_days(db):
+        return
+    with db:
+        db.execute("DELETE FROM verified_days WHERE instrument_id = ? AND day = ?", (iid, day))
 
 
 def prune(db: sqlite3.Connection, now_ms: int | None = None) -> None:
@@ -369,6 +388,9 @@ class CandleStore:
 
     def verified_status(self, instrument_id: str, day: str) -> str | None:
         return verified_status(self._db, instrument_id, day)
+
+    def clear_verified(self, instrument_id: str, day: str) -> None:
+        clear_verified(self._db, instrument_id, day)
 
     def close(self) -> None:
         self._db.close()

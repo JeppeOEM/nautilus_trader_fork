@@ -21,10 +21,29 @@ from typing import Self
 
 from kernel.venues import venue_of
 
+from candles.infrastructure.sqlite_store import clear_verified
 from candles.infrastructure.sqlite_store import connect_rw
 from candles.infrastructure.sqlite_store import db_path_for_venue
 from candles.infrastructure.sqlite_store import mark_verified
 from candles.infrastructure.sqlite_store import verified_status
+
+
+def candle_store_dir_problem(candles_dir: str | Path) -> str | None:
+    """
+    Return why `candles_dir` cannot be a writer's verdict-clearing store directory, or None.
+
+    A clear on a venue whose `candles_<venue>.db` is absent is a no-op ("no store, no verdict"), so
+    a typo'd or wrong directory -- the catalog, a host path instead of the container's -- would
+    make every clear silently find nothing while the real store's stale `pass` stands. A directory
+    holding no store file at all is therefore refused: on a running deployment every collector
+    writes its venue's store (`CANDLES_DB_PATH`), so the right directory always holds one.
+    """
+    path = Path(candles_dir)
+    if not path.is_dir():
+        return f"{candles_dir} is not an existing directory"
+    if not any(path.glob("candles_*.db")):
+        return f"{candles_dir} holds no candle store (candles_<venue>.db)"
+    return None
 
 
 class VerifiedDaysStore:
@@ -63,6 +82,18 @@ class VerifiedDaysStore:
         finally:
             db.close()
 
+    def clear_verified(self, instrument_id: str, day: str) -> None:
+        if not Path(self._path).exists():
+            return  # no store, no verdict: never create one just to delete from it
+        # `mode=rw` (not `connect_rw`): an existing file only, and no schema written into it.
+        db = sqlite3.connect(
+            f"file:{self._path}?mode=rw", uri=True, check_same_thread=False, timeout=60.0
+        )
+        try:
+            clear_verified(db, instrument_id, day)
+        finally:
+            db.close()
+
 
 class VerifiedDaysDir:
     """
@@ -76,6 +107,7 @@ class VerifiedDaysDir:
     Only an open connection is cached. A venue whose file is absent is re-probed on every call,
     because `mark_verified` on this same object creates that file (`connect_rw` writes the schema),
     so remembering "absent" would make a verdict this adapter just wrote read back as unverified.
+    `clear_verified` never creates a missing file: an absent store has no verdict to clear.
     """
 
     def __init__(self, candles_dir: str | Path) -> None:
@@ -113,6 +145,12 @@ class VerifiedDaysDir:
     def verified_status(self, instrument_id: str, day: str) -> str | None:
         db = self._reader(venue_of(instrument_id))
         return None if db is None else verified_status(db, instrument_id, day)
+
+    def clear_verified(self, instrument_id: str, day: str) -> None:
+        # Through its own read-write connection, closed again: the cached read-only one starts a
+        # fresh read transaction per statement (autocommit), so its next read sees the delete.
+        store = VerifiedDaysStore(db_path_for_venue(self._dir, venue_of(instrument_id)))
+        store.clear_verified(instrument_id, day)
 
     def close(self) -> None:
         for db in self._connections.values():

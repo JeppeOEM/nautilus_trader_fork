@@ -3101,8 +3101,11 @@ refused in `--types`, and rule 1 skips it too: trades have their own policy (4).
 deleted only when every UTC day its name spans is older than 7 days **and** that
 instrument-day's `verified_days` row (`candles_<venue>.db`, written by `archive.compare_klines`,
 read through the `VerifiedDays` port) is `pass` -- the `ArchiveDay` is `verified`, the only status
-`released` accepts. Otherwise it is kept and listed with its reason (`unverified` / `failed`).
-Each deleted trade file is first recorded as a `pruned` archive-gap marker.
+`released` accepts. Otherwise it is kept and listed with its reason (`unverified` / `failed` /
+`unknown_status:<s>` / `status_unreadable`, the last for a venue whose store cannot be read).
+A rebuild or repair that changes a day's seconds clears its row first (DW-203), so a `pass` always
+judged the seconds the day holds now. Each deleted trade file is first recorded as a `pruned`
+archive-gap marker.
 
 **Known limit:** raw trades exist to correct and prove the aggregates (the rebuild and the
 kline reconciliation), not as a tick-level research archive, so the window is 7 days after
@@ -3146,8 +3149,8 @@ is released after 7 days (mechanism 4). The other unlimited types above still ne
 runs the `archive.nightly` saga, each step its own process (`python -m archive.<step>`), stopping
 at the first failure:
 
-1. `rebuild_seconds --apply --result-file <saga temp>` -- rewrites the day's snapshot trade
-   columns from the raw archive on `ts_event` (late trades move to their exchange second; the
+1. `rebuild_seconds --apply --candles-dir <dir> --result-file <saga temp>` -- rewrites the day's
+   snapshot trade columns from the raw archive on `ts_event` (late trades move to their exchange second; the
    arrival row is cleared). Rows before the instrument's first archived trade keep live values
    (`not covered`), and so do rows inside an archive-gap marker (`<catalog>/_archive_gaps/<iid>.jsonl`, format
    `kernel.archive_markers`:
@@ -3155,13 +3158,30 @@ at the first failure:
    the archive is known to miss trades their live values hold; those are counted `in gap`. A marker
    line that does not parse, lacks a key, or holds a non-integer or inverted span makes the rebuild
    refuse that instrument every night, naming the file and line, until the line is fixed by hand:
-   guessing a span could overwrite exactly the rows the marker protects. Trades with no covered row
+   guessing a span could overwrite exactly the rows the marker protects. Every marker append (capture's
+   and archive's) is whole-line-or-nothing: it holds an exclusive `flock` on the file, and a write or
+   fsync that fails is truncated back to the file's size before it (`archive_gaps.write`, saying
+   when even that failed and a torn line may remain); the rebuild reads under a shared lock. Only a
+   crash mid-append can still leave a torn tail, which refuses as above (DW-211). Trades with no covered row
    are counted (`orphan trades`). The day's files are every snapshot file whose `ts_init` span
    overlaps `[D, D end + MAX_TS_INIT_SKEW_NS]` -- a row of D can be sampled after midnight (venue
    time closes second S at `S + 1 + hold_back_seconds`), so it may sit in a file that starts in
    D+1 -- and rows are chosen by `ts_event` in D. Every write keeps the rows of the current UTC day
    identical (`RewriteMode.KEEP_OPEN_DAY_ROWS`, verified against the original before the rename),
    and all of an instrument-day's changed files are staged and verified before the first rename.
+   An instrument-day with at least one changed row then loses its stored `verified_days` verdict in
+   `--candles-dir` (required with `--apply`, and refused when it holds no `candles_<venue>.db`, where
+   every clear would silently find nothing), still before the first rename: the verdict judged
+   seconds that no longer exist, so the day stays unverified -- its trades kept -- until step 4
+   judges it again in the same run, and a later failure, skip or a standalone run can never leave a
+   stale `pass` (DW-203); a day left unverified that way is re-judged only by a rerun of the saga
+   for it (`make nightly VENUE=<v> DAY=<day>`), since the scheduler's watermark has passed it. A
+   verdict that cannot be cleared refuses the instrument-day with its files untouched
+   (`rebuild.verdict`); a day whose rebuild changes no row keeps its verdict. Known limit:
+   `compare_klines` writes its verdict without the maintenance lock, so a clear racing an
+   in-flight reconcile of the same day (an operator repair during the compare step) can be
+   followed by that reconcile's `pass` judged on the old bars (upgrade path: the verdict written
+   under the maintenance lock, or a compare-and-set on a per-day rebuild generation).
    An instrument-day with two rows in one second, mixed schemas, a change to a row of the current
    UTC day (`rebuild.open_day`) or a temp failing its read-back (`rebuild.verify`) is refused and
    left untouched (exit 2, the chain continues); a rename failing part-way is `rebuild.error`
@@ -3188,7 +3208,8 @@ at the first failure:
    compared (an allowlist); any other instrument on the day is `reconcile.not_rebuilt` and gets no
    verdict; without `--rebuilt-by` nothing is compared or written (`reconcile.not_rebuilt`,
    exit 1). A per-instrument error (no definition, fetch error, no venue history for the day,
-   unrepresentable value) is a `reconcile.error` with no verdict. Exit 2 = findings of any kind
+   unrepresentable value, or kline paging that stops moving its cursor or needs more than
+   `MAX_KLINE_PAGES` = 1440 pages -- DW-212) is a `reconcile.error` with no verdict. Exit 2 = findings of any kind
    (the chain continues), 1 = run-level failure (stops). `--kline-source catalog` never writes
    `verified_days`.
 5. `prune_catalog --apply [--dydx-plan]` -- the retention rules above (§5).
@@ -3268,7 +3289,9 @@ order match `[amended 2026-09-29: Story 30.1]`; a crash leaves only the temp fil
 the next run of any archive tool deletes (with the pre-25.1 `*.rebuild.tmp`,
 `*.consolidate.tmp`, `*.parquet.tmp`). The only offline `ParquetDataCatalog.write_data()` callers
 are `archive.backfill_bars` (venue bars, §1.3) and `archive.repair_catalog` (cleared snapshot
-rows, through `delete_data_range` + `write_data`). No archive tool changes a row of the current
+rows, through `delete_data_range` + `write_data`; `--apply` needs `--candles-dir` holding a store (and a `--candles-db` inside it), and every UTC day
+holding a cleared row loses its stored `verified_days` verdict before the first delete -- one that
+cannot be cleared leaves the instrument unrepaired, `repair.error`, DW-203). No archive tool changes a row of the current
 UTC day: a whole-file rewrite (the migration tools), merge or delete of a file whose `ts_init` span
 reaches it is refused (`OpenDayWriteError`; ledgered `<tool>.open_day` and skipped), and the
 rebuild's row-preserving rewrite may touch such a file only with every row whose `ts_event` lies in
@@ -3276,7 +3299,7 @@ the open day identical in value and order: capture is that day's one writer, and
 file once and never reopens it. A report-only run of any tool takes no lock. Each collector holds a shared `flock` on
 `<catalog>/.capture-<VENUE>.lock` for its whole run (pid and start time inside, informational;
 never unlinked -- a killed process's flock is released by the kernel), and
-`repair_catalog --apply` refuses that venue while it is held (`repair.capture_running`, exit 1);
+`repair_catalog --apply --candles-dir <dir>` refuses that venue while it is held (`repair.capture_running`, exit 1);
 a collector starting while a tool holds it exclusively waits and ledgers
 `collector.capture_lock_wait` once. New ledger sites in Story 25.1: `reconcile.not_rebuilt`,
 `repair.capture_running`, `repair.open_day`, `rebuild.open_day` on `--apply` (the site existed),
@@ -3293,7 +3316,10 @@ an I/O error: left as it was, the run goes on, exit 2; the latter tool deleted i
 and `nightly.dydx_plan_missing` (a DYDX saga without `--dydx-plan`: the chain runs, plan retention
 is not applied, the outcome is findings). A trade file whose `pruned` marker could not be written is
 kept (`kept <iid> <day>: marker_failed`; the failure itself is `archive_gaps.write`), an unknown
-`verified_days` status keeps its day's files (`unknown_status:<s>`), and a dYdX instrument with any
+`verified_days` status keeps its day's files (`unknown_status:<s>`), a venue whose
+`candles_<venue>.db` cannot be read (`sqlite3.DatabaseError`) keeps every day of that venue
+(`status_unreadable`, ledgered once per venue at `prune.verified_days`, the other venues decided
+normally, exit 2 -- DW-188), and a dYdX instrument with any
 file reaching the current UTC day is never treated as dropped (a torn read of the plan file, which
 control rewrites in place, must not delete a collected coin's history). Every rewrite fsyncs the
 temp file before its rename and the directory after it, and before any source or file removal.
@@ -3306,8 +3332,9 @@ options from one function, `archive.infrastructure.compact_parquet.compact_write
 are chosen (`platform/CLAUDE.md` DATA-05); `CatalogFiles` is the only caller that writes with them.
 Capture's live minute files keep the encoding of Nautilus's own `write_data` (FORK-01;
 `kernel.parquet_compat` only makes it zstd), as do the files of the two offline `write_data`
-callers above (`archive.backfill_bars`, `archive.repair_catalog`), so a file gets these settings
-when archive merges or rewrites it.
+callers above (`archive.backfill_bars`, `archive.repair_catalog`: each module calls
+`apply_zstd_default()` at import -- the repair since DW-260, before which its files were snappy), so
+a file gets these settings when archive merges or rewrites it.
 
 | Setting | Value | Why |
 |---|---|---|

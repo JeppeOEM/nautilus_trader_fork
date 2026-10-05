@@ -136,6 +136,8 @@ def test_steps_are_the_documented_chain_as_subprocess_modules() -> None:
         "--venue",
         "BYBIT",
         "--apply",
+        "--candles-dir",
+        "/cd",
         "--result-file",
         "/scratch/r.json",
     ]

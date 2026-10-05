@@ -64,10 +64,23 @@ float-layout day file (`rebuild.legacy_layout`: run `archive.tools.migrate_snaps
 then rerun the day), a trade finer than its row's precision (`rebuild.off_grid`: never rounded),
 day files whose full schema differs or lacks the trade columns (`rebuild.mixed_schema`, D-24), a change
 to a row of the current UTC day (`rebuild.open_day`), a temp that failed its read-back
-(`rebuild.verify`), an unreadable file or gap marker (`rebuild.error`). All of an instrument-day's
-changed files are staged and verified before the first one is renamed, so a refusal leaves every
-file as it was. Only files with a changed row are written; `apply` False = report only (no writer
-needed). One instrument-day in memory at a time, trades one hour at a time (MEM-01).
+(`rebuild.verify`), an unreadable file or gap marker (`rebuild.error`), a stored verdict that
+could not be cleared (`rebuild.verdict`). All of an instrument-day's changed files are staged and
+verified before the first one is renamed, so a refusal leaves every file as it was. Only files
+with a changed row are written; `apply` False = report only (no writer needed). One
+instrument-day in memory at a time, trades one hour at a time (MEM-01).
+
+Verdict (DW-203): an instrument-day with at least one changed row loses its stored
+`verified_days` verdict (`VerifiedDays.clear_verified`) after its files are staged and verified and
+*before* the first rename. The verdict judged seconds that are about to stop existing; clearing it
+here, at the writer, rather than relying on the reconcile that follows covers every path that would
+otherwise leave a stale `pass` for `prune_catalog` to release trades on -- a reconcile that errors,
+refuses or is skipped, a stopped saga, a standalone `--apply` run. A commit failing after the clear
+leaves the day unverified (its trades kept), the fail-safe side. Nothing re-runs it automatically
+-- the `archive` scheduler's watermark moves past a day that ended with findings -- so it stays
+unverified until a rerun of the saga for that day (`make nightly VENUE=<v> DAY=<day>`, i.e.
+`python -m archive.nightly --venue <v> --day <day>`) rebuilds and reconciles it again. A day whose
+rebuild changes no row keeps its verdict: nothing it judged changed.
 
 Known limit: the renames of one instrument-day's files are individually atomic, not as a set. A
 rename failing part-way (an I/O error between two of its renames) leaves the day partially
@@ -80,6 +93,7 @@ replayed at the next run's start.
 import glob
 import logging
 import os
+import sqlite3
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -91,6 +105,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from candles.application.rebuild import all_instruments
 from candles.application.rebuild import venue_instruments
+from candles.application.verified_days import VerifiedDays
 from kernel.catalog_files import snapshot_files
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import CatalogFileSpan
@@ -410,13 +425,17 @@ def rebuild_day(
     writer: CatalogWriter | None,
     gaps: GapMarkers,
     apply: bool,
+    verified: VerifiedDays | None,
 ) -> DayReport:
     """
     Rebuild (or, without `apply`, report) one instrument-day; raises `RefusedError`, having
-    changed no file. `writer` may be None only when not applying.
+    changed no file. `writer` and `verified` (whose verdict a changed day loses) may be None only
+    when not applying.
     """
     if apply and writer is None:
         raise ValueError("rebuild_day(apply=True) needs a CatalogWriter")
+    if apply and verified is None:
+        raise ValueError("rebuild_day(apply=True) needs the VerifiedDays to clear a changed day in")
     label = f"{iid} {day_text(day_start_ns)}"
     report = DayReport(iid)
     files = day_files(catalog_path, iid, day_start_ns)
@@ -436,7 +455,7 @@ def rebuild_day(
         if covered.start is None
         else fold_day(catalog_path, iid, day_start_ns, rows, covered, report)
     )
-    _rebuild_files(files, day_start_ns, covered, rebuilt, report, active)
+    _rebuild_files(files, day_start_ns, covered, rebuilt, report, active, verified)
     return report
 
 
@@ -447,10 +466,12 @@ def _rebuild_files(
     rebuilt: dict[int, SecondTradeFields],
     report: DayReport,
     writer: CatalogWriter | None,
+    verified: VerifiedDays | None,
 ) -> None:
     """
     Count every file's changes into `report`; with a `writer`, stage each changed file (written
-    and verified, nothing renamed), then commit them all -- or, on any refusal, none.
+    and verified, nothing renamed), clear the day's stored verdict, then commit them all -- or, on
+    any refusal, none.
     """
     label = f"{report.iid} {day_text(lo)}"
     staged: list[StagedRewrite] = []
@@ -464,6 +485,7 @@ def _rebuild_files(
             writer.discard_rewrites(staged)
         raise
     if writer is not None and staged:
+        _clear_verdict(verified, report.iid, day_text(lo), writer, staged)
         _commit(writer, staged, label)
         report.files_rewritten += len(staged)
 
@@ -490,6 +512,35 @@ def _stage(writer: CatalogWriter, path: str, table: pa.Table, label: str) -> Sta
         raise RefusedError("rebuild.verify", f"{label}: {e}") from e
     except OpenDayWriteError as e:
         raise RefusedError("rebuild.open_day", f"{label}: {path}: {e}") from e
+
+
+def _clear_verdict(
+    verified: VerifiedDays | None,
+    iid: str,
+    day: str,
+    writer: CatalogWriter,
+    staged: list[StagedRewrite],
+) -> None:
+    """
+    Drop the instrument-day's stored verdict before any staged file is renamed; a store that
+    cannot be written discards the staged rewrites and refuses the day (files untouched), since
+    renaming over a verdict that still stands would leave a `pass` the new seconds never earned.
+    Any other exception (an id with no venue, an interrupt) also discards them, then propagates.
+    """
+    if verified is None:  # `rebuild_day` refuses apply without it; a direct caller is a bug
+        writer.discard_rewrites(staged)
+        raise ValueError("a staged rebuild needs the VerifiedDays a changed day is cleared in")
+    try:
+        verified.clear_verified(iid, day)
+    except (sqlite3.Error, OSError) as e:
+        writer.discard_rewrites(staged)
+        raise RefusedError(
+            "rebuild.verdict",
+            f"{iid} {day}: the stored verdict could not be cleared ({e!r}); not rebuilt",
+        ) from e
+    except BaseException:
+        writer.discard_rewrites(staged)  # never leave temps behind, whatever stopped the clear
+        raise
 
 
 def _commit(writer: CatalogWriter, staged: list[StagedRewrite], label: str) -> None:
@@ -526,6 +577,7 @@ def _rebuild_or_refuse(
     writer: CatalogWriter | None,
     gaps: GapMarkers,
     apply: bool,
+    verified: VerifiedDays | None,
 ) -> DayReport | None:
     """
     One instrument-day; a refusal is ledgered at its site and returns None (day untouched, or --
@@ -533,7 +585,7 @@ def _rebuild_or_refuse(
     """
     day = day_text(day_start_ns)
     try:
-        return rebuild_day(catalog_path, iid, day_start_ns, writer, gaps, apply)
+        return rebuild_day(catalog_path, iid, day_start_ns, writer, gaps, apply, verified)
     except RefusedError as e:
         error_ledger.record(e.site, str(e))
     except (OSError, pa.ArrowException, ValueError, RuntimeError) as e:
@@ -565,12 +617,16 @@ def run(
     writer: CatalogWriter | None,
     gaps: GapMarkers,
     apply: bool,
+    verified: VerifiedDays | None,
 ) -> RunResult:
-    """Rebuild every instrument's day; returns the rebuilt and the refused (ledgered) ids."""
+    """
+    Rebuild every instrument's day; returns the rebuilt and the refused (ledgered) ids. A changed
+    instrument-day's verdict is cleared in `verified` (None only when not applying).
+    """
     day, refused, done = day_text(day_start_ns), [], []
     totals = DayReport("all")
     for iid in iids:
-        report = _rebuild_or_refuse(catalog_path, iid, day_start_ns, writer, gaps, apply)
+        report = _rebuild_or_refuse(catalog_path, iid, day_start_ns, writer, gaps, apply, verified)
         if report is None:
             refused.append(iid)
             continue

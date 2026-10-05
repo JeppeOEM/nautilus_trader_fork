@@ -22,6 +22,7 @@ responses (`fixtures/`, captured 2026-09-21 for 2026-09-20). No network.
 import http.client
 import json
 import sqlite3
+import time
 import urllib.request
 from collections.abc import Callable
 from decimal import Decimal
@@ -46,9 +47,11 @@ from archive.compare_klines import main
 from archive.compare_klines import proof_for
 from archive.compare_klines import venue_klines
 from archive.domain.archive_day import RebuildProof
+from archive.domain.reconciliation import MAX_KLINE_PAGES
 from archive.domain.reconciliation import Kline
 from archive.domain.reconciliation import KlineError
 from archive.domain.reconciliation import float_units
+from archive.domain.reconciliation import next_kline_cursor
 from archive.domain.reconciliation import seed_with_previous_close
 from archive.domain.reconciliation import units
 from archive.infrastructure.klines_bybit import parse_bybit_klines
@@ -436,6 +439,104 @@ def test_hyperliquid_parser_and_fetch() -> None:
         "req": {"coin": "BTC", "interval": "1m", "startTime": day, "endTime": day + 86_399_999},
     }
     assert json.loads(http.requests[1].data)["req"]["startTime"] == day + 180_000  # type: ignore[arg-type]
+
+
+# -- kline paging that stops advancing (DW-212) ----------------------------------------------------
+
+_PAGING_DAY = parse_date_ns("2026-09-20") // 1_000_000
+
+
+def test_the_next_kline_cursor_must_move_strictly_in_the_paging_direction() -> None:
+    assert next_kline_cursor("X", 1, 100, 99, backwards=True) == 99
+    assert next_kline_cursor("X", 1, 100, 101, backwards=False) == 101
+    for proposed, backwards in ((100, True), (101, True), (100, False), (99, False)):
+        with pytest.raises(KlineError, match="did not move"):
+            next_kline_cursor("X", 1, 100, proposed, backwards=backwards)
+
+
+def test_the_next_kline_cursor_refuses_past_the_page_cap() -> None:
+    assert MAX_KLINE_PAGES == 1440  # one page per minute of the day at the very least
+    assert next_kline_cursor("X", MAX_KLINE_PAGES - 1, 100, 99, backwards=True) == 99
+    with pytest.raises(KlineError, match="exceeded 1440 pages"):
+        next_kline_cursor("X", MAX_KLINE_PAGES, 100, 99, backwards=True)
+    assert next_kline_cursor("X", 2, 100, 99, backwards=True, max_pages=3) == 99
+    with pytest.raises(KlineError, match="exceeded 3 pages"):
+        next_kline_cursor("X", 3, 100, 99, backwards=True, max_pages=3)
+
+
+def _bybit_page(minutes: range) -> dict:
+    rows = [
+        [str(_PAGING_DAY + m * 60_000), "1.0", "1.0", "1.0", "1.0", "0.001", "1"] for m in minutes
+    ]
+    return {"retCode": 0, "result": {"list": rows[::-1]}}
+
+
+def _dydx_page(minutes: range) -> dict:
+    def candle(m: int) -> dict:
+        started = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(_PAGING_DAY / 1000 + m * 60))
+        prices = {"open": "1", "high": "1", "low": "1", "close": "1"}
+        return {"startedAt": started, **prices, "baseTokenVolume": "0.0001"}
+
+    return {"candles": [candle(m) for m in reversed(minutes)]}
+
+
+def _hyperliquid_page(minutes: range) -> list:
+    return [
+        {"t": _PAGING_DAY + m * 60_000, "o": "1", "h": "1", "l": "1", "c": "1", "v": "0.00001"}
+        for m in minutes
+    ]
+
+
+@pytest.mark.parametrize(
+    ("venue", "iid", "raw", "page"),
+    [
+        ("BYBIT", "BTCUSDT-LINEAR.BYBIT", "BTCUSDT", _bybit_page(range(440, 1440))),
+        ("DYDX", "BTC-USD-PERP.DYDX", "BTC-USD", _dydx_page(range(440, 1440))),
+        ("HYPERLIQUID", "BTC-USD-PERP.HYPERLIQUID", "BTC", _hyperliquid_page(range(10))),
+    ],
+)
+def test_a_venue_repeating_a_full_page_is_a_kline_error_not_an_endless_loop(
+    venue: str, iid: str, raw: str, page: Any
+) -> None:
+    inst = _instrument(iid, raw, 0, 5)
+    http = _Recorder(page, page, page)  # a third page would mean the loop went round again
+    with pytest.raises(KlineError, match="did not move"):
+        fetch_klines(venue, inst, _PAGING_DAY, "mainnet", http)
+    assert len(http.requests) == 2
+
+
+@pytest.mark.parametrize(
+    ("venue", "iid", "raw", "page"),
+    [
+        ("BYBIT", "BTCUSDT-LINEAR.BYBIT", "BTCUSDT", _bybit_page),
+        ("DYDX", "BTC-USD-PERP.DYDX", "BTC-USD", _dydx_page),
+    ],
+)
+def test_full_pages_advancing_a_minute_each_hit_the_page_size_cap(
+    venue: str, iid: str, raw: str, page: Callable[[range], Any]
+) -> None:
+    """1000-row pages cover a day in 2; full pages that barely move stop after 3, not 1440."""
+    inst = _instrument(iid, raw, 0, 5)
+    http = _Recorder(*(page(range(440 - k, 1440 - k)) for k in range(5)))
+    with pytest.raises(KlineError, match="exceeded 3 pages"):
+        fetch_klines(venue, inst, _PAGING_DAY, "mainnet", http)
+    assert len(http.requests) == 3
+
+
+def test_hyperliquid_pages_creeping_forward_hit_the_day_cap() -> None:
+    """
+    Hyperliquid's page size is unknown, so it keeps the 1440-page cap: candles stamped off the
+    minute grid move the cursor by 1 ms a page -- progress, but never a day's worth.
+    """
+    inst = _instrument("BTC-USD-PERP.HYPERLIQUID", "BTC", 0, 5)
+
+    def creeping(k: int) -> list:
+        return [{"t": _PAGING_DAY + k, "o": "1", "h": "1", "l": "1", "c": "1", "v": "0.00001"}]
+
+    http = _Recorder(*(creeping(k) for k in range(MAX_KLINE_PAGES + 1)))
+    with pytest.raises(KlineError, match="exceeded 1440 pages"):
+        fetch_klines("HYPERLIQUID", inst, _PAGING_DAY, "mainnet", http)
+    assert len(http.requests) == MAX_KLINE_PAGES
 
 
 def test_catalog_kline_source_never_writes_verified_days(tmp_path: Path) -> None:

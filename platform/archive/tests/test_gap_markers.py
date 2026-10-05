@@ -14,6 +14,11 @@
 # -------------------------------------------------------------------------------------------------
 """`archive.infrastructure.gap_markers`: the marker file I/O over `kernel.archive_markers`."""
 
+import errno
+import fcntl
+import os
+import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -21,6 +26,7 @@ from kernel import archive_markers
 from observability import error_ledger
 
 from archive.application.ports import GapMarkers
+from archive.infrastructure import gap_markers
 from archive.infrastructure.gap_markers import GapMarkerFiles
 from archive.infrastructure.gap_markers import load_gaps
 from archive.infrastructure.gap_markers import record_gap
@@ -96,3 +102,144 @@ def test_an_unwritable_marker_is_ledgered_not_raised(tmp_path: Path) -> None:
         is False
     )
     assert error_ledger.counts() == {"archive_gaps.write": 2}
+
+
+# -- whole lines or nothing (DW-211) ---------------------------------------------------------------
+
+
+def _one_marker(tmp_path: Path) -> bytes:
+    """Write one line to the marker file: what a failed append must leave byte-identical."""
+    assert record_gap(str(tmp_path), _IID, 1, 2, "write_failed", 1)
+    return archive_markers.path_for(tmp_path, _IID).read_bytes()
+
+
+def _no_space() -> OSError:
+    return OSError(errno.ENOSPC, "No space left on device")
+
+
+def _half_then_full(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the first write call land half its bytes, then find the disk full."""
+    real_write = os.write
+    calls: list[int] = []
+
+    def half(fd: int, data: bytes | memoryview) -> int:
+        calls.append(fd)
+        if len(calls) > 1:
+            return real_write(fd, data)
+        real_write(fd, data[: len(data) // 2])
+        raise _no_space()
+
+    monkeypatch.setattr(gap_markers.os, "write", half)
+
+
+def test_a_write_failing_mid_line_is_truncated_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    before = _one_marker(tmp_path)
+    _half_then_full(monkeypatch)
+    assert record_gap(str(tmp_path), _IID, 5, 9, "pruned", 0) is False
+    assert archive_markers.path_for(tmp_path, _IID).read_bytes() == before
+    assert load_gaps(str(tmp_path), _IID) == [(1, 2)]  # the next rebuild is not wedged
+    assert error_ledger.counts() == {"archive_gaps.write": 1}
+    assert "torn" not in error_ledger.last_details()["archive_gaps.write"]
+
+
+def test_an_fsync_failing_after_the_write_is_truncated_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    before = _one_marker(tmp_path)
+    real_fsync, calls = os.fsync, []
+
+    def first_fails(fd: int) -> None:
+        calls.append(fd)
+        if len(calls) == 1:
+            raise _no_space()
+        real_fsync(fd)
+
+    monkeypatch.setattr(gap_markers.os, "fsync", first_fails)
+    assert record_gap(str(tmp_path), _IID, 5, 9, "pruned", 0) is False
+    assert archive_markers.path_for(tmp_path, _IID).read_bytes() == before
+    assert load_gaps(str(tmp_path), _IID) == [(1, 2)]
+    assert error_ledger.counts() == {"archive_gaps.write": 1}
+
+
+def test_a_failed_truncate_back_says_a_torn_line_may_remain_and_the_read_still_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    _one_marker(tmp_path)
+    _half_then_full(monkeypatch)
+
+    def no_truncate(fd: int, size: int) -> None:
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(gap_markers.os, "ftruncate", no_truncate)
+    assert record_gap(str(tmp_path), _IID, 5, 9, "pruned", 0) is False
+    assert "a torn line may remain" in error_ledger.last_details()["archive_gaps.write"]
+    with pytest.raises(ValueError, match="malformed archive-gap marker"):  # never healed silently
+        load_gaps(str(tmp_path), _IID)
+
+
+def _blocked_until_released(tmp_path: Path, held: int, action: Callable[[], object]) -> None:
+    """Run `action` in a thread while `held` (a lock on the marker file) is held: it must wait."""
+    path = archive_markers.path_for(tmp_path, _IID)
+    done = threading.Event()
+
+    def act() -> None:
+        action()
+        done.set()
+
+    worker = threading.Thread(target=act)
+    with path.open("r+") as f:
+        fcntl.flock(f.fileno(), held)
+        worker.start()
+        assert not done.wait(0.2)  # still waiting on the lock
+    worker.join(5)
+    assert done.is_set()
+
+
+def test_an_append_waits_for_another_writers_lock(tmp_path: Path) -> None:
+    _one_marker(tmp_path)
+    _blocked_until_released(
+        tmp_path, fcntl.LOCK_EX, lambda: record_gap(str(tmp_path), _IID, 5, 9, "pruned", 0)
+    )
+    assert load_gaps(str(tmp_path), _IID) == [(1, 2), (5, 9)]
+
+
+def test_a_read_waits_for_an_append_in_progress(tmp_path: Path) -> None:
+    _one_marker(tmp_path)
+    read: list[list[tuple[int, int]]] = []
+    _blocked_until_released(
+        tmp_path, fcntl.LOCK_EX, lambda: read.append(load_gaps(str(tmp_path), _IID))
+    )
+    assert read == [[(1, 2)]]
+
+
+def test_a_write_making_no_progress_fails_instead_of_spinning_under_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    before = _one_marker(tmp_path)
+    monkeypatch.setattr(gap_markers.os, "write", lambda fd, data: 0)
+    assert record_gap(str(tmp_path), _IID, 5, 9, "pruned", 0) is False
+    assert archive_markers.path_for(tmp_path, _IID).read_bytes() == before
+    assert error_ledger.counts() == {"archive_gaps.write": 1}  # EIO, ledgered with its traceback
+
+
+def test_an_interrupt_mid_append_is_truncated_back_and_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = _one_marker(tmp_path)
+    real_write = os.write
+
+    def interrupted(fd: int, data: bytes | memoryview) -> int:
+        real_write(fd, data[:10])
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(gap_markers.os, "write", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        record_gap(str(tmp_path), _IID, 5, 9, "pruned", 0)
+    monkeypatch.undo()
+    assert archive_markers.path_for(tmp_path, _IID).read_bytes() == before

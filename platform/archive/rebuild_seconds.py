@@ -17,12 +17,19 @@ Rebuild a closed UTC day's second-snapshot trade columns from the raw trade arch
 
 Usage:
     python -m archive.rebuild_seconds --catalog /app/catalog --day 2026-09-20 \\
-        [--instrument BTCUSDT-LINEAR.BYBIT ...] [--venue BYBIT] [--apply] [--include-open-day] \\
-        [--result-file PATH]
+        [--instrument BTCUSDT-LINEAR.BYBIT ...] [--venue BYBIT] \\
+        [--apply --candles-dir /app/candles_dir] [--include-open-day] [--result-file PATH]
 
 What is rebuilt, and why, is `archive.application.rebuild_day`'s docstring: rows move to their
 exchange-time second, rows before the archive (`not covered`) or inside an archive gap (`in gap`)
 keep their live values, orphan trades and duplicates are counted, never dropped.
+
+`--apply` needs `--candles-dir`, an existing candle-store directory holding at least one
+`candles_<venue>.db` (a store-less directory would make every clear a silent no-op), whose
+`verified_days` verdict an instrument-day with a changed row loses before its files are renamed
+(DW-203): the verdict judged seconds that no longer exist, so the day stays unverified -- its
+trades kept by `prune_catalog` -- until a reconcile judges the rebuilt day again. A verdict that
+cannot be cleared refuses that instrument-day (`rebuild.verdict`, files untouched).
 
 Refusals are per instrument-day (error ledger, that instrument-day untouched, the run continues and
 exits 2). Run-level failures exit 1: today (or later) without `--include-open-day` (only safe
@@ -49,6 +56,8 @@ import uuid
 from pathlib import Path
 
 from candles.application.rebuild import parse_date_ns
+from candles.infrastructure.verified_days import VerifiedDaysDir
+from candles.infrastructure.verified_days import candle_store_dir_problem
 from kernel.venues import VENUE_KINDS
 from observability import error_ledger
 
@@ -79,6 +88,10 @@ def _parser() -> argparse.ArgumentParser:
         "--venue", choices=sorted(VENUE_KINDS), help="only ids of this venue, e.g. DYDX"
     )
     parser.add_argument("--apply", action="store_true", help="rewrite files (default: report)")
+    parser.add_argument(
+        "--candles-dir",
+        help="candle-store directory whose verdicts a changed day loses (required with --apply)",
+    )
     parser.add_argument(
         "--include-open-day",
         action="store_true",
@@ -117,18 +130,23 @@ def _run(args: argparse.Namespace, iids: list[str], day_start_ns: int) -> RunRes
     """Apply under the maintenance flock (None when it is held); a report takes no lock."""
     gaps = GapMarkerFiles(args.catalog)
     if not args.apply:
-        return run(args.catalog, iids, day_start_ns, None, gaps, apply=False)
-    with maintenance(args.catalog) as writer:
+        return run(args.catalog, iids, day_start_ns, None, gaps, apply=False, verified=None)
+    with maintenance(args.catalog) as writer, VerifiedDaysDir(args.candles_dir) as verified:
         if writer is None:
             logger.error("rebuild: another run holds %s; not starting", MAINTENANCE_LOCK_NAME)
             return None
-        return run(args.catalog, iids, day_start_ns, writer, gaps, apply=True)
+        return run(args.catalog, iids, day_start_ns, writer, gaps, apply=True, verified=verified)
 
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point; returns 0, 2 when some instrument-days were refused, 1 on a run failure."""
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.apply and not args.candles_dir:
+        parser.error("--apply needs --candles-dir: a changed day's stored verdict is cleared there")
+    problem = candle_store_dir_problem(args.candles_dir) if args.apply else None
+    if problem is not None:
+        parser.error(f"--candles-dir {problem}")
     if args.result_file and not args.apply:
         parser.error("--result-file is the proof of a rebuild: it needs --apply")
     if args.result_file and not args.venue:

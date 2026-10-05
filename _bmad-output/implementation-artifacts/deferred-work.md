@@ -1483,7 +1483,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-24-1-candles-context-behind-the-secondsink-port.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-24-1-candles-context-behind-the-secondsink-port.md` summary: A corrupt or truncated `candles_<venue>.db` aborts the whole nightly `prune_catalog` step with an unledgered `sqlite3.DatabaseError`, instead of treating that venue's days as unverified and continuing. evidence: `collector_core/prune_catalog.py:_leaf_statuses` catches only `MalformedInstrumentId`; the sqlite read beneath it (now `candles.infrastructure.verified_days.VerifiedDaysDir`, previously `candle_store.connect_ro` + `verified_status`) can raise `sqlite3.DatabaseError`, which propagates out of `plan_trade_prune` and ends the nightly chain. Pre-existing — the same hole is in the baseline at `7cd2f91aa2` — and unverified days are fail-safe (files are kept), so this is a robustness gap rather than a data-loss one. DATA-07 wants the continue-past-failure ledgered at `prune.verified_days`.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-archive-prune-repair-safety
+resolution-undo: dcc0700427eddf493cae780ae257b14adaad477dcd1d81d72caf42af892bf694 2026-10-05 7374617475733a206f70656e
 
 ### DW-189: `Collector._catch_up_candle_store` still calls `error_ledger.record("collector.candle_store_catch_up", ...)` inside its per-instrument loop, the exact shape …
 
@@ -1600,7 +1602,9 @@ resolution: already resolved: platform/archive/application/rebuild_day.py:_rebui
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: A stored `verified_days = pass` is not invalidated when a later rebuild or repair changes that day's seconds and the reconcile then errors, is refused, or is skipped. Prune can then release the trades behind stale proof. evidence: Documented as a Known limit in archive/domain/archive_day.py. The fix needs rebuild to report changed rows per instrument and reconcile to refuse to leave a stale pass.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-archive-prune-repair-safety
+resolution-undo: dcc0700427eddf493cae780ae257b14adaad477dcd1d81d72caf42af892bf694 2026-10-05 7374617475733a206f70656e
 
 ### DW-204: repair_catalog runs `delete_data_range` then `write_data` per row with no backup or atomicity; a crash between them loses that second's snapshot.
 
@@ -1665,14 +1669,18 @@ resolution-undo: 503907f1821fa3d9323ad14b8c3f6d3be2067e07f8adbfeaa0b3aad39585a6c
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: `record_gap` can leave a torn `_archive_gaps/*.jsonl` line on a mid-write OSError (e.g. ENOSPC), and `load_gaps` then raises ValueError every later night, refusing that instrument's rebuild until the file is hand-edited. evidence: archive/infrastructure/gap_markers.py and collector_core/gap_markers.py write with f.write + fsync and no truncate-back on failure. This predates 25.1 (collector_core/archive_gaps.py:66).
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-archive-prune-repair-safety
+resolution-undo: dcc0700427eddf493cae780ae257b14adaad477dcd1d81d72caf42af892bf694 2026-10-05 7374617475733a206f70656e
 
 ### DW-212: The venue kline paging loops (dYdX/Bybit/Hyperliquid) have no iteration cap or strict-progress check, so a server returning a page that does not advance the …
 
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: The venue kline paging loops (dYdX/Bybit/Hyperliquid) have no iteration cap or strict-progress check, so a server returning a page that does not advance the cursor loops forever. evidence: archive/infrastructure/klines_{dydx,bybit,hyperliquid}.py, moved as-is from collector_core/compare_klines.py:248,287,329. This predates 25.1.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-archive-prune-repair-safety
+resolution-undo: dcc0700427eddf493cae780ae257b14adaad477dcd1d81d72caf42af892bf694 2026-10-05 7374617475733a206f70656e
 
 ### DW-213: consolidate_catalog exits 1 on any refused day, so one standing mixed-schema day stops candles.rebuild, compare_klines and prune in every nightly saga run, not …
 
@@ -2044,7 +2052,9 @@ decision: 2026-10-05 Open an investigation story — Trace root cause in live-pa
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-30-1-compact-parquet-encoding-for-consolidated-and-rewritten-files.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-30-1-compact-parquet-encoding-for-consolidated-and-rewritten-files.md` summary: `archive.repair_catalog --apply` writes its replacement snapshot files through Nautilus's `write_data` without `kernel.parquet_compat.apply_zstd_default()` ever running in that process, so they land snappy-compressed, contrary to `parquet_compat`'s "the writers make it zstd" contract. evidence: `archive/application/repair.py:148` calls `catalog.write_data([cleared])`; neither `repair.py` nor `archive/repair_catalog.py` imports or calls `apply_zstd_default` (only `capture/infrastructure/parquet_writer.py` and `archive/application/backfill_bars.py` do), and before Story 30.1 the only other call sat inside `CatalogFiles`' rewrite, which the repair path never reaches before its `write_data`. Pre-existing; such a file stays snappy until a consolidation merge or an `archive.tools.recompress --apply` run re-encodes it.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-archive-prune-repair-safety
+resolution-undo: dcc0700427eddf493cae780ae257b14adaad477dcd1d81d72caf42af892bf694 2026-10-05 7374617475733a206f70656e
 
 ### DW-261: The "Price" label means the slow loop's trade close on the history page (metrics.db `price`) but the live mid on the rankings page.
 

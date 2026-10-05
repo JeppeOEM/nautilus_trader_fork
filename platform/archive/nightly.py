@@ -23,8 +23,9 @@ Usage:
 Runs, in order, each as its own subprocess (so each step's memory is returned to the OS before the
 next one starts -- MEM-01; the job never runs inside a collector):
 
-    rebuild_seconds --apply --result-file -> consolidate_catalog --apply --days 2 -> build_candles
-        (`python -m candles.rebuild`) --day --workers 1 -> compare_klines --rebuilt-by RUN_ID
+    rebuild_seconds --apply --candles-dir --result-file -> consolidate_catalog --apply --days 2
+        -> build_candles (`python -m candles.rebuild`) --day --workers 1
+        -> compare_klines --rebuilt-by RUN_ID
         -> prune_catalog --apply --trade-retention-days 7 [--dydx-plan]
         -> verify_day --result-file <saga scratch>/verify_result.json
 
@@ -123,6 +124,8 @@ def steps(
                 "--venue",
                 venue,
                 "--apply",
+                "--candles-dir",
+                candles_dir,
                 "--result-file",
                 result_file,
             ),

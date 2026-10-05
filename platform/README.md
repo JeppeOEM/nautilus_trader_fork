@@ -311,7 +311,7 @@ owed are in [`docs/DEPLOY_CHECKLIST.md`](docs/DEPLOY_CHECKLIST.md), whose §1 al
 the old host cron line.
 
 **`make nightly VENUE=<DYDX|BYBIT|HYPERLIQUID> [DAY=YYYY-MM-DD]`** (default: yesterday, UTC;
-`archive.nightly` in the collector image, the archive context's saga since Story 25.1) runs, each as its own process: `rebuild_seconds --apply` (the closed day's snapshot
+`archive.nightly` in the collector image, the archive context's saga since Story 25.1) runs, each as its own process: `rebuild_seconds --apply --candles-dir` (the closed day's snapshot
 trade columns re-derived from the raw trade archive on exchange time; rows inside an archive-gap
 marker keep their live values and are counted `in gap`) -> `consolidate_catalog --apply --venue
 --days 2` (below) -> `build_candles` (`python -m candles.rebuild --day --workers 1`; the step keeps
@@ -328,10 +328,15 @@ rebuild whose result file is missing counts as failed. One summary line per venu
 nightly <VENUE> <DAY>: rebuild_seconds ok <s>s, consolidate_catalog ok <s>s, build_candles ok <s>s, compare_klines ok|findings <s>s, prune_catalog ok <s>s; peak child RSS <M> MB; outcome ok|findings|FAILED; run id <id>
 ```
 
-Run standalone, `python -m archive.rebuild_seconds --day D --apply` logs `run id <id>; pass
---rebuilt-by <id> to compare_klines`: `python -m archive.compare_klines` compares and records
-nothing without `--rebuilt-by` (`reconcile.not_rebuilt`, exit 1), and with it compares only the
-instruments named by `--rebuilt IID` (repeatable). Known limit: standalone, that id
+Run standalone, `python -m archive.rebuild_seconds --day D --apply --candles-dir <candles dir>`
+(`--candles-dir` is required with `--apply`: an instrument-day the rebuild changes loses its stored
+`verified_days` verdict there before its files are renamed, so it stays unverified until a
+reconcile judges it again; a directory holding no `candles_<venue>.db` is refused, since every
+clear there would silently find nothing; `repair_catalog --apply` takes the same flag for the same
+reason, and its `--candles-db` must sit in that directory) logs
+`run id <id>; pass --rebuilt-by <id> to compare_klines`: `python -m archive.compare_klines`
+compares and records nothing without `--rebuilt-by` (`reconcile.not_rebuilt`, exit 1), and with
+it compares only the instruments named by `--rebuilt IID` (repeatable). Known limit: standalone, that id
 is the operator's attestation -- `rebuilt` is never persisted, so the tool cannot check it.
 Every archive tool is `python -m archive.<tool>` (`rebuild_seconds`, `consolidate_catalog`,
 `prune_catalog`, `repair_catalog`, `compare_klines`, `nightly`, `backfill_bars`,
@@ -339,7 +344,7 @@ Every archive tool is `python -m archive.<tool>` (`rebuild_seconds`, `consolidat
 `tools.migrate_snapshot_ints` -- Story 30.2's one-off float -> exact-integer snapshot migration,
 which replaced `tools.normalize_snapshot_schema`); their old module paths were
 removed in Story 25.3. Each collector holds
-`<catalog>/.capture-<VENUE>.lock` while it runs, and `repair_catalog --apply` refuses that venue
+`<catalog>/.capture-<VENUE>.lock` while it runs, and `repair_catalog --apply --candles-dir <dir>` refuses that venue
 until it is stopped.
 
 Details of each step: `docs/DATA_DICTIONARY.md` §6.

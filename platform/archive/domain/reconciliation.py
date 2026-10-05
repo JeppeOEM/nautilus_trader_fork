@@ -47,6 +47,38 @@ class KlineError(Exception):
     """A value or response that cannot be compared exactly; the instrument-day stays unverified."""
 
 
+# The most pages one instrument-day's kline fetch may take: every legitimate non-final page moves
+# the paging cursor past at least one of the day's 1440 minutes, so a fetch needing more is a
+# venue (or adapter) that stopped advancing -- refused, never looped on forever.
+MAX_KLINE_PAGES = DAY_MS // MINUTE_MS
+
+
+def next_kline_cursor(
+    iid: str,
+    pages: int,
+    cursor: int,
+    proposed: int,
+    *,
+    backwards: bool,
+    max_pages: int = MAX_KLINE_PAGES,
+) -> int:
+    """
+    Return `proposed` as the cursor of the next page after `pages` pages were fetched; raise
+    `KlineError` when it does not move strictly in the paging direction (a full page repeating the
+    same window would be fetched forever) or when `max_pages` pages are already spent (a venue
+    with a known page size passes the tighter cap it implies).
+    """
+    advanced = proposed < cursor if backwards else proposed > cursor
+    if not advanced:
+        direction = "back" if backwards else "forward"
+        raise KlineError(
+            f"{iid}: kline paging did not move {direction} (cursor {cursor} -> {proposed})"
+        )
+    if pages >= max_pages:
+        raise KlineError(f"{iid}: kline paging exceeded {max_pages} pages for one day")
+    return proposed
+
+
 @dataclass(frozen=True)
 class Kline:
     """One 1 m bar; prices in units of `10**-price_precision`, volume of `10**-size_precision`."""

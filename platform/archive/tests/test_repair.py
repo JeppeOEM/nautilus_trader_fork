@@ -15,14 +15,21 @@
 """`archive.repair_catalog`: impossible-OHLC seconds cleared, gated by the capture lock and the open day."""
 
 import fcntl
+import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
+import pyarrow.parquet as pq
 import pytest
 from candles.application import queries
 from candles.application.rebuild import rebuild_instrument
 from candles.infrastructure.sqlite_store import CandleStore
+from candles.infrastructure.sqlite_store import connect_rw
+from candles.infrastructure.sqlite_store import db_path_for_venue
+from candles.infrastructure.verified_days import VerifiedDaysDir
 from kernel.archive_markers import capture_lock_path
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.tests.snapshot_factory import make_snapshot
@@ -42,6 +49,21 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 _IID = "BTC-USD-PERP.DYDX"
 _T0 = 1_789_800_000 * 1_000_000_000 // 60_000_000_000 * 60_000_000_000
 _SEC = 1_000_000_000
+
+
+def _candles_dir(tmp_path: Path) -> str:
+    """
+    Return a directory holding a DYDX candle store for `--candles-dir` (the CLI refuses a
+    missing directory, or one with no store in it).
+    """
+    (tmp_path / "candles").mkdir(exist_ok=True)
+    connect_rw(db_path_for_venue(tmp_path / "candles", "DYDX")).close()
+    return str(tmp_path / "candles")
+
+
+def _verified(tmp_path: Path) -> VerifiedDaysDir:
+    """Return the candle-store directory whose verdicts a repaired day loses (`--candles-dir`)."""
+    return VerifiedDaysDir(tmp_path / "candles")
 
 
 def _snap(
@@ -90,7 +112,7 @@ def test_spike_snapshot_is_cleared_and_its_candle_rebuilt(tmp_path: Path) -> Non
     flagged = find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 200 * _SEC)
     assert [f.ts_event for f in flagged] == [_T0 + 70 * _SEC]
 
-    repair_instrument(catalog, catalog_path, _IID, flagged, db_path)
+    repair_instrument(catalog, catalog_path, _IID, flagged, _verified(tmp_path), db_path)
 
     assert find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 200 * _SEC) == []
     rows = second_snapshots(catalog_path, _IID, _T0, _T0 + 200 * _SEC)
@@ -125,7 +147,7 @@ def test_a_row_whose_ts_init_trails_its_ts_event_is_replaced_not_duplicated(
     flagged = find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 20 * _SEC)
     assert [f.ts_init for f in flagged] == [_T0 + 8 * _SEC]
 
-    repair_instrument(catalog, catalog_path, _IID, flagged)
+    repair_instrument(catalog, catalog_path, _IID, flagged, _verified(tmp_path))
 
     assert find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 20 * _SEC) == []
     assert _second_events(catalog_path, 10) == [_T0 + s * _SEC for s in range(10)]
@@ -142,7 +164,7 @@ def test_an_unflagged_row_sharing_the_flagged_ts_init_survives_unchanged(tmp_pat
     flagged = find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 20 * _SEC)
     assert [f.ts_event for f in flagged] == [_T0 + 5 * _SEC]
 
-    repair_instrument(catalog, catalog_path, _IID, flagged)
+    repair_instrument(catalog, catalog_path, _IID, flagged, _verified(tmp_path))
 
     rows = {r.ts_event: r for r in second_snapshots(catalog_path, _IID, _T0, _T0 + 20 * _SEC)}
     assert _second_events(catalog_path, 7) == [_T0 + s * _SEC for s in range(7)]
@@ -160,7 +182,7 @@ def test_a_pre_fix_repairs_leftover_copy_collapses_into_one_cleared_row(tmp_path
     catalog.write_data([*[_snap(s) for s in range(5)], spike, leftover])
     flagged = find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 20 * _SEC)
 
-    assert repair_instrument(catalog, catalog_path, _IID, flagged)
+    assert repair_instrument(catalog, catalog_path, _IID, flagged, _verified(tmp_path))
 
     assert _second_events(catalog_path, 6) == [_T0 + s * _SEC for s in range(6)]
     assert find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 20 * _SEC) == []
@@ -176,7 +198,7 @@ def test_a_flagged_row_no_longer_stored_is_ledgered_and_nothing_is_deleted(
     catalog.write_data([_snap(s) for s in range(5)])
     gone = _snap(30, high=150.0, low=50.0, init_second=3)  # ts_init 3 holds only second 3
 
-    assert not repair_instrument(catalog, catalog_path, _IID, [gone])
+    assert not repair_instrument(catalog, catalog_path, _IID, [gone], _verified(tmp_path))
 
     assert error_ledger.counts() == {"repair.error": 1}
     assert _second_events(catalog_path, 5) == [_T0 + s * _SEC for s in range(5)]
@@ -200,7 +222,7 @@ def test_a_failed_rewrite_after_the_delete_is_ledgered_with_the_lost_rows(
 
     monkeypatch.setattr(catalog, "write_data", _fail)
     with pytest.raises(OSError):
-        repair_instrument(catalog, catalog_path, _IID, flagged)
+        repair_instrument(catalog, catalog_path, _IID, flagged, _verified(tmp_path))
     assert error_ledger.counts() == {"repair.error": 1}
     assert f"lost ts_event [{_T0 + 2 * _SEC}]" in error_ledger.last_details()["repair.error"]
 
@@ -218,10 +240,15 @@ def test_a_running_collector_of_the_venue_blocks_the_repair(tmp_path: Path) -> N
     catalog_path = _spiked_catalog(tmp_path)
     with capture_lock_path(catalog_path, "DYDX").open("a") as capture:
         fcntl.flock(capture, fcntl.LOCK_SH | fcntl.LOCK_NB)  # what a running collector holds
-        assert main(["--catalog", catalog_path, "--apply"]) == 1
+        assert (
+            main(["--catalog", catalog_path, "--apply", "--candles-dir", _candles_dir(tmp_path)])
+            == 1
+        )
     assert error_ledger.counts() == {"repair.capture_running": 1}
     assert len(find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 10 * _SEC)) == 1
-    assert main(["--catalog", catalog_path, "--apply"]) == 0  # collector gone: repaired
+    assert (
+        main(["--catalog", catalog_path, "--apply", "--candles-dir", _candles_dir(tmp_path)]) == 0
+    )  # collector gone: repaired
     assert find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 10 * _SEC) == []
 
 
@@ -259,7 +286,20 @@ def test_a_closed_row_in_a_file_crossing_into_today_is_skipped(tmp_path: Path) -
 def test_an_instrument_without_a_venue_is_refused_not_repaired_unlocked(tmp_path: Path) -> None:
     error_ledger.reset()
     catalog_path = _spiked_catalog(tmp_path)
-    assert main(["--catalog", catalog_path, "--instrument", "NOVENUE", "--apply"]) == 1
+    assert (
+        main(
+            [
+                "--catalog",
+                catalog_path,
+                "--instrument",
+                "NOVENUE",
+                "--apply",
+                "--candles-dir",
+                _candles_dir(tmp_path),
+            ]
+        )
+        == 1
+    )
     assert error_ledger.counts() == {"repair.error": 1}
 
 
@@ -267,7 +307,20 @@ def test_an_unknown_venue_is_ledgered_and_refused(tmp_path: Path) -> None:
     """A venue `kernel.venues` does not know names a lock no collector holds: never trusted."""
     error_ledger.reset()
     catalog_path = _spiked_catalog(tmp_path)
-    assert main(["--catalog", catalog_path, "--instrument", "BTC-USD.NOWHERE", "--apply"]) == 1
+    assert (
+        main(
+            [
+                "--catalog",
+                catalog_path,
+                "--instrument",
+                "BTC-USD.NOWHERE",
+                "--apply",
+                "--candles-dir",
+                _candles_dir(tmp_path),
+            ]
+        )
+        == 1
+    )
     assert error_ledger.counts() == {"repair.error": 1}
     assert "unknown venue 'NOWHERE'" in error_ledger.last_details()["repair.error"]
 
@@ -277,7 +330,10 @@ def test_a_report_takes_no_maintenance_lock(tmp_path: Path) -> None:
     with maintenance(catalog_path) as held:
         assert held is not None
         assert main(["--catalog", catalog_path]) == 0
-        assert main(["--catalog", catalog_path, "--apply"]) == 1
+        assert (
+            main(["--catalog", catalog_path, "--apply", "--candles-dir", _candles_dir(tmp_path)])
+            == 1
+        )
 
 
 def test_a_flagged_row_gone_by_repair_time_exits_two(
@@ -287,7 +343,9 @@ def test_a_flagged_row_gone_by_repair_time_exits_two(
     error_ledger.reset()
     catalog_path = _spiked_catalog(tmp_path)
     monkeypatch.setattr("archive.application.repair._rows_at", lambda *_: [])
-    assert main(["--catalog", catalog_path, "--apply"]) == 2
+    assert (
+        main(["--catalog", catalog_path, "--apply", "--candles-dir", _candles_dir(tmp_path)]) == 2
+    )
     assert error_ledger.counts() == {"repair.error": 1}
 
 
@@ -295,3 +353,91 @@ def test_a_missing_catalog_is_ledgered(tmp_path: Path) -> None:
     error_ledger.reset()
     assert main(["--catalog", str(tmp_path / "nope")]) == 1
     assert error_ledger.counts() == {"archive.catalog_missing": 1}
+
+
+# -- the stored verdict of a repaired day (DW-203) and the repaired files' codec (DW-260) ---------
+
+_DAY = time.strftime("%Y-%m-%d", time.gmtime(_T0 // _SEC))
+
+
+def test_a_repair_clears_the_verdict_of_the_day_it_changes_only(tmp_path: Path) -> None:
+    catalog_path = _spiked_catalog(tmp_path)
+    verified = _verified(tmp_path)
+    verified.mark_verified(_IID, _DAY, "pass", 0, 1_000)
+    verified.mark_verified(_IID, "2020-01-01", "pass", 0, 1_000)
+    flagged = find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 10 * _SEC)
+    assert repair_instrument(
+        ParquetDataCatalog(catalog_path), catalog_path, _IID, flagged, verified
+    )
+    assert verified.verified_status(_IID, _DAY) is None
+    assert verified.verified_status(_IID, "2020-01-01") == "pass"
+    verified.close()
+
+
+class _UnwritableVerdicts:
+    """A `VerifiedDays` whose store refuses the write, like a read-only or full volume."""
+
+    def mark_verified(self, instrument_id: str, day: str, s: str, m: int, at: int) -> None:
+        raise AssertionError("the repair never writes a verdict")
+
+    def verified_status(self, instrument_id: str, day: str) -> str | None:
+        return "pass"
+
+    def clear_verified(self, instrument_id: str, day: str) -> None:
+        raise OSError(28, "No space left on device")
+
+
+def test_a_verdict_that_cannot_be_cleared_leaves_the_instrument_unrepaired(
+    tmp_path: Path,
+) -> None:
+    error_ledger.reset()
+    catalog_path = _spiked_catalog(tmp_path)
+    leaf = Path(catalog_path) / "data" / "custom_dydx_second_snapshot" / _IID
+    before = {p.name: p.read_bytes() for p in leaf.glob("*.parquet")}
+    flagged = find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 10 * _SEC)
+    catalog = ParquetDataCatalog(catalog_path)
+    assert not repair_instrument(catalog, catalog_path, _IID, flagged, _UnwritableVerdicts())
+    assert error_ledger.counts() == {"repair.error": 1}
+    assert "verdict could not be cleared" in error_ledger.last_details()["repair.error"]
+    assert {p.name: p.read_bytes() for p in leaf.glob("*.parquet")} == before  # nothing deleted
+
+
+def test_apply_needs_the_candle_store_directory(tmp_path: Path) -> None:
+    catalog_path = _spiked_catalog(tmp_path)
+    with pytest.raises(SystemExit):
+        main(["--catalog", catalog_path, "--apply"])
+    with pytest.raises(SystemExit):  # a typo'd directory: every clear would silently find no store
+        main(["--catalog", catalog_path, "--apply", "--candles-dir", str(tmp_path / "candels")])
+    (tmp_path / "empty").mkdir()  # a real directory but the wrong one: it holds no store
+    with pytest.raises(SystemExit):
+        main(["--catalog", catalog_path, "--apply", "--candles-dir", str(tmp_path / "empty")])
+    elsewhere = str(tmp_path / "elsewhere" / "candles_dydx.db")  # rebuilt here, cleared there
+    candles_db = ["--candles-db", elsewhere, "--candles-dir", _candles_dir(tmp_path)]
+    with pytest.raises(SystemExit):
+        main(["--catalog", catalog_path, "--apply", *candles_db])
+    assert len(find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 10 * _SEC)) == 1
+
+
+def test_a_repair_in_a_fresh_process_writes_zstd(tmp_path: Path) -> None:
+    """The patch must come from the repair's own import, not from another test's in this process."""
+    catalog_path = _spiked_catalog(tmp_path)
+    leaf = Path(catalog_path) / "data" / "custom_dydx_second_snapshot" / _IID
+    for path in leaf.glob("*.parquet"):  # start from snappy, whatever this process defaulted to
+        pq.write_table(pq.read_table(path), path, compression="snappy")
+    candles = _candles_dir(tmp_path)
+    argv = ["-m", "archive.repair_catalog", "--catalog", catalog_path, "--apply"]
+    platform_root = Path(__file__).resolve().parents[2]
+    env = {k: v for k, v in os.environ.items() if k != "ERROR_LEDGER_DIR"}
+    done = subprocess.run(  # noqa: S603 (this interpreter, our own module)
+        [sys.executable, *argv, "--candles-dir", candles],
+        cwd=platform_root,
+        env=env,
+        capture_output=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr.decode()
+    codecs = {
+        pq.ParquetFile(path).metadata.row_group(0).column(0).compression
+        for path in leaf.glob("*.parquet")
+    }
+    assert codecs == {"ZSTD"}

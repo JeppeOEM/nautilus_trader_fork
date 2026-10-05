@@ -16,6 +16,7 @@
 
 import glob
 import json
+import sqlite3
 import time
 from decimal import Decimal
 from pathlib import Path
@@ -24,6 +25,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from candles.application.rebuild import parse_date_ns
+from candles.infrastructure.sqlite_store import connect_rw
+from candles.infrastructure.sqlite_store import db_path_for_venue
+from candles.infrastructure.verified_days import VerifiedDaysStore
 from kernel.fold import fold_trades
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.tests.snapshot_factory import make_snapshot
@@ -33,6 +37,7 @@ from archive.application.rebuild_day import DayReport
 from archive.application.rebuild_day import RefusedError
 from archive.application.rebuild_day import covered_from
 from archive.application.rebuild_day import rebuild_day
+from archive.application.rebuild_day import run
 from archive.application.repair import second_snapshots
 from archive.infrastructure import catalog_files
 from archive.infrastructure.gap_markers import GapMarkerFiles
@@ -114,11 +119,28 @@ def _rows(tmp_path: Path) -> dict[int, DydxSecondSnapshot]:
     return {(s.ts_event - _D0) // _S: s for s in snaps}
 
 
+def _candles_dir(tmp_path: Path) -> str:
+    """
+    Return a directory holding a BYBIT candle store for `--candles-dir` (the CLI refuses a
+    missing directory, or one with no store in it).
+    """
+    (tmp_path / "candles").mkdir(exist_ok=True)
+    connect_rw(db_path_for_venue(tmp_path / "candles", "BYBIT")).close()
+    return str(tmp_path / "candles")
+
+
+def _verified(tmp_path: Path) -> VerifiedDaysStore:
+    """Return the BYBIT candle store whose verdict a changed day loses (`--candles-dir`'s)."""
+    return VerifiedDaysStore(db_path_for_venue(tmp_path / "candles", "BYBIT"))
+
+
 def _rebuild(tmp_path: Path, apply: bool = True) -> DayReport:
     """Rebuild the day as the CLI wires it: `CatalogFiles` under the maintenance flock."""
     with maintenance(tmp_path) as writer:
         assert writer is not None
-        return rebuild_day(str(tmp_path), _IID, _D0, writer, GapMarkerFiles(tmp_path), apply)
+        return rebuild_day(
+            str(tmp_path), _IID, _D0, writer, GapMarkerFiles(tmp_path), apply, _verified(tmp_path)
+        )
 
 
 def _snapshot_files(tmp_path: Path) -> list[str]:
@@ -214,7 +236,20 @@ def test_orphan_trades_and_duplicates_are_counted_never_dropped_silently(tmp_pat
 def test_open_day_is_refused(tmp_path: Path) -> None:
     error_ledger.reset()
     today = time.strftime("%Y-%m-%d", time.gmtime())
-    assert main(["--catalog", str(tmp_path), "--day", today, "--apply"]) == 1
+    assert (
+        main(
+            [
+                "--catalog",
+                str(tmp_path),
+                "--day",
+                today,
+                "--apply",
+                "--candles-dir",
+                _candles_dir(tmp_path),
+            ]
+        )
+        == 1
+    )
     assert error_ledger.counts() == {"rebuild.open_day": 1}
 
 
@@ -224,7 +259,20 @@ def test_two_rows_in_one_second_refuse_the_instrument_day(tmp_path: Path) -> Non
     catalog.write_data([_snap(60, [], offset=0.2), _snap(60, [], offset=0.7), _snap(61, [])])
     catalog.write_data([_trade(1, 60.3, 60.4)])
     before = [Path(f).read_bytes() for f in _snapshot_files(tmp_path)]
-    assert main(["--catalog", str(tmp_path), "--day", _DAY, "--apply"]) == 2
+    assert (
+        main(
+            [
+                "--catalog",
+                str(tmp_path),
+                "--day",
+                _DAY,
+                "--apply",
+                "--candles-dir",
+                _candles_dir(tmp_path),
+            ]
+        )
+        == 2
+    )
     assert error_ledger.counts() == {"rebuild.duplicate_second": 1}
     assert [Path(f).read_bytes() for f in _snapshot_files(tmp_path)] == before
 
@@ -241,7 +289,20 @@ def test_mixed_schema_day_is_refused_and_files_unchanged(tmp_path: Path) -> None
     )
     before = [Path(f).read_bytes() for f in _snapshot_files(tmp_path)]
     assert len(before) == 2
-    assert main(["--catalog", str(tmp_path), "--day", _DAY, "--apply"]) == 2
+    assert (
+        main(
+            [
+                "--catalog",
+                str(tmp_path),
+                "--day",
+                _DAY,
+                "--apply",
+                "--candles-dir",
+                _candles_dir(tmp_path),
+            ]
+        )
+        == 2
+    )
     assert error_ledger.counts() == {"rebuild.mixed_schema": 1}
     assert [Path(f).read_bytes() for f in _snapshot_files(tmp_path)] == before
 
@@ -252,7 +313,20 @@ def test_a_float_layout_day_is_refused_naming_the_migration(tmp_path: Path) -> N
     legacy = [LegacyRow(_at(70.5), [99.5], [1.0], [100.5], [2.0])]
     path = write_legacy(tmp_path, _IID, legacy)
     before = path.read_bytes()
-    assert main(["--catalog", str(tmp_path), "--day", _DAY, "--apply"]) == 2
+    assert (
+        main(
+            [
+                "--catalog",
+                str(tmp_path),
+                "--day",
+                _DAY,
+                "--apply",
+                "--candles-dir",
+                _candles_dir(tmp_path),
+            ]
+        )
+        == 2
+    )
     assert error_ledger.counts() == {"rebuild.legacy_layout": 1}
     assert "migrate_snapshot_ints" in error_ledger.last_details()["rebuild.legacy_layout"]
     assert path.read_bytes() == before
@@ -264,7 +338,20 @@ def test_a_trade_finer_than_the_row_precision_is_refused_never_rounded(tmp_path:
     catalog.write_data([_snap(s, []) for s in range(80, 82)])
     catalog.write_data([_trade(1, 80.3, 80.4, "100.125")])  # 3 decimals, the rows hold 2
     before = [Path(f).read_bytes() for f in _snapshot_files(tmp_path)]
-    assert main(["--catalog", str(tmp_path), "--day", _DAY, "--apply"]) == 2
+    assert (
+        main(
+            [
+                "--catalog",
+                str(tmp_path),
+                "--day",
+                _DAY,
+                "--apply",
+                "--candles-dir",
+                _candles_dir(tmp_path),
+            ]
+        )
+        == 2
+    )
     assert error_ledger.counts() == {"rebuild.off_grid": 1}
     assert [Path(f).read_bytes() for f in _snapshot_files(tmp_path)] == before
 
@@ -273,7 +360,20 @@ def test_rebuilt_trade_columns_are_integers_at_the_row_precision(tmp_path: Path)
     catalog = _catalog(tmp_path)
     catalog.write_data([_snap(s, []) for s in range(90, 92)])
     catalog.write_data([_trade(1, 90.3, 90.4, "100.25", "0.75")])
-    assert main(["--catalog", str(tmp_path), "--day", _DAY, "--apply"]) == 0
+    assert (
+        main(
+            [
+                "--catalog",
+                str(tmp_path),
+                "--day",
+                _DAY,
+                "--apply",
+                "--candles-dir",
+                _candles_dir(tmp_path),
+            ]
+        )
+        == 0
+    )
     (path,) = _snapshot_files(tmp_path)
     table = pq.read_table(path)
     assert table.schema.field("open_price").type == pa.int64()
@@ -283,9 +383,39 @@ def test_rebuilt_trade_columns_are_integers_at_the_row_precision(tmp_path: Path)
 
 def test_cli_rebuilds_only_the_requested_venue(tmp_path: Path) -> None:
     _late_trade_day(tmp_path)
-    assert main(["--catalog", str(tmp_path), "--day", _DAY, "--venue", "DYDX", "--apply"]) == 0
+    assert (
+        main(
+            [
+                "--catalog",
+                str(tmp_path),
+                "--day",
+                _DAY,
+                "--venue",
+                "DYDX",
+                "--apply",
+                "--candles-dir",
+                _candles_dir(tmp_path),
+            ]
+        )
+        == 0
+    )
     assert _rows(tmp_path)[102].open_price == 100.0  # BYBIT untouched
-    assert main(["--catalog", str(tmp_path), "--day", _DAY, "--venue", "BYBIT", "--apply"]) == 0
+    assert (
+        main(
+            [
+                "--catalog",
+                str(tmp_path),
+                "--day",
+                _DAY,
+                "--venue",
+                "BYBIT",
+                "--apply",
+                "--candles-dir",
+                _candles_dir(tmp_path),
+            ]
+        )
+        == 0
+    )
     assert _rows(tmp_path)[102].open_price is None
 
 
@@ -326,7 +456,20 @@ def test_a_malformed_gap_marker_refuses_the_instrument_day(tmp_path: Path) -> No
     _late_trade_day(tmp_path)
     (tmp_path / "_archive_gaps").mkdir()
     (tmp_path / "_archive_gaps" / f"{_IID}.jsonl").write_text("{not json\n")
-    assert main(["--catalog", str(tmp_path), "--day", _DAY, "--apply"]) == 2
+    assert (
+        main(
+            [
+                "--catalog",
+                str(tmp_path),
+                "--day",
+                _DAY,
+                "--apply",
+                "--candles-dir",
+                _candles_dir(tmp_path),
+            ]
+        )
+        == 2
+    )
     assert error_ledger.counts() == {"rebuild.error": 1}
     assert _rows(tmp_path)[102].open_price == 100.0  # untouched
 
@@ -354,7 +497,16 @@ def test_a_zero_row_trade_file_proves_no_coverage(tmp_path: Path) -> None:
 def test_apply_on_the_open_day_is_refused_even_with_include_open_day(tmp_path: Path) -> None:
     error_ledger.reset()
     today = time.strftime("%Y-%m-%d", time.gmtime())
-    args = ["--catalog", str(tmp_path), "--day", today, "--apply", "--include-open-day"]
+    args = [
+        "--catalog",
+        str(tmp_path),
+        "--day",
+        today,
+        "--apply",
+        "--candles-dir",
+        _candles_dir(tmp_path),
+        "--include-open-day",
+    ]
     assert main(args) == 1
     assert error_ledger.counts() == {"rebuild.open_day": 1}
 
@@ -372,7 +524,17 @@ def test_the_result_file_names_the_rebuilt_and_the_refused(tmp_path: Path) -> No
     other = "ETHUSDT-LINEAR.BYBIT"
     result = tmp_path / "result.json"
     args = ["--catalog", str(tmp_path), "--day", _DAY, "--venue", "BYBIT"]
-    args += ["--instrument", _IID, "--instrument", other, "--apply", "--result-file", str(result)]
+    args += [
+        "--instrument",
+        _IID,
+        "--instrument",
+        other,
+        "--apply",
+        "--candles-dir",
+        _candles_dir(tmp_path),
+        "--result-file",
+        str(result),
+    ]
     assert main(args) == 2
     # `other` has no snapshot row on the day: nothing was rebuilt, so it is in neither list.
     assert json.loads(result.read_text()) == {
@@ -396,7 +558,15 @@ def test_a_change_to_a_row_of_the_open_day_refuses_the_instrument_day_before_any
     with maintenance(tmp_path, now_ns=lambda: _D0 + 3_600 * _S) as writer:  # "today" is _DAY
         assert writer is not None
         with pytest.raises(RefusedError) as refused:
-            rebuild_day(str(tmp_path), _IID, _D0, writer, GapMarkerFiles(tmp_path), True)
+            rebuild_day(
+                str(tmp_path),
+                _IID,
+                _D0,
+                writer,
+                GapMarkerFiles(tmp_path),
+                True,
+                _verified(tmp_path),
+            )
     assert refused.value.site == "rebuild.open_day"
     assert [Path(f).read_bytes() for f in _snapshot_files(tmp_path)] == before
     assert not glob.glob(str(tmp_path / "data" / "*" / "*" / "*.tmp"))
@@ -411,6 +581,8 @@ def test_a_result_file_needs_a_venue(tmp_path: Path) -> None:
                 "--day",
                 _DAY,
                 "--apply",
+                "--candles-dir",
+                _candles_dir(tmp_path),
                 "--result-file",
                 str(tmp_path / "r"),
             ]
@@ -420,7 +592,17 @@ def test_a_result_file_needs_a_venue(tmp_path: Path) -> None:
 def test_the_result_file_carries_the_normalized_day(tmp_path: Path) -> None:
     _late_trade_day(tmp_path)
     result = tmp_path / "result.json"
-    args = ["--catalog", str(tmp_path), "--day", "2026-9-10", "--venue", "BYBIT", "--apply"]
+    args = [
+        "--catalog",
+        str(tmp_path),
+        "--day",
+        "2026-9-10",
+        "--venue",
+        "BYBIT",
+        "--apply",
+        "--candles-dir",
+        _candles_dir(tmp_path),
+    ]
     assert main([*args, "--result-file", str(result)]) == 0
     assert json.loads(result.read_text()) == {
         "venue": "BYBIT",
@@ -493,7 +675,9 @@ def test_the_midnight_rebuild_rewrites_b_and_c_and_leaves_every_open_day_row(
     assert len(open_before[file_c]) == 59
     with maintenance(tmp_path, now_ns=lambda: _D1 + 30 * 60 * _S) as writer:  # 00:30 of D+1
         assert writer is not None
-        report = rebuild_day(str(tmp_path), _IID, _D0, writer, GapMarkerFiles(tmp_path), True)
+        report = rebuild_day(
+            str(tmp_path), _IID, _D0, writer, GapMarkerFiles(tmp_path), True, _verified(tmp_path)
+        )
     assert error_ledger.counts() == {}  # no `rebuild.open_day` on the normal nightly path
     assert report.files_rewritten == 2
     assert (report.rebuilt, report.changed, report.orphan_trades) == (61, 3, 0)
@@ -516,7 +700,15 @@ def test_a_rewrite_that_would_change_an_open_day_row_is_refused_with_the_files_i
     with maintenance(tmp_path, now_ns=lambda: _D1 + 30 * 60 * _S) as writer:
         assert writer is not None
         with pytest.raises(RefusedError) as refused:
-            rebuild_day(str(tmp_path), _IID, _D1, writer, GapMarkerFiles(tmp_path), True)
+            rebuild_day(
+                str(tmp_path),
+                _IID,
+                _D1,
+                writer,
+                GapMarkerFiles(tmp_path),
+                True,
+                _verified(tmp_path),
+            )
     assert refused.value.site == "rebuild.open_day"
     assert [Path(f).read_bytes() for f in _snapshot_files(tmp_path)] == before
     assert not glob.glob(str(tmp_path / "data" / "*" / "*" / "*.tmp"))
@@ -539,7 +731,15 @@ def test_a_failed_verification_of_a_later_file_leaves_every_file_untouched(
     with maintenance(tmp_path, now_ns=lambda: _D1 + 30 * 60 * _S) as writer:
         assert writer is not None
         with pytest.raises(RefusedError) as refused:
-            rebuild_day(str(tmp_path), _IID, _D0, writer, GapMarkerFiles(tmp_path), True)
+            rebuild_day(
+                str(tmp_path),
+                _IID,
+                _D0,
+                writer,
+                GapMarkerFiles(tmp_path),
+                True,
+                _verified(tmp_path),
+            )
     assert refused.value.site == "rebuild.verify"
     assert [Path(f).read_bytes() for f in _snapshot_files(tmp_path)] == before
     assert not glob.glob(str(tmp_path / "data" / "*" / "*" / "*.tmp"))
@@ -560,12 +760,30 @@ def test_a_rename_failing_part_way_is_ledgered_as_partially_rebuilt(
         real_replace(src, dst)
 
     monkeypatch.setattr(catalog_files.os, "replace", fail_second)
-    args = ["--catalog", str(tmp_path), "--day", _DAY, "--venue", "BYBIT", "--apply"]
+    args = [
+        "--catalog",
+        str(tmp_path),
+        "--day",
+        _DAY,
+        "--venue",
+        "BYBIT",
+        "--apply",
+        "--candles-dir",
+        _candles_dir(tmp_path),
+    ]
     result = tmp_path / "result.json"
     with maintenance(tmp_path, now_ns=lambda: _D1 + 30 * 60 * _S) as writer:
         assert writer is not None
         with pytest.raises(RefusedError) as refused:
-            rebuild_day(str(tmp_path), _IID, _D0, writer, GapMarkerFiles(tmp_path), True)
+            rebuild_day(
+                str(tmp_path),
+                _IID,
+                _D0,
+                writer,
+                GapMarkerFiles(tmp_path),
+                True,
+                _verified(tmp_path),
+            )
     assert refused.value.site == "rebuild.error"
     assert "PARTIALLY rebuilt -- 1 of 2 file(s) replaced" in str(refused.value)
     assert Path(file_c).read_bytes() == c_before  # whole, old content
@@ -583,10 +801,175 @@ def test_a_report_only_run_takes_no_lock(tmp_path: Path) -> None:
     with maintenance(tmp_path) as held:  # e.g. a nightly running right now
         assert held is not None
         assert main(["--catalog", str(tmp_path), "--day", _DAY]) == 0
-        assert main(["--catalog", str(tmp_path), "--day", _DAY, "--apply"]) == 1
+        assert (
+            main(
+                [
+                    "--catalog",
+                    str(tmp_path),
+                    "--day",
+                    _DAY,
+                    "--apply",
+                    "--candles-dir",
+                    _candles_dir(tmp_path),
+                ]
+            )
+            == 1
+        )
 
 
 def test_a_missing_catalog_is_ledgered(tmp_path: Path) -> None:
     error_ledger.reset()
-    assert main(["--catalog", str(tmp_path / "nope"), "--day", _DAY, "--apply"]) == 1
+    assert (
+        main(
+            [
+                "--catalog",
+                str(tmp_path / "nope"),
+                "--day",
+                _DAY,
+                "--apply",
+                "--candles-dir",
+                _candles_dir(tmp_path),
+            ]
+        )
+        == 1
+    )
     assert error_ledger.counts() == {"archive.catalog_missing": 1}
+
+
+# -- the stored verdict of a changed day (DW-203) -------------------------------------------------
+
+
+def _pass(tmp_path: Path, day: str = _DAY) -> VerifiedDaysStore:
+    verified = _verified(tmp_path)
+    verified.mark_verified(_IID, day, "pass", 0, 1_000)
+    return verified
+
+
+def test_a_rebuild_that_changes_a_passed_day_clears_its_verdict(tmp_path: Path) -> None:
+    _late_trade_day(tmp_path)
+    verified = _pass(tmp_path)
+    verified.mark_verified(_IID, "2026-09-09", "pass", 0, 1_000)  # another day: untouched
+    assert _rebuild(tmp_path).files_rewritten == 1
+    assert verified.verified_status(_IID, _DAY) is None
+    assert verified.verified_status(_IID, "2026-09-09") == "pass"
+
+
+def test_a_rebuild_that_changes_no_row_keeps_the_verdict(tmp_path: Path) -> None:
+    _late_trade_day(tmp_path)
+    _rebuild(tmp_path)
+    verified = _pass(tmp_path)  # proven after the first rebuild
+    assert _rebuild(tmp_path).changed == 0
+    assert verified.verified_status(_IID, _DAY) == "pass"
+
+
+def test_a_report_only_rebuild_keeps_the_verdict(tmp_path: Path) -> None:
+    _late_trade_day(tmp_path)
+    verified = _pass(tmp_path)
+    assert _rebuild(tmp_path, apply=False).changed == 2
+    assert verified.verified_status(_IID, _DAY) == "pass"
+
+
+def test_the_verdict_is_cleared_before_the_renames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A commit failing after the clear leaves the day unverified -- never a stale pass."""
+    _late_trade_day(tmp_path)
+    verified = _pass(tmp_path)
+    before = [Path(f).read_bytes() for f in _snapshot_files(tmp_path)]
+
+    def no_rename(src: str, dst: str) -> None:
+        assert verified.verified_status(_IID, _DAY) is None  # already cleared at the first rename
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(catalog_files.os, "replace", no_rename)
+    with pytest.raises(RefusedError) as refused:
+        _rebuild(tmp_path)
+    assert refused.value.site == "rebuild.error"
+    assert [Path(f).read_bytes() for f in _snapshot_files(tmp_path)] == before
+    assert verified.verified_status(_IID, _DAY) is None
+
+
+class _UnwritableVerdicts:
+    """A `VerifiedDays` whose store refuses the write, like a read-only or full volume."""
+
+    def mark_verified(self, instrument_id: str, day: str, s: str, m: int, at: int) -> None:
+        raise AssertionError("the rebuild never writes a verdict")
+
+    def verified_status(self, instrument_id: str, day: str) -> str | None:
+        return "pass"
+
+    def clear_verified(self, instrument_id: str, day: str) -> None:
+        raise sqlite3.OperationalError("attempt to write a readonly database")
+
+
+def test_a_verdict_that_cannot_be_cleared_refuses_the_day_with_the_files_untouched(
+    tmp_path: Path,
+) -> None:
+    error_ledger.reset()
+    _late_trade_day(tmp_path)
+    before = [Path(f).read_bytes() for f in _snapshot_files(tmp_path)]
+    with maintenance(tmp_path) as writer:
+        assert writer is not None
+        result = run(
+            str(tmp_path),
+            [_IID],
+            _D0,
+            writer,
+            GapMarkerFiles(tmp_path),
+            True,
+            _UnwritableVerdicts(),
+        )
+    assert result.refused == [_IID]
+    assert error_ledger.counts() == {"rebuild.verdict": 1}
+    assert [Path(f).read_bytes() for f in _snapshot_files(tmp_path)] == before
+    assert not glob.glob(str(tmp_path / "data" / "*" / "*" / "*.tmp"))
+
+
+def test_apply_needs_the_candle_store_directory(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        main(["--catalog", str(tmp_path), "--day", _DAY, "--apply"])
+    typo = ["--candles-dir", str(tmp_path / "candels")]  # every clear would silently find no store
+    with pytest.raises(SystemExit):
+        main(["--catalog", str(tmp_path), "--day", _DAY, "--apply", *typo])
+    (tmp_path / "empty").mkdir()  # a real directory but the wrong one: it holds no store
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "--catalog",
+                str(tmp_path),
+                "--day",
+                _DAY,
+                "--apply",
+                "--candles-dir",
+                str(tmp_path / "empty"),
+            ]
+        )
+    with maintenance(tmp_path) as writer, pytest.raises(ValueError, match="VerifiedDays"):
+        rebuild_day(str(tmp_path), _IID, _D0, writer, GapMarkerFiles(tmp_path), True, None)
+
+
+def test_the_cli_clears_the_verdict_in_the_candles_dir(tmp_path: Path) -> None:
+    _late_trade_day(tmp_path)
+    verified = _pass(tmp_path)
+    args = ["--catalog", str(tmp_path), "--day", _DAY, "--apply"]
+    assert main([*args, "--candles-dir", _candles_dir(tmp_path)]) == 0
+    assert verified.verified_status(_IID, _DAY) is None
+
+
+class _NoVenueVerdicts(_UnwritableVerdicts):
+    """A `VerifiedDays` whose clear fails with a non-store error (`venue_of` on a bad id)."""
+
+    def clear_verified(self, instrument_id: str, day: str) -> None:
+        raise ValueError("not an instrument id")
+
+
+def test_any_failure_of_the_clear_discards_the_staged_rewrites(tmp_path: Path) -> None:
+    _late_trade_day(tmp_path)
+    before = [Path(f).read_bytes() for f in _snapshot_files(tmp_path)]
+    with maintenance(tmp_path) as writer:
+        assert writer is not None
+        gaps = GapMarkerFiles(tmp_path)
+        with pytest.raises(ValueError, match="not an instrument id"):
+            rebuild_day(str(tmp_path), _IID, _D0, writer, gaps, True, _NoVenueVerdicts())
+    assert [Path(f).read_bytes() for f in _snapshot_files(tmp_path)] == before
+    assert not glob.glob(str(tmp_path / "data" / "*" / "*" / "*.tmp"))

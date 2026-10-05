@@ -34,15 +34,32 @@ same path is why one `ts_init` group is deleted then written, not replaced atomi
 between the two loses that group, siblings included -- a failed write is ledgered `repair.error`
 with the group's `ts_event`s before it is re-raised), and why each group costs one catalog query
 and one file split; the rewrite would replace a file once, whatever its group count.
+
+Verdict (DW-203): before the first `delete_data_range`, every UTC day (of `ts_event`) holding a
+flagged row about to be cleared loses its stored `verified_days` verdict
+(`VerifiedDays.clear_verified`): the verdict judged trade values the repair replaces, so the day
+stays unverified -- its trades kept by `prune_catalog` -- until a rerun of the nightly saga for
+that day (`make nightly VENUE=<v> DAY=<day>`) rebuilds and reconciles it again: nothing re-runs a
+day the scheduler's watermark has passed. A
+verdict that cannot be cleared stops the instrument before anything is deleted (`repair.error`,
+not repaired). The unflagged siblings written back unchanged change no day, so they clear none.
+
+Encoding: `write_data` writes with pyarrow's default compression, which this module makes zstd at
+import (`kernel.parquet_compat.apply_zstd_default`, as `backfill_bars` does) -- without it every
+repaired file would be snappy, unlike every other file of the catalog (DW-260).
 """
 
 import logging
+import sqlite3
+import time
 
 from candles.application.rebuild import day_chunks
 from candles.application.rebuild import rebuild_instrument
+from candles.application.verified_days import VerifiedDays
 from kernel.catalog_files import snapshot_files
 from kernel.clocks import READ_SPAN_MARGIN_NS
 from kernel.clocks import CatalogFileSpan
+from kernel.parquet_compat import apply_zstd_default
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import ohlc_outside_book
 from observability import error_ledger
@@ -53,6 +70,13 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
 logger = logging.getLogger(__name__)
+
+# Repaired files are zstd-compressed, like the collector's own files: the one patch, shared with
+# `collector.py`/`backfill_bars` and idempotent in either import order
+# (see `kernel.parquet_compat`).
+apply_zstd_default()
+
+_S_NS = 1_000_000_000
 
 
 def second_snapshots(
@@ -183,20 +207,49 @@ def _replacement_groups(
     return groups
 
 
+def _changed_days(flagged: list[DydxSecondSnapshot], ts_inits: set[int]) -> list[str]:
+    """Return the UTC days (YYYY-MM-DD of `ts_event`) of the flagged rows the groups will clear."""
+    seconds = {s.ts_event // _S_NS for s in flagged if s.ts_init in ts_inits}
+    return sorted({time.strftime("%Y-%m-%d", time.gmtime(second)) for second in seconds})
+
+
+def _clear_verdicts(verified: VerifiedDays, iid: str, days: list[str]) -> bool:
+    """Clear each day's stored verdict; False (ledgered) when one could not be cleared."""
+    cleared: list[str] = []
+    try:
+        for day in days:
+            verified.clear_verified(iid, day)
+            cleared.append(day)
+    except (sqlite3.Error, OSError) as e:
+        # Name the days already cleared: they are unverified now and need a saga rerun.
+        what = (
+            f"{iid} {days}: the stored verdict could not be cleared ({e!r}); not repaired; "
+            f"already cleared: {cleared}"
+        )
+        error_ledger.record("repair.error", what, exc=e)
+        return False
+    return True
+
+
 def repair_instrument(
     catalog: ParquetDataCatalog,
     catalog_path: str,
     iid: str,
     flagged: list[DydxSecondSnapshot],
+    verified: VerifiedDays,
     candles_db_path: str | None = None,
 ) -> bool:
     """
     Replace every flagged row with its cleared copy, keeping every other row at the same
-    `ts_init`; with `candles_db_path`, rebuild the candle-store days they touched from the
-    corrected raw 1 s. False when a flagged row was not repaired (no longer stored, ledgered).
+    `ts_init`, after clearing the stored verdict of every day a cleared row is in; with
+    `candles_db_path`, rebuild the candle-store days they touched from the corrected raw 1 s.
+    False when a flagged row was not repaired (no longer stored, or its day's verdict could not be
+    cleared -- nothing deleted then; ledgered).
     """
     # Build every replacement first so a bad row fails before anything is deleted.
     groups = _replacement_groups(catalog, iid, flagged)
+    if not _clear_verdicts(verified, iid, _changed_days(flagged, set(groups))):
+        return False
     for ts_init, rows in groups.items():
         catalog.delete_data_range(DydxSecondSnapshot, iid, ts_init, ts_init)
         try:

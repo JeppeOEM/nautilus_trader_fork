@@ -19,6 +19,7 @@ policy and the plan rules, executed end to end on a real catalog tree (the rules
 """
 
 import logging
+import sqlite3
 import time
 from pathlib import Path
 
@@ -445,3 +446,58 @@ def test_a_missing_catalog_is_ledgered_and_exit_one(tmp_path: Path) -> None:
     error_ledger.reset()
     assert main(["--catalog", str(tmp_path / "nope"), "--types", "order_book_deltas"]) == 1
     assert error_ledger.counts() == {"archive.catalog_missing": 1}
+
+
+# -- an unreadable status store (DW-188) -----------------------------------------------------------
+
+
+class _UnreadableBybit:
+    """A `VerifiedDays` whose BYBIT store raises like a corrupt file; other venues read normally."""
+
+    def __init__(self) -> None:
+        self.reads: list[str] = []
+
+    def verified_status(self, instrument_id: str, day: str) -> str | None:
+        self.reads.append(instrument_id)
+        if instrument_id.endswith(".BYBIT"):
+            raise sqlite3.DatabaseError("file is not a database")
+        return "pass"
+
+    def mark_verified(self, instrument_id: str, day: str, s: str, m: int, at: int) -> None:
+        raise AssertionError("prune never writes a verdict")
+
+    def clear_verified(self, instrument_id: str, day: str) -> None:
+        raise AssertionError("prune never clears a verdict")
+
+
+def test_an_unreadable_store_keeps_that_venues_days_and_decides_the_others(
+    tmp_path: Path,
+) -> None:
+    error_ledger.reset()
+    catalog, dydx = tmp_path / "catalog", "BTC-USD-PERP.DYDX"
+    bybit_files = [_trade_file(catalog, 8), _trade_file(catalog, 9)]
+    dydx_file = _trade_file(catalog, 8, dydx)
+    verified = _UnreadableBybit()
+    policy = RetentionPolicy(time.time_ns(), trade_retention_days=7)
+    decision = decide(str(catalog), policy, verified)
+    assert [Path(d.file.path) for d in decision.delete] == [dydx_file]
+    assert sorted(decision.kept) == [
+        (_IID, _day(9), "status_unreadable"),
+        (_IID, _day(8), "status_unreadable"),
+    ]
+    assert verified.reads.count(_IID) == 1  # the venue is not queried again this run
+    assert error_ledger.counts() == {"prune.verified_days": 1}
+    report = execute(decision, None, GapMarkerFiles(catalog))
+    assert report.has_findings()
+    assert all(f.exists() for f in bybit_files)
+
+
+def test_a_corrupt_store_file_is_ledgered_and_the_run_exits_with_findings(tmp_path: Path) -> None:
+    error_ledger.reset()
+    catalog, candles = tmp_path / "catalog", tmp_path / "candles"
+    candles.mkdir()
+    kept = _trade_file(catalog, 8)
+    Path(db_path_for_venue(candles, "BYBIT")).write_bytes(b"not a database, just garbage " * 64)
+    assert main(["--catalog", str(catalog), "--candles-dir", str(candles), "--apply"]) == 2
+    assert kept.exists()
+    assert error_ledger.counts() == {"prune.verified_days": 1}

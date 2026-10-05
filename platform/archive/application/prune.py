@@ -23,9 +23,16 @@ recorded as a `pruned` archive gap (`GapMarkers`, over its name span widened by 
 older unverified file can keep `covered_from` reaching back past it -- and only then removed
 through `CatalogWriter.delete`. This module is the only caller of `delete`
 (`platform/archive/tests/test_one_deleter_one_rewriter.py`).
+
+A venue whose status store cannot be read (`sqlite3.DatabaseError`: a corrupt or non-database
+`candles_<venue>.db`) does not abort the run: it is ledgered once at `prune.verified_days`, that
+venue is not queried again, and its days stay provisional -- kept, reason `status_unreadable` --
+while the other venues are decided normally. Keeping is the fail-safe direction, and such a day is
+a finding (`PruneReport.has_findings`, exit 2), never a silent keep.
 """
 
 import logging
+import sqlite3
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -58,6 +65,9 @@ logger = logging.getLogger(__name__)
 
 _MB = 1024 * 1024
 
+# The kept reason of a day whose venue's status store could not be read (DW-188).
+STATUS_UNREADABLE = "status_unreadable"
+
 
 @dataclass
 class PruneReport:
@@ -71,8 +81,12 @@ class PruneReport:
     marker_failed: int = 0
 
     def has_findings(self) -> bool:
-        """Whether a decided deletion did not happen (ledgered): the run ends with findings."""
-        return bool(self.open_day or self.errors or self.marker_failed)
+        """
+        Whether a decided deletion did not happen, or a venue's day statuses could not be read
+        (both ledgered): the run ends with findings.
+        """
+        unreadable = any(reason == STATUS_UNREADABLE for _iid, _day, reason in self.kept)
+        return bool(self.open_day or self.errors or self.marker_failed or unreadable)
 
 
 def _span(path: Path) -> tuple[int, int] | None:
@@ -144,29 +158,67 @@ def _warn_unparsable_ids(files: list[CatalogFile]) -> None:
             logger.warning("  skipped %s: not an instrument id, its files are never pruned", iid)
 
 
+def _read_status(
+    verified: VerifiedDays, venue: str, iid: str, day: str, unreadable: set[str]
+) -> str | None:
+    """
+    Return that day's stored status; re-raise `sqlite3.DatabaseError` for a venue whose store
+    cannot be read, ledgered and added to `unreadable` so it is not queried again this run.
+    """
+    try:
+        return verified.verified_status(iid, day)
+    except sqlite3.DatabaseError as e:  # OperationalError included: corrupt, locked, not a db
+        error_ledger.record(
+            "prune.verified_days",
+            f"{venue} store unreadable ({e!r}); its days stay unverified, files kept",
+            exc=e,
+        )
+        unreadable.add(venue)
+        raise
+
+
+def _resolve(
+    verified: VerifiedDays | None, iid: str, text: str, unreadable: set[str]
+) -> tuple[ArchiveDay, str | None]:
+    """One instrument-day's `ArchiveDay`, and the kept reason when it is provisional by fault."""
+    provisional = ArchiveDay("", iid, text)
+    try:
+        venue = venue_of(iid)
+    except MalformedInstrumentId:
+        return provisional, None  # warned up front (`_warn_unparsable_ids`)
+    if venue in unreadable:
+        return provisional, STATUS_UNREADABLE
+    try:
+        status = (
+            _read_status(verified, venue, iid, text, unreadable) if verified is not None else None
+        )
+    except sqlite3.DatabaseError:
+        return provisional, STATUS_UNREADABLE
+    try:
+        return ArchiveDay.from_verified_status(venue, iid, text, status), None
+    except ValueError:
+        return provisional, f"unknown_status:{status}"
+
+
 def day_statuses(
     verified: VerifiedDays | None, needed: set[tuple[str, int]]
 ) -> tuple[dict[tuple[str, int], ArchiveDay], dict[tuple[str, str], str]]:
     """
-    Each needed (instrument, day)'s `ArchiveDay`, from its `verified_days` status; plus the
-    (instrument, day text) -> status of every status string the state machine does not know.
-    Such a day stays provisional (its files are kept) and the run goes on.
+    Each needed (instrument, day)'s `ArchiveDay`, from its `verified_status`; plus the (instrument,
+    day text) -> kept reason of every day left provisional because its status could not be used:
+    `unknown_status:<s>` for a status string the state machine does not know, `status_unreadable`
+    for a venue whose store raised (ledgered once per venue at `prune.verified_days`). Either way
+    the day's files are kept and the run goes on.
     """
     days: dict[tuple[str, int], ArchiveDay] = {}
-    unknown: dict[tuple[str, str], str] = {}
-    for iid, day in needed:
+    reasons: dict[tuple[str, str], str] = {}
+    unreadable: set[str] = set()
+    for iid, day in sorted(needed):
         text = day_text(day)
-        days[(iid, day)] = ArchiveDay("", iid, text)
-        try:
-            venue = venue_of(iid)
-        except MalformedInstrumentId:
-            continue
-        status = verified.verified_status(iid, text) if verified is not None else None
-        try:
-            days[(iid, day)] = ArchiveDay.from_verified_status(venue, iid, text, status)
-        except ValueError:
-            unknown[(iid, text)] = str(status)
-    return days, unknown
+        days[(iid, day)], reason = _resolve(verified, iid, text, unreadable)
+        if reason is not None:
+            reasons[(iid, text)] = reason
+    return days, reasons
 
 
 def decide(
@@ -178,14 +230,11 @@ def decide(
     """List, read the statuses the policy needs, and ask it (nothing is deleted here)."""
     files = list(list_files(catalog_path, policy, venue))
     _warn_unparsable_ids(files)
-    days, unknown = day_statuses(verified, policy.status_days(files))
+    days, reasons = day_statuses(verified, policy.status_days(files))
     decision = policy.decide(files, days)
     for skipped in decision.unparsable:
         logger.warning("  skipped %s: not a catalog file name, never pruned", skipped.path)
-    kept = [
-        (iid, day, f"unknown_status:{unknown[(iid, day)]}" if (iid, day) in unknown else reason)
-        for iid, day, reason in decision.kept
-    ]
+    kept = [(iid, day, reasons.get((iid, day), reason)) for iid, day, reason in decision.kept]
     return RetentionDecision(decision.delete, kept, decision.unparsable)
 
 

@@ -36,6 +36,7 @@ from archive.infrastructure.gap_markers import GapMarkerFiles
 from archive.infrastructure.gap_markers import load_gaps
 from archive.infrastructure.maintenance_lock import capture_exclusive
 from archive.infrastructure.maintenance_lock import maintenance
+from candles.infrastructure.verified_days import VerifiedDaysDir
 from capture.infrastructure.capture_lock import acquire_capture_lock
 from capture.tests.test_collector import _BYBIT
 from capture.tests.test_collector import _D0 as _BYBIT_D0
@@ -62,7 +63,9 @@ def _rebuild(tmp_path: Path, iid: str, day_start_ns: int) -> DayReport:
     """Rebuild the day capture wrote, wired as `archive.rebuild_seconds` wires it."""
     with maintenance(tmp_path) as writer:
         assert writer is not None
-        return rebuild_day(str(tmp_path), iid, day_start_ns, writer, GapMarkerFiles(tmp_path), True)
+        gaps = GapMarkerFiles(tmp_path)
+        verified = VerifiedDaysDir(tmp_path / "candles")
+        return rebuild_day(str(tmp_path), iid, day_start_ns, writer, gaps, True, verified)
 
 
 def test_a_failed_trade_write_marks_a_gap_and_the_rebuild_keeps_live_values(

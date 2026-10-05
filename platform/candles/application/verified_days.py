@@ -29,6 +29,11 @@ class VerifiedDays(Protocol):
     `compare_klines`'s verdict write and `prune_catalog`'s retention read; both go through this port
     and never through a database connection.
 
+    Invalidation: a writer that changes a closed day's seconds (`archive.rebuild_seconds`,
+    `archive.repair_catalog`) calls `clear_verified` for that instrument-day *before* the change
+    lands, so no later outcome -- a failed or skipped reconcile, a refusal, a standalone run --
+    can leave a verdict standing over seconds it never judged.
+
     `verified_status` returns `None` both for a day never verified and for a store that does not
     exist yet or predates the table -- an unverified day, whose files are kept.
     """
@@ -41,4 +46,8 @@ class VerifiedDays(Protocol):
 
     def verified_status(self, instrument_id: str, day: str) -> str | None:
         """Return that instrument-day's verdict ("pass"/"fail"), or None when never verified."""
+        ...
+
+    def clear_verified(self, instrument_id: str, day: str) -> None:
+        """Delete that instrument-day's verdict, so it reads as never verified; no-op if absent."""
         ...

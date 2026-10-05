@@ -26,14 +26,19 @@ from kernel.venue_http import http_json
 from kernel.venues import bybit_category
 
 from archive.domain.reconciliation import DAY_MS
+from archive.domain.reconciliation import MINUTE_MS
 from archive.domain.reconciliation import Kline
 from archive.domain.reconciliation import KlineError
 from archive.domain.reconciliation import kline_from_text
+from archive.domain.reconciliation import next_kline_cursor
 from archive.domain.reconciliation import unique_traded_in_day
 from nautilus_trader.model.instruments import Instrument
 
 
 _PAGE = 1000
+# A non-final page is a full `_PAGE` rows of distinct minutes, so a day's 1440 minutes need at most
+# ceil(1440 / _PAGE) pages; one more is margin. Beyond it the venue is not paging as verified.
+_MAX_PAGES = -(-(DAY_MS // MINUTE_MS) // _PAGE) + 1
 # Known limit: inverse klines report volume in contracts, not the base asset our fold sums; an
 # `-INVERSE.BYBIT` id is refused until its units are verified against the venue (then add it).
 BYBIT_KLINE_CATEGORIES = frozenset({"linear", "spot"})
@@ -78,10 +83,14 @@ class BybitKlines:
 
         Verified (live 2026-09-21): `start` and `end` both inclusive on the kline's start time,
         newest first, `limit` up to 1000.
+
+        A page that does not move the cursor, or a day needing more than `_MAX_PAGES` pages (what
+        `_PAGE` implies), is a `KlineError` (`next_kline_cursor`): a venue repeating or barely
+        advancing a full page is never looped on.
         """
         category = kline_category(inst.id.value)
         out: list[Kline] = []
-        end_ms = day_ms + DAY_MS - 1
+        end_ms, pages = day_ms + DAY_MS - 1, 0
         while True:
             url = bybit_url(
                 self._environment,
@@ -93,6 +102,10 @@ class BybitKlines:
                 self._http(get_request(url)), inst.price_precision, inst.size_precision
             )
             out += page
+            pages += 1
             if len(page) < _PAGE or min(k.t_ms for k in page) <= day_ms:
                 return unique_traded_in_day(out, inst.id.value, day_ms)
-            end_ms = min(k.t_ms for k in page) - 1
+            oldest = min(k.t_ms for k in page)
+            end_ms = next_kline_cursor(
+                inst.id.value, pages, end_ms, oldest - 1, backwards=True, max_pages=_MAX_PAGES
+            )

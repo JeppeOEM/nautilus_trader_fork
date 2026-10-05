@@ -82,7 +82,7 @@ What the service runs (schedule in `platform/archive/config.toml`, times UTC):
 - **Capture lock (Story 25.1).** Every collector holds a shared `flock` on
   `<catalog>/.capture-<VENUE>.lock` for its whole life. The pid and start time inside are
   informational only. The file is never deleted, and the kernel releases a killed collector's lock.
-  - `python -m archive.repair_catalog --apply` refuses a venue whose collector holds it
+  - `python -m archive.repair_catalog --apply --candles-dir /app/candles_dir` refuses a venue whose collector holds it
     (`repair.capture_running`, exit 1): stop that collector first. While a tool holds it
     exclusively, a starting collector waits (`collector.capture_lock_wait`, once) and starts when it
     is released.
@@ -1068,7 +1068,7 @@ only then do the readers start again.
       `views.*` site rising.
 - [ ] For every day the nightly or a manual rebuild ledgered `rebuild.legacy_layout` (a day that
       was still float when the rebuild ran), rerun `python -m archive.rebuild_seconds --day D
-      --apply` for it (or let the next nightly's missed-day catch-up do it).
+      --apply --candles-dir /app/candles_dir` for it (or let the next nightly's missed-day catch-up do it).
 - [ ] Record the `--apply` run's per-venue and total files, rows, snapped values and bytes before
       -> after in `docs/DATA_INTEGRITY_AUDIT.md` row D-69 and set its status to FIXED.
 

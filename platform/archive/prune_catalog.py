@@ -31,7 +31,9 @@ Trade policy (with `--candles-dir`): a `data/trade_tick/<iid>/` file is deleted 
 UTC day its name spans is older than `--trade-retention-days` (default 7) **and** that
 instrument-day's `verified_days` row in `candles_<venue>.db` is `pass` (`compare_klines`).
 Otherwise it is kept, and each old kept (instrument, day) is reported with its reason:
-`unverified` (no row) or `failed` (a kline mismatch). A day younger than the window is kept
+`unverified` (no row), `failed` (a kline mismatch), `unknown_status:<s>` or `status_unreadable`
+(that venue's store could not be read, `prune.verified_days`; the other venues are decided
+normally). A day younger than the window is kept
 silently. A file starting within the arrival margin (5 min) after midnight also needs the
 previous day proven: its trades' `ts_event` can belong to it. Every deleted trade file is first
 recorded as a `pruned` archive gap so a later rebuild keeps those rows' live values.
@@ -52,9 +54,9 @@ A dYdX instrument with a file reaching the current UTC day is never treated as d
 
 Exit code: 0 done; 2 findings -- a decided deletion did not happen: a per-file error
 (`prune.error`), a file that reached the open day by the time it was deleted (`prune.open_day`) or
-a trade file kept because its `pruned` marker could not be written (`archive_gaps.write`), all
-ledgered; 1 a run-level failure (bad arguments, a missing catalog, an unusable plan, the lock
-held).
+a trade file kept because its `pruned` marker could not be written (`archive_gaps.write`) -- or a
+venue whose day statuses could not be read (`prune.verified_days`), all ledgered; 1 a run-level
+failure (bad arguments, a missing catalog, an unusable plan, the lock held).
 """
 
 import argparse
@@ -85,7 +87,7 @@ from archive.infrastructure.maintenance_lock import maintenance
 
 logger = logging.getLogger(__name__)
 
-_FINDINGS = 2  # finished, but a decided deletion did not happen (ledgered)
+_FINDINGS = 2  # finished, but a decided deletion did not happen or a status was unreadable
 
 
 # How long a dYdX plan read waits between its two fingerprints (see `DydxPlanFile`).

@@ -26,6 +26,7 @@ from archive.domain.reconciliation import DAY_MS
 from archive.domain.reconciliation import MINUTE_MS
 from archive.domain.reconciliation import Kline
 from archive.domain.reconciliation import kline_from_text
+from archive.domain.reconciliation import next_kline_cursor
 from archive.domain.reconciliation import unique_traded_in_day
 from nautilus_trader.model.instruments import Instrument
 
@@ -57,10 +58,13 @@ class HyperliquidKlines:
         Verified (live 2026-09-21): `startTime`/`endTime` both inclusive on the candle's open
         time, oldest first; a whole day (1440) came back in one response, and the forward paging
         still reads everything should the server cap a response below a day.
+
+        A page that does not move the cursor, or a day needing more than `MAX_KLINE_PAGES` pages,
+        is a `KlineError` (`next_kline_cursor`): a venue repeating a full page is never looped on.
         """
         out: list[Kline] = []
-        start_ms, end_ms = day_ms, day_ms + DAY_MS - 1
-        while start_ms <= end_ms:
+        start_ms, end_ms, pages = day_ms, day_ms + DAY_MS - 1, 0
+        while True:
             body = {
                 "type": "candleSnapshot",
                 "req": {
@@ -77,5 +81,11 @@ class HyperliquidKlines:
             if not page:
                 break
             out += page
-            start_ms = max(k.t_ms for k in page) + MINUTE_MS
+            pages += 1
+            after_newest = max(k.t_ms for k in page) + MINUTE_MS
+            if after_newest > end_ms:
+                break
+            start_ms = next_kline_cursor(
+                inst.id.value, pages, start_ms, after_newest, backwards=False
+            )
         return unique_traded_in_day(out, inst.id.value, day_ms)

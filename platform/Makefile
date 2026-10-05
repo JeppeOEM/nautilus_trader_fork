@@ -312,11 +312,12 @@ consolidate:
 		python3 -m archive.consolidate_catalog --catalog /app/catalog --apply $(CONSOLIDATE_ARGS)
 
 ## One venue's nightly maintenance for one closed UTC day (story 22.13; the archive.nightly saga,
-## Story 25.1), each step its own process: rebuild_seconds --apply -> consolidate_catalog --apply
-## --days 2 -> build_candles --day --workers 1 -> compare_klines --rebuilt-by <this run> ->
-## prune_catalog --apply (trade retention 7 days, gated on verified_days; for DYDX also the plan's
-## dropped-instrument and per-coin delta retention, read from the mounted dYdX config.toml). A
-## step's "findings" exit 2 continues; any other failure stops the chain; one summary line.
+## Story 25.1), each step its own process: rebuild_seconds --apply --candles-dir ->
+## consolidate_catalog --apply --days 2 -> build_candles --day --workers 1 ->
+## compare_klines --rebuilt-by <this run> -> prune_catalog --apply (trade retention 7 days, gated
+## on verified_days; for DYDX also the plan's dropped-instrument and per-coin delta retention,
+## read from the mounted dYdX config.toml). A step's "findings" exit 2 continues; any other
+## failure stops the chain; one summary line.
 ## VENUE is required (DYDX|BYBIT|HYPERLIQUID); DAY defaults to yesterday (UTC). A manual tool (a
 ## re-run, or a day past the catch-up cap): the `archive` compose service runs this saga every
 ## night for every venue in archive/config.toml (Story 25.1b; no host cron line). It shares the

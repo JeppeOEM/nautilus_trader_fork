@@ -25,15 +25,24 @@ Deliberate refinement of the spine's diagram: `verified -> rebuilt` is legal, ex
 `mismatched -> rebuilt`. A rerun of the saga re-derives a verified day's seconds, and the stored
 `pass` must then be proven again within that same run. A day becomes `verified` -- the only
 status `RetentionPolicy` releases trades for -- solely through reconcile's exact verdict
-(`reconciled`), and `verified_days` changes only through that verdict.
+(`reconciled`), and `verified_days` changes only through that verdict or its clear.
 
-Known limit: nothing clears a stored `pass` when a day is changed afterwards. A re-derived verified
-day whose reconcile then errors or is skipped (the saga stopped, a fetch failed), or a standalone
-rebuild or repair of one with no reconcile after it, keeps its `pass` although its seconds may
-have changed -- so the prune can still release that day's raw trades on the old verdict. Upgrade
-path: the rebuild's result reports the per-instrument changed rows, and the reconcile refuses to
-leave a `pass` standing for a changed instrument-day it could not judge (it writes `fail`, or
-deletes the row, instead).
+Invalidation (DW-203): a writer that changes a closed day's seconds -- the rebuild
+(`archive.application.rebuild_day`), the repair (`archive.application.repair`) -- clears that
+instrument-day's stored verdict (`VerifiedDays.clear_verified`) *before* the change lands, so the
+day is provisional again until a reconcile of a rebuild in one run judges it. Any outcome after
+the clear -- a reconcile that errors or is skipped, a stopped saga, a standalone rebuild or repair,
+a failed commit -- leaves the day unverified and its raw trades kept, never a stale `pass` the
+prune could release them on (save the in-flight reconcile race in the Known limit below). Nothing re-judges such a day automatically (the scheduler's watermark
+has passed it): it stays unverified until a rerun of the saga for that day (`make nightly
+VENUE=<v> DAY=<day>`, `python -m archive.nightly --day`). A rebuild that changes no row of the day
+clears nothing.
+
+Known limit: `compare_klines` writes its verdict without the catalog maintenance lock, so a repair
+or rebuild clearing a day while a reconcile of that same day is in flight (an operator repair, or
+a standalone `rebuild_seconds --apply`, during a nightly's compare step) can have the reconcile's `pass`, judged on the old bars, land
+after the clear. Upgrade path: the reconcile writes its verdict under the maintenance lock, or a
+compare-and-set on a per-day rebuild generation.
 """
 
 import enum
