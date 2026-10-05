@@ -2203,26 +2203,50 @@ source_spec: `_bmad-output/implementation-artifacts/bmad-dev-auto-result-live-ch
 reason: The heartbeat-silence `_receive` loop is now copied in four modules (`views/archive_status_bus.py`, `views/rankings_bus.py`, `bot_tui/archive_state.py`, `bot_tui/collector_state.py`) and two more subscribers (`bot_tui/bots_state.py`, `bot_tui/bot_history_state.py`) still need it, so it should become one shared helper taking an ingest callback. evidence: The four `_receive` bodies are line-for-line the same poll/`heard`/`ConnectionError` loop with differently named constants (`STALE_AFTER_SECONDS`, `SILENCE_RESUBSCRIBE_SECONDS`, `_SILENCE_RESUBSCRIBE_SECONDS`); a shared home has to respect `tests/test_boundaries.py`'s context edges (views and bot_tui may not import each other).
 status: open
 
-- source_spec: `_bmad-output/implementation-artifacts/spec-dw-data-api-input-validation.md`
-  summary: `GET /api/coin/{iid}/indicator-values` builds whatever params its `entries` query carries with no magnitude cap, so a request for `HullMovingAverage {period: 10**9}` still stalls `data_api` for ~16 s per entry; save-time validation (`check_params`) now covers both PUTs and the technicals-values GET, but not this read path.
-  evidence: `data_api/routes/indicators.py` `get_indicator_values` runs only `_parse_entries` + `_check_sources` before `chart_series.indicator_values_page`; the fix must keep the route's per-entry `errors` contract (one bad entry must not blank the others), e.g. by calling `indicator_picker.check_params` inside the per-entry replay and reporting its `ValueError` per entry. Predates the input-validation bundle.
+### DW-284: `GET /api/coin/{iid}/indicator-values` builds request params with no magnitude cap, so `HullMovingAverage {period: 10**9}` stalls `data_api` ~16 s per entry
 
-- source_spec: `_bmad-output/implementation-artifacts/spec-chart-edge-coordinates.md`
-  summary: An FRVP whose range (placement or edge drag) ends on the forming live bar builds its profile from `candles`/`fullVolume`, which exclude that bar, and is not rebuilt once the bar closes, so the profile silently stops one bar short of its drawn range.
-  evidence: `ChartPage.tsx` `handleRangeSelect`/`handleEdgeCommit` call `buildRangeProfile(candles, fullVolume, ...)`; the refill at ~806 only rebuilds profiles that are not `filled`; the live bar was already reachable through `coordinateToTime` before DW-143/DW-150, which only made the margin drag land there more easily.
+origin: migrated from legacy ledger (flat append from spec-dw-data-api-input-validation.md), 2026-10-05
+location: platform/data_api/routes/indicators.py
+source_spec: `_bmad-output/implementation-artifacts/spec-dw-data-api-input-validation.md`
+reason: `GET /api/coin/{iid}/indicator-values` builds whatever params its `entries` query carries with no magnitude cap, so a request for `HullMovingAverage {period: 10**9}` still stalls `data_api` for ~16 s per entry; save-time validation (`check_params`) now covers both PUTs and the technicals-values GET, but not this read path. evidence: `data_api/routes/indicators.py` `get_indicator_values` runs only `_parse_entries` + `_check_sources` before `chart_series.indicator_values_page`; the fix must keep the route's per-entry `errors` contract (one bad entry must not blank the others), e.g. by calling `indicator_picker.check_params` inside the per-entry replay and reporting its `ValueError` per entry. Predates the input-validation bundle.
+status: open
 
-- source_spec: `_bmad-output/implementation-artifacts/spec-dw-capture-script-and-docs.md`
-  summary: The in-app knowledge base's "Redis channel reference" table (`platform/frontend/src/pages/docs/kbData.ts`) lists only five channels (`snapshots:raw`, `rankings:live`, `ranking:control`, `bots:status`, `bots:control`), while the module map beside it names `collector:status`, `archive:status`, `markets:live` and `collector:control`, and `archive:control` is live too, so a reader who takes the table as the channel contract misses five live channels.
-  evidence: `bot_tui/collector_pane.py`/`collector_state.py` (collector:status/control), `archive/infrastructure/redis_bus.py` + `archive/scheduler.py` (archive:status/control), `bot_tui/markets_state.py` (markets:live); the table predates this bundle, which only corrected the module-map prose.
+### DW-285: An FRVP whose range ends on the forming live bar is built without that bar and never rebuilt once it closes, so the profile stops one bar short
 
-- source_spec: `_bmad-output/implementation-artifacts/spec-32-7-remaining-tradingview-profiles-auto-anchored-anchored-vp-anchored-vwap-and-tpo.md`
-  summary: TPO overflow bar takes the colour of the last block, losing the up/down split of hidden touches.
-  evidence: VolumeProfilePrimitive drawTpo overflow path.
+origin: migrated from legacy ledger (flat append from spec-chart-edge-coordinates.md), 2026-10-05
+location: platform/frontend/src/pages/ChartPage.tsx
+source_spec: `_bmad-output/implementation-artifacts/spec-chart-edge-coordinates.md`
+reason: An FRVP whose range (placement or edge drag) ends on the forming live bar builds its profile from `candles`/`fullVolume`, which exclude that bar, and is not rebuilt once the bar closes, so the profile silently stops one bar short of its drawn range. evidence: `ChartPage.tsx` `handleRangeSelect`/`handleEdgeCommit` call `buildRangeProfile(candles, fullVolume, ...)`; the refill at ~806 only rebuilds profiles that are not `filled`; the live bar was already reachable through `coordinateToTime` before DW-143/DW-150, which only made the margin drag land there more easily.
+status: open
 
-- source_spec: `_bmad-output/implementation-artifacts/spec-32-8-volume-footprint-bars-from-the-raw-trade-archive-toggled-from-the-indicators-menu.md`
-  summary: The views' other catalog readers (`kernel.catalog_files.query_second_ohlc` and its siblings behind `candle_page`) list files and then open them, so a nightly consolidation that removes minute files after writing their day file makes a concurrent read raise an unledgered `FileNotFoundError` (a bare 500).
-  evidence: `archive/consolidate_catalog.py` writes the merged day file and then removes its sources; no reader in `views/` or `kernel/catalog_files.py` other than the new `query_trade_columns` (Story 32.8 follow-up review) catches `FileNotFoundError` or lists again.
+### DW-286: The knowledge base's "Redis channel reference" table lists five channels and misses five live ones (`collector:status`/`control`, `archive:status`/`control`, `markets:live`)
 
-- source_spec: `_bmad-output/implementation-artifacts/spec-32-8-volume-footprint-bars-from-the-raw-trade-archive-toggled-from-the-indicators-menu.md`
-  summary: `kernel.catalog_files.query_second_ohlc` and the other pre-existing catalog readers behind `candle_page` let a truncated or corrupt Parquet file's `pyarrow.ArrowInvalid`/`OSError` escape unmapped, so the chart request fails as a bare 500 that no `error_ledger.record` site counts (DATA-07).
-  evidence: Only the new `query_trade_columns` (Story 32.8 second follow-up review) maps an unreadable file to a ledgered error; `query_second_ohlc` and its siblings call `pq.read_table`/`pq.read_schema` with no handler, and `data_api/routes/candles.py` maps only `ImpossibleCandle`.
+origin: migrated from legacy ledger (flat append from spec-dw-capture-script-and-docs.md), 2026-10-05
+location: platform/frontend/src/pages/docs/kbData.ts
+source_spec: `_bmad-output/implementation-artifacts/spec-dw-capture-script-and-docs.md`
+reason: The in-app knowledge base's "Redis channel reference" table (`platform/frontend/src/pages/docs/kbData.ts`) lists only five channels (`snapshots:raw`, `rankings:live`, `ranking:control`, `bots:status`, `bots:control`), while the module map beside it names `collector:status`, `archive:status`, `markets:live` and `collector:control`, and `archive:control` is live too, so a reader who takes the table as the channel contract misses five live channels. evidence: `bot_tui/collector_pane.py`/`collector_state.py` (collector:status/control), `archive/infrastructure/redis_bus.py` + `archive/scheduler.py` (archive:status/control), `bot_tui/markets_state.py` (markets:live); the table predates this bundle, which only corrected the module-map prose.
+status: open
+
+### DW-287: TPO overflow bar takes the colour of the last block, losing the up/down split of hidden touches
+
+origin: migrated from legacy ledger (flat append from spec-32-7-remaining-tradingview-profiles-auto-anchored-anchored-vp-anchored-vwap-and-tpo.md), 2026-10-05
+location: VolumeProfilePrimitive drawTpo overflow path (platform/frontend)
+source_spec: `_bmad-output/implementation-artifacts/spec-32-7-remaining-tradingview-profiles-auto-anchored-anchored-vp-anchored-vwap-and-tpo.md`
+reason: TPO overflow bar takes the colour of the last block, losing the up/down split of hidden touches. evidence: VolumeProfilePrimitive drawTpo overflow path.
+status: open
+
+### DW-288: Catalog readers behind `candle_page` list files then open them, so a concurrent nightly consolidation makes a read raise an unledgered `FileNotFoundError` (bare 500)
+
+origin: migrated from legacy ledger (flat append from spec-32-8-volume-footprint-bars-from-the-raw-trade-archive-toggled-from-the-indicators-menu.md), 2026-10-05
+location: platform/kernel/catalog_files.py
+source_spec: `_bmad-output/implementation-artifacts/spec-32-8-volume-footprint-bars-from-the-raw-trade-archive-toggled-from-the-indicators-menu.md`
+reason: The views' other catalog readers (`kernel.catalog_files.query_second_ohlc` and its siblings behind `candle_page`) list files and then open them, so a nightly consolidation that removes minute files after writing their day file makes a concurrent read raise an unledgered `FileNotFoundError` (a bare 500). evidence: `archive/consolidate_catalog.py` writes the merged day file and then removes its sources; no reader in `views/` or `kernel/catalog_files.py` other than the new `query_trade_columns` (Story 32.8 follow-up review) catches `FileNotFoundError` or lists again.
+status: open
+
+### DW-289: Catalog readers behind `candle_page` let a corrupt Parquet file's `ArrowInvalid`/`OSError` escape unmapped as a bare 500 no `error_ledger.record` site counts (DATA-07)
+
+origin: migrated from legacy ledger (flat append from spec-32-8-volume-footprint-bars-from-the-raw-trade-archive-toggled-from-the-indicators-menu.md), 2026-10-05
+location: platform/kernel/catalog_files.py
+source_spec: `_bmad-output/implementation-artifacts/spec-32-8-volume-footprint-bars-from-the-raw-trade-archive-toggled-from-the-indicators-menu.md`
+reason: `kernel.catalog_files.query_second_ohlc` and the other pre-existing catalog readers behind `candle_page` let a truncated or corrupt Parquet file's `pyarrow.ArrowInvalid`/`OSError` escape unmapped, so the chart request fails as a bare 500 that no `error_ledger.record` site counts (DATA-07). evidence: Only the new `query_trade_columns` (Story 32.8 second follow-up review) maps an unreadable file to a ledgered error; `query_second_ohlc` and its siblings call `pq.read_table`/`pq.read_schema` with no handler, and `data_api/routes/candles.py` maps only `ImpossibleCandle`.
+status: open
