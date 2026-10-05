@@ -1447,7 +1447,7 @@ VIEWS_QUERY_SERVICES: dict[str, frozenset[str]] = {
     # The one bucket rule (Story 31.3): the chart's forming bar, per-bar replay and picker buckets
     # use the fold's own `bucket_start_ms`, so a 1W pane starts on Monday like its candles.
     "candles.domain.fold": frozenset({"bucket_start_ms"}),
-    "ranking.application.queries": frozenset({"history", "nearest"}),
+    "ranking.application.queries": frozenset({"history", "nearest", "HISTORY_MAX_DAYS"}),
 }
 # Packages views never imports (AD-D2): the interfaces and capture.
 _VIEWS_FORBIDDEN_PACKAGES = frozenset({DATA_API, BOT_TUI, CAPTURE})

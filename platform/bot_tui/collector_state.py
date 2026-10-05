@@ -33,6 +33,11 @@ from here are remembered (`record_sent_add`) until their row appears, so a row c
 refusal of a `start` naming a sent add is copied onto that add (`add_refused_reason`) the moment it
 arrives, because the aggregate holds only one refusal per venue: a second refusal, or a restarted
 collector's null, would otherwise replace the answer before the browser showed it.
+
+Every local receive or send time here is `time.monotonic()` (DW-60): each is compared only with
+another reading of this TUI's own clock, so a wall-clock step (an NTP correction) must never flip a
+row or plan stale or fresh, or an add's `pending` into `no answer`. "Never received" is an absent
+key, never a sentinel time.
 """
 
 import asyncio
@@ -114,7 +119,7 @@ def _handle_plan_message(message: dict) -> None:
         _drop_rows_not_republished(venue, _REPUBLISHED_SINCE_PLAN.get(venue, set()))
     _REPUBLISHED_SINCE_PLAN[venue] = set()
     _LATEST_PLANS[venue] = message
-    _PLAN_RECEIVED_AT[venue] = time.time()
+    _PLAN_RECEIVED_AT[venue] = time.monotonic()
     _track_refusal(venue, message.get("last_refusal"))
 
 
@@ -134,7 +139,7 @@ def _track_refusal(venue: str, refusal: object) -> None:
         return
     if _LAST_REFUSAL.get(venue) != refusal:
         _LAST_REFUSAL[venue] = refusal
-        _REFUSAL_RECEIVED_AT[venue] = time.time()
+        _REFUSAL_RECEIVED_AT[venue] = time.monotonic()
         _answer_sent_add(refusal)
 
 
@@ -153,7 +158,7 @@ def _answer_sent_add(refusal: dict) -> None:
 
 
 def latest_refusal(venue: str) -> tuple[dict, float] | None:
-    """Return `venue`'s latest refusal and when this TUI received it, or None."""
+    """Return `venue`'s latest refusal and when (monotonic) this TUI received it, or None."""
     refusal = _LAST_REFUSAL.get(venue)
     if refusal is None:
         return None
@@ -162,7 +167,7 @@ def latest_refusal(venue: str) -> tuple[dict, float] | None:
 
 def record_sent_add(instrument_id: str, now: float) -> None:
     """
-    Remember that this TUI sent an add of `instrument_id` at local time `now`, dropping the answer
+    Remember that this TUI sent an add of `instrument_id` at monotonic `now`, dropping the answer
     to an earlier add of it: called before the add is published, so any refusal arriving after
     this answers the new add.
     """
@@ -228,7 +233,7 @@ def _handle_status_message(message: dict) -> None:
         _REPUBLISHED_SINCE_PLAN.get(venue_of_row(iid), set()).discard(iid)
         return
     _LATEST_COLLECTOR_STATUS[iid] = message
-    _LATEST_RECEIVED_AT[iid] = time.time()
+    _LATEST_RECEIVED_AT[iid] = time.monotonic()
     _REPUBLISHED_SINCE_PLAN.setdefault(venue_of_row(iid), set()).add(iid)
     # The row answers the add: from here on `collector:status` alone says what the id is.
     _SENT_ADDS.pop(iid, None)
@@ -236,21 +241,22 @@ def _handle_status_message(message: dict) -> None:
 
 
 def is_stale(instrument_id: str, now: float | None = None) -> bool:
-    received_at = _LATEST_RECEIVED_AT.get(instrument_id, 0.0)
-    if received_at == 0.0:
+    """Return whether the id's row is missing or older than `_STATUS_STALE_SECONDS` (monotonic)."""
+    received_at = _LATEST_RECEIVED_AT.get(instrument_id)
+    if received_at is None:
         return True
     if now is None:
-        now = time.time()
+        now = time.monotonic()
     return (now - received_at) > _STATUS_STALE_SECONDS
 
 
 def plan_is_stale(venue: str, now: float | None = None) -> bool:
     """Return whether `venue`'s aggregate is missing or older than `_STATUS_STALE_SECONDS`."""
-    received_at = _PLAN_RECEIVED_AT.get(venue, 0.0)
-    if received_at == 0.0:
+    received_at = _PLAN_RECEIVED_AT.get(venue)
+    if received_at is None:
         return True
     if now is None:
-        now = time.time()
+        now = time.monotonic()
     return (now - received_at) > _STATUS_STALE_SECONDS
 
 

@@ -4,7 +4,8 @@ import type { ISeriesPrimitive, Time } from "lightweight-charts";
 
 /** A recording stand-in for a canvas 2D context: jsdom has none, and what matters is what was drawn. */
 export function fakeContext() {
-  const texts: { text: string; x: number; y: number }[] = [];
+  const texts: { text: string; x: number; y: number; style: unknown }[] = [];
+  const rects: { x: number; y: number; w: number; h: number; style: unknown; lineWidth: number }[] = [];
   const fills: { x: number; y: number; w: number; h: number; alpha: number; style: unknown }[] = [];
   const strokes: { from: [number, number]; to: [number, number]; style: unknown }[] = [];
   let path: [number, number][] = [];
@@ -29,10 +30,13 @@ export function fakeContext() {
     setLineDash: vi.fn(),
     fillRect: (x: number, y: number, w: number, h: number) =>
       fills.push({ x, y, w, h, alpha: context.globalAlpha, style: context.fillStyle }),
-    strokeRect: vi.fn(),
-    fillText: (text: string, x: number, y: number) => texts.push({ text, x, y }),
+    strokeRect: (x: number, y: number, w: number, h: number) =>
+      rects.push({ x, y, w, h, style: context.strokeStyle, lineWidth: context.lineWidth }),
+    fillText: (text: string, x: number, y: number) => texts.push({ text, x, y, style: context.fillStyle }),
+    // A fixed 6 px per character: enough to tell a text that fits its box from one that does not.
+    measureText: (text: string) => ({ width: text.length * 6 }),
   };
-  return { context, texts, fills, strokes };
+  return { context, texts, fills, strokes, rects };
 }
 
 /** Run the primitive's renderer into a fake pane `width` bitmap pixels wide (1:1 pixel ratio). */

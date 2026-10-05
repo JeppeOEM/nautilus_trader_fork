@@ -103,11 +103,15 @@ class SnapshotStrategy(Strategy):
 
         # The one OFI gap rule (Story 31.3): past `OFI_GAP_NS` the previous book is stale, so it
         # is cleared rather than diffed against (this strategy had no gap rule before).
-        if self._last_ts is not None and data.ts_event - self._last_ts > OFI_GAP_NS:
+        after_gap = self._last_ts is not None and data.ts_event - self._last_ts > OFI_GAP_NS
+        if after_gap:
             self._ofi.clear_prev_state()
         self._last_ts = data.ts_event
         self._ofi.update_raw(data.bid_prices, data.bid_sizes, data.ask_prices, data.ask_sizes)
-        if not self._ofi.initialized:
+        # The post-gap row only re-baselines MultiLevelOFI and leaves `value` at the pre-gap
+        # reading, so it is not evaluated (as `OFIStrategy.on_data` and
+        # `microstructure.ofi_readings` skip it); every decision here reads OFI.
+        if after_gap or not self._ofi.initialized:
             return
 
         is_flat = self.portfolio.is_flat(self.config.instrument_id)

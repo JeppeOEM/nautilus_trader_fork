@@ -51,6 +51,7 @@ _HISTORY_STALE_SECONDS: float = 90.0
 
 _TRACKED_BOT_ID: str | None = None
 _LATEST_HISTORY: dict[str, dict] = {}
+# range -> this TUI's `time.monotonic()` at receipt (DW-60), absent until first fetched.
 _LATEST_RECEIVED_AT: dict[str, float] = {}
 
 
@@ -88,16 +89,19 @@ def _handle_history_payload(bot_id: str, range_name: str, payload: dict) -> None
         logger.warning("bots:history payload missing trades/pnl_series, ignoring: %r", payload)
         return
     _LATEST_HISTORY[range_name] = payload
-    _LATEST_RECEIVED_AT[range_name] = time.time()
+    _LATEST_RECEIVED_AT[range_name] = time.monotonic()
 
 
 def is_stale(range_name: str, now: float | None = None) -> bool:
-    """Whether range_name's last-received history should count as stale/unfetched."""
-    received_at = _LATEST_RECEIVED_AT.get(range_name, 0.0)
-    if received_at == 0.0:
+    """
+    Whether range_name's last-received history should count as stale/unfetched. `now` is a
+    `time.monotonic()` reading, the clock the receipt was stamped with.
+    """
+    received_at = _LATEST_RECEIVED_AT.get(range_name)
+    if received_at is None:
         return True
     if now is None:
-        now = time.time()
+        now = time.monotonic()
     return (now - received_at) > _HISTORY_STALE_SECONDS
 
 

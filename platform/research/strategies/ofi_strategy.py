@@ -132,7 +132,8 @@ class OFIStrategy(Strategy):
         # A hole in the 1s feed (collector restart / WS resubscribe) makes the next OFI delta
         # compare against a stale book: clear it first, at the one platform-wide threshold
         # (`kernel.indicators.OFI_GAP_NS`, 3 s since Story 31.3 -- this strategy used 5 s).
-        if self._last_ts is not None and ts - self._last_ts > OFI_GAP_NS:
+        after_gap = self._last_ts is not None and ts - self._last_ts > OFI_GAP_NS
+        if after_gap:
             self._ofi.clear_prev_state()
         self._last_ts = ts
         self._first_ts = self._first_ts or ts
@@ -141,10 +142,21 @@ class OFIStrategy(Strategy):
         self._track_cum_delta(ts, data.buy_volume - data.sell_volume)
         self._track_trend(ts, (data.bid_prices[0] + data.ask_prices[0]) / 2)
 
+        # The post-gap row only re-baselines MultiLevelOFI and leaves its value at the pre-gap
+        # reading, so no OFI-driven decision (entry, zero-cross exit) is taken on it, as
+        # `microstructure.ofi_readings` skips it; the trend-flip exit does not read OFI and
+        # `_track_trend` is current, so it still fires there. `_prev_ofi` deliberately stays the
+        # last real pre-gap reading (assigning the unchanged value is a no-op): the first
+        # post-gap reading's zero-cross is judged against it, consistent with MultiLevelOFI
+        # keeping its window and z-score history across the gap.
         ofi = self._ofi.value
-        if self._ofi.initialized and ts - self._first_ts >= self.config.warmup_seconds * _NS_PER_S:
-            self._evaluate(ofi, data)
+        if self._ofi.initialized and self._warmed_up(ts):
+            self._evaluate(ofi, data, fresh_ofi=not after_gap)
         self._prev_ofi = ofi
+
+    def _warmed_up(self, ts: int) -> bool:
+        assert self._first_ts is not None
+        return ts - self._first_ts >= self.config.warmup_seconds * _NS_PER_S
 
     # ------------------------------------------------------------------
     # State
@@ -190,23 +202,32 @@ class OFIStrategy(Strategy):
         # Blocks counter-trend entries; None (EMAs not warm yet) does not block.
         return self._trend_bull is None or self._trend_bull == buy
 
-    def _evaluate(self, ofi: float, data: DydxSecondSnapshot) -> None:
+    def _evaluate(self, ofi: float, data: DydxSecondSnapshot, fresh_ofi: bool) -> None:
+        """`fresh_ofi` is False on a post-gap baseline row, where `ofi` is the stale reading."""
         iid = self.config.instrument_id
-        t = self.config.ofi_threshold
         if self.portfolio.is_flat(iid):
-            if ofi > t and self._filters_pass(OrderSide.BUY, data):
-                self._submit(OrderSide.BUY)
-            elif ofi < -t and self._filters_pass(OrderSide.SELL, data):
-                self._submit(OrderSide.SELL)
+            if fresh_ofi:
+                self._enter(ofi, data)
             return
 
         long = self.portfolio.is_net_long(iid)
         trend_flipped = self._trend_bull is not None and self._trend_bull != long
-        zero_cross = self.config.exit_on_zero and (
-            (long and ofi <= 0.0 < self._prev_ofi) or (not long and ofi >= 0.0 > self._prev_ofi)
+        zero_cross = (
+            fresh_ofi
+            and self.config.exit_on_zero
+            and (
+                (long and ofi <= 0.0 < self._prev_ofi) or (not long and ofi >= 0.0 > self._prev_ofi)
+            )
         )
         if trend_flipped or zero_cross:
             self._submit(OrderSide.SELL if long else OrderSide.BUY)
+
+    def _enter(self, ofi: float, data: DydxSecondSnapshot) -> None:
+        t = self.config.ofi_threshold
+        if ofi > t and self._filters_pass(OrderSide.BUY, data):
+            self._submit(OrderSide.BUY)
+        elif ofi < -t and self._filters_pass(OrderSide.SELL, data):
+            self._submit(OrderSide.SELL)
 
     def _submit(self, side: OrderSide) -> None:
         assert self.instrument is not None

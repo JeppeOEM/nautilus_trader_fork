@@ -306,12 +306,10 @@ def ofi_readings(seconds: pd.DataFrame, config: OFIStrategyConfig) -> pd.DataFra
     rows with `ofi` (the raw windowed OFI) and `ofi_z` (`RollingZScore` over the config's
     `ofi_zscore_window`, the formula `MultiLevelOFI(zscore_window=...)` delegates to, so it equals
     the strategy's own value). A row that only sets the baseline (the first, or the first after
-    a gap) or has an empty side produced no reading: NaN, never the last value.
-
-    Known limit (the strategy's, shown not copied): on the baseline row after a gap
-    `MultiLevelOFI.update_raw` returns without a new reading, yet `OFIStrategy.on_data` still
-    evaluates its carried pre-gap `value` there -- that row is NaN here, not the stale value the
-    strategy acts on; upgrade path: the strategy skips evaluation on a baseline row (deferred).
+    a gap) or has an empty side produced no reading: NaN, never the last value. `OFIStrategy`
+    (and `SnapshotStrategy`) likewise take no OFI-driven decision on the baseline row after a
+    gap, where `MultiLevelOFI.update_raw` makes no new reading and `value` still holds the
+    pre-gap one; only `OFIStrategy`'s trend-flip exit, which does not read OFI, may fire there.
     """
     ofi = MultiLevelOFI(levels=config.ofi_levels, window=config.ofi_window, usd_notional=True)
     zscore = RollingZScore(config.ofi_zscore_window)

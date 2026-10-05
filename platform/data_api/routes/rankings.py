@@ -36,7 +36,9 @@ import json
 import logging
 import time
 import tomllib
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 from typing import Literal
 
 import redis.asyncio as aioredis
@@ -196,17 +198,28 @@ def get_technicals_columns() -> list[TechnicalsColumn]:
     return [TechnicalsColumn(**vars(e)) for e in entries]
 
 
-def _require_known_indicators(names: list[str]) -> None:
-    """A saved name the catalogs don't know would make every later values poll fail."""
+def _require_valid_indicators(entries: Sequence[tuple[str, Any]]) -> None:
+    """
+    Refuse (400) a name the catalogs don't know or params its replay refuses: saved, either would
+    make every later values poll fail (`indicators.check_entry_params`, the picker's one rule).
+    """
     known = indicator_picker.merged_catalog()
-    unknown = [n for n in names if n not in known]
+    unknown = [name for name, _ in entries if name not in known]
     if unknown:
         raise HTTPException(status_code=400, detail=f"unknown indicator(s): {unknown}")
+    for name, params in entries:
+        _indicators.check_entry_params(name, params)
 
 
-@router.put("/api/rankings/technicals-columns")
+@router.put(
+    "/api/rankings/technicals-columns",
+    openapi_extra=_indicators.json_array_body("TechnicalsColumn"),
+)
 async def put_technicals_columns(request: Request) -> dict[str, bool]:
-    """Persist the FULL screener-wide column list (add/remove/reorder/param change)."""
+    """
+    Persist the FULL screener-wide column list (add/remove/reorder/param change). The body is a
+    JSON array of `TechnicalsColumn`, read raw so a malformed one is a 400, never a 422.
+    """
     try:
         payload = await request.json()
         entries = [
@@ -233,7 +246,7 @@ async def put_technicals_columns(request: Request) -> dict[str, bool]:
         raise HTTPException(
             status_code=400, detail=f"bar_seconds must be one of {_TECHNICALS_BAR_SIZES}"
         )
-    _require_known_indicators([e.name for e in entries])
+    _require_valid_indicators([(e.name, e.params) for e in entries])
     try:
         preferences.save_screener_columns(entries, Path(SCREENER_COLUMNS_CONFIG_PATH))
     except OSError as exc:
@@ -269,7 +282,7 @@ def get_technicals_values(entries: str) -> TechnicalsValuesResponse:
         raise HTTPException(
             status_code=400, detail=f"bar_seconds must be one of {_TECHNICALS_BAR_SIZES}"
         )
-    _require_known_indicators([e.name for e in parsed])
+    _require_valid_indicators([(e.name, e.params) for e in parsed])
     latest = buses.bus.latest
     if latest is None:
         raise HTTPException(status_code=503, detail="Rankings not yet available")

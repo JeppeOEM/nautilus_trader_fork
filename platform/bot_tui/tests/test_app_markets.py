@@ -293,7 +293,7 @@ def test_a_row_whose_subscribe_failed_says_it_is_retrying() -> None:
 def test_an_add_nothing_answers_reads_no_answer_and_may_be_sent_again() -> None:
     _publish_markets("BYBIT", _BYBIT)
     _status(_aggregate())
-    collector_state.record_sent_add(_SOL, time.time() - ADD_ANSWER_TIMEOUT_SECONDS - 1)
+    collector_state.record_sent_add(_SOL, time.monotonic() - ADD_ANSWER_TIMEOUT_SECONDS - 1)
     app = _browser("sol")
     _focus(app, _SOL)
     assert _row_line(app, _SOL).endswith(" no answer from BYBIT collector")
@@ -420,11 +420,11 @@ def test_an_unchanged_refresh_keeps_every_row_widget() -> None:
 
 
 def test_a_stale_venue_is_marked_and_an_expired_one_dropped() -> None:
-    _publish_markets("BYBIT", _BYBIT, received_at=time.time() - 200)
+    _publish_markets("BYBIT", _BYBIT, received_at=time.monotonic() - 200)
     app = _browser("sol")
     assert _row_line(app, _SOL).startswith("~ ")
 
-    _publish_markets("BYBIT", _BYBIT, received_at=time.time() - 1000)
+    _publish_markets("BYBIT", _BYBIT, received_at=time.monotonic() - 1000)
     app._refresh_markets_body()
 
     assert app._markets_body.original_widget.text == COLD_OPEN_TEXT
@@ -483,3 +483,22 @@ def test_an_add_still_in_flight_counts_toward_dydx_s_cap(monkeypatch: pytest.Mon
 
     assert app._footer_hint.text == "cannot add NEXT-USD-PERP.DYDX: cap reached (30)"
     assert len(published) == 1
+
+
+def test_a_wall_clock_jump_never_turns_a_pending_add_into_no_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DW-60: the add's send time and the browser's `now` are both monotonic."""
+    _fake_redis(monkeypatch)
+    _publish_markets("BYBIT", _BYBIT)
+    _status(_aggregate())
+    app = _browser("sol")
+    _focus(app, _SOL)
+    app._unhandled_input("a")
+    _confirm_add(app)
+    wall = time.time()
+    monkeypatch.setattr(time, "time", lambda: wall + 3600.0)
+
+    app._refresh_markets_body()
+
+    assert _row_line(app, _SOL).endswith(" pending")

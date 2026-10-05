@@ -210,7 +210,9 @@ resolution: already resolved: platform/bots/infrastructure/config.py:52-59 _reje
 origin: migrated from legacy ledger ("Deferred from: code review of 3-2-dummy-strategy-consumes-every-produced-signal-and-runs-live-in-paper-mode (2026-07-17)"), 2026-10-05
 location: troll/live_paper/strategy.py
 reason: **`DummyStrategy._maybe_trade()`'s signal-cadence mismatch: `on_timer` re-evaluates every 1s once `mlofi` initializes, but `trend.value` only updates once per bar close** (once per minute with the default `bar_spec`). Between bar closes, up to ~60 timer ticks re-evaluate a fresh `mlofi.value` against the same minute-old `trend.value` — the strategy can flip entries/exits based on OFI noise crossing `ofi_confirm_threshold` while the trend reading itself hasn't moved. The new `orders_inflight()` guard (this story's review round) prevents this from ever producing *duplicate simultaneous* orders, but doesn't change the underlying re-evaluation-frequency mismatch. Resolving this properly (e.g. holding the trend gate fixed between bar closes rather than re-checking it on every timer tick, or debouncing entries within a bar) is a real design decision beyond this story's "prove the wiring, not the trade quality" scope. Not fixed here. `troll/live_paper/strategy.py`.
-status: open
+status: done 2026-10-05
+resolution: closed by human decision: Accepted: DummyStrategy only proves wiring; real strategies live in research/strategies
+decision: 2026-10-05 Accept as is: DummyStrategy is a wiring-proof scaffold — Accepted: DummyStrategy only proves wiring; real strategies live in research/strategies
 
 ### DW-30: Neither `load_paper_config` nor `load_real_money_config` rejects unknown/typo'd TOML keys
 
@@ -255,7 +257,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of 1-3-expose-the-live-watchlist-as-a-queryable-backtest-consumable-coin-set (2026-07-15)"), 2026-10-05
 location: troll/ml_signals/watchlist.py:36-38
 reason: `fetch_watchlist` (`troll/ml_signals/watchlist.py:36-38`) has no error handling around `urlopen`/`json.load` — a strategy script calling it while the dashboard is down gets a raw `URLError`/`JSONDecodeError` rather than a clear diagnostic. Mirrors `_fetch_volume_24h_json`'s identical shape, but that helper's only caller (`_volume_loop_task`) wraps it in `try/except Exception`; `fetch_watchlist` is a new external-facing entry point with no equivalent safety net elsewhere. Worth a small hardening pass alongside other deferred staleness/error-signaling items.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-research-test-and-path-fixes
+resolution-undo: 89c508f4086e6130fe63c3b8c7df6e501f431e414611a6838c2e01ff0641c80a 2026-10-05 7374617475733a206f70656e
 
 ### DW-36: `_is_fresh` (`troll/ml_signals/dashboard.py:151-154`) treats a `_LIVE_FAST` entry with a future timestamp as fresh indefinitely — if the system clock ever …
 
@@ -276,7 +280,9 @@ status: open
 origin: migrated from legacy ledger ("Flagged during: Epic 1 retrospective (2026-07-16)"), 2026-10-05
 location: logger.warning
 reason: **Collector resync/sync-issue log volume uncharacterized.** The collector has only been verified in the Docker test environment, never run against sustained live dYdX traffic. User reports logs "spammed" with sync issues from a past run, but the exact channel (routine `logger.warning` "Resyncing desynced order book" / `housekeeping_logger` known-cause sequence gaps from Story 1.6 / `critical_logger.critical` crossed-book escalation from Story 1.7) and root cause (flaky connection vs. a false-positive resync loop) are both unconfirmed — no log evidence was available to inspect during this retrospective (no container running, no persisted log files found locally). Does not block Epic 2 (no Epic 2 AC depends on resolving it — 2.1/2.2 are code-structure stories, 2.3/2.4 are backtest-mechanics stories, neither depends on the underlying data being desync-free), but it does affect whether any *research conclusion* Epic 2 eventually produces from captured data can be trusted. Recommended next step whenever picked up: run the collector against live traffic for a sustained period and read the actual `dydx_collector.critical`/`dydx_collector.housekeeping`/default logger output to characterize frequency and root cause before treating catalog data as ground truth for real trading decisions.
-status: open
+status: done 2026-10-05
+resolution: closed by human decision: Superseded by Story 5.1 permanent incident reports and the capture/ rewrite; reopen with fresh log evidence if spam recurs
+decision: 2026-10-05 Close as superseded by capture-context rewrite and incident-report ledger — Superseded by Story 5.1 permanent incident reports and the capture/ rewrite; reopen with fresh log evidence if spam recurs
 
 ### DW-39: `BacktestEngine` construction across test-file boundaries causes a fatal native abort, root cause not identified.
 
@@ -323,7 +329,9 @@ resolution: already resolved: platform/Makefile:193 test target passes -e HOME=/
 origin: migrated from legacy ledger ("Flagged during: code review of 2-4-multi-coin-backtest-runs-across-the-live-watchlist (2026-07-16)"), 2026-10-05
 location: troll/ml_signals/backtest_dydx.py
 reason: **`backtest_dydx.run()` only surfaces skipped Watchlist symbols via a log warning, not via the return value itself.** A symbol with no matching catalog instrument (or any other per-symbol `BacktestRunConfig` construction failure) is skipped and logged at the aggregate level, but the returned `dict[str, BacktestResult]` gives a caller no programmatic way to detect "some requested symbols were silently dropped" without diffing their input `symbols` list against the returned dict's keys themselves. Expanding the return type (e.g. to also return a `skipped: list[str]`, or a small result object instead of a bare dict) would close this, but changing `run()`'s return contract again is a real API design decision beyond what Story 2.4's ACs asked for (the ACs require distinguishable per-coin results, not a skip-reporting contract) — not fixed here. Revisit if/when a caller (dashboard, notebook, a future scheduled multi-coin sweep) actually needs to alert on partial coverage rather than just log it. `troll/ml_signals/backtest_dydx.py`.
-status: open
+status: done 2026-10-05
+resolution: closed by human decision: Accepted: skipped symbols are logged in one aggregate warning; callers can diff keys; revisit if a caller needs alerting
+decision: 2026-10-05 Accept log-only reporting — Accepted: skipped symbols are logged in one aggregate warning; callers can diff keys; revisit if a caller needs alerting
 
 ### DW-45: Second addendum: the crash is broader still — it also occurs with a `BacktestNode` (not just a raw `BacktestEngine`) and with ZERO custom Data types involved …
 
@@ -381,7 +389,9 @@ resolution: already resolved: platform/research/tests/conftest.py:_keep_nautilus
 origin: migrated from legacy ledger ("Resolved: root cause of the BacktestEngine/BacktestNode native abort (2026-07-17)"), 2026-10-05
 location: test_snapshot_strategy.py
 reason: The existing per-file "one `BacktestEngine` construction per file" / filename-ordering mitigations (Story 2.2/2.3 test files) are now redundant safety margin, not load-bearing — left in place since removing them (e.g. restoring `test_snapshot_strategy.py`'s dropped negative-case test) is separate test-coverage work, not part of this fix.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-research-test-and-path-fixes
+resolution-undo: 89c508f4086e6130fe63c3b8c7df6e501f431e414611a6838c2e01ff0641c80a 2026-10-05 7374617475733a206f70656e
 
 ### DW-53: `metrics_store.latest()/history()/nearest()` lack the `_lock` guard `write()` has.
 
@@ -426,7 +436,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of 4-1-scaffold-the-tui-shell-and-live-coins-pane (2026-07-28)"), 2026-10-05
 location: troll/bot_tui/app.py:run
 reason: **`BotTuiApp.run()`'s `finally` block cancels the listener/redraw asyncio tasks but never awaits their cancellation** (no `loop.run_until_complete(...)` after `MainLoop.run()` returns), so the aioredis connection isn't given a chance to close cleanly on `:q`. Likely to emit a harmless "Task was destroyed but it is pending!" warning at shutdown. Cosmetic only — the process exits immediately afterward. `troll/bot_tui/app.py:run`.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-bot-tui-robustness
+resolution-undo: ddee5d273c5815dadfe57f0176738c0b9a9a64ff679763c9b494d5992cf1f027 2026-10-05 7374617475733a206f70656e
 
 ### DW-59: The working tree already contained substantial uncommitted deployment wiring for Story 1.8
 
@@ -440,7 +452,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of 4-2-coins-pane-interaction-and-attention-only-visual-polish (2026-07-28)"), 2026-10-05
 location: ml_signals/dashboard.py
 reason: **Staleness detection (`is_stale`, `_LATEST_RANKING_RECEIVED_AT`) is built on wall-clock `time.time()`, not `time.monotonic()`** -- vulnerable to NTP adjustments/manual clock changes causing false stale/fresh flips, and if the clock ever moves backward, `is_stale` can under-report staleness entirely (negative `now - received_at` never exceeds the threshold). Mirrors `ml_signals/dashboard.py`'s own already-shipped, already-accepted identical pattern this story was explicitly instructed to reuse verbatim -- not a new risk, and a near-identical clock-skew item is already deferred against `dashboard.py`'s own `_is_fresh` (Story 1.3's review). `troll/bot_tui/ranking_state.py`.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-bot-tui-robustness
+resolution-undo: ddee5d273c5815dadfe57f0176738c0b9a9a64ff679763c9b494d5992cf1f027 2026-10-05 7374617475733a206f70656e
 
 ### DW-61: Nothing in the Coins pane displays which Ranking Mode is currently active.
 
@@ -482,14 +496,18 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of 4-3-coin-detail-drill-down-with-collapsible-order-book-depth.md (2026-07-29)"), 2026-10-05
 location: try/except Exception
 reason: **`_open_dashboard_chart`'s `webbrowser.open()` call isn't guarded against stdout/stderr bleed-through from a failed headless launch corrupting the urwid full-screen display.** This product's own `main()` already redirects Python logging to a file specifically to avoid stray output corrupting the screen (`logging.basicConfig(..., filename=_LOG_PATH)`), but a subprocess-based browser backend (e.g. `xdg-open` under the documented headless Docker/SSH deployment shape) can still write directly to the terminal on failure -- the `try/except Exception` around the call only catches Python-level exceptions, not subprocess fd bleed-through. Self-healing within one redraw tick (~0.5s) since the periodic redraw loop repaints the full screen; not a crash. `troll/bot_tui/app.py:448-461`.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-bot-tui-robustness
+resolution-undo: ddee5d273c5815dadfe57f0176738c0b9a9a64ff679763c9b494d5992cf1f027 2026-10-05 7374617475733a206f70656e
 
 ### DW-67: `webbrowser.open()` runs synchronously on the single asyncio event-loop thread
 
 origin: migrated from legacy ledger ("Deferred from: code review of 4-3-coin-detail-drill-down-with-collapsible-order-book-depth.md (2026-07-29)"), 2026-10-05
 location: troll/bot_tui/app.py:458
 reason: **`webbrowser.open()` runs synchronously on the single asyncio event-loop thread**, with no offload to an executor -- could briefly block Redis ingestion and the redraw loop for the duration of the subprocess launch. Low risk: this is a rare, human-triggered action (pressing `o` once per Coin-detail visit), not a hot path. `troll/bot_tui/app.py:458`.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-bot-tui-robustness
+resolution-undo: ddee5d273c5815dadfe57f0176738c0b9a9a64ff679763c9b494d5992cf1f027 2026-10-05 7374617475733a206f70656e
 
 ### DW-68: The `d` keypress handler (and `_open_coin_detail`) call `_build_coin_detail_body()` with no try/except, unlike the redraw loop's identical call, which is …
 
@@ -540,7 +558,9 @@ resolution: already resolved: platform/bot_tui/app.py:480-492,1556 persistent _b
 origin: migrated from legacy ledger ("Deferred from: code review of 4-4-bots-pane-with-start-stop-control.md (2026-09-01)"), 2026-10-05
 location: troll/bot_tui/app.py:_toggle_bot
 reason: **`_toggle_bot`'s start/stop direction is decided from `bots_state`'s last-known `running` field, which can be stale** (up to `_BOT_STALE_SECONDS` = 15s old, or older if the bot has crashed and stopped heartbeating entirely -- `_LATEST_STATUSES` never expires an entry, it just ages toward the stale badge). Pressing `s` against a crashed bot's lingering "running: true" sends a "stop" into the void; harmless (published to a channel no live process is consuming) but not actually correct feedback. No optimistic local-state fix is possible without violating AC3's "no optimistic local state change" -- the honest fix would be disabling/relabeling `s` once a row's stale badge is active, not attempted here. `troll/bot_tui/app.py:_toggle_bot`.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-bot-tui-robustness
+resolution-undo: ddee5d273c5815dadfe57f0176738c0b9a9a64ff679763c9b494d5992cf1f027 2026-10-05 7374617475733a206f70656e
 
 ### DW-75: `bot_status.run()`'s reconnect loop can leak an orphaned `_control_loop` task on a partial failure.
 
@@ -570,13 +590,16 @@ origin: migrated from legacy ledger ("Deferred from: code review of 4-4-bots-pan
 location: config.toml
 reason: **`bot_id` uniqueness between a bot's paper and live-mode configs is unenforced** -- restating the architecture's own already-flagged operator-discipline gap (epic-4-context.md's Technical Decisions) now that Story 4.4 is the first story to actually wire `bot_id` into a live, addressable Redis identity. A cloned config that keeps the same `bot_id` across `config.toml`/a real-money config would silently merge that bot's status/control history across paper and real-money trading. No automated check exists. `troll/live_paper/config.py`.
 status: open
+decision: 2026-10-05 Detect collision at startup via Redis bots:status presence from another config/mode — Refuse to start (or warn loudly) when a live bot_id is already heartbeating from a different mode/config
 
 ### DW-79: `usePickerIndicatorValues`'s `resetAndLoad` wipes and re-fetches history for every configured picker indicator whenever any one indicator is …
 
 origin: migrated from legacy ledger ("Deferred from: code review of 15-6-per-coin-indicator-configuration (2026-09-16)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-15-6-per-coin-indicator-configuration.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-15-6-per-coin-indicator-configuration.md` summary: `usePickerIndicatorValues`'s `resetAndLoad` wipes and re-fetches history for every configured picker indicator whenever any one indicator is added/removed/param-applied, not just the one that changed -- a user who scrolled back through days of history for indicator A loses that scroll-back the moment they add unrelated indicator B. evidence: `troll/frontend/src/hooks/usePickerIndicatorValues.ts`'s `resetAndLoad` unconditionally clears `itemsRef`/`seriesByKey` for the whole hook (not per-key) and re-anchors every series to the current view on any `entries` change; the hook's own docstring documents this as deliberate ("each picker change is a materially different request... no unbounded/stitched-across-requests state"). Fixing this properly means per-indicator incremental fetch/merge rather than whole-hook reset -- a real architecture change, not a trivial patch.
-status: open
+status: done 2026-10-05
+resolution: closed by human decision: Accepted: deliberate design, request is cheap and re-anchors to view
+decision: 2026-10-05 Accept whole-hook reset — Accepted: deliberate design, request is cheap and re-anchors to view
 
 ### DW-80: One bad/stale persisted indicator entry (e.g. referencing a renamed/removed catalog indicator) fails the entire `GET /api/coin/{iid}/indicator-values` request …
 
@@ -599,7 +622,9 @@ resolution: already resolved: platform/data_api/routes/indicators.py:359 passes 
 origin: migrated from legacy ledger ("Deferred from: code review of 15-6-per-coin-indicator-configuration (2026-09-16)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-15-6-per-coin-indicator-configuration.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-15-6-per-coin-indicator-configuration.md` summary: A slow-warm-up native indicator (e.g. default-period SMA/EMA) spends a large fraction of a freshly-added picker pane's small initial page as `None`, since `chart_indicators.replay_indicator` restarts from cold state on every page fetch -- pre-existing behavior, but now directly user-exposed since the picker gives users free choice of arbitrary indicator/period combinations. evidence: Same per-page-reset replay behavior already present in `candles.py`/`indicator_series.py` (AD-F2/SSOT-01: no new indicator math added by this story). Not fixable within this story's scope without either persisting indicator state across pages or widening the query window, both out of proportion to a config-persistence story.
-status: open
+status: done 2026-10-05
+resolution: closed by human decision: Accepted: cold-start Nones are the honest warm-up gap, shown not fabricated
+decision: 2026-10-05 Accept; None is honest warm-up gap — Accepted: cold-start Nones are the honest warm-up gap, shown not fabricated
 
 ### DW-83: `PUT /api/coin/{iid}/indicators`' read-modify-write (`load_config` -> mutate -> `save_config`, a full-TOML-rewrite) has no locking -- two concurrent `PUT`s …
 
@@ -622,7 +647,9 @@ resolution: already resolved: platform/views/chart_series.py:937 candle_page der
 origin: migrated from legacy ledger ("Deferred from: code review of 4-5-bot-detail-live-snapshot-view.md (2026-09-01)"), 2026-10-05
 location: bots_pane.py
 reason: **`_build_bot_detail_body()`'s PnL coloring locates the PnL segment via `str.index()` substring search rather than a structured return from `bots_pane.bot_detail_lines()`.** Works correctly today because `format_pnl`'s output is deterministically embedded as the first thing after `"pnl "` in line 2 and can't coincidentally appear earlier in that same string, but it's a more fragile coupling between `bots_pane.py`'s text layout and `app.py`'s coloring logic than the ladder's own bid/ask `urwid.Columns` pairing (Story 4.3) or the Bots-pane row's own `_build_bot_row_widget` (Story 4.4, which builds its markup list directly rather than searching rendered text for a segment). A cleaner fix would have `bot_detail_lines` return the PnL line as `(prefix, pnl_text, suffix)` or similar instead of one fused string -- not attempted here since it would touch `bot_detail_lines`'s already-tested return shape for a purely cosmetic-robustness win. `troll/bot_tui/app.py:_build_bot_detail_body`.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-bot-tui-robustness
+resolution-undo: ddee5d273c5815dadfe57f0176738c0b9a9a64ff679763c9b494d5992cf1f027 2026-10-05 7374617475733a206f70656e
 
 ### DW-86: Bot-detail's own `s`-triggered `_toggle_bot()` call is not exercised by an automated test that reaches `asyncio.ensure_future(...)`
 
@@ -671,7 +698,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of spec-4-7-bot-detail-trades-blotter-and-pnl-over-time-chart.md (2026-09-02)"), 2026-10-05
 location: http://.../bot/None
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-4-7-bot-detail-trades-blotter-and-pnl-over-time-chart.md` summary: `_open_dashboard_bot`'s `assert self._bot_detail_bot_id is not None` is unreachable by construction today but would build a silently-wrong `http://.../bot/None` URL instead of failing loudly if that invariant were ever violated, since asserts are stripped under `python -O`; this mirrors the pre-existing, already-shipped `_open_dashboard_chart`'s identical pattern rather than introducing a new one, per this story's own spec instruction to mirror it exactly. evidence: `troll/bot_tui/app.py` -- both `_open_dashboard_chart` (Story 4.2/4.3) and the new `_open_dashboard_bot` (Story 4.7) use the same `assert ... is not None` shape ahead of URL construction; neither is guarded by an explicit `if`/`raise`. A single shared fix (or at least a joint decision to accept the risk) would be cleaner than fixing one call site and not the other.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-bot-tui-robustness
+resolution-undo: ddee5d273c5815dadfe57f0176738c0b9a9a64ff679763c9b494d5992cf1f027 2026-10-05 7374617475733a206f70656e
 
 ### DW-93: Pressing `o` in Bot-detail opens a `/bot/{bot_id}` dashboard URL that 404s today -- the web dashboard has no per-bot route, and the TUI gives no in-app signal …
 
@@ -679,6 +708,7 @@ origin: migrated from legacy ledger ("Deferred from: code review of spec-4-7-bot
 location: _bmad-output/implementation-artifacts/spec-4-7-bot-detail-trades-blotter-and-pnl-over-time-chart.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-4-7-bot-detail-trades-blotter-and-pnl-over-time-chart.md` summary: Pressing `o` in Bot-detail opens a `/bot/{bot_id}` dashboard URL that 404s today -- the web dashboard has no per-bot route, and the TUI gives no in-app signal that this is a dead link before the operator's browser opens it. evidence: `troll/bot_tui/bots_pane.py:dashboard_bot_url`'s own docstring discloses the missing route; `troll/ml_signals/dashboard.py`'s route list has no bot-shaped endpoint (confirmed by inspection during this story's planning). Building the dashboard-side page is explicitly out of this story's scope (cross-module, TUI-only story) -- same accepted-gap shape as the pre-existing Coin-detail `o` key, but worth a future story once the web dashboard grows a bot view.
 status: open
+decision: 2026-10-05 Remove the `o` key from Bot-detail — Remove dashboard_bot_url and the o binding until a web bot view exists
 
 ### DW-94: Bot-detail's three stacked regions (snapshot + trades blotter + PnL sparkline) sit inside a plain `urwid.Filler(valign="top")` with a fixed-height blotter …
 
@@ -723,35 +753,45 @@ resolution: already resolved: platform/ranking/infrastructure/metrics_store.py r
 origin: migrated from legacy ledger ("Deferred from: code review of spec-12-1-read-only-data-api-fastapi-service.md (2026-09-12)"), 2026-10-05
 location: /catalog/chart-series/{symbol}
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-12-1-read-only-data-api-fastapi-service.md` summary: `/catalog/chart-series/{symbol}` and `/catalog/snapshots/{iid}` accept caller-supplied `start_ns`/`end_ns` with no maximum window enforced, so a client can request an unbounded time range in one call -- the exact anti-pattern troll/CLAUDE.md MEM-01 warns against ("never load full catalog slices into memory... always use time-bounded queries"). evidence: `troll/data_api/app.py:catalog_chart_series`/`catalog_snapshots` pass `start_ns`/`end_ns` straight through to `ml_signals.chart_data.compute_chart_series()`/`ml_signals.catalog_stats.query_second_snapshots()` with no range-width check; this characteristic pre-exists in the wrapped functions themselves (this story calls them verbatim per NAUT-02) but is now reachable over the network for the first time. Surfaced by both Blind Hunter and Edge Case Hunter review of this story's diff.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-data-api-legacy-routes
+resolution-undo: 0494e1d5631fbe7841cf0d7cfefba53aa18067a35474cd982d05d4012b815cd0 2026-10-05 7374617475733a206f70656e
 
 ### DW-100: No route in `data_api/app.py` catches exceptions from the underlying catalog/metrics reads (e.g. Arrow schema/precision conflicts that …
 
 origin: migrated from legacy ledger ("Deferred from: code review of spec-12-1-read-only-data-api-fastapi-service.md (2026-09-12)"), 2026-10-05
 location: data_api/app.py
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-12-1-read-only-data-api-fastapi-service.md` summary: No route in `data_api/app.py` catches exceptions from the underlying catalog/metrics reads (e.g. Arrow schema/precision conflicts that `ml_signals/catalog_stats.py`'s own `coverage()`/`price_series()` already special-case elsewhere for the same data paths) -- an unhandled exception becomes a generic 500 with no client-meaningful 404/400 translation, and no test exercises this path. evidence: `troll/data_api/app.py` -- all 4 route handlers call their wrapped function directly with no `try`/`except`; `troll/data_api/tests/test_data_api.py` only covers happy-path plus one "no data" branch (`nearest` returning `null`), never an exception path. Surfaced by both Blind Hunter and Edge Case Hunter review of this story's diff.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-data-api-legacy-routes
+resolution-undo: 0494e1d5631fbe7841cf0d7cfefba53aa18067a35474cd982d05d4012b815cd0 2026-10-05 7374617475733a206f70656e
 
 ### DW-101: `data_api/app.py`'s `METRICS_DB_PATH` default is computed by an independent expression that a code comment merely asserts "mirrors `dashboard.py:85-86` …
 
 origin: migrated from legacy ledger ("Deferred from: code review of spec-12-1-read-only-data-api-fastapi-service.md (2026-09-12)"), 2026-10-05
 location: data_api/app.py
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-12-1-read-only-data-api-fastapi-service.md` summary: `data_api/app.py`'s `METRICS_DB_PATH` default is computed by an independent expression that a code comment merely asserts "mirrors `dashboard.py:85-86` exactly" -- nothing enforces the two stay identical if one is edited later (no shared constant/import, no test comparing them). evidence: `troll/data_api/app.py:44-46` vs `troll/ml_signals/dashboard.py:85-86` -- both compute `str(Path(CATALOG_PATH).parent / "metrics" / "metrics.db")` independently; a future edit to one's default with no compiler/lint/test signal to update the other. Surfaced by Blind Hunter review of this story's diff.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-data-api-legacy-routes
+resolution-undo: 0494e1d5631fbe7841cf0d7cfefba53aa18067a35474cd982d05d4012b815cd0 2026-10-05 7374617475733a206f70656e
 
 ### DW-102: Minor unvalidated inputs with low-probability, non-crashing failure modes: `/metrics/history/{symbol}?days=` accepts zero/negative/absurdly large `days` (the …
 
 origin: migrated from legacy ledger ("Deferred from: code review of spec-12-1-read-only-data-api-fastapi-service.md (2026-09-12)"), 2026-10-05
 location: /metrics/history/{symbol}?days=
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-12-1-read-only-data-api-fastapi-service.md` summary: Minor unvalidated inputs with low-probability, non-crashing failure modes: `/metrics/history/{symbol}?days=` accepts zero/negative/absurdly large `days` (the underlying store's 31-day retention already bounds the real answer regardless); `start_ns > end_ns` on the two `/catalog/*` routes is never rejected (naturally yields an empty result rather than an error); no route has a `/health` check despite `restart: always`; routes declare no `response_model` so a NaN/Infinity value from upstream book-imbalance math would serialize as non-standard JSON tokens; no test exercises an unknown/never-subscribed instrument ID or malformed symbol path segment. evidence: `troll/data_api/app.py` (all 4 routes, no input validation beyond FastAPI's own type coercion); `troll/data_api/tests/test_data_api.py` (every test seeds exactly the data it then reads back). Surfaced by Blind Hunter and Edge Case Hunter review of this story's diff; each individually low severity, grouped here as one entry since none block real functionality today.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-data-api-legacy-routes
+resolution-undo: 0494e1d5631fbe7841cf0d7cfefba53aa18067a35474cd982d05d4012b815cd0 2026-10-05 7374617475733a206f70656e
 
 ### DW-103: `make test` (inside the `troll-collector` image) now emits a new `StarletteDeprecationWarning: Using httpx with starlette.testclient is deprecated; install …
 
 origin: migrated from legacy ledger ("Deferred from: code review of spec-12-1-read-only-data-api-fastapi-service.md (2026-09-12)"), 2026-10-05
 location: data_api/tests/test_data_api.py
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-12-1-read-only-data-api-fastapi-service.md` summary: `make test` (inside the `troll-collector` image) now emits a new `StarletteDeprecationWarning: Using httpx with starlette.testclient is deprecated; install httpx2 instead`, introduced by this story's `data_api/tests/test_data_api.py` importing `fastapi.testclient.TestClient`. Per troll/CLAUDE.md TEST-04 this is recorded rather than suppressed; not fixed in this story since the fix is an unverified dependency swap outside this story's declared scope (adding `fastapi`/`uvicorn`/`httpx` per the spec's Code Map, not `httpx2`). evidence: Warning fires unconditionally at `import starlette.testclient` (starlette 1.6.0, installed via `troll-requirements.txt`'s `fastapi==0.141.1` -> `starlette` dep), re-exported by `fastapi/testclient.py:1`; reproduced directly via `python3 -c "import starlette.testclient"` inside the built `troll-collector:latest` container. `httpx2` is confirmed to exist as a real published PyPI package (checked `https://pypi.org/pypi/httpx2/json`, latest `2.12.0`) so a fix path exists, but swapping `troll-requirements.txt`'s `httpx==0.28.1` pin for `httpx2` and re-verifying `data_api/tests` still pass has not been attempted or validated here.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-httpx-test-client-swap
+resolution-undo: 4c1afab883e641f497ef3955752a01d50bf2edd5105183651c9b7aba7c97f1dd 2026-10-05 7374617475733a206f70656e
 
 ### DW-104: The module-level global `_http_session` in `ml_signals/dashboard.py` has no re-entrancy guard against two `make_app()` instances sharing/fighting over one …
 
@@ -882,7 +922,9 @@ resolution: already resolved: platform/frontend/src/components/chart/IndicatorPi
 origin: migrated from legacy ledger ("Deferred from: code review of spec-15-6-per-coin-indicator-configuration.md (2026-09-16)"), 2026-10-05
 location: PUT /api/coin/{iid}/indicators
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-15-6-per-coin-indicator-configuration.md` summary: `PUT /api/coin/{iid}/indicators` deliberately reads the raw request body (`Request.json()`, not a typed Pydantic body parameter) to preserve a `400` instead of FastAPI's automatic `422` for a malformed payload -- a documented, correct tradeoff, but it means this endpoint's request-body shape never appears in the generated `openapi.json`/`schema.ts`, so `client.ts`'s hand-maintained `saveCoinIndicatorConfig` request type has nothing in the codegen pipeline to catch future drift from the Python handler. evidence: `troll/data_api/routes/indicators.py`'s `put_coin_indicator_config` docstring explains the tradeoff explicitly; confirmed against the live `openapi.json` that no `requestBody` is generated for this operation. Surfaced by Blind Hunter review of this story's diff.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-data-api-input-validation
+resolution-undo: 91b47c52cc0253ee68fc7a1fe5a9d3fd9432e6964681548c0f72e9cd0679be68 2026-10-05 7374617475733a206f70656e
 
 ### DW-121: `PUT /api/coin/{iid}/indicators` persists any `name`/`category` string without checking it against `_merged_indicator_catalog()` -- a typo'd or stale entry …
 
@@ -961,7 +1003,9 @@ resolution: already resolved: platform/views/chart_series.py:477 reader no longe
 origin: migrated from legacy ledger ("Deferred from: code review of 17-2-unpark-and-complete-story-15-8-31-day-metrics-history (2026-09-17)"), 2026-10-05
 location: data_api/app.py
 reason: source_spec: `_bmad-output/implementation-artifacts/17-2-unpark-and-complete-story-15-8-31-day-metrics-history.md` summary: `data_api/app.py`'s own `METRICS_DB_PATH` default comment ("mirrors dashboard.py:85-86 exactly") cites the wrong line numbers -- `dashboard.py`'s actual `METRICS_DB_PATH` assignment is at lines 96-98 -- and this story's new `data_api/routes/metrics.py` copied the same stale citation verbatim into its own comment. evidence: Confirmed by grepping `ml_signals/dashboard.py` for `METRICS_DB_PATH`, which resolves to lines 96-98, not 85-86. The inaccurate citation predates this story (already wrong in `app.py` before this diff); this story's own file only inherited it. Surfaced by Blind Hunter review of this story's diff.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-data-api-legacy-routes
+resolution-undo: 0494e1d5631fbe7841cf0d7cfefba53aa18067a35474cd982d05d4012b815cd0 2026-10-05 7374617475733a206f70656e
 
 ### DW-131: `HistoryPage.tsx`'s `toMetricDatum` treats only `null`/`undefined` as a gap; a `NaN`/`Infinity` metric value (were one ever to reach the route from an upstream …
 
@@ -984,7 +1028,9 @@ resolution: already resolved: platform/views/preferences.py:251 _write_atomic (t
 origin: migrated from legacy ledger ("Deferred from: code review of epic 17 (2026-09-19)"), 2026-10-05
 location: n/a
 reason: PUT technicals-columns validates param type only, not values (e.g. period 0); the bad config makes GET technicals-values 400 until fixed in the picker.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-data-api-input-validation
+resolution-undo: 91b47c52cc0253ee68fc7a1fe5a9d3fd9432e6964681548c0f72e9cd0679be68 2026-10-05 7374617475733a206f70656e
 
 ### DW-134: technicals-values cache is single-key with no single-flight; 60s client poll > 30s TTL means little hit-rate.
 
@@ -998,7 +1044,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of epic 17 (2026-09-19)"), 2026-10-05
 location: =
 reason: `=` filter operator on float values is strict equality; tech filters hide all rows while values are loading/errored on the Performance tab.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-screener-filter-equality
+resolution-undo: 90ba95829001d719ed6b8bfa449998ead31f76789d534b0bd14e5f0058919a08 2026-10-05 7374617475733a206f70656e
 
 ### DW-136: 16.x minute_rollup partial_start does not cover gap-created partial minutes (outside epic 17).
 
@@ -1012,14 +1060,18 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of epic-20 (2026-09-19)"), 2026-10-05
 location: n/a
 reason: Alert horizontal-line conditions are resolved to a static price at creation; later line drags don't move the alert.
-status: open
+status: done 2026-10-05
+resolution: closed by human decision: Alerts on horizontal lines are by design a static price snapshot; documented in alert.py
+decision: 2026-10-05 Accept static price (current documented design) — Alerts on horizontal lines are by design a static price snapshot; documented in alert.py
 
 ### DW-138: `AlertStore` in-place TOML rewrite: a crash mid-write corrupts the file (fails loudly on load).
 
 origin: migrated from legacy ledger ("Deferred from: code review of epic-20 (2026-09-19)"), 2026-10-05
 location: AlertStore
 reason: `AlertStore` in-place TOML rewrite: a crash mid-write corrupts the file (fails loudly on load).
-status: open
+status: done 2026-10-05
+resolution: closed by human decision: Accepted: in-place rewrite of a tiny file; corrupt file raises on load rather than silently resetting
+decision: 2026-10-05 Accept: crash mid-write fails loudly on load — Accepted: in-place rewrite of a tiny file; corrupt file raises on load rather than silently resetting
 
 ### DW-139: Alert run state is in-memory: first tick after a data_api restart can't fire; once_per_bar may re-fire within the same bar.
 
@@ -1056,28 +1108,36 @@ resolution: already resolved: platform/frontend/src/components/chart/Lightweight
 origin: migrated from legacy ledger ("Deferred from: code review of story-18.3 (2026-09-19)"), 2026-10-05
 location: n/a
 reason: Measurement drag past the last bar freezes at the last valid point (no coordinate->time there); same root cause as 18.2's empty-margin item.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-chart-edge-coordinates
+resolution-undo: 988e15f4b5ef3bc15b0c3918fdddb8822929edd35fe148958cc5976427cb70dd 2026-10-05 7374617475733a206f70656e
 
 ### DW-144: Measure mousedown on price/time axis strips starts a measurement; mouse events only (no touch); label unclamped at pane edges; O(n) `computeMeasurement` per …
 
 origin: migrated from legacy ledger ("Deferred from: code review of story-18.3 (2026-09-19)"), 2026-10-05
 location: computeMeasurement
 reason: Measure mousedown on price/time axis strips starts a measurement; mouse events only (no touch); label unclamped at pane edges; O(n) `computeMeasurement` per mousemove; forming live bar not in the label counts.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-chart-edge-coordinates
+resolution-undo: 988e15f4b5ef3bc15b0c3918fdddb8822929edd35fe148958cc5976427cb70dd 2026-10-05 7374617475733a206f70656e
 
 ### DW-145: Replay: no follow-scroll -- revealed bars may end up off-screen right after `setData`; verify in a real browser and add `scrollToPosition`/`scrollToRealTime` …
 
 origin: migrated from legacy ledger ("Deferred from: code review of story-18.4 (2026-09-19)"), 2026-10-05
 location: setData
 reason: Replay: no follow-scroll -- revealed bars may end up off-screen right after `setData`; verify in a real browser and add `scrollToPosition`/`scrollToRealTime` if so.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-chart-replay-polish
+resolution-undo: d46e45e5a8206fc33cb2bd6cecda4ae20ede7cce2c87830feddf1aecf8a9bcff 2026-10-05 7374617475733a206f70656e
 
 ### DW-146: Replay polish: silent no-op when picking a gap; Play at newest bar does nothing visibly; Step back can pass the start marker; play interval restarts on any …
 
 origin: migrated from legacy ledger ("Deferred from: code review of story-18.4 (2026-09-19)"), 2026-10-05
 location: candles
 reason: Replay polish: silent no-op when picking a gap; Play at newest bar does nothing visibly; Step back can pass the start marker; play interval restarts on any `candles` identity change; marker color resolved at construction.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-chart-replay-polish
+resolution-undo: d46e45e5a8206fc33cb2bd6cecda4ae20ede7cce2c87830feddf1aecf8a9bcff 2026-10-05 7374617475733a206f70656e
 
 ### DW-147: `GET /api/candles` `has_more` probes only one query window back, so a collector outage longer than that window (limit*bar_seconds*3, capped at 7 days -- ~25h …
 
@@ -1100,42 +1160,54 @@ resolution: already resolved: platform/frontend/src/components/chart/primitives/
 origin: migrated from legacy ledger ("Deferred from: code review of story-18.5 (2026-09-19)"), 2026-10-05
 location: #ffff55
 reason: POC color hardcoded (`#ffff55`), Value Area band reuses `upColor`; rows with null y-spans can bridge a Value Area gap; row gaps not bitmap-pixel-snapped.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-volume-profile-polish
+resolution-undo: 338049af4fa3f4cf58d1fa9adcb5d39eb86748330420f70c6444135f7b50f1d1 2026-10-05 7374617475733a206f70656e
 
 ### DW-150: FRVP: dragging past the last bar has no coordinate->time so the endpoint is dropped/stale (same root as 18.2/18.3); edge ghost not cancelled if the edge effect …
 
 origin: migrated from legacy ledger ("Deferred from: code review of story-18.6 (2026-09-19)"), 2026-10-05
 location: n/a
 reason: FRVP: dragging past the last bar has no coordinate->time so the endpoint is dropped/stale (same root as 18.2/18.3); edge ghost not cancelled if the edge effect is torn down mid-drag; no hover cursor on edges; shared settings panel only appears once a profile is placed; removal is a text button outside the chart rather than an in-chart x.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-chart-edge-coordinates
+resolution-undo: 988e15f4b5ef3bc15b0c3918fdddb8822929edd35fe148958cc5976427cb70dd 2026-10-05 7374617475733a206f70656e
 
 ### DW-151: VRVP recomputes on every pan frame (no rAF throttle or range quantization); a visible range extending past the loaded candles is clamped to the loaded part …
 
 origin: migrated from legacy ledger ("Deferred from: code review of story-18.7 (2026-09-19)"), 2026-10-05
 location: n/a
 reason: VRVP recomputes on every pan frame (no rAF throttle or range quantization); a visible range extending past the loaded candles is clamped to the loaded part without a cue; fixed 150px width is not clamped to narrow panes; VRVP settings are not persisted across remounts.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-volume-profile-polish
+resolution-undo: 338049af4fa3f4cf58d1fa9adcb5d39eb86748330420f70c6444135f7b50f1d1 2026-10-05 7374617475733a206f70656e
 
 ### DW-152: Session profiles: `respondsToZoom` is a draw-time gap tweak only; partly loaded sessions draw narrow (0.7 x loaded span; zero width for a single bar) …
 
 origin: migrated from legacy ledger ("Deferred from: code review of story-18.8 (2026-09-19)"), 2026-10-05
 location: respondsToZoom
 reason: Session profiles: `respondsToZoom` is a draw-time gap tweak only; partly loaded sessions draw narrow (0.7 x loaded span; zero width for a single bar); `sinceSeconds` is fixed when the profile is added (no UTC-midnight re-anchor); every Sessions edit re-pages history from now; replay far in the past has no session history before the fetch window; an empty server page across a long outage stops paging early (see 18.5's `has_more` ceiling).
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-volume-profile-polish
+resolution-undo: 338049af4fa3f4cf58d1fa9adcb5d39eb86748330420f70c6444135f7b50f1d1 2026-10-05 7374617475733a206f70656e
 
 ### DW-153: Session/periodic profiles: every period/count change re-pages from now (no debounce or abort of in-flight pages, no loading indicator); `sinceSeconds` is not …
 
 origin: migrated from legacy ledger ("Deferred from: code review of story-18.9 (2026-09-19)"), 2026-10-05
 location: sinceSeconds
 reason: Session/periodic profiles: every period/count change re-pages from now (no debounce or abort of in-flight pages, no loading indicator); `sinceSeconds` is not re-anchored at a period rollover; the PVP period choice is not persisted; `SESSION_PRESETS.period` is a fixed period for SVP but only the dropdown default for PVP; dropdown shows raw values.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-volume-profile-polish
+resolution-undo: 338049af4fa3f4cf58d1fa9adcb5d39eb86748330420f70c6444135f7b50f1d1 2026-10-05 7374617475733a206f70656e
 
 ### DW-154: Live-app §A8.2 walkthrough owed for all of Epic 18
 
 origin: migrated from legacy ledger ("Deferred from: story 18.10 parity audit (2026-09-19)"), 2026-10-05
 location: n/a
 reason: **Live-app §A8.2 walkthrough owed for all of Epic 18** (18.1-18.10 are UI verified only in jsdom with a mocked lightweight-charts): pan/zoom, fit/latest, pane resize hit zone, every drawing tool's real mouse mechanics, replay, all volume-profile variants' actual drawing (right-axis anchoring, time-anchored session/FRVP widths, edge grab, respondsToZoom).
-status: open
+status: done 2026-10-05
+resolution: closed by human decision: Moved to DEPLOY_CHECKLIST deferred operator actions Operator: the §A8.2 live walkthrough is added to DEPLOY_CHECKLIST's deferred operator actions, to run after the Epic 33 chart stories.
+decision: 2026-10-05 Close; fold into DEPLOY_CHECKLIST deferred operator actions (OPS-01) — Moved to DEPLOY_CHECKLIST deferred operator actions Operator: the §A8.2 live walkthrough is added to DEPLOY_CHECKLIST's deferred operator actions, to run after the Epic 33 chart stories.
 
 ### DW-155: Crosshair readout status bar (O/H/L/C/time on hover) does not exist.
 
@@ -1159,6 +1231,7 @@ origin: migrated from legacy ledger ("Deferred from: story 18.10 parity audit (2
 location: n/a
 reason: Trendline placement is two-click, not click-drag.
 status: open
+decision: 2026-10-05 Build click-drag placement via rangeDrag — Trendline placed by press-drag-release like the other range tools, keeping two-click as fallback
 
 ### DW-158: Alerts: Epic 20.
 
@@ -1252,7 +1325,9 @@ resolution: already resolved: platform/data_api.dockerfile:27-33 now copies obse
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: troll/scripts/capture_hl_ws.py
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-22-8-spine-rules-and-docs-updated-for-the-multi-venue-core.md` summary: `troll/scripts/capture_hl_ws.py` cannot capture a venue it does not already know — `--venue` is `choices=("hyperliquid", "bybit")` (`:118`) and the subscribe payload is a hard two-way branch (`:41`), so a new venue's `--url` is sent Hyperliquid's subscribe JSON. evidence: Verified by reading the script. `troll/CLAUDE.md`'s "Adding a venue" step 1 makes a raw-frame capture mandatory and DATA-08's rule depends on that evidence, so the harness needs a third branch before a fourth venue can be investigated. Secondary: `_BYBIT_URL` is `/public/linear` only, so it also cannot close the Bybit-spot `u` gap DATA-08 flags as an open DATA-02 question. Story 22.8 documents the limitation in step 1 but cannot fix it (docs-only).
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-capture-script-and-docs
+resolution-undo: 9077e58b03eea8f8c9d2570018bc9c06100b365969d0b85199174491807bf96f 2026-10-05 7374617475733a206f70656e
 
 ### DW-170: `data_api/routes/snapshots.py:129-133` re-implements the gate's empty-top-of-book and crossed-book checks in a reader (`if bp >= ap: continue`), which AD-3 …
 
@@ -1275,7 +1350,9 @@ resolution: already resolved: platform/ranking/infrastructure/volume_bybit.py an
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: troll/frontend/src/pages/docs/kbData.ts:143,195,202
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-22-8-spine-rules-and-docs-updated-for-the-multi-venue-core.md` summary: `troll/frontend/src/pages/docs/kbData.ts:143,195,202` — the knowledge-base page `data_api` serves at `/docs` — still cites the deleted module constant `_CROSSED_RESYNC_NS` and `troll/ml_signals/dashboard.py` as live references, and `troll/docs/DATA_DICTIONARY.md` still names `dashboard` in seven places while its own `:309` records that Story 15.10 retired it. evidence: Verified by grep in this worktree. `_CROSSED_RESYNC_NS` became `CoreConfig.crossed_resync_seconds` in story 22.2 and `dashboard.py` was deleted by 15.10. The `.ts` file is frontend source, not a `.md` document of record, so both it and the wider `DATA_DICTIONARY` sweep fall outside a docs-only story whose acceptance criterion is "only `.md` files appear in the diff".
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-capture-script-and-docs
+resolution-undo: 9077e58b03eea8f8c9d2570018bc9c06100b365969d0b85199174491807bf96f 2026-10-05 7374617475733a206f70656e
 
 ### DW-173: `troll/bot_tui/coin_detail_state.py:24`'s docstring states "snapshots:raw carries every currently-published instrument's batch every tick", an invariant that …
 
@@ -1314,7 +1391,9 @@ resolution: already resolved: platform/archive/prune_catalog.py:44 -- the dYdX i
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-23-1-observability-context-and-migration-guardrails.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-23-1-observability-context-and-migration-guardrails.md` summary: `observability.incidents.IncidentHandler` debounces on `(incident_type, iid)`, so every unclassified WARNING+ that has no instrument shares the key `("unclassified", None)`. Unrelated warnings within the debounce window (10 s for dYdX) after the first one get no incident report. evidence: the debounce key has been built this way since before Story 23.1, which moved the code unchanged; the handler is now the generic, reusable one. A fix would key unclassified reports on the logger name and message template, or exempt them from debounce.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-observability-ledger-fixes
+resolution-undo: f29f38bea3e637c6b62e34f9b17b6105f4546cafc7682de177659092884f975f 2026-10-05 7374617475733a206f70656e
 
 ### DW-178: `ml_signals/strategies/example_strategy.py:84` subscribes a bar type whose pandas offset alias `'d'` is deprecated (`Pandas4Warning: 'd' is deprecated ... use …
 
@@ -1343,13 +1422,16 @@ origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (
 location: _bmad-output/implementation-artifacts/spec-23-2-kernel-shared-kernel.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-23-2-kernel-shared-kernel.md` summary: one file-name parser (`kernel.clocks.CatalogFileSpan.from_path`), two policies for a `*.parquet` whose stem the catalog did not write inside an instrument leaf: `prune_catalog._parsed_files` skips it with a warning and never prunes it, while `kernel.catalog_files` (`data_file_ranges`/`files_by_day`/`query_second_ohlc`), `compare_klines.instruments_on_day` and `rebuild_seconds.covered_from`/`trade_files` let the `ValueError` abort the whole instrument (a `data_api` request 500s, `compare_klines` aborts, the rebuild refuses the instrument); nothing documents which is intended. evidence: both review hunters of the 23.2 second pass flagged it independently. Pre-dates 23.2: the former `catalog_stats._stamp_to_ns` raised `ValueError` at the same sites and `prune_catalog` already caught it alone (`git show 7bd64952fd:platform/collector_core/prune_catalog.py:198-206`); the move preserved both behaviours verbatim. A foreign file only reaches a leaf by hand (the collector quarantines unreadable files out of the leaf), so no live path produces it today.
 status: open
+decision: 2026-10-05 All readers skip and ledger it (like reconcile_day._overlaps_day) — Make CatalogFileSpan callers in kernel.catalog_files and rebuild_day skip+ledger foreign names.
 
 ### DW-182: `kernel.archive_markers.decode`/`ArchiveGap.encode`'s new inverted-span refusal (this story's third pass) has no companion check-before-rollout: if any …
 
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-23-2-kernel-shared-kernel.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-23-2-kernel-shared-kernel.md` summary: `kernel.archive_markers.decode`/`ArchiveGap.encode`'s new inverted-span refusal (this story's third pass) has no companion check-before-rollout: if any already-deployed `_archive_gaps/<iid>.jsonl` was written by the pre-fix `record_gap` (which this same story found could emit an inverted span on a backward wall-clock step), the nightly rebuild will now hard-refuse that instrument-day on the first read instead of the old silent tolerance. evidence: triage log pass 2 item 1 (`spec-23-2-kernel-shared-kernel.md`) confirms the pre-fix write path was capable of the inverted span this decode now refuses. No `_archive_gaps` file exists in this worktree's `platform/data/` (pre-rollout, per `DEPLOY_CHECKLIST.md` §5 / Epic 22 memory), so nothing is known to be affected today, but this wasn't checked against the actual VPS collector's historical files before merge, and should be a one-line grep (`decode` every line, catch `ValueError`) added to the rollout checklist rather than discovered by a failed rebuild.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-capture-script-and-docs
+resolution-undo: 9077e58b03eea8f8c9d2570018bc9c06100b365969d0b85199174491807bf96f 2026-10-05 7374617475733a206f70656e
 
 ### DW-183: the catalog read helpers list files and then open them in a second step with no guard for a file that vanished in between …
 
@@ -1357,6 +1439,7 @@ origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (
 location: _bmad-output/implementation-artifacts/spec-23-2-kernel-shared-kernel.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-23-2-kernel-shared-kernel.md` summary: the catalog read helpers list files and then open them in a second step with no guard for a file that vanished in between (`kernel.catalog_files._ohlc_rows`/`second_ohlc_arrays` call `pq.ParquetFile(path)` on paths from an earlier `snapshot_files` glob), so a `data_api` candle or paging request that overlaps `prune_catalog`/`consolidate_catalog`/`rebuild_seconds` rewriting that instrument's files raises `FileNotFoundError` and 500s instead of skipping the one file. evidence: flagged by the 23.2 fourth pass's edge-case hunter. Pre-dates 23.2 and was moved verbatim: `git show 2d7dd5ab6e:platform/ml_signals/catalog_stats.py:157-166` has the same list-then-open shape with no `try`. Real on the deployed box because `make nightly` runs consolidate/prune against the same catalog `data_api` serves from, but not yet observed — the VPS rollout (DEPLOY_CHECKLIST.md §5) has not run. Fix is a `try/except (FileNotFoundError, OSError): continue` per file, which is a policy decision (skip silently vs. ledger the skip) rather than a mechanical patch, so it belongs with the archive context move in 25.1.
 status: open
+decision: 2026-10-05 Skip and ledger the vanished file — Skip with error_ledger record.
 
 ### DW-184: two readers of the same snapshot rows disagree at the window's lower edge — `kernel.catalog_files.query_second_ohlc` widens the file span by …
 
@@ -1378,7 +1461,9 @@ resolution: already resolved: platform/archive/application/crosscheck.py:97-103 
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-23-3-durable-error-ledger-and-day-long-data-error-crosscheck.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-23-3-durable-error-ledger-and-day-long-data-error-crosscheck.md` summary: `observability.error_ledger._FileSink._admit`'s minute-bucket read happens under the sink's lock, but the `ts_ns` two concurrent `record()` calls from different threads present to it is captured by each caller before that lock is acquired, so at an exact minute boundary two racing threads can be admitted in an order that does not match wall-clock order, narrowly misattributing which of the two gets the bucket reset. evidence: `record()` is only reached from failure paths (rare, low call frequency per process), and the window is exactly one minute boundary under real thread contention on the same site; carried over from the preserved attempt's review round as real but low-consequence, and not scoped for this story pass.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-observability-ledger-fixes
+resolution-undo: f29f38bea3e637c6b62e34f9b17b6105f4546cafc7682de177659092884f975f 2026-10-05 7374617475733a206f70656e
 
 ### DW-187: `observability.error_ledger.services()`/`ledger_files()` list every `<service>.jsonl*` file under `ERROR_LEDGER_DIR` with no concept of "this service was …
 
@@ -1429,6 +1514,7 @@ origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (
 location: candles/rebuild.py
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-24-1-candles-context-behind-the-secondsink-port.md` summary: this story moved candle-store ownership to the three venue entrypoints without giving them a teardown — `CandleStore.close()` is called only by `candles/rebuild.py`, `candles/application/rebuild.py` and tests, so no entrypoint and no `Collector.run` `finally` ever closes the store a composition root opened. evidence: `grep -rn "\.close()" platform/*_collector/collector.py` finds nothing, and `run_forever` (`collector_core/collector.py`) calls `build()` for the next attempt while the failed collector is still reachable from the `except Exception` traceback, so the same file is transiently open read-write twice — under a class whose docstring asserts writer ownership. Committed data survives (WAL + `synchronous=NORMAL`), so this is a lifecycle/ownership gap, not data loss; the fix (an `AbstractContextManager` on `CandleStore`, or a `Collector` teardown hook for injected resources) is a small design decision about who owns injected-resource shutdown, which belongs with the composition-root work rather than a patch here.
 status: open
+decision: 2026-10-05 Make CandleStore an AbstractContextManager used by each __main__ root — Context-manage the store in the three composition roots.
 
 ### DW-194: `make build-candles` passes no `--venue`, so on the shared three-venue catalog it folds Bybit and Hyperliquid instruments into `candles_dydx.db` (where …
 
@@ -1443,6 +1529,7 @@ origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (
 location: _bmad-output/implementation-artifacts/spec-24-1-candles-context-behind-the-secondsink-port.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-24-1-candles-context-behind-the-secondsink-port.md` summary: the hourly retention prune runs `store.prune()` synchronously on the collector's event loop, and the `candles` table's primary key leads with `instrument_id`, so the `DELETE ... WHERE bar_seconds = ? AND t < ?` cannot use it — on a large store the scan blocks ingestion and per-second sampling for its whole duration. evidence: `candles/application/prune.py`'s `prune_loop` awaits only `asyncio.sleep`, never `asyncio.to_thread`; `_SCHEMA` (frozen under AD-D12) declares `PRIMARY KEY (instrument_id, bar_seconds, t) WITHOUT ROWID` and no secondary index. Pre-existing: the baseline's `Collector._candle_prune_loop` called `candle_store.prune(self._candle_db)` the same way on the same loop, so this story moved the shape rather than introducing it. The two fixes pull in opposite directions — `asyncio.to_thread` hands a second thread a connection the store's single-writer invariant says it owns alone, and an index on `(bar_seconds, t)` touches the frozen schema — so it needs a decision, not a patch.
 status: open
+decision: 2026-10-05 Add a secondary index (bar_seconds, t) (schema change; nothing frozen until prod) — Add index in _SCHEMA with migration for existing stores.
 
 ### DW-196: the web frontend still hand-mirrors the ranking-table columns (`frontend/src/pages/RankingsPage.tsx`'s TS copy of `RANKING_COLS`) and its own coin-detail …
 
@@ -1465,6 +1552,7 @@ origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (
 location: alerts.toml
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-24-3-alerting-context-as-forming-bar-observer.md` summary: `AlertStore._load` builds `Alert(**entry)` without checking `frequency` against `FiringPolicy`, so a hand-edited or legacy `alerts.toml` entry with an unknown frequency falls through `evaluate` to fire on every cross and, since `record_fire` sets `triggered` only for `only_once`, never stops firing. evidence: `alerting/domain/policy.py`'s `evaluate` treats any frequency other than `once_per_bar_close`/`once_per_bar` as fire-on-cross; `/api/alerts` validates with a `Literal[...]`, so only a file edit reaches it. Pre-existing (identical in the baseline's `data_api/alerts.py`). The fix — reject or ledger an unknown frequency (and non-positive `bar_seconds`) at load — is a load-contract decision: raising makes `data_api` refuse to start on one bad entry, skipping drops a user's alert.
 status: open
+decision: 2026-10-05 Skip the entry and ledger it — Drop the entry with an error_ledger record (alert is lost).
 
 ### DW-199: `alerting.infrastructure.toml_store.AlertStore.add`/`delete` mutate the in-memory list before `_save()`, so a failed write (disk full, permission) returns 500 …
 
@@ -1478,7 +1566,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: "platform/data/catalog"
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-24-4-research-pure-consumer-and-broken-tests-repaired.md` summary: `research.strategies.backtest_dydx.run` and `backtest_snapshot.run` default `catalog_path` to the cwd-relative `"platform/data/catalog"`, while `docs/BOT_OPERATIONS.md` tells the user to `cd platform` first, so the documented call resolves `platform/platform/data/catalog`: `backtest_dydx` then skips every symbol and returns `{}`, and `backtest_snapshot` raises `IndexError` on `instruments(...)[0]`. evidence: both defaults are literal relative strings, and `backtest_ofi` alone derives its path from `__file__`. Pre-existing: the baseline `ml_signals.strategies.backtest_*` had the same defaults, and the baseline BOT_OPERATIONS.md had the same `cd platform` instruction. This story only renamed the module paths. The fix (one `__file__`-anchored default shared by all three runners, plus how the collector image's `/app/catalog` mount is addressed) spans the runners and the image layout, so it belongs with Story 27.8's research-in-image work.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-research-test-and-path-fixes
+resolution-undo: 89c508f4086e6130fe63c3b8c7df6e501f431e414611a6838c2e01ff0641c80a 2026-10-05 7374617475733a206f70656e
 
 ### DW-201: A `pruned` archive-gap marker spans the deleted file's `ts_init` name range, but the rebuild tests gaps on the row's `ts_event`, so rows in `[start …
 
@@ -1508,6 +1598,7 @@ origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: repair_catalog runs `delete_data_range` then `write_data` per row with no backup or atomicity; a crash between them loses that second's snapshot. evidence: archive/application/repair.py `repair_instrument`. This predates 25.1.
 status: open
+decision: 2026-10-05 Rewrite via CatalogFiles.rewrite (verified temp-then-rename) instead of delete+write — Replace the flagged rows in-file through the maintenance rewriter.
 
 ### DW-205: The retention `file_days` rule widens only backwards (the previous day). A file ending just before midnight can hold venue-clock-ahead trades of the next day …
 
@@ -1522,6 +1613,7 @@ origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: repair_catalog's "never run on a rebuilt day" rule is enforced only by its docstring; nothing checks the rebuild or `verified_days` state before clearing trades. evidence: archive/repair_catalog.py. This predates 25.1.
 status: open
+decision: 2026-10-05 Refuse rows at or after the instrument's trade-archive coverage start (pre-archive rows only) — Use archive Coverage.start to refuse repairing covered rows.
 
 ### DW-207: One stray `*.parquet` with an unparsable name in a snapshot or trade leaf crashes `compare_klines` (`instruments_on_day`) before any instrument is compared …
 
@@ -1537,6 +1629,7 @@ origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: The dropped-instrument rule deletes a dropped dYdX coin's instrument-definition leaves while its unverified `trade_tick` days are kept, so those days can never be reconciled and are kept forever. evidence: archive/domain/retention.py rule (c) covers every type except trade_tick, the same set as the old `prune_instrument`. Semantics predate 25.1.
 status: open
+decision: 2026-10-05 Keep definition leaves until the coin's trade days are verified or released — Gate rule (c) definition deletion on trade days.
 
 ### DW-209: Capture appends `_archive_gaps/*.jsonl` without a lock, so a nightly `load_gaps` can read a torn last line, raise ValueError and refuse the instrument-day.
 
@@ -1544,6 +1637,7 @@ origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: Capture appends `_archive_gaps/*.jsonl` without a lock, so a nightly `load_gaps` can read a torn last line, raise ValueError and refuse the instrument-day. evidence: archive/infrastructure/gap_markers.py `load_gaps`, collector_core/gap_markers.py append. This predates 25.1.
 status: open
+decision: 2026-10-05 Single O_APPEND os.write per line plus truncate-back on OSError — Make marker appends one write, truncate back on failure.
 
 ### DW-210: repair_catalog deletes a flagged snapshot with `delete_data_range(..., snap.ts_event, snap.ts_event)`, but the catalog range-filters on `ts_init`, which …
 
@@ -1572,6 +1666,7 @@ origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: consolidate_catalog exits 1 on any refused day, so one standing mixed-schema day stops candles.rebuild, compare_klines and prune in every nightly saga run, not just the prune the Known limit names. evidence: archive/consolidate_catalog.py exit code and application/nightly.py stop-at-first-failure. This predates 25.1 (collector_core/consolidate_catalog.py:53).
 status: open
+decision: 2026-10-05 Exit 2 (findings) for refused days — consolidate exits 2 on refused days/leaves so the saga continues past it, ledgered as findings
 
 ### DW-214: The prune's `pruned` marker covers the deleted trade file's raw `ts_init` span, but a trade's `ts_event` can precede its `ts_init` by up to …
 
@@ -1586,6 +1681,7 @@ origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: `make prune` (order_book_deltas age rule, 14 days) deletes raw deltas of a dYdX instrument whose plan entry says `retain_hours = None` (unlimited), because the age rule is decided independently of the plan's per-instrument delta retention. evidence: platform/Makefile `prune` target and archive/domain/retention.py, where rule (b) runs regardless of rule (d)'s None. This predates 25.1 (baseline Makefile prune target, plus the old `_prune_loop`).
 status: open
+decision: 2026-10-05 Plan wins: skip age rule for unlimited-plan instruments — Age rule excludes dYdX instruments whose plan retain_hours is None
 
 ### DW-216: bot_tui Bot-detail's `o` deep-link opens `<DASHBOARD_BASE_URL>/bot/{bot_id}`, which the web app has no route for, so the only remaining TUI deep-link (and the …
 
@@ -1593,6 +1689,7 @@ origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (
 location: _bmad-output/implementation-artifacts/spec-25-1a-rankings-web-only-mode-toggle-on-web-tui-coins-pane-deleted.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1a-rankings-web-only-mode-toggle-on-web-tui-coins-pane-deleted.md` summary: bot_tui Bot-detail's `o` deep-link opens `<DASHBOARD_BASE_URL>/bot/{bot_id}`, which the web app has no route for, so the only remaining TUI deep-link (and the open_listener.go hand-off now serving it) lands on a blank page. evidence: platform/bot_tui/bots_pane.py `dashboard_bot_url` docstring states the route does not exist; platform/frontend/src/App.tsx routes are `/`, `/chart/:iid`, `/history/:iid`, `/alerts`, `/docs/*`. This predates 25.1a (the URL builder and route gap were there at baseline f00ab8aeea).
 status: open
+decision: 2026-10-05 Remove the deep-link key — Remove the `o` key and open_listener hand-off for bots
 
 ### DW-217: The ranking slow loop writes a `metrics.db` row stamped with the current `ts` for an instrument that is stale (>30 s silent) but not yet aged out (<1 h) …
 
@@ -1614,6 +1711,7 @@ origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (
 location: platform/data/{chart_indicators,screener_columns}.toml
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-2-ranking-context-rankingboard-replaces-module-globals.md` summary: The two UI preference TOMLs (`platform/data/{chart_indicators,screener_columns}.toml`) are tracked in git yet rewritten in place by data_api at runtime, so every VPS `git pull` that touches them is refused until the live copy is set aside and restored. evidence: docker-compose.yml mounts both `:rw` for data_api's PUT routes; the Story 25.2 DEPLOY_CHECKLIST step works around it. The conflict existed at their old `ml_signals/` path at baseline a046e0839a; 25.2 only moved them.
 status: open
+decision: 2026-10-05 Untrack, gitignore, seed defaults at startup — Stop tracking live files; ship *.default.toml and copy if missing
 
 ### DW-220: The ranking price-series mark-price fallback (`CatalogPriceHistory._mark_prices`) loads every mark price since `start_ns` with no rate bound, so a venue …
 
@@ -1628,7 +1726,9 @@ resolution: already resolved: f7c9e3ea38 (Story 31.3) deleted the mark-price fal
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-2-ranking-context-rankingboard-replaces-module-globals.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-2-ranking-context-rankingboard-replaces-module-globals.md` summary: The in-app knowledge base's "One paragraph" overview still says a web dashboard and a terminal UI both read the two Redis feeds and names dYdX only, though Story 25.1a made rankings web-only and the collectors cover three venues. evidence: platform/frontend/src/pages/docs/kbData.ts line 9 ("A web dashboard and a terminal UI both read the same two Redis feeds"); unchanged by 25.2, stale since 25.1a (a046e0839a).
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-capture-script-and-docs
+resolution-undo: 9077e58b03eea8f8c9d2570018bc9c06100b365969d0b85199174491807bf96f 2026-10-05 7374617475733a206f70656e
 
 ### DW-222: The bots' `fills.db` reads run synchronously on the TradingNode's one event loop -- every 30 s each bot's history refresh runs 4 ranges x 4 queries (two …
 
@@ -1643,6 +1743,7 @@ origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (
 location: _bmad-output/implementation-artifacts/spec-25-3-bots-context-paper-and-exec-types-nautilus-acl.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-3-bots-context-paper-and-exec-types-nautilus-acl.md` summary: Per-fill realized PnL attribution loses its invariant across a restart or a flip -- the pending partial-close estimates live only in memory, so a close after a restart records `total - 0` over estimates already in `fills.db` (double count), and a fill on the new entry side of a flipped position returns `(None, None)`, dropping the closed leg's round trip from win rate and PnL. evidence: platform/bots/domain/fill_ledger.py `FillLedger.attribute` (`_pending` in-process dict; `fill.order_side == position.entry` short-circuit), moved from live_paper/trade_history.py `_fill_pnl`/`_pending_realized_pnl` at baseline 88abf70269.
 status: open
+decision: 2026-10-05 Derive realized PnL from Nautilus position events only — Replace estimate scheme with per-position-close attribution Operator: record each PositionClosed live as it fires; never read closed positions back from the Cache (NETTING overwrites them, cf. DW-225 / Story 4.6).
 
 ### DW-224: `fills.db` has no idempotency key (no `trade_id`, no unique constraint), so a re-delivered `OrderFilled` (e.g. exec-path reconciliation after a restart) …
 
@@ -1657,6 +1758,7 @@ origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (
 location: _bmad-output/implementation-artifacts/spec-25-3-bots-context-paper-and-exec-types-nautilus-acl.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-3-bots-context-paper-and-exec-types-nautilus-acl.md` summary: `bots:status.realized_pnl` sums `cache.positions_closed(strategy_id=...)`, which keeps only a NETTING position's latest round trip, so after any reopen the status figure shows the current cycle only and disagrees with `bots:history` (from `fills.db`). evidence: platform/bots/infrastructure/cache_reader.py `positions()`; the Cache overwrite is documented in bots/domain/fill_ledger.py and was the reason Story 4.6 moved closed_trades/win_rate to fills.db. Same computation in live_paper/bot_status.py `build_status` at baseline 88abf70269; changing it changes a frozen payload value.
 status: open
+decision: 2026-10-05 Source from fills.db — realized_pnl from fills.db total, consistent with bots:history
 
 ### DW-226: `DummyStrategy._maybe_trade` decides from `portfolio.is_flat/is_net_long/is_net_short(instrument_id)`, which are account-and-instrument wide, so two paper bots …
 
@@ -1758,7 +1860,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: frontend/src/pages/docs/kbData.ts
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-26-2-capture-package-and-venue-packages-with-entrypoints.md` summary: The in-app docs (`frontend/src/pages/docs/kbData.ts`) show `bar_intervals = ["1-MINUTE"]` under the dYdX `[[instruments]]` example, a key the strict loader rejects (`_DYDX_ENTRY_KEYS` is id/store_order_book_deltas/retain_hours), so an operator copying it gets a collector that refuses to start. evidence: platform/frontend/src/pages/docs/kbData.ts line 50; identical at baseline 7fbdb4fe76; loader in platform/capture/infrastructure/config.py.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-capture-script-and-docs
+resolution-undo: 9077e58b03eea8f8c9d2570018bc9c06100b365969d0b85199174491807bf96f 2026-10-05 7374617475733a206f70656e
 
 ### DW-240: `archive/tools/measure_lag.py` `_default_instruments` reads fixed in-tree paths: for dYdX inside a container that is the bind-mounted live plan whose …
 
@@ -1795,6 +1899,7 @@ origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version le
 location: platform/requirements.txt:2
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-26-3-closeout-shims-gone-spines-reconciled.md` summary: The platform images install `pandas==3.0.4` (`platform/requirements.txt:2`) over nautilus_trader 1.229.0's own `pandas>=2.3.3,<3.0.0` (`pyproject.toml:31`, `uv.lock` 2.3.3), so `pip check` fails in the collector image and host-side test runs (pandas 2.3.3) never exercise the pandas major version production runs. Resolve by pinning `pandas==2.3.3` or by proving pandas 3.x on the catalog read/backtest path; recorded as a DDD spine Deferred entry. evidence: `pip check` inside `platform-collector:latest` built 2026-09-28: "nautilus-trader 1.229.0 has requirement pandas<3.0.0 … but you have pandas 3.0.4" (reviews/review-versions-2026-09-28.md H-1); predates 26.3, which changed no dependency.
 status: open
+decision: 2026-10-05 Prove 3.x — Run catalog read/backtest suite on pandas 3.x and document override
 
 ### DW-245: `platform/views/tests/test_live_candles.py::test_seed_wide_bar_reads_raw_seconds_plus_unflushed_tail` is wall-clock flaky -- it floors `time.time_ns()` to a …
 
@@ -1809,6 +1914,7 @@ origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version le
 location: research/application/quotes.py
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-27-1-research-domain-analysis-values-and-application-ports.md` summary: `research/application/quotes.py`'s `derived_quotes` (moved unchanged out of `snapshot_backtest.py`) builds each `QuoteTick` from level 0 without checking `bid < ask`, so a crossed or locked dYdX second (DATA-04) replays as a crossed quote and the simulated exchange can fill against it (e.g. a market buy at an ask below the bid books a profit the venue never offered). evidence: `derived_quotes` reads `bid_prices[0]`/`ask_prices[0]` and constructs the tick with no crossed-book branch; dYdX books cross by design (platform/CLAUDE.md DATA-04) and the live gate writes crossed seconds (DATA-01, Story 24.2); the derivation predates 27.1, which only relocated it.
 status: open
+decision: 2026-10-05 Keep open: dYdX-deferred — Operator 2026-10-05: dYdX work is deferred in general; this stays open as a recorded dYdX issue, not built.
 
 ### DW-247: `research/strategies/snapshot_backtest.py`'s `run` is a second backtest path with semantics `NodeRunner` has since corrected -- no `MAX_TS_INIT_SKEW_NS` …
 
@@ -1816,20 +1922,25 @@ origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version le
 location: research/strategies/snapshot_backtest.py
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-27-1-research-domain-analysis-values-and-application-ports.md` summary: `research/strategies/snapshot_backtest.py`'s `run` is a second backtest path with semantics `NodeRunner` has since corrected -- no `MAX_TS_INIT_SKEW_NS` widening of the derived tops, an unbounded quote data config, an inclusive `end`, `params` spread after `instrument_id` (overridable), and its result taken as `node.run()[0]` (list position) -- while NAUT-03 now routes notebooks through `NodeRunner` only; port its callers to `NodeRunner` and retire it, or align it. evidence: platform/research/strategies/snapshot_backtest.py `run` vs platform/research/application/backtest_runner.py (`end_ns - 1`, skew-widened quotes, `RESERVED_PARAMS`, `get_engine(config_id)`); 27.1's task list kept `snapshot_backtest` behaviour-unchanged on purpose.
 status: open
+decision: 2026-10-05 Port callers to NodeRunner and delete snapshot_backtest — Retire the second path (NAUT-03)
 
 ### DW-248: `research/strategies/ofi_strategy.py`'s `OFIStrategy.on_data` evaluates its carried pre-gap OFI z-score on the first row after a gap over `MAX_GAP_NS` …
 
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: research/strategies/ofi_strategy.py
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-27-3-microstructure-notebook.md` summary: `research/strategies/ofi_strategy.py`'s `OFIStrategy.on_data` evaluates its carried pre-gap OFI z-score on the first row after a gap over `MAX_GAP_NS`: `clear_prev_state()` makes `MultiLevelOFI.update_raw` return without a new reading, yet `self._ofi.initialized` stays True, so `_evaluate` can enter on a signal from before the outage (and stores it as `_prev_ofi`). evidence: `on_data` calls `clear_prev_state()`, then `update_raw` (which returns early when `_prev_bid_prices is None`, leaving `value` untouched), then `_evaluate(self._ofi.value, ...)` gated only on `initialized` and warm-up; predates 27.3, which only renamed `_MAX_GAP_NS`; 27.3's replay shows that row as NaN and documents the divergence as a `Known limit:`.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-research-test-and-path-fixes
+resolution-undo: 89c508f4086e6130fe63c3b8c7df6e501f431e414611a6838c2e01ff0641c80a 2026-10-05 7374617475733a206f70656e
 
 ### DW-249: `PUT /api/rankings/technicals-columns` (and the chart-indicator PUT) validate only indicator names, never enum param values, so a saved column with `"pattern" …
 
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: PUT /api/rankings/technicals-columns
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-27-7-candlestick-pattern-detector-kernel-chart-screener-scanner.md` summary: `PUT /api/rankings/technicals-columns` (and the chart-indicator PUT) validate only indicator names, never enum param values, so a saved column with `"pattern": "hammer"` or an unknown `ma_type` is accepted with 200 and then makes every `technicals-values` GET return 400, blanking the whole Technicals tab until the file is hand-edited. evidence: `data_api/routes/rankings.py` PUT checks `_require_known_indicators` names only; `views.indicator_picker._resolve_enum_params` raises on the bad name only at replay time; predates 27.7 (`ma_type`/`price_type` had the same gap), 27.7's `choices` now makes the valid set available for server-side validation.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-data-api-input-validation
+resolution-undo: 91b47c52cc0253ee68fc7a1fe5a9d3fd9432e6964681548c0f72e9cd0679be68 2026-10-05 7374617475733a206f70656e
 
 ### DW-250: The chart and Technicals replay (`views.indicator_picker.replay_native` over `queries.window`) feeds only traded candles, so an untraded or missing bucket is …
 
@@ -1837,6 +1948,7 @@ origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version le
 location: _bmad-output/implementation-artifacts/spec-27-7-candlestick-pattern-detector-kernel-chart-screener-scanner.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-27-7-candlestick-pattern-detector-kernel-chart-screener-scanner.md` summary: The chart and Technicals replay (`views.indicator_picker.replay_native` over `queries.window`) feeds only traded candles, so an untraded or missing bucket is skipped and multi-bar indicators (now including two/three-bar candlestick patterns) compare non-adjacent bars across the hole. evidence: `candles` `window` returns rows with `o IS NOT NULL` only and the replay loop has no bucket-adjacency check; the scanner notebook resets at holes (`research/application/patterns.py`'s `scan`) but the spec forbids a pattern special case in `replay_native`, so a hole-aware replay is a cross-indicator change for its own story.
 status: open
+decision: 2026-10-05 Own story: reset indicators at bucket holes — Hole-aware replay in views.indicator_picker.replay_native
 
 ### DW-251: The picker's `price_type` param (now a dropdown of BID/ASK/MID/LAST/MARK/...) is ignored by the replay, which always feeds the candle close, so choosing BID …
 
@@ -1844,6 +1956,7 @@ origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version le
 location: _bmad-output/implementation-artifacts/spec-27-7-candlestick-pattern-detector-kernel-chart-screener-scanner.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-27-7-candlestick-pattern-detector-kernel-chart-screener-scanner.md` summary: The picker's `price_type` param (now a dropdown of BID/ASK/MID/LAST/MARK/...) is ignored by the replay, which always feeds the candle close, so choosing BID for an SMA silently shows the close SMA. evidence: `views/indicator_picker.py` `_feed_values` maps feed fields to candle keys only (`close`), never reading `price_type`; the param predates 27.7, whose `choices` only made the unsupported options visible.
 status: open
+decision: 2026-10-05 Feed the chosen price series — Needs bid/ask/mark data in candles
 
 ### DW-252: The chart and Technicals replay (`views.indicator_picker.replay_native` via `views.chart_series`/`views.ranking_columns._recent_candles`) feeds candles flagged …
 
@@ -1851,6 +1964,7 @@ origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version le
 location: research/application/patterns.bar_grid
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-27-7-candlestick-pattern-detector-kernel-chart-screener-scanner.md` summary: The chart and Technicals replay (`views.indicator_picker.replay_native` via `views.chart_series`/`views.ranking_columns._recent_candles`) feeds candles flagged `partial` (under 90% of the span observed) as if they were the bucket's real OHLC, so after a capture outage a truncated bar can read as a DOJI/HARAMI on the chart and screener while the scanner (`research/application/patterns.bar_grid`) blanks and resets on the same bar. evidence: `research/application/patterns.py` turns a `partial` row into a NaN row (27.7 Spec Change Log), but the replay loop has no `partial` check and the spec forbids a pattern special case in `replay_native`; distinct from the untraded-bucket hole entry above because the partial bar is present, just truncated. Affects every native indicator, so it belongs with the hole-aware replay story.
 status: open
+decision: 2026-10-05 Bundle into hole-aware replay story — Treat partial bars as NaN/reset in replay_native Operator rule: if a bar is not 100% true it cannot be used for anything -- any bar not fully observed (not only below the 90% `partial` threshold) is a hole for the replay AND the scanner; the story must revisit the 90% partial threshold.
 
 ### DW-253: Delete the `platform/research/BACKTESTING.md` redirect stub in the first story of the next research epic, and re-point any link that still names it at …
 
@@ -1895,7 +2009,9 @@ resolution: already resolved: platform/bot_tui/collector_state.py:302-325 publis
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: j/k, up/down move selection
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-29-5-market-browser-search-by-name-and-add-in-collector-pane.md` summary: `bot_tui`'s Collector-pane and Bots-pane help both advertise `j/k, up/down move selection`, but only up/down work there: no urwid `command_map` entry or pane handler maps `j`/`k`, and the rows' `keypress` passes keys through unchanged. evidence: `bot_tui/app.py`'s HELP text (Bots `j/k` line ~149, Collector ~174); `_handle_bots_pane_key`/`_handle_collector_pane_key` handle only `enter`/`s` and `p`/`x`/`/`; Story 29.5's follow-up review added `_VimListBox` for the market browser only. Fix: use `_VimListBox` for those panes' ListBoxes too (or map `j`/`k` in urwid's `command_map`), with a test per pane.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-bot-tui-robustness
+resolution-undo: ddee5d273c5815dadfe57f0176738c0b9a9a64ff679763c9b494d5992cf1f027 2026-10-05 7374617475733a206f70656e
 
 ### DW-259: On the live dYdX feed, the `live-paper` node's Cache L2 order book for `BTC-USD-PERP.DYDX` reported a best bid about 2% below the real market while quotes and …
 
@@ -1903,6 +2019,7 @@ origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version le
 location: _bmad-output/implementation-artifacts/spec-29-6-bots-pane-take-profit-stop-loss-and-position-details.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-29-6-bots-pane-take-profit-stop-loss-and-position-details.md` summary: On the live dYdX feed, the `live-paper` node's Cache L2 order book for `BTC-USD-PERP.DYDX` reported a best bid about 2% below the real market while quotes and Sandbox fills agreed with each other. Anything reading that book is skewed: `DummyStrategy`'s MultiLevelOBI/OFI inputs (`on_timer` reads `cache.order_book`) and a `BID_ASK` emulation trigger. The root cause is untraced (DATA-02). evidence: 2026-09-29, third `make bots-churn-check` run (Story 29.6): an emulated stop at 83,792 released at a Cache-book "bid" of 82,133 and filled at 83,832 milliseconds after the entry. 29.6 switched its exits to `TriggerType.LAST_PRICE` to stay off that book (`bots/strategies/exits.py` docstring) and did not investigate the book itself. Same shape on the final run (07:07:25 UTC): a 0.0001 BTC market BUY filled by the Sandbox (L1_MBP, `bar_execution`/`trade_execution` on by default) at 84,037 while the last quote's mid was 83,979.5, about 7 bps, against a real spread of about $1. Candidate loci: the Sandbox L1 book being moved by bar/trade execution next to the quotes; the node's dYdX data client book-delta handling (snapshot/CLEAR replay, the crossed-book class in platform/.planning/debug/crossed-book-root-cause.md) versus the quote stream.
 status: open
+decision: 2026-10-05 Open an investigation story — Trace root cause in live-paper book handling Operator: first check whether the Cache L2 skew reproduces on Hyperliquid and Bybit books (it may affect them, not only dYdX); root cause per DATA-02.
 
 ### DW-260: `archive.repair_catalog --apply` writes its replacement snapshot files through Nautilus's `write_data` without `kernel.parquet_compat.apply_zstd_default()` …
 
@@ -1917,13 +2034,16 @@ origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version le
 location: _bmad-output/implementation-artifacts/spec-31-3-derived-signals-against-independent-reference-implementations.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-31-3-derived-signals-against-independent-reference-implementations.md` summary: The "Price" label means the slow loop's trade close on the history page (metrics.db `price`) but the live mid on the rankings page. evidence: `ranking/application/engine.py` slow pass persists the `price_stats_from_series` trade close, while `RankingBoard.fast_metrics` publishes `price` = mid (DATA_DICTIONARY §3.3/§3.4). The mismatch was already there before Story 31.3; the 31.3 review surfaced it.
 status: open
+decision: 2026-10-05 Rename labels (Close vs Mid) — Distinct labels on both pages
 
 ### DW-262: `research/tests/test_backtest_runner.py::test_an_order_fills_at_the_top_of_book_after_its_latency` (5 parametrizations) errors with `TypeError …
 
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: research/tests/test_backtest_runner.py::test_an_order_fills_at_the_top_of_book_after_its_latency
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-31-3-derived-signals-against-independent-reference-implementations.md` summary: `research/tests/test_backtest_runner.py::test_an_order_fills_at_the_top_of_book_after_its_latency` (5 parametrizations) errors with `TypeError: DydxSecondSnapshot.__init__() missing 2 required positional arguments`: its fixture builder at `:427` still calls the pre-Story-30.2 constructor. evidence: the same `DydxSecondSnapshot(` call is at line 426 of the baseline revision 5e324bbb8e, and the 5 errors show in both 31.3 review passes' full pytest runs, so the fixture was never updated for 30.2's precision arguments. It is pre-existing and not caused by 31.3.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-research-test-and-path-fixes
+resolution-undo: 89c508f4086e6130fe63c3b8c7df6e501f431e414611a6838c2e01ff0641c80a 2026-10-05 7374617475733a206f70656e
 
 ### DW-263: Bybit prints BTCUSDT spot trades below the instrument's 0.1 tick (e.g. `84528.67`), and capture archives them rounded (`84528.7`) with no trace, so the stored …
 
@@ -1952,6 +2072,7 @@ origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version le
 location: _bmad-output/implementation-artifacts/spec-28-1-capture-hotpath-metrics-cpu-priority-and-vps-profile.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-28-1-capture-hotpath-metrics-cpu-priority-and-vps-profile.md` summary: A collector's plan can grow at runtime (`collector:control`) past the size its compose `mem_limit` was measured for, with nothing warning before the cgroup OOM-kills it into a restart loop. A memory-pressure canary is needed: the collector reads its cgroup `memory.current`/`memory.max` each flush and ledgers above a threshold, or refuses a plan change that projects past it. evidence: Story 28.1 set `mem_limit` from a 4-instrument Bybit / 1-instrument Hyperliquid peak × 1.5 (362m/248m). The `docker-compose.yml` Known limit estimates ~16 MiB per instrument, so the Bybit limit is reached at about 11 instruments, while Epic 28 targets 30+. Today the only signal is `OOMKilled=true` after the fact (DEPLOY_CHECKLIST §7).
 status: open
+decision: 2026-10-05 Read cgroup memory each flush and ledger above threshold — Memory canary ledger
 
 ### DW-267: On shutdown `CaptureService.run()` cancels `_ingest_loop` as soon as `_stop` is set. Any backlog still in `_ingest_queue`, and whatever the client pushes …
 
@@ -1966,6 +2087,7 @@ origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version le
 location: _bmad-output/implementation-artifacts/spec-32-3-legend-is-the-indicator-control-surface-larger-type-gear-settings-remove-in-place.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-32-3-legend-is-the-indicator-control-surface-larger-type-gear-settings-remove-in-place.md` summary: One persisted stale/invalid `source` makes the whole indicator-values request 422 and blanks every picker series, instead of a per-entry error. evidence: contract mandates 422; `usePickerIndicatorValues` sends all entries in one request, so the gear (which needs loaded series keys) is unreachable to repair it.
 status: open
+decision: 2026-10-05 Client drops/repairs invalid entries before request — Per-entry handling client-side
 
 ### DW-269: Settings modal cannot reset an output's style to the pane palette default, and legend action buttons are invisible (opacity 0) on touch devices; keyboard focus …
 
@@ -1993,7 +2115,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: PUT /api/coin/{iid}/indicators
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-32-3-legend-is-the-indicator-control-surface-larger-type-gear-settings-remove-in-place.md` summary: Nothing server-side refuses two chart indicator entries with the same `indicator_id`: `PUT /api/coin/{iid}/indicators` stores duplicates, and the GET's unservable-source fallback to `close` can turn a hand-edited `SMA(20) close` + `SMA(20) <bad source>` pair into two identical entries that the next save writes back. evidence: `put_coin_indicator_config` (`platform/data_api/routes/indicators.py`) checks names and sources only; duplicates are refused only client-side (`IndicatorPicker.hasInstance`); `_servable_source` rewrites the source without checking for a collision. Two entries with one id share one series key, so the legend acts on the first only. Refusing duplicates in the PUT needs a decision on files that already hold them (they would make every save of that coin a 400). Trigger is a hand edit only.
-status: open
+status: done 2026-10-05
+resolution: closed by human decision: Accepted
+decision: 2026-10-05 Accept hand-edit only — Accepted
 
 ### DW-273: `GET /api/candles/{iid}` reads the catalog's instrument definition on every request (including scroll-back pages) and 404s when absent.
 
@@ -2050,14 +2174,18 @@ resolution: already resolved: platform/frontend/src/pages/ChartPage.tsx:838-841 
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: chart_indicators.toml
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-32-6-chart-layout-restored-on-return-and-default-setup-for-a-new-coin.md` summary: A corrupt `chart_indicators.toml` (a server-side condition) is answered 400 "invalid indicator config payload" by the indicators PUT, while the layout routes answer the same condition 500. evidence: `data_api/routes/indicators.py` `_store_entries` maps `KeyError`/`TypeError` from `load_chart_indicators` to 400; `data_api/routes/layout.py` `_file_errors` maps them to 500.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-data-api-input-validation
+resolution-undo: 91b47c52cc0253ee68fc7a1fe5a9d3fd9432e6964681548c0f72e9cd0679be68 2026-10-05 7374617475733a206f70656e
 
 ### DW-281: A `[default]` indicator later dropped from the catalog makes the first-open GET of every coin without an indicator list a 500, so no new coin draws a chart …
 
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-32-6-chart-layout-restored-on-return-and-default-setup-for-a-new-coin.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-32-6-chart-layout-restored-on-return-and-default-setup-for-a-new-coin.md` summary: A `[default]` indicator later dropped from the catalog makes the first-open GET of every coin without an indicator list a 500, so no new coin draws a chart until the default is re-saved. evidence: `data_api/routes/layout.py` `_write_template_indicators` revalidates the template on every seed and maps a stale entry to 500 (`test_an_invalid_default_indicator_fails_the_seed_loudly_and_writes_nothing`).
-status: open
+status: done 2026-10-05
+resolution: closed by human decision: Accepted: fail-loud intended
+decision: 2026-10-05 Keep loud failure — Accepted: fail-loud intended
 
 ### DW-282: The session volume profile's session count and the Periodic-vs-Session preset are not in the layout's field list, so a Periodic profile on "daily" comes back …
 
@@ -2065,10 +2193,64 @@ origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version le
 location: _bmad-output/implementation-artifacts/spec-32-6-chart-layout-restored-on-return-and-default-setup-for-a-new-coin.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-32-6-chart-layout-restored-on-return-and-default-setup-for-a-new-coin.md` summary: The session volume profile's session count and the Periodic-vs-Session preset are not in the layout's field list, so a Periodic profile on "daily" comes back as the Session Volume Profile and the count resets to 5. evidence: `pages/ChartPage.tsx` `initialSessionConfig` derives the preset from `session`/`hd` and sets `sessionCount: DEFAULT_SESSION_COUNT`; the spec's enumerated `volume_profile` keys have no field for either.
 status: open
+decision: 2026-10-05 Extend layout schema with preset and session_count — Persist and restore both Note: the session count is already persisted on troll by DW-153 (`sessions`); what remains is the Periodic-vs-Session preset.
 
-- source_spec: `_bmad-output/implementation-artifacts/bmad-dev-auto-result-live-channel-hardening.md`
-  summary: The heartbeat-silence `_receive` loop is now copied in four modules (`views/archive_status_bus.py`, `views/rankings_bus.py`, `bot_tui/archive_state.py`, `bot_tui/collector_state.py`) and two more subscribers (`bot_tui/bots_state.py`, `bot_tui/bot_history_state.py`) still need it, so it should become one shared helper taking an ingest callback.
-  evidence: The four `_receive` bodies are line-for-line the same poll/`heard`/`ConnectionError` loop with differently named constants (`STALE_AFTER_SECONDS`, `SILENCE_RESUBSCRIBE_SECONDS`, `_SILENCE_RESUBSCRIBE_SECONDS`); a shared home has to respect `tests/test_boundaries.py`'s context edges (views and bot_tui may not import each other).
+### DW-283: Extract the heartbeat-silence `_receive` loop, now copied in four pub/sub subscribers, into one shared helper taking an ingest callback
+
+origin: migrated from legacy ledger (flat append from sweep bundle dw-live-channel-hardening, bmad-dev-auto-result-live-channel-hardening.md), 2026-10-05
+location: platform/views/archive_status_bus.py, platform/views/rankings_bus.py, platform/bot_tui/archive_state.py, platform/bot_tui/collector_state.py
+source_spec: `_bmad-output/implementation-artifacts/bmad-dev-auto-result-live-channel-hardening.md`
+reason: The heartbeat-silence `_receive` loop is now copied in four modules (`views/archive_status_bus.py`, `views/rankings_bus.py`, `bot_tui/archive_state.py`, `bot_tui/collector_state.py`) and two more subscribers (`bot_tui/bots_state.py`, `bot_tui/bot_history_state.py`) still need it, so it should become one shared helper taking an ingest callback. evidence: The four `_receive` bodies are line-for-line the same poll/`heard`/`ConnectionError` loop with differently named constants (`STALE_AFTER_SECONDS`, `SILENCE_RESUBSCRIBE_SECONDS`, `_SILENCE_RESUBSCRIBE_SECONDS`); a shared home has to respect `tests/test_boundaries.py`'s context edges (views and bot_tui may not import each other).
+status: open
+
+### DW-284: `GET /api/coin/{iid}/indicator-values` builds request params with no magnitude cap, so `HullMovingAverage {period: 10**9}` stalls `data_api` ~16 s per entry
+
+origin: migrated from legacy ledger (flat append from spec-dw-data-api-input-validation.md), 2026-10-05
+location: platform/data_api/routes/indicators.py
+source_spec: `_bmad-output/implementation-artifacts/spec-dw-data-api-input-validation.md`
+reason: `GET /api/coin/{iid}/indicator-values` builds whatever params its `entries` query carries with no magnitude cap, so a request for `HullMovingAverage {period: 10**9}` still stalls `data_api` for ~16 s per entry; save-time validation (`check_params`) now covers both PUTs and the technicals-values GET, but not this read path. evidence: `data_api/routes/indicators.py` `get_indicator_values` runs only `_parse_entries` + `_check_sources` before `chart_series.indicator_values_page`; the fix must keep the route's per-entry `errors` contract (one bad entry must not blank the others), e.g. by calling `indicator_picker.check_params` inside the per-entry replay and reporting its `ValueError` per entry. Predates the input-validation bundle.
+status: open
+
+### DW-285: An FRVP whose range ends on the forming live bar is built without that bar and never rebuilt once it closes, so the profile stops one bar short
+
+origin: migrated from legacy ledger (flat append from spec-chart-edge-coordinates.md), 2026-10-05
+location: platform/frontend/src/pages/ChartPage.tsx
+source_spec: `_bmad-output/implementation-artifacts/spec-chart-edge-coordinates.md`
+reason: An FRVP whose range (placement or edge drag) ends on the forming live bar builds its profile from `candles`/`fullVolume`, which exclude that bar, and is not rebuilt once the bar closes, so the profile silently stops one bar short of its drawn range. evidence: `ChartPage.tsx` `handleRangeSelect`/`handleEdgeCommit` call `buildRangeProfile(candles, fullVolume, ...)`; the refill at ~806 only rebuilds profiles that are not `filled`; the live bar was already reachable through `coordinateToTime` before DW-143/DW-150, which only made the margin drag land there more easily.
+status: open
+
+### DW-286: The knowledge base's "Redis channel reference" table lists five channels and misses five live ones (`collector:status`/`control`, `archive:status`/`control`, `markets:live`)
+
+origin: migrated from legacy ledger (flat append from spec-dw-capture-script-and-docs.md), 2026-10-05
+location: platform/frontend/src/pages/docs/kbData.ts
+source_spec: `_bmad-output/implementation-artifacts/spec-dw-capture-script-and-docs.md`
+reason: The in-app knowledge base's "Redis channel reference" table (`platform/frontend/src/pages/docs/kbData.ts`) lists only five channels (`snapshots:raw`, `rankings:live`, `ranking:control`, `bots:status`, `bots:control`), while the module map beside it names `collector:status`, `archive:status`, `markets:live` and `collector:control`, and `archive:control` is live too, so a reader who takes the table as the channel contract misses five live channels. evidence: `bot_tui/collector_pane.py`/`collector_state.py` (collector:status/control), `archive/infrastructure/redis_bus.py` + `archive/scheduler.py` (archive:status/control), `bot_tui/markets_state.py` (markets:live); the table predates this bundle, which only corrected the module-map prose.
+status: open
+
+### DW-287: TPO overflow bar takes the colour of the last block, losing the up/down split of hidden touches
+
+origin: migrated from legacy ledger (flat append from spec-32-7-remaining-tradingview-profiles-auto-anchored-anchored-vp-anchored-vwap-and-tpo.md), 2026-10-05
+location: VolumeProfilePrimitive drawTpo overflow path (platform/frontend)
+source_spec: `_bmad-output/implementation-artifacts/spec-32-7-remaining-tradingview-profiles-auto-anchored-anchored-vp-anchored-vwap-and-tpo.md`
+reason: TPO overflow bar takes the colour of the last block, losing the up/down split of hidden touches. evidence: VolumeProfilePrimitive drawTpo overflow path.
+status: open
+
+### DW-288: Catalog readers behind `candle_page` list files then open them, so a concurrent nightly consolidation makes a read raise an unledgered `FileNotFoundError` (bare 500)
+
+origin: migrated from legacy ledger (flat append from spec-32-8-volume-footprint-bars-from-the-raw-trade-archive-toggled-from-the-indicators-menu.md), 2026-10-05
+location: platform/kernel/catalog_files.py
+source_spec: `_bmad-output/implementation-artifacts/spec-32-8-volume-footprint-bars-from-the-raw-trade-archive-toggled-from-the-indicators-menu.md`
+reason: The views' other catalog readers (`kernel.catalog_files.query_second_ohlc` and its siblings behind `candle_page`) list files and then open them, so a nightly consolidation that removes minute files after writing their day file makes a concurrent read raise an unledgered `FileNotFoundError` (a bare 500). evidence: `archive/consolidate_catalog.py` writes the merged day file and then removes its sources; no reader in `views/` or `kernel/catalog_files.py` other than the new `query_trade_columns` (Story 32.8 follow-up review) catches `FileNotFoundError` or lists again.
+status: open
+
+### DW-289: Catalog readers behind `candle_page` let a corrupt Parquet file's `ArrowInvalid`/`OSError` escape unmapped as a bare 500 no `error_ledger.record` site counts (DATA-07)
+
+origin: migrated from legacy ledger (flat append from spec-32-8-volume-footprint-bars-from-the-raw-trade-archive-toggled-from-the-indicators-menu.md), 2026-10-05
+location: platform/kernel/catalog_files.py
+source_spec: `_bmad-output/implementation-artifacts/spec-32-8-volume-footprint-bars-from-the-raw-trade-archive-toggled-from-the-indicators-menu.md`
+reason: `kernel.catalog_files.query_second_ohlc` and the other pre-existing catalog readers behind `candle_page` let a truncated or corrupt Parquet file's `pyarrow.ArrowInvalid`/`OSError` escape unmapped, so the chart request fails as a bare 500 that no `error_ledger.record` site counts (DATA-07). evidence: Only the new `query_trade_columns` (Story 32.8 second follow-up review) maps an unreadable file to a ledgered error; `query_second_ohlc` and its siblings call `pq.read_table`/`pq.read_schema` with no handler, and `data_api/routes/candles.py` maps only `ImpossibleCandle`.
+status: open
+
 - source_spec: `_bmad-output/implementation-artifacts/spec-33-1-bybit-liquidations-captured-over-a-second-socket-into-one-shared-liquidation-type.md`
   summary: Story 33.2's planned `price_kind` (`dictionary<int8,string>`) and nullable `confirmed` (`bool`) columns on `kernel.liquidation.Liquidation` will leave `custom_liquidation/` holding Bybit files written under 33.1's 9-column schema beside files with the extended schema, so 33.2 must prove `ParquetDataCatalog` reads and consolidates the mixed-schema directory, or rewrite the 33.1 files (`price_kind="bankruptcy"`, `confirmed=null`) in the same story.
   evidence: The epic assigns both columns to 33.2 ("added to the type in this story"); 33.1's `Liquidation.schema()` has neither, and `register_arrow` binds one schema per class, so files written before and after 33.2 differ in column set. Raised by the 33.1 Blind Hunter review (finding 10).

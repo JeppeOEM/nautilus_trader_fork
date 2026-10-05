@@ -428,3 +428,42 @@ def test_values_come_from_the_candle_store_without_touching_parquet(
 
     assert got["errors"] == {}
     assert got["values"][_IID]["0.value"] is not None
+
+
+@pytest.mark.parametrize(
+    "column",
+    [
+        {"name": "SimpleMovingAverage", "params": {"period": 0}, "category": "native"},
+        {"name": "CandlePattern", "params": {"pattern": "hammer"}, "category": "native"},
+        {"name": "BollingerBands", "params": {"ma_type": "NOPE"}, "category": "native"},
+        {"name": "SimpleMovingAverage", "params": {"perod": 20}, "category": "native"},
+        {"name": "HullMovingAverage", "params": {"period": 10**9}, "category": "native"},
+        {"name": "CancelPressure", "params": {"window": -1}, "category": "custom"},
+    ],
+)
+def test_put_with_params_the_indicator_refuses_is_400_and_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, column: dict
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+    saved = [{"name": "RelativeStrengthIndex", "params": {"period": 14}, "category": "native"}]
+    assert client.put("/api/rankings/technicals-columns", json=saved).status_code == 200
+    before = Path(rankings_routes.SCREENER_COLUMNS_CONFIG_PATH).read_bytes()
+
+    response = client.put("/api/rankings/technicals-columns", json=[column])
+
+    assert response.status_code == 400
+    assert column["name"] in response.json()["detail"]
+    assert Path(rankings_routes.SCREENER_COLUMNS_CONFIG_PATH).read_bytes() == before
+
+
+def test_values_with_params_the_indicator_refuses_are_400(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ranked(monkeypatch, _IID)
+    client = _client(tmp_path, monkeypatch)
+    entries = json.dumps([{"name": "SimpleMovingAverage", "params": {"period": 0}}])
+
+    response = client.get("/api/rankings/technicals-values", params={"entries": entries})
+
+    assert response.status_code == 400
+    assert "period" in response.json()["detail"]

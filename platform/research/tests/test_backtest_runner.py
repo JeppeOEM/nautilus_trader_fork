@@ -424,8 +424,15 @@ _LATENCY_SECONDS = 10
 def _stepped_snapshot(i: int) -> DydxSecondSnapshot:
     ts = _LATENCY_START + i * NS_PER_S
     bid = 100.0 + i
-    return DydxSecondSnapshot(
-        _IID, [bid], [5.0], [round(bid + 0.1, 1)], [5.0], 0.0, 0.0, 0, 0, ts, ts
+    return make_snapshot(
+        instrument_id=_IID,
+        bid_prices=[bid],
+        bid_sizes=[5.0],
+        ask_prices=[round(bid + 0.1, 1)],
+        ask_sizes=[5.0],
+        ts_event=ts,
+        price_precision=1,  # the instrument definition's
+        size_precision=3,
     )
 
 

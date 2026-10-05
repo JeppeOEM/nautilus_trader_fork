@@ -4,12 +4,33 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CreatePriceLineOptions, Time } from "lightweight-charts";
 
-import type { ChartMode, DrawingSpec, IndicatorPaneSpec, PriceLineSpec, TrendlineSpec, VolumeProfileSpec } from "./LightweightChart";
+import type {
+  AnchoredVpSpec,
+  AnchoredVwapSpec,
+  ChartMode,
+  DrawingSpec,
+  IndicatorPaneSpec,
+  PriceLineSpec,
+  TrendlineSpec,
+  VolumeProfileSpec,
+} from "./LightweightChart";
+import { AnchoredVpPrimitive } from "./primitives/AnchoredVpPrimitive";
+import { AnchoredVwapPrimitive } from "./primitives/AnchoredVwapPrimitive";
 import { TrendlinePrimitive } from "./primitives/TrendlinePrimitive";
 import { FibPrimitive } from "./primitives/FibPrimitive";
 import { PositionPrimitive } from "./primitives/PositionPrimitive";
-import { type DragPoint, type FibDrawing, type PositionDrawing, defaultFibLevels, newPosition } from "../../lib/drawings";
+import {
+  type DragPoint,
+  type FibDrawing,
+  type PositionDrawing,
+  defaultFibLevels,
+  newAnchoredVp,
+  newAnchoredVwap,
+  newPosition,
+} from "../../lib/drawings";
 import { GapPrimitive } from "./primitives/GapPrimitive";
+import { MeasurementPrimitive } from "./primitives/MeasurementPrimitive";
+import { FootprintPrimitive, type FootprintRenderSpec } from "./primitives/FootprintPrimitive";
 
 const addSeriesMock = vi.fn();
 const seriesUpdateMock = vi.fn();
@@ -83,6 +104,13 @@ const pricePaneMock = {
   getHeight: vi.fn(() => 0),
 };
 const TIME_AXIS_PX = 28;
+// The plot area the range tools hit-test presses against (rangeDrag's plotPoint): x in
+// [left price scale, + time scale width), y in [0, price pane height). jsdom's container box sits
+// at (0, 0) and the left scale is hidden (width 0), so client px are plot px.
+const PLOT_WIDTH_PX = 1000;
+const LAID_OUT_PANE_PX = 500;
+// The left price scale's width: 0 (hidden) unless a test shows it.
+let leftScaleWidthPx = 0;
 const timeScaleHeightMock = vi.fn(() => TIME_AXIS_PX);
 type PaneMock = ReturnType<typeof makePaneMock>;
 function addedPane(n: number): PaneMock {
@@ -191,6 +219,8 @@ type ChartTestProps = {
   onMeasureEnd?: () => void;
   data?: { time: Time; open: number; high: number; low: number; close: number }[];
   markerTime?: Time | null;
+  followNewest?: boolean;
+  anchorMarkerTime?: Time | null;
   volumeProfiles?: VolumeProfileSpec[];
   crosshairVisible?: boolean;
   viewCommand?: { kind: "fit" | "latest"; seq: number } | null;
@@ -199,6 +229,9 @@ type ChartTestProps = {
   profileEdgesEditable?: boolean;
   onProfileEdgeDrag?: (id: string, edge: "start" | "end", time: Time) => void;
   onProfileEdgeCommit?: (id: string, edge: "start" | "end", time: Time) => void;
+  onProfileEdgeCancel?: () => void;
+  liveBar?: { time: Time; open: number; high: number; low: number; close: number; volume: number } | null;
+  volume?: { time: Time; value?: number }[];
   onPointClick?: (point: { time: Time; price: number }) => void;
   precision?: { price: number; size: number } | null;
   onDrawingDrag?: (id: string, handle: string, point: DragPoint) => void;
@@ -254,6 +287,7 @@ beforeEach(() => {
   // controlled conversions.
   priceToCoordinateMock.mockReset().mockImplementation((price: number) => price);
   coordinateToPriceMock.mockReset().mockImplementation((coordinate: number) => coordinate);
+  leftScaleWidthPx = 0;
   createChartMock.mockReset().mockImplementation(() => ({
     addSeries: addSeriesMock,
     removeSeries: removeSeriesMock,
@@ -266,8 +300,10 @@ beforeEach(() => {
     unsubscribeClick: unsubscribeClickMock,
     subscribeCrosshairMove: subscribeCrosshairMoveMock,
     unsubscribeCrosshairMove: unsubscribeCrosshairMoveMock,
+    priceScale: () => ({ width: () => leftScaleWidthPx }),
     timeScale: () => ({
       height: timeScaleHeightMock,
+      width: () => PLOT_WIDTH_PX,
       getVisibleLogicalRange: getVisibleLogicalRangeMock,
       setVisibleLogicalRange: setVisibleLogicalRangeMock,
       coordinateToTime: coordinateToTimeMock,
@@ -1079,6 +1115,7 @@ describe("TrendlinePrimitive (Story 18.2)", () => {
 describe("measurement drag (Story 18.3)", () => {
   beforeEach(() => {
     coordinateToTimeMock.mockImplementation((x: number) => x);
+    pricePaneMock.getHeight.mockReturnValue(LAID_OUT_PANE_PX);
   });
 
   it("attaches a transient primitive on drag and removes it on release, reporting the end", () => {
@@ -1148,6 +1185,83 @@ describe("replay support (Story 18.4)", () => {
     expect(setVisibleLogicalRangeMock).toHaveBeenCalledWith({ from: 12, to: 52 });
   });
 
+  describe("followNewest (DW-145)", () => {
+    const bars = (n: number) => Array.from({ length: n }, (_, i) => b(60 * (i + 1)));
+
+    it("scrolls a newest bar right of the view back in, keeping the width, the bar at the right edge", () => {
+      getVisibleLogicalRangeMock.mockReturnValue({ from: 0, to: 4 });
+      const { rerender } = render(chartElement({ data: bars(3), followNewest: true }));
+      expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled(); // index 2 is visible
+
+      rerender(chartElement({ data: bars(6), followNewest: true }));
+
+      expect(setVisibleLogicalRangeMock).toHaveBeenCalledExactlyOnceWith({ from: 1.5, to: 5.5 });
+    });
+
+    it("scrolls a newest bar left of the view in (a start picked while scrolled back)", () => {
+      getVisibleLogicalRangeMock.mockReturnValue({ from: 0, to: 100 });
+      const { rerender } = render(chartElement({ data: bars(60), followNewest: false }));
+      getVisibleLogicalRangeMock.mockReturnValue({ from: 40, to: 80 });
+
+      rerender(chartElement({ data: bars(30), followNewest: true }));
+
+      expect(setVisibleLogicalRangeMock).toHaveBeenCalledExactlyOnceWith({ from: -10.5, to: 29.5 });
+    });
+
+    it("follows a newest bar half clipped at the right edge", () => {
+      getVisibleLogicalRangeMock.mockReturnValue({ from: 0, to: 2 });
+      const { rerender } = render(chartElement({ data: bars(2), followNewest: true }));
+      expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled(); // index 1 spans 0.5..1.5
+
+      rerender(chartElement({ data: bars(3), followNewest: true })); // index 2 spans 1.5..2.5
+
+      expect(setVisibleLogicalRangeMock).toHaveBeenCalledExactlyOnceWith({ from: 0.5, to: 2.5 });
+    });
+
+    it("leaves the view alone while the newest bar is already visible", () => {
+      getVisibleLogicalRangeMock.mockReturnValue({ from: 0, to: 100 });
+      const { rerender } = render(chartElement({ data: bars(3), followNewest: true }));
+
+      rerender(chartElement({ data: bars(4), followNewest: true }));
+      rerender(chartElement({ data: bars(5), followNewest: true }));
+
+      expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled();
+    });
+
+    it("a prepend during replay only compensates; the unchanged newest bar is not followed", () => {
+      const { rerender } = render(chartElement({ data: [b(60), b(120)], followNewest: true }));
+      setVisibleLogicalRangeMock.mockClear();
+
+      // the range stays {10, 50}, so index 3 reads as off-screen: only the newest-time check
+      // keeps the follow from firing
+      rerender(chartElement({ data: [b(0), b(30), b(60), b(120)], followNewest: true }));
+
+      expect(setVisibleLogicalRangeMock).toHaveBeenCalledExactlyOnceWith({ from: 12, to: 52 });
+    });
+
+    it("never follows while not replaying", () => {
+      getVisibleLogicalRangeMock.mockReturnValue({ from: 0, to: 4 });
+      const { rerender } = render(chartElement({ data: bars(3) }));
+
+      rerender(chartElement({ data: bars(6) }));
+      rerender(chartElement({ data: bars(9), followNewest: false }));
+
+      expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled();
+    });
+
+    it("flipping the prop alone neither repaints the data nor moves the view", () => {
+      getVisibleLogicalRangeMock.mockReturnValue({ from: 0, to: 4 });
+      const data = bars(9);
+      const { rerender } = render(chartElement({ data, followNewest: false }));
+      const paints = setDataMock.mock.calls.length;
+
+      rerender(chartElement({ data, followNewest: true }));
+
+      expect(setDataMock).toHaveBeenCalledTimes(paints);
+      expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled();
+    });
+  });
+
   it("attaches, moves and detaches the start marker", () => {
     const { rerender } = render(chartElement({ markerTime: 60 as Time }));
     expect(attachPrimitiveMock).toHaveBeenCalledTimes(1);
@@ -1192,6 +1306,7 @@ describe("volumeProfiles registry (Story 18.5)", () => {
 describe("FRVP range select and edge drag (Story 18.6)", () => {
   beforeEach(() => {
     coordinateToTimeMock.mockImplementation((x: number) => x);
+    pricePaneMock.getHeight.mockReturnValue(LAID_OUT_PANE_PX);
   });
 
   it("previews a drag without calculating, then reports exactly one range on release (AC #2)", () => {
@@ -1330,6 +1445,340 @@ describe("FRVP range select and edge drag (Story 18.6)", () => {
       fireEvent.mouseUp(window);
 
       expect(first).toHaveBeenCalledWith("frvp-1", "start", 160);
+    });
+  });
+});
+
+describe("range tools at the last-bar edge (DW-143, DW-144, DW-150)", () => {
+  // Bars at 10..50 (logical 0..4); the time scale only resolves a time up to x = 50, like the real
+  // library past the newest bar. The grid fallback maps x through the mock's x / 10 logical.
+  const bar = (n: number) => ({ time: n as Time, open: 1, high: 2, low: 1, close: 1 });
+  const data = [bar(10), bar(20), bar(30), bar(40), bar(50)];
+  const reached = vi.fn();
+
+  beforeEach(() => {
+    coordinateToTimeMock.mockImplementation((x: number) => (x <= 50 ? x : null));
+    pricePaneMock.getHeight.mockReturnValue(LAID_OUT_PANE_PX);
+    reached.mockReset();
+    document.addEventListener("mousedown", reached);
+    document.addEventListener("touchstart", reached);
+  });
+
+  afterEach(() => {
+    document.removeEventListener("mousedown", reached);
+    document.removeEventListener("touchstart", reached);
+  });
+
+  const dragRange = (target: Element, toX: number) => {
+    fireEvent.mouseDown(target, { clientX: 10, clientY: 100, button: 0 });
+    fireEvent.mouseMove(window, { buttons: 1, clientX: 40, clientY: 120 });
+    fireEvent.mouseMove(window, { buttons: 1, clientX: toX, clientY: 130 });
+    fireEvent.mouseUp(window);
+  };
+
+  it("follows a drag into the right margin to the last bar, price included", () => {
+    const onRangeSelect = vi.fn();
+    const { container } = render(chartElement({ data, rangeSelectActive: true, onRangeSelect }));
+
+    dragRange(container.firstElementChild!, 300);
+
+    expect(onRangeSelect).toHaveBeenCalledWith({ time: 10, price: 100 }, { time: 50, price: 130 });
+  });
+
+  it("ends on the forming live bar when one is newer than the data", () => {
+    const onFibPlace = vi.fn();
+    const liveBar = { ...bar(60), volume: 5 };
+    const { container } = render(chartElement({ data, liveBar, fibActive: true, onFibPlace }));
+
+    dragRange(container.firstElementChild!, 300);
+
+    expect(onFibPlace).toHaveBeenCalledWith({ time: 10, price: 100 }, { time: 60, price: 130 });
+  });
+
+  it("still pans on a press past the data: no start without a time under the press", () => {
+    const onRangeSelect = vi.fn();
+    const { container } = render(chartElement({ data, rangeSelectActive: true, onRangeSelect }));
+
+    fireEvent.mouseDown(container.firstElementChild!, { clientX: 300, clientY: 100, button: 0 });
+    fireEvent.mouseMove(window, { buttons: 1, clientX: 20, clientY: 130 });
+    fireEvent.mouseUp(window);
+
+    expect(reached).toHaveBeenCalledTimes(1);
+    expect(onRangeSelect).not.toHaveBeenCalled();
+  });
+
+  it("ignores a press on the price or time axis strip, leaving the event to the library", () => {
+    coordinateToTimeMock.mockImplementation((x: number) => x);
+    const onMeasureEnd = vi.fn();
+    const { container } = render(chartElement({ data, measureActive: true, onMeasureEnd }));
+    const target = container.firstElementChild!;
+
+    for (const [x, y] of [[PLOT_WIDTH_PX + 5, 100], [10, LAID_OUT_PANE_PX + 5]]) {
+      fireEvent.mouseDown(target, { clientX: x, clientY: y, button: 0 });
+      fireEvent.mouseMove(window, { buttons: 1, clientX: 40, clientY: 120 });
+      fireEvent.mouseUp(window);
+    }
+
+    expect(reached).toHaveBeenCalledTimes(2);
+    expect(attachPrimitiveMock).not.toHaveBeenCalled();
+    expect(onMeasureEnd).not.toHaveBeenCalled();
+  });
+
+  it("reads plot x past a visible left price scale, whose strip is not a press target", () => {
+    leftScaleWidthPx = 40;
+    const onRangeSelect = vi.fn();
+    const { container } = render(chartElement({ data, rangeSelectActive: true, onRangeSelect }));
+    const target = container.firstElementChild!;
+
+    fireEvent.mouseDown(target, { clientX: 30, clientY: 100, button: 0 });
+    fireEvent.mouseUp(window);
+    expect(reached).toHaveBeenCalledTimes(1);
+
+    fireEvent.mouseDown(target, { clientX: 50, clientY: 100, button: 0 });
+    fireEvent.mouseMove(window, { buttons: 1, clientX: 70, clientY: 120 });
+    fireEvent.mouseUp(window);
+
+    expect(reached).toHaveBeenCalledTimes(1);
+    expect(onRangeSelect).toHaveBeenCalledWith({ time: 10, price: 100 }, { time: 30, price: 120 });
+  });
+
+  it("ignores every press before the chart is laid out (price pane height 0)", () => {
+    pricePaneMock.getHeight.mockReturnValue(0);
+    const onRangeSelect = vi.fn();
+    const { container } = render(chartElement({ data, rangeSelectActive: true, onRangeSelect }));
+
+    dragRange(container.firstElementChild!, 40);
+
+    expect(onRangeSelect).not.toHaveBeenCalled();
+  });
+
+  it("measures the forming live bar in the label's bar count and volume", () => {
+    const setSelection = vi.spyOn(MeasurementPrimitive.prototype, "setSelection");
+    const volume = data.map((b) => ({ time: b.time, value: 10 }));
+    const liveBar = { ...bar(60), volume: 5 };
+    const { container } = render(chartElement({ data, volume, liveBar, measureActive: true }));
+
+    fireEvent.mouseDown(container.firstElementChild!, { clientX: 10, clientY: 100, button: 0 });
+    fireEvent.mouseMove(window, { buttons: 1, clientX: 300, clientY: 130 });
+
+    expect(setSelection.mock.calls.at(-1)?.[2]).toEqual(["+30 (+30.00%)", "6 bars", "vol 55"]);
+    setSelection.mockRestore();
+  });
+
+  describe("touch", () => {
+    // `fireEvent` returns false when a listener called preventDefault().
+    const finger = (x: number, y: number, identifier = 1) => ({ identifier, clientX: x, clientY: y });
+    const touch = (x: number, y: number) => ({ touches: [finger(x, y)] });
+    const lifted = (identifier = 1) => ({ touches: [], changedTouches: [finger(0, 0, identifier)] });
+
+    it("drags with the same move/release sequence as the mouse, blocking pan and scroll", () => {
+      const onRangeSelect = vi.fn();
+      const { container } = render(chartElement({ data, rangeSelectActive: true, onRangeSelect }));
+
+      const startDispatched = fireEvent.touchStart(container.firstElementChild!, touch(10, 100));
+      const moveDispatched = fireEvent.touchMove(window, touch(300, 130));
+      expect(onRangeSelect).not.toHaveBeenCalled();
+      fireEvent.touchEnd(window, lifted());
+
+      expect(startDispatched).toBe(false);
+      expect(moveDispatched).toBe(false);
+      expect(reached).not.toHaveBeenCalled();
+      expect(onRangeSelect).toHaveBeenCalledTimes(1);
+      expect(onRangeSelect).toHaveBeenCalledWith({ time: 10, price: 100 }, { time: 50, price: 130 });
+    });
+
+    it("finishes on touchcancel like a lost release, and is not finished by a stray mouse move", () => {
+      const onRangeSelect = vi.fn();
+      const { container } = render(chartElement({ data, rangeSelectActive: true, onRangeSelect }));
+
+      fireEvent.touchStart(container.firstElementChild!, touch(10, 100));
+      fireEvent.touchMove(window, touch(40, 120));
+      fireEvent.mouseMove(window, { buttons: 0, clientX: 45, clientY: 120 });
+      expect(onRangeSelect).not.toHaveBeenCalled();
+      fireEvent.touchCancel(window, lifted());
+
+      expect(onRangeSelect).toHaveBeenCalledWith({ time: 10, price: 100 }, { time: 40, price: 120 });
+    });
+
+    it("follows only the dragging finger: a second finger is blocked and its lift ends nothing", () => {
+      const onRangeSelect = vi.fn();
+      const { container } = render(chartElement({ data, rangeSelectActive: true, onRangeSelect }));
+      const target = container.firstElementChild!;
+
+      fireEvent.touchStart(target, touch(10, 100));
+      fireEvent.touchMove(window, touch(20, 105));
+      const secondDispatched = fireEvent.touchStart(target, { touches: [finger(10, 100), finger(200, 50, 2)] });
+      fireEvent.touchMove(window, { touches: [finger(200, 60, 2), finger(30, 110)] });
+      fireEvent.touchEnd(window, { touches: [finger(30, 110)], changedTouches: [finger(200, 60, 2)] });
+      expect(onRangeSelect).not.toHaveBeenCalled();
+      fireEvent.touchEnd(window, lifted());
+
+      expect(secondDispatched).toBe(false);
+      expect(reached).not.toHaveBeenCalled();
+      expect(onRangeSelect).toHaveBeenCalledWith({ time: 10, price: 100 }, { time: 30, price: 110 });
+    });
+
+    it("hands a pinch whose second finger lands before any move to the library", () => {
+      const onRangeSelect = vi.fn();
+      const { container } = render(chartElement({ data, rangeSelectActive: true, onRangeSelect }));
+      const target = container.firstElementChild!;
+
+      fireEvent.touchStart(target, touch(10, 100));
+      const secondDispatched = fireEvent.touchStart(target, { touches: [finger(10, 100), finger(200, 50, 2)] });
+      const moveDispatched = fireEvent.touchMove(window, { touches: [finger(5, 100), finger(220, 50, 2)] });
+      fireEvent.touchEnd(window, lifted());
+
+      expect(secondDispatched).toBe(true);
+      expect(moveDispatched).toBe(true);
+      expect(reached).toHaveBeenCalledTimes(1); // the second touchstart, which starts the library's pinch
+      expect(onRangeSelect).not.toHaveBeenCalled();
+    });
+
+    it("finishes a drag whose touchend was lost when a new single touch starts", () => {
+      const onRangeSelect = vi.fn();
+      const { container } = render(chartElement({ data, rangeSelectActive: true, onRangeSelect }));
+      const target = container.firstElementChild!;
+
+      fireEvent.touchStart(target, touch(10, 100));
+      fireEvent.touchMove(window, touch(40, 120));
+      fireEvent.touchStart(target, { touches: [finger(20, 100, 7)] });
+
+      expect(onRangeSelect).toHaveBeenCalledTimes(1);
+      expect(onRangeSelect).toHaveBeenCalledWith({ time: 10, price: 100 }, { time: 40, price: 120 });
+    });
+
+    it("leaves pinches, axis presses and moves with no drag to the library and the page", () => {
+      const onRangeSelect = vi.fn();
+      const { container } = render(chartElement({ data, rangeSelectActive: true, onRangeSelect }));
+      const target = container.firstElementChild!;
+
+      fireEvent.touchStart(target, { touches: [finger(10, 100), finger(30, 100, 2)] });
+      fireEvent.touchStart(target, touch(PLOT_WIDTH_PX + 5, 100));
+      const moveDispatched = fireEvent.touchMove(window, touch(40, 120));
+      fireEvent.touchEnd(window, lifted());
+
+      expect(reached).toHaveBeenCalledTimes(2);
+      expect(moveDispatched).toBe(true);
+      expect(onRangeSelect).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("FRVP edges", () => {
+    const spec: VolumeProfileSpec = {
+      id: "frvp-1",
+      profile: {
+        rows: [{ priceLow: 10, priceHigh: 20, upVolume: 1, downVolume: 1 }],
+        poc: 15,
+        vah: 20,
+        val: 10,
+        totalVolume: 2,
+      },
+      xAnchor: { time: 20 as Time },
+      width: { toTime: 40 as Time },
+      upColor: "#0f0",
+      downColor: "#f00",
+      showPoc: true,
+      showValueArea: true,
+      edges: { startTime: 20 as Time, endTime: 40 as Time },
+    };
+
+    it("carries the last grid slot in the ghost and the commit when dragged into the right margin", () => {
+      const onProfileEdgeDrag = vi.fn();
+      const onProfileEdgeCommit = vi.fn();
+      const { container } = render(chartElement({ data, volumeProfiles: [spec], onProfileEdgeDrag, onProfileEdgeCommit }));
+
+      fireEvent.mouseDown(container.firstElementChild!, { clientX: 41, clientY: 15, button: 0 });
+      fireEvent.mouseMove(window, { buttons: 1, clientX: 45, clientY: 15 });
+      fireEvent.mouseMove(window, { buttons: 1, clientX: 400, clientY: 15 });
+      fireEvent.mouseUp(window);
+
+      expect(onProfileEdgeDrag.mock.calls.at(-1)).toEqual(["frvp-1", "end", 50]);
+      expect(onProfileEdgeCommit).toHaveBeenCalledWith("frvp-1", "end", 50);
+    });
+
+    it("reports one cancel and no commit when torn down mid-drag, none when idle", () => {
+      const onProfileEdgeCancel = vi.fn();
+      const onProfileEdgeCommit = vi.fn();
+      const props = { data, volumeProfiles: [spec], onProfileEdgeCancel, onProfileEdgeCommit };
+      const { container, rerender } = render(chartElement(props));
+
+      rerender(chartElement({ ...props, measureActive: true }));
+      expect(onProfileEdgeCancel).not.toHaveBeenCalled();
+      rerender(chartElement(props));
+
+      fireEvent.mouseDown(container.firstElementChild!, { clientX: 41, clientY: 15, button: 0 });
+      fireEvent.mouseMove(window, { buttons: 1, clientX: 45, clientY: 15 });
+      rerender(chartElement({ ...props, measureActive: true }));
+      fireEvent.mouseUp(window);
+
+      expect(onProfileEdgeCancel).toHaveBeenCalledTimes(1);
+      expect(onProfileEdgeCommit).not.toHaveBeenCalled();
+    });
+
+    it("shows a resize cursor while hovering an edge, and clears it off the edge and on teardown", () => {
+      const { container, rerender } = render(chartElement({ data, volumeProfiles: [spec] }));
+      const target = container.firstElementChild as HTMLElement;
+
+      fireEvent.mouseMove(target, { clientX: 21, clientY: 15 });
+      expect(target.style.cursor).toBe("ew-resize");
+      fireEvent.mouseMove(target, { clientX: 30, clientY: 15 });
+      expect(target.style.cursor).toBe("");
+
+      fireEvent.mouseMove(target, { clientX: 39, clientY: 15 });
+      expect(target.style.cursor).toBe("ew-resize");
+      rerender(chartElement({ data, volumeProfiles: [spec], profileEdgesEditable: false }));
+      expect(target.style.cursor).toBe("");
+    });
+
+    it("shows no resize cursor while a button is held (a pan crossing an edge)", () => {
+      const { container } = render(chartElement({ data, volumeProfiles: [spec] }));
+      const target = container.firstElementChild as HTMLElement;
+
+      fireEvent.mouseMove(target, { buttons: 1, clientX: 21, clientY: 15 });
+
+      expect(target.style.cursor).toBe("");
+    });
+
+    it("clears the resize cursor on leaving the chart and on a release outside it", () => {
+      const { container } = render(chartElement({ data, volumeProfiles: [spec] }));
+      const target = container.firstElementChild as HTMLElement;
+
+      fireEvent.mouseMove(target, { clientX: 21, clientY: 15 });
+      fireEvent.mouseLeave(target);
+      expect(target.style.cursor).toBe("");
+
+      fireEvent.mouseMove(target, { clientX: 21, clientY: 15 });
+      fireEvent.mouseDown(target, { clientX: 21, clientY: 15, button: 0 });
+      fireEvent.mouseMove(window, { buttons: 1, clientX: 900, clientY: 15 });
+      fireEvent.mouseUp(window, { button: 0 });
+      expect(target.style.cursor).toBe("");
+    });
+
+    it("neither grabs nor advertises an edge while the Fibonacci tool is armed", () => {
+      const onProfileEdgeDrag = vi.fn();
+      const { container } = render(chartElement({ data, volumeProfiles: [spec], fibActive: true, onProfileEdgeDrag }));
+      const target = container.firstElementChild as HTMLElement;
+
+      fireEvent.mouseMove(target, { clientX: 21, clientY: 15 });
+      fireEvent.mouseDown(target, { clientX: 21, clientY: 15, button: 0 });
+      fireEvent.mouseMove(window, { buttons: 1, clientX: 30, clientY: 15 });
+      fireEvent.mouseUp(window, { button: 0 });
+
+      expect(target.style.cursor).toBe("");
+      expect(onProfileEdgeDrag).not.toHaveBeenCalled();
+    });
+
+    it("does not grab an edge from the price axis strip", () => {
+      timeToCoordinateMock.mockImplementation(() => PLOT_WIDTH_PX + 2);
+      const onProfileEdgeCommit = vi.fn();
+      const { container } = render(chartElement({ data, volumeProfiles: [spec], onProfileEdgeCommit }));
+
+      fireEvent.mouseDown(container.firstElementChild!, { clientX: PLOT_WIDTH_PX + 2, clientY: 15, button: 0 });
+      fireEvent.mouseMove(window, { buttons: 1, clientX: 40, clientY: 15 });
+      fireEvent.mouseUp(window);
+
+      expect(reached).toHaveBeenCalledTimes(1);
+      expect(onProfileEdgeCommit).not.toHaveBeenCalled();
     });
   });
 });
@@ -1890,6 +2339,7 @@ describe("Fibonacci and position drawings (Story 32.5)", () => {
 describe("Fibonacci placement drag (Story 32.5)", () => {
   beforeEach(() => {
     coordinateToTimeMock.mockImplementation((x: number) => x);
+    pricePaneMock.getHeight.mockReturnValue(LAID_OUT_PANE_PX);
   });
 
   it("previews the retracement while dragging and reports exactly one (A, B) on release", () => {
@@ -2077,5 +2527,175 @@ describe("LightweightChart layout restore and reports (Story 32.6)", () => {
 
     expect(onVisibleBars).not.toHaveBeenCalled();
     expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("anchored drawings and the Auto Anchored marker (Story 32.7)", () => {
+  const bar = (n: number) => ({ time: n as Time, open: 1, high: 2, low: 1, close: 1 });
+  const bars = [bar(100), bar(200), bar(300)];
+  const vpSpec = (id = "anchored_vp-1"): AnchoredVpSpec => ({
+    ...newAnchoredVp(id, 200, "#25a399", "#ef5350"),
+    anchorPrice: 100,
+  });
+  const vwapSpec = (id = "anchored_vwap-1"): AnchoredVwapSpec => ({
+    ...newAnchoredVwap(id, 100, "#2962ff", "#b26a00"),
+    points: [],
+  });
+
+  it("attaches an anchor primitive for an Anchored VP and a line primitive for an Anchored VWAP, and updates them in place", () => {
+    const { rerender } = render(chartElement({ drawings: [vpSpec(), vwapSpec()], data: bars }));
+
+    expect(attachPrimitiveMock.mock.calls.map((c) => c[0].constructor)).toEqual([AnchoredVpPrimitive, AnchoredVwapPrimitive]);
+    const vwap = attachPrimitiveMock.mock.calls[1][0] as AnchoredVwapPrimitive;
+    const spy = vi.spyOn(vwap, "update");
+    const edited = { ...vwapSpec(), bands: true };
+    rerender(chartElement({ drawings: [vpSpec(), edited], data: bars }));
+
+    expect(spy).toHaveBeenCalledWith(edited, edited.points);
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("detaches a removed anchored drawing", () => {
+    const { rerender } = render(chartElement({ drawings: [vpSpec()], data: bars }));
+    const attached = attachPrimitiveMock.mock.calls[0][0];
+
+    rerender(chartElement({ drawings: [], data: bars }));
+
+    expect(detachPrimitiveMock).toHaveBeenCalledWith(attached);
+  });
+
+  it("offers Settings... in the edit menu of both kinds (they have a modal), and the colour of the VP is its up colour", () => {
+    const onDrawingSettings = vi.fn();
+    const hit = (x: number, y: number) => {
+      const click = subscribeClickMock.mock.calls.at(-1)![0];
+      act(() => click({ point: { x, y }, sourceEvent: { clientX: 5, clientY: 5 } }));
+    };
+    const vwap: AnchoredVwapSpec = {
+      ...vwapSpec(),
+      points: [
+        { time: 100, vwap: 50, sd: 0, upper1: 50, lower1: 50, upper2: 50, lower2: 50 },
+        { time: 300, vwap: 60, sd: 0, upper1: 60, lower1: 60, upper2: 60, lower2: 60 },
+      ],
+    };
+    render(chartElement({ drawings: [vpSpec(), vwap], data: bars, drawEditable: true, onDrawingSettings, onDrawingColor: () => {} }));
+    for (const call of attachPrimitiveMock.mock.calls) {
+      const primitive = call[0];
+      primitive.attached({
+        chart: { timeScale: () => ({ timeToCoordinate: (t: number) => t, logicalToCoordinate: (i: number) => i * 10 }) },
+        series: { priceToCoordinate: (p: number) => p },
+        requestUpdate: vi.fn(),
+      } as never);
+      primitive.updateAllViews();
+    }
+
+    hit(200, 400); // on the VP's anchor line (x 200), far from its handle
+    expect(screen.getByLabelText("Line color")).toHaveValue("#25a399");
+    fireEvent.click(screen.getByText("Settings…"));
+    expect(onDrawingSettings).toHaveBeenCalledWith("anchored_vp-1");
+
+    hit(250, 55); // on the VWAP line
+    fireEvent.click(screen.getByText("Settings…"));
+    expect(onDrawingSettings).toHaveBeenCalledWith("anchored_vwap-1");
+  });
+
+  it("attaches, moves and detaches the anchor marker apart from the replay marker", () => {
+    const { rerender } = render(chartElement({ anchorMarkerTime: 100 as Time, markerTime: 200 as Time }));
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(2);
+    const [replayMarker, anchorMarker] = attachPrimitiveMock.mock.calls.map((c) => c[0]);
+    expect(replayMarker).not.toBe(anchorMarker);
+    expect(anchorMarker).toMatchObject({ time: 100, token: "--chart-drawing" });
+
+    rerender(chartElement({ anchorMarkerTime: 300 as Time, markerTime: 200 as Time }));
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(2); // moved, not re-attached
+    expect(anchorMarker).toMatchObject({ time: 300 });
+
+    rerender(chartElement({ anchorMarkerTime: null, markerTime: 200 as Time }));
+    expect(detachPrimitiveMock).toHaveBeenCalledTimes(1);
+    expect(detachPrimitiveMock).toHaveBeenCalledWith(anchorMarker);
+  });
+
+  it("re-attaches the anchor marker to the new host after a Candles -> Lines -> Candles flip", () => {
+    const { rerender } = render(chartElement({ anchorMarkerTime: 100 as Time, data: bars }));
+    const before = attachPrimitiveMock.mock.calls.length;
+
+    rerender(chartElement({ anchorMarkerTime: 100 as Time, data: bars, mode: "lines" }));
+    rerender(chartElement({ anchorMarkerTime: 100 as Time, data: bars, mode: "candles" }));
+
+    const markers = attachPrimitiveMock.mock.calls
+      .slice(before)
+      .map((c) => c[0])
+      .filter((p) => p.constructor.name === "VerticalMarkerPrimitive");
+    expect(markers).toHaveLength(1);
+    expect(markers[0]).toMatchObject({ time: 100 });
+  });
+});
+
+describe("the volume footprint (Story 32.8)", () => {
+  const settings = { on: true, row_ticks: 0, mode: "bid_ask" as const, imbalance_ratio: 3, text: true };
+  const spec = (over: Partial<FootprintRenderSpec> = {}): FootprintRenderSpec => ({
+    items: [],
+    precision: { price: 2, size: 3 },
+    settings,
+    ...over,
+  });
+  const footprints = () => attachPrimitiveMock.mock.calls.map((c) => c[0]).filter((p) => p instanceof FootprintPrimitive);
+  const pricePane = (): HTMLElement => {
+    const paneEl = document.createElement("div");
+    document.body.appendChild(paneEl);
+    const base = createChartMock.getMockImplementation()!;
+    createChartMock.mockImplementation((...args: unknown[]) => ({
+      ...base(...args),
+      panes: () => [{ ...pricePaneMock, getHTMLElement: () => paneEl }],
+    }));
+    return paneEl;
+  };
+
+  it("attaches one primitive on the candle series, updates it in place and detaches it when off", () => {
+    const first = spec();
+    const { rerender } = render(<LightweightChart data={[]} onChartApi={() => {}} footprint={first} />);
+    expect(footprints()).toHaveLength(1);
+    const [primitive] = footprints();
+    const update = vi.spyOn(primitive, "update");
+
+    const next = spec({ settings: { ...settings, mode: "delta" } });
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} footprint={next} />);
+    expect(footprints()).toHaveLength(1);
+    expect(update).toHaveBeenCalledWith(next);
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} footprint={null} />);
+    expect(detachPrimitiveMock).toHaveBeenCalledWith(primitive);
+  });
+
+  it("draws nothing in Lines mode and re-attaches on the return to Candles", () => {
+    const footprint = spec();
+    const { rerender } = render(<LightweightChart mode="lines" data={[]} onChartApi={() => {}} footprint={footprint} />);
+    expect(footprints()).toHaveLength(0);
+
+    rerender(<LightweightChart mode="candles" data={[]} onChartApi={() => {}} footprint={footprint} />);
+    rerender(<LightweightChart mode="lines" data={[]} onChartApi={() => {}} footprint={footprint} />);
+    rerender(<LightweightChart mode="candles" data={[]} onChartApi={() => {}} footprint={footprint} />);
+
+    expect(footprints()).toHaveLength(2);
+    expect(footprints()[0]).not.toBe(footprints()[1]);
+  });
+
+  it("has a price-pane legend row with its mode and row size, a gear and an x, reported as 'footprint'", () => {
+    const onLegendAction = vi.fn();
+    const paneEl = pricePane();
+    const { rerender } = render(
+      <LightweightChart data={[]} onChartApi={() => {}} footprint={spec()} onLegendAction={onLegendAction} />,
+    );
+
+    const row = paneEl.querySelector('.chart-legend-row[data-group="footprint"]')!;
+    expect(row.textContent).toBe("Footprintbid×ask · auto rows");
+    expect([...row.querySelectorAll("button")].map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Settings for Footprint",
+      "Remove Footprint",
+    ]);
+    (row.querySelector('button[aria-label="Settings for Footprint"]') as HTMLElement).click();
+    expect(onLegendAction).toHaveBeenCalledWith("settings", "footprint");
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} footprint={null} onLegendAction={onLegendAction} />);
+    expect(paneEl.querySelector('.chart-legend-row[data-group="footprint"]')).toBeNull();
   });
 });

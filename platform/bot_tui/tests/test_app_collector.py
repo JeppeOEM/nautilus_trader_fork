@@ -572,10 +572,10 @@ def test_the_row_sweep_orders_by_arrival_not_by_the_wall_clock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = _collector_app(_status(_BYBIT_ROW), _plan("BYBIT"))
-    # NTP steps the clock back between the republished row and its aggregate.
-    monkeypatch.setattr(collector_state.time, "time", lambda: 1_000.0)
+    # The receive stamps disagree with the arrival order (a stamp is never the sweep's key).
+    monkeypatch.setattr(collector_state.time, "monotonic", lambda: 1_000.0)
     collector_state._handle_status_message(_status(_BYBIT_ROW))
-    monkeypatch.setattr(collector_state.time, "time", lambda: 999.0)
+    monkeypatch.setattr(collector_state.time, "monotonic", lambda: 999.0)
     collector_state._handle_status_message(_plan("BYBIT"))
     app._refresh_collector_body()
     assert _row_ids(app._collector_body) == [_BYBIT_ROW]
@@ -638,7 +638,7 @@ def test_a_published_action_is_addressed_to_its_ids_venue(
 
 def test_a_plan_whose_status_went_stale_refuses_commands() -> None:
     app = _collector_app(_status(_BYBIT_ROW), _bybit_live_plan())
-    collector_state._PLAN_RECEIVED_AT["BYBIT"] = time.time() - 3601
+    collector_state._PLAN_RECEIVED_AT["BYBIT"] = time.monotonic() - 3601
     published = _recording_publishes(app)
     caption = _submit(app, "start SOLUSDT-LINEAR.BYBIT")
     assert caption == (
@@ -666,3 +666,31 @@ def test_a_venue_token_no_venue_registers_is_refused_as_unknown() -> None:
     caption = _submit(app, "start eth-usd-perp.hyperliquid")
     assert caption.startswith("cannot start eth-usd-perp.hyperliquid: unknown venue 'hyperliquid'")
     assert published == []
+
+
+# --- DW-258: j/k move the selection like down/up ---
+
+
+def test_j_and_k_move_the_collector_selection_like_the_arrows() -> None:
+    app = _collector_app(_status("BTC-USD-PERP.DYDX"), _status("ETH-USD-PERP.DYDX"))
+    body = app._collector_body
+    assert isinstance(body, urwid.ListBox)
+    assert app._highlighted_collector_id() == "BTC-USD-PERP.DYDX"
+
+    assert body.keypress((80, 20), "j") is None
+    assert app._highlighted_collector_id() == "ETH-USD-PERP.DYDX"
+    assert body.keypress((80, 20), "k") is None
+    assert app._highlighted_collector_id() == "BTC-USD-PERP.DYDX"
+
+
+def test_j_reaches_the_collector_rows_through_the_frame() -> None:
+    app = _collector_app(_status("BTC-USD-PERP.DYDX"), _status("ETH-USD-PERP.DYDX"))
+    assert app._frame.keypress((80, 20), "j") is None
+    assert app._highlighted_collector_id() == "ETH-USD-PERP.DYDX"
+
+
+def test_a_key_the_collector_list_does_not_map_is_left_for_the_pane() -> None:
+    app = _collector_app(_status("BTC-USD-PERP.DYDX"), _status("ETH-USD-PERP.DYDX"))
+    body = app._collector_body
+    assert isinstance(body, urwid.ListBox)
+    assert body.keypress((80, 20), "x") == "x"

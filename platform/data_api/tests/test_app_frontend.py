@@ -112,3 +112,16 @@ def test_committed_openapi_json_matches_the_live_schema() -> None:
     committed = json.loads(committed_path.read_text())
 
     assert committed == app_module.app.openapi()
+
+
+def test_both_indicator_list_puts_declare_a_json_array_body_of_a_known_component() -> None:
+    """The raw-read PUT bodies are declared via `openapi_extra`, so the codegen has an anchor."""
+    schema = app_module.app.openapi()
+    for path, component in (
+        ("/api/coin/{instrument_id}/indicators", "IndicatorConfigEntry"),
+        ("/api/rankings/technicals-columns", "TechnicalsColumn"),
+    ):
+        body = schema["paths"][path]["put"]["requestBody"]["content"]["application/json"]
+        ref = body["schema"]["items"]["$ref"]
+        assert ref == f"#/components/schemas/{component}"
+        assert ref.rsplit("/", 1)[1] in schema["components"]["schemas"]

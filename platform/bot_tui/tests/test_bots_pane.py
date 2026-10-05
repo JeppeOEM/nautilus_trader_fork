@@ -192,6 +192,28 @@ def test_bot_detail_lines_third_line_has_uptime_and_win_rate() -> None:
     assert "41% (63 trades)" in lines[2]
 
 
+def test_bot_detail_segments_are_exactly_the_lines_text() -> None:
+    row = _status("bot-03", realized_pnl=10.0, unrealized_pnl=-2.0, position_side="short")
+    segments = bots_pane.bot_detail_segments(row, now=1_005.0)
+    joined = ["".join(text for _attr, text in line) for line in segments]
+    assert joined == bots_pane.bot_detail_lines(row, now=1_005.0)
+
+
+def _pnl_segments(row: dict) -> list[tuple[str | None, str]]:
+    line = bots_pane.bot_detail_segments(row, now=1_005.0)[1]
+    return [(attr, text) for attr, text in line if attr is not None]
+
+
+def test_bot_detail_segments_tag_a_gain_positive() -> None:
+    row = _status("bot-03", realized_pnl=0.0, unrealized_pnl=0.0)
+    assert _pnl_segments(row) == [("pnl-pos", bots_pane.format_pnl(0.0))]
+
+
+def test_bot_detail_segments_tag_a_loss_negative() -> None:
+    row = _status("bot-03", realized_pnl=1.0, unrealized_pnl=-3.5)
+    assert _pnl_segments(row) == [("pnl-neg", bots_pane.format_pnl(-2.5))]
+
+
 def test_next_range_cycles_day_week_month_all_day() -> None:
     assert bots_pane.next_range("day") == "week"
     assert bots_pane.next_range("week") == "month"

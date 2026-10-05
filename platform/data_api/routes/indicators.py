@@ -173,18 +173,22 @@ def _servable_source(instrument_id: str, entry: preferences.IndicatorEntry) -> s
 
 def _parse_config_entry(e: dict[str, Any]) -> preferences.IndicatorEntry:
     """
-    One PUT body entry. A wrong type for `source`/`hidden`/`style` is a `TypeError` (the route's
-    400); TOML cannot hold `null` and JSON cannot hold `NaN`, so style leaves must be strings,
-    integers, booleans or finite floats (`preferences.is_valid_style`, the loader's rule too).
+    One PUT body entry. A wrong type for `params`/`source`/`hidden`/`style` is a `TypeError` (the
+    route's 400); TOML cannot hold `null` and JSON cannot hold `NaN`, so style leaves must be
+    strings, integers, booleans or finite floats (`preferences.is_valid_style`, the loader's rule
+    too).
     """
     source, hidden, style = e.get("source", "close"), e.get("hidden", False), e.get("style", {})
+    params = e.get("params", {})
     if not isinstance(source, str) or not isinstance(hidden, bool):
         raise TypeError("source must be a string and hidden a boolean")
+    if not isinstance(params, dict):
+        raise TypeError("params must be an object")
     if not preferences.is_valid_style(style):
         raise TypeError("style must be an object of per-output objects of finite scalar values")
     return preferences.IndicatorEntry(
         name=e["name"],
-        params=e.get("params", {}),
+        params=params,
         category=e["category"],
         source=source,
         hidden=hidden,
@@ -201,15 +205,28 @@ def _check_sources(entries: Sequence[indicator_picker.IndicatorRequest]) -> None
             raise HTTPException(status_code=422, detail=f"invalid source: {exc}") from exc
 
 
+def check_entry_params(name: str, params: Any) -> None:
+    """
+    Raise a 400 naming the indicator and the param for params its replay would refuse
+    (`indicator_picker.check_params`): saved, they would fail every later values request.
+    """
+    try:
+        indicator_picker.check_params(name, params)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid params for {name}: {exc}") from exc
+
+
 def check_indicator_entries(entries: Sequence[preferences.IndicatorEntry]) -> None:
     """
     Apply the one validation every writer of an indicator list shares (the PUT here, the layout
-    route's seed and reset): names must be in the merged catalog (400) and each source one its
-    indicator can take (422).
+    route's seed and reset): names must be in the merged catalog (400), params ones the indicator
+    can be built with (400) and each source one its indicator can take (422).
     """
     unknown = [e.name for e in entries if e.name not in indicator_picker.merged_catalog()]
     if unknown:
         raise HTTPException(status_code=400, detail=f"unknown indicator(s): {unknown}")
+    for entry in entries:
+        check_entry_params(entry.name, entry.params)
     _check_sources(entries)
 
 
@@ -231,32 +248,54 @@ def _store_entries(instrument_id: str, entries: list[preferences.IndicatorEntry]
         try:
             config = preferences.load_chart_indicators(path)
         except (tomllib.TOMLDecodeError, UnicodeDecodeError, KeyError, TypeError) as exc:
+            # The stored file, not the payload, is at fault: a server-side condition, answered
+            # like the GET (and the layout routes' `_file_errors`) -- never blamed on the client.
             raise HTTPException(
-                status_code=400, detail=f"invalid indicator config payload: {exc}"
+                status_code=500, detail=f"chart_indicators.toml is corrupt: {exc}"
+            ) from exc
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"failed to read chart_indicators.toml: {exc}"
             ) from exc
         config[instrument_id] = entries
         try:
             preferences.save_chart_indicators(config, path)
         except OSError as exc:
-            # Distinct from the client-input branch above (400): the payload was fine, the
-            # write itself failed (e.g. the docker-mounted file isn't actually writable) --
-            # a server-side condition, never a silent/opaque failure (DATA-02).
+            # The payload was fine, the write itself failed (e.g. the docker-mounted file isn't
+            # actually writable) -- a server-side condition, never a silent/opaque failure
+            # (DATA-02).
             raise HTTPException(
                 status_code=500, detail=f"failed to write chart_indicators.toml: {exc}"
             ) from exc
 
 
-@router.put("/api/coin/{instrument_id}/indicators")
+def json_array_body(component: str) -> dict[str, Any]:
+    """
+    Return the `openapi_extra` declaring a raw-read PUT body as a JSON array of `component` items:
+    the route still reads `request.json()` itself (malformed -> 400, never FastAPI's 422), but the
+    schema -- and the frontend codegen from it -- names the body's shape.
+    """
+    schema = {"type": "array", "items": {"$ref": f"#/components/schemas/{component}"}}
+    return {"requestBody": {"required": True, "content": {"application/json": {"schema": schema}}}}
+
+
+@router.put(
+    "/api/coin/{instrument_id}/indicators",
+    openapi_extra=json_array_body("IndicatorConfigEntry"),
+)
 async def put_coin_indicator_config(instrument_id: str, request: Request) -> dict[str, bool]:
     """
     Persist this instrument's current indicator selection (explicit Save/change, never
-    auto-save-per-keystroke -- matches today's handler's docstring).
+    auto-save-per-keystroke -- matches today's handler's docstring). The body is a JSON array of
+    `IndicatorConfigEntry` (declared through `openapi_extra`).
 
     Reads the raw JSON body itself (rather than a typed Pydantic body parameter) so a
     malformed entry -- missing `name`/`category`, or invalid JSON outright -- degrades to a
     real `400` with a message, never FastAPI's automatic `422`, matching the pre-existing
     handler's contract exactly (DATA-02: never a silent/opaque failure for a client-input
-    problem).
+    problem). An unknown name or params the indicator refuses are 400 too, a source the
+    indicator cannot take 422; nothing is written then. A corrupt or unreadable stored file is
+    500.
     """
     try:
         payload = await request.json()

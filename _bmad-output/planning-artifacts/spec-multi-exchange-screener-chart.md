@@ -424,12 +424,19 @@ types, alert templates library, multi-condition (AND/OR) logic.
 
 ---
 
-## A7. Volume Profile family — BUILD all of these (except Anchored)
+## A7. Volume Profile family — BUILD all of these (nine tools since Story 32.7)
 
 Unlike §A6, this is not deferred — build the full family this round:
 **Fixed Range, Visible Range, Session, Session HD, and Periodic**. Only
 **Anchored Volume Profile** and **Volume Candles** (the chart-type variant)
 are excluded — see §A9.
+
+> **[amended 2026-10-05: Story 32.7]** The exclusion of **Anchored Volume
+> Profile** is lifted, and the family is nine tools on the one engine and the
+> one primitive: the five above plus **Auto Anchored VP**, **Anchored VP**,
+> **Anchored VWAP** and **TPO** (§A7.6). `buildVolumeProfile` gains a
+> `weight: "volume" | "time"` option (TPO); there is still exactly one profile
+> calculation. Volume Candles stays excluded.
 
 ### A7.0 Shared engine — build this once, all five variants consume it
 
@@ -535,6 +542,25 @@ and a different x-anchor/width.
 > this project already applies for daily rollups in `ranking_engine`, rather
 > than a second date-bucketing implementation — check there before writing
 > a new one.
+
+---
+
+### A7.6 The four added by Story 32.7 — same engine, same primitive
+
+| Tool | Placement | Anchors to | Weight | Saved in |
+|---|---|---|---|---|
+| **Auto Anchored VP** | session-slot preset (one session-type profile per chart, with SVP / SVP HD / PVP / TPO) | `session` (UTC day), `week` (Monday), `month`, `highest high`, `lowest low` (of the loaded bars) or `auto` (session up to 15m bars, week up to 4H, month above; a named table in `lib/autoAnchor.ts`), to the latest bar; re-resolved on every new bar and every timeframe change; marked by a `VerticalMarkerPrimitive` | volume | `chart_layouts.toml` (`volume_profile.kind = "auto"`, `anchor`) |
+| **Anchored VP** | left-rail drawing, one click at a bar | that bar to the latest bar, growing rightward from the anchor (the FRVP `{time}` anchoring); anchor draggable; settings modal (rows, value area, colours) | volume | `chart_drawings.toml` (`anchored_vp`) |
+| **Anchored VWAP** | left-rail drawing, one click at a bar | that bar onward: a line `sum(src * v) / sum(v)`, optional ±1σ / ±2σ bands (volume-weighted standard deviation, `lib/anchoredVwap.ts`), source `hlc3` (default) / `close` / `ohlc4`; current value in the legend at the instrument precision; a bar with no volume adds no point | — (a line) | `chart_drawings.toml` (`anchored_vwap`) |
+| **TPO** | session-slot preset, per session/day like SVP | each period, counting 30-minute candles | **time**: one count per candle in every row it touches, shown as blocks (at most `TPO_MAX_BLOCKS_PER_ROW = 30` per row, the overflow as one longer bar) or, with `letters`, the candle's letter; POC and value area marked as for volume profiles; an initial-balance band (first `ib_minutes`, default 60 = 2 x 30m) outlined | `chart_layouts.toml` (`volume_profile.kind = "tpo"`, `ib_minutes`, `letters`) |
+
+The layout's `volume_profile` table gains the kinds `auto` and `tpo` and the
+optional keys `anchor`, `ib_minutes` and `letters` (absent = the defaults, so an
+older file loads unchanged); `views/preferences.py` validates the same closed
+sets the frontend holds. Known limits: the candle-level spread (Story 32.8's
+per-trade footprint is the upgrade path); an Anchored VP or VWAP older than the
+loaded bars is not drawn until they are paged in; the TPO period is fixed at
+30 minutes; profile colours are not saved with the layout.
 
 ---
 
@@ -693,9 +719,10 @@ the code review if any of these sneak back in:
   pattern scanner or pattern tooltips.
 - **Multi-chart grid layouts** — no 2/4/6/8-pane workspace of different
   symbols/timeframes; this build is a single chart.
-- **Anchored Volume Profile** — the one Volume Profile variant we don't
+- ~~**Anchored Volume Profile** — the one Volume Profile variant we don't
   build (§A7 builds all the others). No "click one bar and grow forward
-  indefinitely" mode.
+  indefinitely" mode.~~ **[amended 2026-10-05: Story 32.7]** Built: Anchored
+  VP, Auto Anchored VP, Anchored VWAP and TPO are §A7.6.
 - **Volume Candles** — the chart-type variant that encodes volume into
   candle width/shape. Not one of the two chart types in §A2, and not
   confused with the Volume Profile *indicators* in §A7, which are a

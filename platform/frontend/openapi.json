@@ -25,6 +25,8 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "maximum": 31,
+              "minimum": 1,
               "default": 31,
               "title": "Days"
             }
@@ -136,6 +138,8 @@
             "required": true,
             "schema": {
               "type": "integer",
+              "maximum": 9223371976854775807,
+              "minimum": 0,
               "title": "Start Ns"
             }
           },
@@ -145,6 +149,8 @@
             "required": true,
             "schema": {
               "type": "integer",
+              "maximum": 9223371976854775807,
+              "minimum": 0,
               "title": "End Ns"
             }
           }
@@ -201,6 +207,8 @@
             "required": true,
             "schema": {
               "type": "integer",
+              "maximum": 9223371976854775807,
+              "minimum": 0,
               "title": "Start Ns"
             }
           },
@@ -210,6 +218,8 @@
             "required": true,
             "schema": {
               "type": "integer",
+              "maximum": 9223371976854775807,
+              "minimum": 0,
               "title": "End Ns"
             }
           }
@@ -547,8 +557,21 @@
       },
       "put": {
         "summary": "Put Technicals Columns",
-        "description": "Persist the FULL screener-wide column list (add/remove/reorder/param change).",
+        "description": "Persist the FULL screener-wide column list (add/remove/reorder/param change). The body is a\nJSON array of `TechnicalsColumn`, read raw so a malformed one is a 400, never a 422.",
         "operationId": "put_technicals_columns_api_rankings_technicals_columns_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/TechnicalsColumn"
+                },
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -658,6 +681,84 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CandlesResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/coin/{instrument_id}/footprint": {
+      "get": {
+        "summary": "Get Footprint",
+        "operationId": "get_footprint_api_coin__instrument_id__footprint_get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          },
+          {
+            "name": "before_ns",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Before Ns"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 120,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "bar_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 60,
+              "title": "Bar Seconds"
+            }
+          },
+          {
+            "name": "row_ticks",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "auto",
+              "title": "Row Ticks"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FootprintResponse"
                 }
               }
             }
@@ -892,7 +993,7 @@
       },
       "put": {
         "summary": "Put Coin Indicator Config",
-        "description": "Persist this instrument's current indicator selection (explicit Save/change, never\nauto-save-per-keystroke -- matches today's handler's docstring).\n\nReads the raw JSON body itself (rather than a typed Pydantic body parameter) so a\nmalformed entry -- missing `name`/`category`, or invalid JSON outright -- degrades to a\nreal `400` with a message, never FastAPI's automatic `422`, matching the pre-existing\nhandler's contract exactly (DATA-02: never a silent/opaque failure for a client-input\nproblem).",
+        "description": "Persist this instrument's current indicator selection (explicit Save/change, never\nauto-save-per-keystroke -- matches today's handler's docstring). The body is a JSON array of\n`IndicatorConfigEntry` (declared through `openapi_extra`).\n\nReads the raw JSON body itself (rather than a typed Pydantic body parameter) so a\nmalformed entry -- missing `name`/`category`, or invalid JSON outright -- degrades to a\nreal `400` with a message, never FastAPI's automatic `422`, matching the pre-existing\nhandler's contract exactly (DATA-02: never a silent/opaque failure for a client-input\nproblem). An unknown name or params the indicator refuses are 400 too, a source the\nindicator cannot take 422; nothing is written then. A corrupt or unreadable stored file is\n500.",
         "operationId": "put_coin_indicator_config_api_coin__instrument_id__indicators_put",
         "parameters": [
           {
@@ -926,6 +1027,19 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/IndicatorConfigEntry"
                 }
               }
             }
@@ -1255,6 +1369,8 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "maximum": 31,
+              "minimum": 1,
               "default": 31,
               "title": "Days"
             }
@@ -1902,6 +2018,134 @@
           "services"
         ],
         "title": "ErrorsResponse"
+      },
+      "FootprintItem": {
+        "properties": {
+          "t": {
+            "type": "integer",
+            "title": "T"
+          },
+          "row_ticks": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Row Ticks"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/FootprintRow"
+            },
+            "type": "array",
+            "title": "Rows"
+          },
+          "delta": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delta"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total"
+          },
+          "poc_row": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Poc Row"
+          },
+          "no_trades": {
+            "type": "boolean",
+            "title": "No Trades"
+          }
+        },
+        "type": "object",
+        "required": [
+          "t",
+          "row_ticks",
+          "rows",
+          "delta",
+          "total",
+          "poc_row",
+          "no_trades"
+        ],
+        "title": "FootprintItem"
+      },
+      "FootprintResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/FootprintItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "price_precision": {
+            "type": "integer",
+            "title": "Price Precision"
+          },
+          "size_precision": {
+            "type": "integer",
+            "title": "Size Precision"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "has_more",
+          "price_precision",
+          "size_precision"
+        ],
+        "title": "FootprintResponse"
+      },
+      "FootprintRow": {
+        "properties": {
+          "p": {
+            "type": "integer",
+            "title": "P"
+          },
+          "b": {
+            "type": "integer",
+            "title": "B"
+          },
+          "s": {
+            "type": "integer",
+            "title": "S"
+          }
+        },
+        "type": "object",
+        "required": [
+          "p",
+          "b",
+          "s"
+        ],
+        "title": "FootprintRow"
       },
       "HTTPValidationError": {
         "properties": {

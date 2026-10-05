@@ -22,12 +22,14 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from ranking.infrastructure.metrics_store import SqliteMetricsStore
+from views import coin_detail
 
 import data_api.app as app_module
 import data_api.routes.metrics as metrics_routes
 
 
 _IID = "BTC-USD-PERP.DYDX"
+_MAX_DAYS = coin_detail.METRICS_HISTORY_MAX_DAYS
 
 # Large, arbitrary, far-from-epoch base timestamp -- comfortably inside `history()`'s
 # 31-day retention cutoff regardless of when this test runs (mirrors test_candles.py's
@@ -125,3 +127,26 @@ def test_nearest_returns_null_when_never_stored(
 
     assert response.status_code == 200
     assert response.json() is None
+
+
+@pytest.mark.parametrize("days", [0, -1, _MAX_DAYS + 1, 10**12])
+def test_history_rejects_days_outside_retention(
+    days: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(str(tmp_path / "metrics.db"), monkeypatch)
+
+    response = client.get(f"/api/metrics/history/{_IID}?days={days}")
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("days", [1, _MAX_DAYS])
+def test_history_serves_days_within_retention(
+    days: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(str(tmp_path / "metrics.db"), monkeypatch)
+
+    response = client.get(f"/api/metrics/history/{_IID}?days={days}")
+
+    assert response.status_code == 200
+    assert response.json() == {"items": []}

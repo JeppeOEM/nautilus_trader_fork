@@ -283,7 +283,10 @@ statistic.
 ### Run an existing backtest
 
 ```bash
-# from the repo root (default catalog path is platform/data/catalog)
+# from the repo root (or `cd platform` and drop PYTHONPATH): with no catalog_path argument every
+# runner reads $CATALOG_PATH if set (a relative one is taken as given, against the cwd), else
+# platform/data/catalog, resolved from the package, not the cwd
+# (research.strategies.catalog_location.default_catalog_path)
 PYTHONPATH=platform python -m research.strategies.backtest_dydx       # IndicatorSignalStrategy (logistic_trend) on internally-aggregated Bars
 PYTHONPATH=platform python -m research.strategies.backtest_snapshot   # SnapshotStrategy on raw 1s DydxSecondSnapshot
 PYTHONPATH=platform python -m research.strategies.backtest_ofi        # OFIStrategy on 1s DydxSecondSnapshot, quotes from level 0

@@ -15,6 +15,20 @@ from pathlib import Path
 # instrument_id, so no venue -> path registry is needed.
 CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "platform/data/catalog")
 
+
+def default_metrics_db_path(catalog_path: str) -> str:
+    """
+    Where the ranking engine writes metrics.db when `METRICS_DB_PATH` is unset. It must equal the
+    writer's own default (`ranking/__main__.py`'s `settings_from_env`), or data_api would read an
+    empty file next to the real one; `data_api/tests/test_data_api.py` pins the two together.
+    """
+    return str(Path(catalog_path).parent / "metrics" / "metrics.db")
+
+
+# The ranking engine's metrics.db, read by both the legacy `/metrics/*` and the `/api/metrics/*`
+# routes. A directory mount in compose: SQLite WAL's -wal/-shm sidecars sit next to the file.
+METRICS_DB_PATH: str = os.environ.get("METRICS_DB_PATH", default_metrics_db_path(CATALOG_PATH))
+
 # Derived SQLite candle stores (`candles.infrastructure.sqlite_store`): each venue's collector
 # writes its own
 # file in this directory, the UI routes read them. A directory for the same WAL-sidecar reason as

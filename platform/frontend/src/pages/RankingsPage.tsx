@@ -14,7 +14,7 @@ import type { TechnicalsColumn } from "../api/schema";
 import IndicatorPicker from "../components/chart/IndicatorPicker";
 import { useLiveChannel } from "../hooks/useLiveChannel";
 import FilterPanel, { type FilterField } from "./FilterPanel";
-import { applyFilters, type FilterCondition } from "./filters";
+import { applyFilters, type DisplayPrecision, type FilterCondition, formatFixed } from "./filters";
 import { buildGroups, COLUMN_TIMEFRAMES, columnBarSeconds, reorder } from "./technicals";
 
 // Client-side heartbeat staleness threshold: 3x ranking_engine's RANKING_HEARTBEAT_SECONDS=5,
@@ -59,56 +59,58 @@ function saveDeselectedVenues(venues: Set<string>): void {
 // so a saved condition survives reordering/removing other columns.
 const TECHNICAL_FIELD_PREFIX = "tech:";
 
+// Every Technicals output cell and filter field: 4 decimals.
+const TECHNICALS_PRECISION: DisplayPrecision = { decimals: 4 };
+
 // Hand-declared TS mirror of views/ranking_columns.py's RANKING_COLS (platform/CLAUDE.md
 // SSOT-04; this page is the list's only renderer since Story 25.1a made rankings web-only).
 // If ranking_columns.py's column list changes, port the change here too:
 // data_api/tests/test_ranking_columns_mirror.py fails until the (key, label) sequences match.
 // Keep it a short, flat array of `{ key: "...", label: "...", ... }` literals -- that test
 // reads it as text.
+// `precision` is how the cell rounds; `format` decorates that rounded text, and the column's
+// filter field's `=` matches at the same precision.
 interface RankingColumn {
   key: string;
   label: string;
-  format: (value: unknown) => string;
+  precision: DisplayPrecision;
+  format: (v: number, precision: DisplayPrecision) => string;
 }
 
-function fmtSigned(v: number, decimals: number): string {
-  return `${v >= 0 ? "+" : ""}${v.toFixed(decimals)}`;
+function fmtSigned(v: number, precision: DisplayPrecision): string {
+  return `${v >= 0 ? "+" : ""}${formatFixed(v, precision)}`;
 }
 
-function fmtFixed(v: number, decimals: number): string {
-  return v.toFixed(decimals);
+function fmtPercent(v: number, precision: DisplayPrecision): string {
+  return `${fmtSigned(v, precision)}%`;
 }
 
-function fmtPercent(v: number): string {
-  return `${fmtSigned(v, 2)}%`;
-}
-
-function fmtMillions(v: number): string {
-  return `${(v / 1e6).toFixed(3)}M`;
+function fmtMillions(v: number, precision: DisplayPrecision): string {
+  return `${formatFixed(v, precision)}M`;
 }
 
 const RANKING_COLS: RankingColumn[] = [
-  { key: "ofi_10_z", label: "OFI10z", format: (v) => fmtSigned(v as number, 2) },
-  { key: "obi_10", label: "OBI10", format: (v) => fmtFixed(v as number, 3) },
-  { key: "obi_5", label: "OBI5", format: (v) => fmtFixed(v as number, 3) },
-  { key: "obi_3", label: "OBI3", format: (v) => fmtFixed(v as number, 3) },
-  { key: "cvd", label: "CVD", format: (v) => fmtSigned(v as number, 2) },
-  { key: "spread", label: "Spread", format: (v) => fmtFixed(v as number, 6) },
-  { key: "volume_delta", label: "Vol d 60s", format: (v) => fmtSigned(v as number, 2) },
-  { key: "price", label: "Price", format: (v) => fmtFixed(v as number, 4) },
-  { key: "pct_1h", label: "1h %", format: (v) => fmtPercent(v as number) },
-  { key: "pct_24h", label: "24h %", format: (v) => fmtPercent(v as number) },
-  { key: "pct_1w", label: "1w %", format: (v) => fmtPercent(v as number) },
-  { key: "pct_1m", label: "1m %", format: (v) => fmtPercent(v as number) },
-  { key: "volatility", label: "Vol 24h σ (trade closes)", format: (v) => fmtFixed(v as number, 6) },
-  { key: "volatility_score", label: "Vol 1h σ (mids)", format: (v) => fmtFixed(v as number, 6) },
-  { key: "volume24h", label: "Vol24h", format: (v) => fmtMillions(v as number) },
+  { key: "ofi_10_z", label: "OFI10z", precision: { decimals: 2 }, format: fmtSigned },
+  { key: "obi_10", label: "OBI10", precision: { decimals: 3 }, format: formatFixed },
+  { key: "obi_5", label: "OBI5", precision: { decimals: 3 }, format: formatFixed },
+  { key: "obi_3", label: "OBI3", precision: { decimals: 3 }, format: formatFixed },
+  { key: "cvd", label: "CVD", precision: { decimals: 2 }, format: fmtSigned },
+  { key: "spread", label: "Spread", precision: { decimals: 6 }, format: formatFixed },
+  { key: "volume_delta", label: "Vol d 60s", precision: { decimals: 2 }, format: fmtSigned },
+  { key: "price", label: "Price", precision: { decimals: 4 }, format: formatFixed },
+  { key: "pct_1h", label: "1h %", precision: { decimals: 2 }, format: fmtPercent },
+  { key: "pct_24h", label: "24h %", precision: { decimals: 2 }, format: fmtPercent },
+  { key: "pct_1w", label: "1w %", precision: { decimals: 2 }, format: fmtPercent },
+  { key: "pct_1m", label: "1m %", precision: { decimals: 2 }, format: fmtPercent },
+  { key: "volatility", label: "Vol 24h σ (trade closes)", precision: { decimals: 6 }, format: formatFixed },
+  { key: "volatility_score", label: "Vol 1h σ (mids)", precision: { decimals: 6 }, format: formatFixed },
+  { key: "volume24h", label: "Vol24h", precision: { scale: 1e6, decimals: 3 }, format: fmtMillions },
 ];
 
 function formatCell(col: RankingColumn, value: unknown): string {
   if (value === null || value === undefined) return "—";
   try {
-    return col.format(value);
+    return col.format(value as number, col.precision);
   } catch (err) {
     // Log rather than silently swallow -- a formatting exception means the upstream
     // value's shape/type doesn't match this column's expectation, a real bug worth
@@ -357,14 +359,25 @@ export default function RankingsPage() {
   });
   const groups = buildGroups(technicalsEntries, technicalsValues);
   const filterFields: FilterField[] = [
-    // Conditions compare the raw value; volume24h is displayed in millions but filtered in USD.
-    ...RANKING_COLS.map((col) => ({ key: col.key, label: col.key === "volume24h" ? `${col.label} (raw USD)` : col.label })),
+    // `=` matches what the cell shows; `<`/`>` order by the raw value. volume24h is displayed in
+    // millions but typed in raw USD: `=` divides the typed value by the column's scale before
+    // matching the shown millions (so only a multiple of $1000 can match), and `<`/`>` compare
+    // raw USD outside that shown-equal band.
+    ...RANKING_COLS.map((col) => ({
+      key: col.key,
+      label: col.key === "volume24h" ? `${col.label} (raw USD)` : col.label,
+      precision: col.precision,
+    })),
     { key: "symbol", label: "Symbol", text: true },
     { key: "venue", label: "Exchange (venue)", text: true },
     { key: "venue_kind", label: "Kind (cex/dex)", text: true },
     { key: "market", label: "Market (perp/spot)", text: true },
     ...groups.flatMap((g) =>
-      g.attrs.map((attr) => ({ key: `${TECHNICAL_FIELD_PREFIX}${g.entry.name}.${attr}`, label: `${g.entry.name}.${attr}` })),
+      g.attrs.map((attr) => ({
+        key: `${TECHNICAL_FIELD_PREFIX}${g.entry.name}.${attr}`,
+        label: `${g.entry.name}.${attr}`,
+        precision: TECHNICALS_PRECISION,
+      })),
     ),
   ];
 
@@ -646,7 +659,7 @@ export default function RankingsPage() {
                       const value = attr === null ? null : technicalsValues?.[row.instrument_id]?.[`${group.entryIndex}.${attr}`];
                       return (
                         <td key={`${group.entryIndex}.${attr}`}>
-                          {value === null || value === undefined ? "—" : value.toFixed(4)}
+                          {value === null || value === undefined ? "—" : formatFixed(value, TECHNICALS_PRECISION)}
                         </td>
                       );
                     }),

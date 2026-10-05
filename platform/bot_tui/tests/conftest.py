@@ -51,7 +51,7 @@ def _reset_bot_history_state() -> None:
 def _reset_archive_state() -> None:
     """Isolate archive_state's latest `archive:status` across test files (Story 25.1b)."""
     archive_state._LATEST_ARCHIVE_STATUS = None
-    archive_state._LATEST_RECEIVED_AT = 0.0
+    archive_state._LATEST_RECEIVED_AT = None
 
 
 @pytest.fixture(autouse=True)

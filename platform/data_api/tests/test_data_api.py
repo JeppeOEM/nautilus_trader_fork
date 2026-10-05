@@ -14,22 +14,32 @@
 # -------------------------------------------------------------------------------------------------
 """Integration tests: each route is a thin wrapper matching its wrapped function's output verbatim."""
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from kernel.clocks import NS_PER_S
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.tests.snapshot_factory import make_snapshot
+from observability import error_ledger
+from ranking.__main__ import settings_from_env
 from ranking.infrastructure.metrics_store import SqliteMetricsStore
 from views import catalog_reads
 from views import chart_series
+from views import coin_detail
 
 import data_api.app as app_module
+from data_api import settings
+from data_api.routes.snapshots import MAX_SNAPSHOTS_LIMIT
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
 _IID = "BTC-USD-PERP.DYDX"
+_CATALOG_ROUTES = ("/catalog/chart-series", "/catalog/snapshots")
+_CAP_NS = MAX_SNAPSHOTS_LIMIT * NS_PER_S
+_MAX_DAYS = coin_detail.METRICS_HISTORY_MAX_DAYS
 
 
 def _client(catalog_path: str, metrics_db_path: str, monkeypatch: pytest.MonkeyPatch) -> TestClient:
@@ -224,3 +234,222 @@ def test_errors_route_services_block_is_empty_without_a_ledger_dir(
     client = TestClient(app_module.app)
     assert client.get("/api/errors").json()["services"] == {}
     error_ledger.reset()
+
+
+@pytest.fixture
+def _clean_ledger() -> Iterator[None]:
+    """Start with an empty process-global ledger and leave it empty, even after a failure."""
+    error_ledger.reset()
+    yield
+    error_ledger.reset()
+
+
+def _refuse_read(*_args: object) -> None:
+    raise AssertionError("a rejected request must not reach the catalog")
+
+
+def _no_catalog_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(chart_series, "compute_chart_series", _refuse_read)
+    monkeypatch.setattr(app_module.coin_detail, "catalog_snapshot_rows", _refuse_read)
+
+
+def _raise_os_error(*_args: object) -> None:
+    raise OSError("disk unreadable")
+
+
+@pytest.mark.parametrize("route", _CATALOG_ROUTES)
+def test_catalog_route_rejects_a_reversed_window(
+    route: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_catalog_reads(monkeypatch)
+    client = _client(str(tmp_path / "catalog"), str(tmp_path / "metrics.db"), monkeypatch)
+
+    response = client.get(f"{route}/{_IID}?start_ns=2000000000&end_ns=1000000000")
+
+    assert response.status_code == 422
+    assert "start_ns" in response.json()["detail"]
+    assert "end_ns" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("route", _CATALOG_ROUTES)
+def test_catalog_route_rejects_a_window_wider_than_the_cap(
+    route: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_catalog_reads(monkeypatch)
+    client = _client(str(tmp_path / "catalog"), str(tmp_path / "metrics.db"), monkeypatch)
+
+    response = client.get(f"{route}/{_IID}?start_ns=0&end_ns={_CAP_NS}")
+
+    assert response.status_code == 422
+    assert f"{MAX_SNAPSHOTS_LIMIT} s" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("route", _CATALOG_ROUTES)
+def test_catalog_route_serves_the_widest_window_under_the_cap(
+    route: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_path = str(tmp_path / "catalog")
+    _write_snapshot(catalog_path, ts=1_000_000_000)
+    client = _client(catalog_path, str(tmp_path / "metrics.db"), monkeypatch)
+
+    response = client.get(f"{route}/{_IID}?start_ns=0&end_ns={_CAP_NS - 1}")
+
+    assert response.status_code == 200
+    assert len(_served_rows(response.json())) == 1
+
+
+def _served_rows(body: list[dict] | dict[str, list[dict]]) -> list[dict]:
+    # /catalog/snapshots answers the rows; /catalog/chart-series one point per row per series.
+    return body if isinstance(body, list) else body["microprice"]
+
+
+@pytest.mark.parametrize("route", _CATALOG_ROUTES)
+def test_catalog_route_reads_at_the_highest_accepted_timestamp(
+    route: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_path = str(tmp_path / "catalog")
+    _write_snapshot(catalog_path, ts=1_000_000_000)
+    client = _client(catalog_path, str(tmp_path / "metrics.db"), monkeypatch)
+    max_ts = app_module._MAX_TS_NS
+
+    response = client.get(f"{route}/{_IID}?start_ns={max_ts}&end_ns={max_ts}")
+
+    assert response.status_code == 200
+    assert _served_rows(response.json()) == []
+
+
+@pytest.mark.parametrize("route", _CATALOG_ROUTES)
+@pytest.mark.parametrize(
+    ("start_ns", "end_ns"),
+    [
+        (-1, 1_000_000_000),
+        (app_module._MAX_TS_NS + 1, app_module._MAX_TS_NS + 1),
+        (2**63 - 2, 2**63 - 1),
+        (10**30, 10**30),
+    ],
+)
+def test_catalog_route_rejects_timestamps_outside_the_readable_range(
+    route: str, start_ns: int, end_ns: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_catalog_reads(monkeypatch)
+    client = _client(str(tmp_path / "catalog"), str(tmp_path / "metrics.db"), monkeypatch)
+
+    response = client.get(f"{route}/{_IID}?start_ns={start_ns}&end_ns={end_ns}")
+
+    assert response.status_code == 422
+
+
+def test_catalog_snapshots_route_unknown_id_is_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_path = str(tmp_path / "catalog")
+    _write_snapshot(catalog_path, ts=1_000_000_000)
+    client = _client(catalog_path, str(tmp_path / "metrics.db"), monkeypatch)
+
+    response = client.get("/catalog/snapshots/ZZZ-USD-PERP.DYDX?start_ns=0&end_ns=2000000000")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_catalog_chart_series_route_unknown_id_is_all_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_path = str(tmp_path / "catalog")
+    _write_snapshot(catalog_path, ts=1_000_000_000)
+    client = _client(catalog_path, str(tmp_path / "metrics.db"), monkeypatch)
+
+    response = client.get("/catalog/chart-series/ZZZ-USD-PERP.DYDX?start_ns=0&end_ns=2000000000")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body
+    assert all(points == [] for points in body.values())
+
+
+@pytest.mark.parametrize("route", _CATALOG_ROUTES)
+def test_catalog_route_rejects_an_id_without_a_venue(
+    route: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_catalog_reads(monkeypatch)
+    client = _client(str(tmp_path / "catalog"), str(tmp_path / "metrics.db"), monkeypatch)
+
+    response = client.get(f"{route}/garbage?start_ns=0&end_ns=1000000000")
+
+    assert response.status_code == 400
+    assert "garbage" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("route", "module", "name"),
+    [
+        ("/catalog/chart-series", chart_series, "compute_chart_series"),
+        ("/catalog/snapshots", app_module.coin_detail, "catalog_snapshot_rows"),
+    ],
+)
+@pytest.mark.usefixtures("_clean_ledger")
+def test_catalog_read_failure_is_ledgered_and_explained(
+    route: str, module: object, name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(module, name, _raise_os_error)
+    client = _client(str(tmp_path / "catalog"), str(tmp_path / "metrics.db"), monkeypatch)
+
+    response = client.get(f"{route}/{_IID}?start_ns=0&end_ns=1000000000")
+
+    assert response.status_code == 500
+    assert response.json()["detail"].startswith("failed to read catalog:")
+    assert "disk unreadable" in response.json()["detail"]
+    assert error_ledger.counts()["data_api.catalog_read"] == 1
+
+
+@pytest.mark.usefixtures("_clean_ledger")
+def test_catalog_chart_series_empty_top_of_book_keeps_its_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _empty_top(*_args: object) -> None:
+        raise chart_series.EmptyTopOfBook("empty bid side at 1")
+
+    monkeypatch.setattr(chart_series, "compute_chart_series", _empty_top)
+    client = _client(str(tmp_path / "catalog"), str(tmp_path / "metrics.db"), monkeypatch)
+
+    response = client.get(f"/catalog/chart-series/{_IID}?start_ns=0&end_ns=1000000000")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "empty bid side at 1"
+    # views ledgers its own malfunction; the route adds no second, misattributed entry.
+    assert "data_api.catalog_read" not in error_ledger.counts()
+
+
+@pytest.mark.parametrize("days", [0, -1, _MAX_DAYS + 1, 10**12])
+def test_metrics_history_route_rejects_days_outside_retention(
+    days: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(str(tmp_path / "catalog"), str(tmp_path / "metrics.db"), monkeypatch)
+
+    response = client.get(f"/metrics/history/{_IID}?days={days}")
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("days", [1, _MAX_DAYS])
+def test_metrics_history_route_serves_days_within_retention(
+    days: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(str(tmp_path / "catalog"), str(tmp_path / "metrics.db"), monkeypatch)
+
+    response = client.get(f"/metrics/history/{_IID}?days={days}")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_metrics_db_default_matches_the_ranking_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_path = str(tmp_path / "catalog")
+    monkeypatch.setenv("CATALOG_PATH", catalog_path)
+    monkeypatch.delenv("METRICS_DB_PATH", raising=False)
+
+    writer_path = settings_from_env().metrics_db_path
+
+    assert writer_path == settings.default_metrics_db_path(catalog_path)

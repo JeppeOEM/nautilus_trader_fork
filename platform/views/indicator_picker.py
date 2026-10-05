@@ -48,6 +48,7 @@ name registered in both catalogs fails loud. The one shared name (`Panel`) is a 
 coupling to catalog internals.
 """
 
+import math
 import os
 from collections import defaultdict
 from collections.abc import Callable
@@ -538,6 +539,9 @@ class CustomIndicatorSpec:
     # Computes every registered output attribute for the given candles/params/window, aligned
     # 1:1 with `candles` -- identical output contract to replay_native.
     replay: ReplayFn
+    # Raises `ValueError` for merged params the replay would refuse; the save-time half of the rule
+    # `check_params` applies (a native spec gets it from its constructor). None: nothing to check.
+    check_params: Callable[[dict[str, Any]], None] | None = None
 
 
 CUSTOM_INDICATOR_CATALOG: dict[str, CustomIndicatorSpec] = {}
@@ -743,10 +747,21 @@ def _cancel_pressure_replay(
     return {"bid_pressure": bid_out, "ask_pressure": ask_out}
 
 
+def _check_positive_window(params: dict[str, Any]) -> None:
+    """
+    `window` sizes the replay's rolling deque (`CancellationTracker`, `OrderFlowImbalance`): a
+    non-integer, zero or negative one cannot build a window at all.
+    """
+    window = params.get("window")
+    if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
+        raise ValueError(f"window must be a positive integer, got {window!r}")
+
+
 CUSTOM_INDICATOR_CATALOG["CancelPressure"] = CustomIndicatorSpec(
     params={"window": 200},
     panel="histogram",
     replay=_cancel_pressure_replay,
+    check_params=_check_positive_window,
 )
 
 
@@ -828,6 +843,7 @@ CUSTOM_INDICATOR_CATALOG["OrderFlowImbalance"] = CustomIndicatorSpec(
     params={"window": 20},
     panel="oscillator",
     replay=_ofi_replay,
+    check_params=_check_positive_window,
 )
 
 
@@ -869,6 +885,108 @@ def merged_catalog() -> dict[str, dict]:
     for name, entry in custom_catalog_json().items():
         merged[name] = {**entry, "category": "custom"}
     return merged
+
+
+# Known limit: one flat ceiling for every integer param (periods, windows, trend bars), not a
+# per-indicator bound. It exists because some constructors allocate eagerly from a period
+# (`HullMovingAverage(period=10**9)` builds its weight arrays for ~16 s) and every replay holds a
+# window that large, so an unchecked integer could stall `data_api` at save time and on every
+# later poll; 10_000 is far above any period the picker's bar widths make meaningful (1W bars hold
+# ~190 years of history at that length). The custom indicators' `window` counts book events, not bars
+# (`CancelPressure` defaults to 200, `OrderFlowImbalance` to 20): 10_000 still holds several seconds
+# of a busy BTC book. Floats get a magnitude ceiling for the same reason: `k=1e308` would replay to
+# `inf`, which the values JSON cannot carry. Upgrade path: a per-param `max` on `IndicatorSpec`,
+# served in the catalog so the picker can bound its inputs too.
+MAX_INT_PARAM = 10_000
+MAX_ABS_FLOAT_PARAM = 1e6
+
+
+def check_params(name: str, params: Any) -> None:
+    """
+    Raise `ValueError` naming the param for params `name` cannot be built with -- the one rule every
+    writer of an indicator list applies before saving it (the indicators and technicals-columns
+    PUTs, the layout seed/reset), so a saved selection is never one its replay refuses up front.
+    Unknown keys, wrong types and out-of-range numbers are refused before anything is built; a
+    native indicator is then constructed exactly as `replay_native` constructs it, a custom one runs
+    its spec's check. Known limit: a failure only `update_raw` would hit is not caught here; the
+    values routes still report it per request.
+    """
+    defaults = _default_params(name)
+    if not isinstance(params, dict):
+        raise ValueError(f"params must be an object, got {type(params).__name__}")
+    unknown = sorted(set(params) - set(defaults))
+    if unknown:
+        raise ValueError(f"unknown param(s) {unknown} (expected a subset of {sorted(defaults)})")
+    for key, value in params.items():
+        _check_param_type(key, value, defaults[key])
+    if name in INDICATOR_CATALOG:
+        _check_native_params(name, INDICATOR_CATALOG[name], params)
+        return
+    custom_check = CUSTOM_INDICATOR_CATALOG[name].check_params
+    if custom_check is not None:
+        custom_check({**CUSTOM_INDICATOR_CATALOG[name].params, **params})
+
+
+def _default_params(name: str) -> dict[str, Any]:
+    """Return the catalog defaults of `name` (every key it takes), with the dispatch's guards."""
+    in_native = name in INDICATOR_CATALOG
+    in_custom = name in CUSTOM_INDICATOR_CATALOG
+    if in_native and in_custom:
+        raise ValueError(f"Indicator name registered in both catalogs: {name!r}")
+    if in_native:
+        return INDICATOR_CATALOG[name].params
+    if in_custom:
+        return CUSTOM_INDICATOR_CATALOG[name].params
+    raise ValueError(f"Unknown indicator: {name!r}")
+
+
+def _check_param_type(key: str, value: Any, default: Any) -> None:
+    """
+    Refuse a numeric or boolean value not of its catalog default's type (an int default takes no
+    bool, a float default also takes an int). Construction alone cannot catch this: a Cython `int`
+    param truncates a float (`SimpleMovingAverage(period=2.5).period == 2`, so `period: 1e9` would
+    slip past the integer cap) and a `bint` param takes any truthy value, so the saved value would
+    not be the one replayed. A string default is an enum name: its choices are checked by the
+    caller.
+    """
+    if isinstance(default, bool):
+        ok, expected = isinstance(value, bool), "a boolean"
+    elif isinstance(default, int):
+        # The integer cap applies to integer params only: a float param sent as an int is bounded
+        # by the float ceiling below, like the same value sent as a float.
+        is_int = isinstance(value, int) and not isinstance(value, bool)
+        ok, expected = is_int and value <= MAX_INT_PARAM, f"an integer at most {MAX_INT_PARAM}"
+    elif isinstance(default, float):
+        # Finite too: `request.json()` parses `NaN`/`Infinity`, and TOML stores them.
+        # Compared as an int when it is one: `math.isfinite(10**400)` raises `OverflowError`.
+        is_number = isinstance(value, int | float) and not isinstance(value, bool)
+        in_range = is_number and (isinstance(value, int) or math.isfinite(value))
+        ok = in_range and abs(value) <= MAX_ABS_FLOAT_PARAM
+        expected = f"a finite number of magnitude at most {MAX_ABS_FLOAT_PARAM:g}"
+    else:
+        return
+    if not ok:
+        raise ValueError(f"{key}={value!r} must be {expected}")
+
+
+def _check_native_params(name: str, spec: IndicatorSpec, params: dict[str, Any]) -> None:
+    """
+    Enum params must be one of the picker's choices (a string); then the indicator is built with the
+    resolved params, so its own constructor checks (`Condition.positive_int` and the like) decide.
+    """
+    for key, enum_type in spec.enum_params.items():
+        if key in params and params[key] not in _choices(enum_type):
+            raise ValueError(
+                f"{key}={params[key]!r} is not one of the choices {_choices(enum_type)}"
+            )
+    try:
+        spec.cls(**_resolve_enum_params(spec, params))
+    except Exception as exc:
+        # Broad by design, as in `values_by_time`: the params are untrusted and every constructor
+        # may refuse them with its own exception type; any refusal is the client's 400, never a 500.
+        # The constructor's own message names the param it refuses (`'period' not a positive
+        # integer, was 0`); the params themselves are not echoed back.
+        raise ValueError(f"{name} cannot be built with these params: {exc}") from exc
 
 
 def indicator_id(name: str, params: dict[str, Any], source: str = DEFAULT_SOURCE) -> str:

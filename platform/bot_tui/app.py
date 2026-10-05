@@ -49,13 +49,14 @@ screen -- see Story 4.1's Dev Notes "Testing strategy: pure logic vs. urwid wiri
 """
 
 import asyncio
+import contextlib
 import datetime as dt
 import logging
 import os
 import socket
 import sys
 import time
-import webbrowser
+from collections.abc import Coroutine
 from pathlib import Path
 
 import urwid
@@ -80,13 +81,13 @@ _START_VIEW = "bots"
 _BREADCRUMB_LABELS = {"bots": "Bots", "collector": "Collector", "help": "Help"}
 
 # Bots pane's own footer (Story 4.4). Enter (open Bot-detail) and `j`/`k` row-focus
-# movement are "free" via urwid.ListBox and aren't advertised as distinct features.
+# movement (the pane's `_VimListBox`, DW-258) aren't advertised as distinct features; `:h`'s
+# help lists both.
 _BOTS_FOOTER_HINT_TEXT = "s start/stop  : command  esc back  :q quit"
 
 # Bot-detail's own footer (Story 4.5 added s/esc; Story 4.7 adds left/right (h/l) for
-# the new blotter/PnL-sparkline regions' history range). No j/k (scroll) hint -- the
-# blotter's own ListBox scrolling is "free" the same way the Bots-pane's j/k movement
-# already is.
+# the new blotter/PnL-sparkline regions' history range). No up/down (scroll) hint -- the
+# blotter's own ListBox scrolling is "free" via urwid.ListBox.
 _BOT_DETAIL_FOOTER_HINT_TEXT = (
     "s start/stop  h/l range  o dashboard  v strategy  i incidents  esc back  :q quit"
 )
@@ -135,7 +136,7 @@ _STRATEGY_SOURCE_DIR = Path(os.environ.get("STRATEGY_SOURCE_DIR", "/app/strategy
 # Full control reference shown by `:h`/`:help` (see _COMMAND_ALIASES below) -- one
 # section per view, listing every key that view's own footer hint above only
 # abbreviates. Plain text, not urwid markup: nothing here needs color.
-_HELP_TEXT = """GLOBAL
+_HELP_TEXT = f"""GLOBAL
   :          command bar (bots / data / help, :q to quit)
   :h, :help  open this help
   esc        back one view
@@ -145,11 +146,15 @@ _HELP_TEXT = """GLOBAL
 
 BOTS PANE
   j/k, up/down  move selection
-  s             start/stop highlighted bot (stop asks for confirmation)
+  s             start/stop highlighted bot (stop asks for confirmation); refused,
+                nothing sent, while the row is stale ("~": no bots:status for
+                over {bots_state._BOT_STALE_SECONDS:.0f}s -- its supervisor, the only
+                consumer of the command, is down)
   enter         open bot detail
 
 BOT DETAIL
-  s          start/stop this bot (stop asks for confirmation)
+  s          start/stop this bot (stop asks for confirmation); refused while stale,
+             as on the Bots pane
   h/l, left/right  step PnL/trades history range back/forward
   o          open dashboard bot page in browser
   v          view this bot's strategy source (read-only, scrollable)
@@ -257,6 +262,23 @@ _COMMAND_ALIASES = {"h": "help"}
 # small loop that re-renders the active view and triggers a redraw.
 _REDRAW_POLL_SECONDS = 0.5
 
+# How long a quit waits for in-flight background work (a bots:control/collector:control publish,
+# a browser launch) before cancelling it (DW-58): long enough for a healthy Redis round trip, short
+# enough that `:q` still feels immediate when Redis is unreachable.
+_SHUTDOWN_GRACE_SECONDS = 2.0
+
+# The ledger site of a background task a quit had to cancel: an operator command lost at quit must
+# be loud, never silently dropped (DATA-07).
+_SHUTDOWN_CANCELLED_SITE = "bot_tui.shutdown_cancelled"
+# A task that ignored its cancellation at quit, and one that had ended in an exception.
+_SHUTDOWN_STUCK_SITE = "bot_tui.shutdown_stuck"
+_SHUTDOWN_FAILED_SITE = "bot_tui.shutdown_failed"
+
+# The browser child's program (`_launch_browser`): exit 1 when no browser took the url.
+_BROWSER_CHILD_SOURCE = (
+    "import sys, webbrowser; sys.exit(0 if webbrowser.open_new_tab(sys.argv[1]) else 1)"
+)
+
 
 def _dispatch_command(
     current_view: str, stack: list[str], text: str
@@ -328,6 +350,153 @@ def _pop_view(current_view: str, stack: list[str]) -> tuple[str, list[str]]:
     if not stack:
         return current_view, []
     return stack[-1], stack[:-1]
+
+
+def _expect[W](widget: object, cls: type[W]) -> W:
+    """
+    Return `widget` narrowed to `cls`, raising TypeError naming both types otherwise (DW-92): an
+    explicit guard that, unlike `assert`, still holds under `python -O`, so a widget of the wrong
+    shape fails loudly instead of being mutated as if it were the right one.
+    """
+    if not isinstance(widget, cls):
+        raise TypeError(f"expected {cls.__name__}, got {type(widget).__name__}")
+    return widget
+
+
+def _segment_markup(segments: list[bots_pane.Segment]) -> list[str | tuple[str, str]]:
+    """Return urwid markup for bots_pane's (attr, text) segments: plain text where no attr."""
+    return [(attr, text) if attr is not None else text for attr, text in segments]
+
+
+async def _launch_browser(url: str) -> None:
+    """
+    Open `url` from a child Python running `webbrowser.open_new_tab` (DW-66/67): the stdlib's own
+    backend choice, off the loop thread, with every stdio on /dev/null and a new session, so
+    neither the child nor any launcher it starts (`xdg-open`, a text browser such as `w3m`) can
+    write into urwid's screen or grab the controlling terminal. Never process-wide fd redirection:
+    that races urwid's writes. The child exits 1 when no browser took the url -- `python -m
+    webbrowser` would exit 0 either way. No browser is the normal state of the headless
+    Docker/SSH deployment, not a malfunction, so a failure is a warning; the caller's footer shows
+    the url (and the OSC 52 copy) regardless.
+    """
+    try:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            _BROWSER_CHILD_SOURCE,
+            url,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (OSError, ValueError) as exc:  # ValueError: a url holding a NUL byte
+        logger.warning("could not start a browser for %s: %s", url, exc)
+        return
+    try:
+        returncode = await process.wait()
+    except asyncio.CancelledError:
+        # A quit while the launcher still waits on its browser (a `BROWSER` command that only
+        # returns when the browser closes): stop the launcher alone -- the browser it started is
+        # its own process and stays open -- and reap it, so the loop closes with no live
+        # subprocess transport.
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        await process.wait()
+        raise
+    if returncode != 0:
+        logger.warning("no browser opened %s (launcher exited %s)", url, returncode)
+
+
+def _shutdown_tasks(
+    loop: asyncio.AbstractEventLoop, tasks: list[asyncio.Task], commands: set[asyncio.Task]
+) -> None:
+    """
+    Drain `loop` at quit and close it (DW-58). `tasks` -- the listeners, the redraw loop (which
+    must not draw onto the terminal urwid has just restored), browser launches -- are cancelled
+    and awaited first. `commands` (bots:control/collector:control publishes) then get up to
+    `_SHUTDOWN_GRACE_SECONDS` to finish before the rest are cancelled and awaited too; a publish
+    cut short is ledgered, since the operator's command may never have reached Redis. Every
+    task's outcome is retrieved, so a failure is ledgered rather than lost; a task that ignores
+    its cancellation is ledgered once as stuck and abandoned rather than hanging the quit.
+    Async generators and the default executor (bounded by the same grace: a resolver thread stuck
+    on a dead DNS must not hold `:q`) are shut down last.
+    """
+    # urwid's AsyncioEventLoop.run() leaves its exception handler installed, and it stops the loop
+    # on any reported exception: a done-callback or async-generator finaliser failing mid-drain
+    # would abort a run_until_complete below and skip the ledgering and loop.close(). The drain
+    # retrieves every task outcome itself, so asyncio's default handler (log only) is restored.
+    loop.set_exception_handler(None)
+    commands_at_quit = list(commands)
+    for task in tasks:
+        task.cancel()
+    _await_cancelled(loop, tasks)
+    in_flight = [task for task in commands_at_quit if not task.done()]
+    if in_flight:
+        loop.run_until_complete(asyncio.wait(in_flight, timeout=_SHUTDOWN_GRACE_SECONDS))
+    cut_short = [task for task in in_flight if not task.done()]
+    for task in cut_short:
+        task.cancel()
+    _await_cancelled(loop, cut_short)
+    for task in cut_short:
+        # A stuck one is already ledgered by _await_cancelled; one that finished despite the
+        # cancel did send.
+        if task.done() and task.cancelled():
+            error_ledger.record(
+                _SHUTDOWN_CANCELLED_SITE,
+                f"{task.get_name()} still running {_SHUTDOWN_GRACE_SECONDS:g}s after quit: "
+                "cancelled, it may never have been sent",
+            )
+    _ledger_failed_tasks([*tasks, *commands_at_quit])
+    loop.run_until_complete(loop.shutdown_asyncgens())
+    _shutdown_default_executor(loop)
+    loop.close()
+
+
+def _shutdown_default_executor(loop: asyncio.AbstractEventLoop) -> None:
+    """
+    Join the default executor's threads for at most `_SHUTDOWN_GRACE_SECONDS`, ledgering a join
+    that timed out (`loop.close()` then shuts the executor down without waiting). Known limit:
+    the interpreter still joins such a thread at exit, so a resolver call stuck past the grace
+    delays the process exit (not the drain) until it returns; upgrade path: a resolver with its
+    own timeout in redis-py's connect.
+    """
+    try:
+        loop.run_until_complete(
+            asyncio.wait_for(loop.shutdown_default_executor(), _SHUTDOWN_GRACE_SECONDS)
+        )
+    except TimeoutError:
+        error_ledger.record(
+            _SHUTDOWN_STUCK_SITE,
+            f"default executor threads still running {_SHUTDOWN_GRACE_SECONDS:g}s after quit",
+        )
+
+
+def _await_cancelled(loop: asyncio.AbstractEventLoop, tasks: list[asyncio.Task]) -> None:
+    """
+    Await cancelled `tasks` for at most `_SHUTDOWN_GRACE_SECONDS`, ledgering one still running (a
+    cleanup stuck on a dead connection) instead of hanging the quit on it.
+    """
+    if not tasks:
+        return
+    loop.run_until_complete(asyncio.wait(tasks, timeout=_SHUTDOWN_GRACE_SECONDS))
+    for task in tasks:
+        if not task.done():
+            error_ledger.record(
+                _SHUTDOWN_STUCK_SITE,
+                f"{task.get_name()} still running {_SHUTDOWN_GRACE_SECONDS:g}s after its "
+                "cancellation at quit",
+            )
+
+
+def _ledger_failed_tasks(tasks: list[asyncio.Task]) -> None:
+    """Ledger every finished task that ended in an exception (its outcome retrieved, never lost)."""
+    for task in tasks:
+        if not task.done() or task.cancelled():
+            continue
+        exc = task.exception()
+        if exc is not None:
+            error_ledger.record(_SHUTDOWN_FAILED_SITE, f"{task.get_name()} failed", exc)
 
 
 class _SelectableBotRow(urwid.Text):
@@ -425,7 +594,10 @@ class BotTuiApp:
         self._view = _START_VIEW
         self._stack: list[str] = []
         self._command_active = False
+        # In-flight bots:control/collector:control publishes (a quit gives them a grace to finish)
+        # and browser launches (a quit just cancels them: nothing is lost) -- `_track_background`.
         self._background_tasks: set[asyncio.Task] = set()
+        self._browser_tasks: set[asyncio.Task] = set()
         self._dashboard_base_url = os.environ.get("DASHBOARD_BASE_URL", "http://127.0.0.1:9100")
 
         # Bot-detail state (Story 4.5). No open_bot()/close_bot() lifecycle pair is
@@ -580,14 +752,19 @@ class BotTuiApp:
                 self._bots_shape = "cold_open"
             return
 
-        now = time.time()
+        # Two clocks (DW-60): uptime is the wire's wall-clock `started_at`, staleness this TUI's
+        # monotonic receive stamps.
+        wall_now = time.time()
+        monotonic_now = time.monotonic()
         rows = bots_pane.bot_rows(statuses)
         widgets = [
-            self._build_bot_row_widget(row, bots_state.is_stale(row["bot_id"], now=now), now)
+            self._build_bot_row_widget(
+                row, bots_state.is_stale(row["bot_id"], now=monotonic_now), wall_now
+            )
             for row in rows
         ]
         if self._bots_shape != "rows" or self._bots_listbox is None:
-            self._bots_listbox = urwid.ListBox(urwid.SimpleListWalker(widgets))
+            self._bots_listbox = _VimListBox(urwid.SimpleListWalker(widgets))
             self._bots_body = urwid.Frame(
                 self._bots_listbox, header=urwid.Text(bots_pane.bots_header_line())
             )
@@ -636,11 +813,10 @@ class BotTuiApp:
             _focused_collector_id(self._collector_body) if self._collector_shape == "rows" else None
         )
         if self._collector_shape != "rows":
-            self._collector_body = urwid.ListBox(urwid.SimpleListWalker(widgets))
+            self._collector_body = _VimListBox(urwid.SimpleListWalker(widgets))
             self._collector_shape = "rows"
         else:
-            listbox = self._collector_body
-            assert isinstance(listbox, urwid.ListBox)
+            listbox = _expect(self._collector_body, urwid.ListBox)
             listbox.body[:] = widgets  # type: ignore[index]
         self._keep_collector_focus_on_a_row(focused_id)
 
@@ -679,9 +855,7 @@ class BotTuiApp:
         stop, an unpin, a sweep), focus may land on another venue's row; `p`/`x` still name the
         id in their confirm prompt.
         """
-        listbox = self._collector_body
-        assert isinstance(listbox, urwid.ListBox)
-        _keep_focus_on_row(listbox, focused_id)
+        _keep_focus_on_row(_expect(self._collector_body, urwid.ListBox), focused_id)
 
     def _set_collector_filler(self, text: str) -> None:
         if self._collector_shape != "cold_open":
@@ -690,9 +864,7 @@ class BotTuiApp:
             return
         # Same shape: update the text in place (the archive line changes while no
         # collector:status has arrived), keeping the widget object per TUI-01.
-        filler = self._collector_body
-        assert isinstance(filler, urwid.Filler)
-        filler.original_widget.set_text(text)
+        _expect(self._collector_body, urwid.Filler).original_widget.set_text(text)
 
     def _build_collector_row_widget(
         self, row: dict, stale: bool, show_liquidity: bool
@@ -709,9 +881,10 @@ class BotTuiApp:
         Rebuild/mutate self._markets_body from markets:live and collector:status, TUI-01's way
         (cold-open <-> populated swaps the widget; a same-shape update slice-assigns the walker),
         and only when `_markets_input_key` changed. Focus follows the focused id across a
-        rebuild, as in the Collector pane.
+        rebuild, as in the Collector pane. `now` is monotonic: every time compared here is one of
+        this TUI's own receive/send stamps (DW-60).
         """
-        now = time.time()
+        now = time.monotonic()
         markets = markets_state.live_markets(now)
         if not markets:
             self._set_markets_filler(market_browser.COLD_OPEN_TEXT)
@@ -732,14 +905,12 @@ class BotTuiApp:
             self._markets_body = _VimListBox(urwid.SimpleListWalker(widgets))
             self._markets_shape = "rows"
         else:
-            listbox = self._markets_body
-            assert isinstance(listbox, urwid.ListBox)
-            listbox.body[:] = widgets  # type: ignore[index]
-        assert isinstance(self._markets_body, urwid.ListBox)
+            _expect(self._markets_body, urwid.ListBox).body[:] = widgets  # type: ignore[index]
+        listbox = _expect(self._markets_body, urwid.ListBox)
         if query_changed:
-            self._markets_body.focus_position = 0
+            listbox.focus_position = 0
             focused_id = None
-        _keep_focus_on_row(self._markets_body, focused_id)
+        _keep_focus_on_row(listbox, focused_id)
 
     def _set_markets_filler(self, text: str) -> None:
         self._markets_key = None
@@ -828,7 +999,7 @@ class BotTuiApp:
     def _market_add_refusal(self, instrument_id: str) -> str | None:
         """Return why `a` must not add `instrument_id` now (`market_browser.add_refusal`)."""
         ctx = self._market_add_context(instrument_id)
-        now = time.time()
+        now = time.monotonic()
         return market_browser.add_refusal(
             ctx,
             now,
@@ -907,10 +1078,7 @@ class BotTuiApp:
         # The markup is bots_pane's own segments -- the same text as format_bot_line, with the
         # PnL sign and an unprotected position's stop colored ("fixed position + color, never
         # color alone").
-        markup = [
-            (attr, text) if attr is not None else text
-            for attr, text in bots_pane.bot_line_segments(row, stale, now)
-        ]
+        markup = _segment_markup(bots_pane.bot_line_segments(row, stale, now))
         return urwid.AttrMap(
             _SelectableBotRow(markup, bot_id=row["bot_id"]), None, focus_map="focus"
         )
@@ -926,9 +1094,7 @@ class BotTuiApp:
         focus_widget = body.focus
         if focus_widget is None:
             return None
-        assert isinstance(focus_widget, urwid.AttrMap)
-        row = focus_widget.original_widget
-        assert isinstance(row, _SelectableBotRow)
+        row = _expect(_expect(focus_widget, urwid.AttrMap).original_widget, _SelectableBotRow)
         return row.bot_id
 
     def _active_bot_id(self) -> str | None:
@@ -954,23 +1120,12 @@ class BotTuiApp:
             self._bot_detail_listbox = None
             return urwid.Filler(urwid.Text("no status yet"), valign="top")
 
-        pnl_value = status["realized_pnl"] + status["unrealized_pnl"]
-        pnl_color = "pnl-pos" if pnl_value >= 0 else "pnl-neg"
-        lines = bots_pane.bot_detail_lines(status, now=time.time())
-        # Color only the PnL segment within line 2 -- same "fixed position + color,
-        # never color alone" precedent as the Bots-pane row (_build_bot_row_widget).
-        pnl_text = bots_pane.format_pnl(pnl_value)
-        pnl_line = lines[1]
-        pnl_start = pnl_line.index(pnl_text)
-        pnl_end = pnl_start + len(pnl_text)
+        # bots_pane's own segments (DW-85): the PnL segment carries its sign's color -- same
+        # "fixed position + color, never color alone" precedent as the Bots-pane row
+        # (_build_bot_row_widget). Wall clock: uptime and last fill are wire timestamps.
         line_widgets = [
-            urwid.Text(lines[0]),
-            urwid.Text(
-                [pnl_line[:pnl_start], (pnl_color, pnl_text), pnl_line[pnl_end:]],
-            ),
-            urwid.Text(lines[2]),
-            # Story 29.6: the position (quantity, entry, mark, open orders) and its exits.
-            *(urwid.Text(line) for line in lines[3:]),
+            urwid.Text(_segment_markup(line))
+            for line in bots_pane.bot_detail_segments(status, now=time.time())
         ]
         snapshot_box = urwid.LineBox(
             urwid.Pile(line_widgets), title=f"{self._bot_detail_bot_id}  snapshot"
@@ -1109,6 +1264,12 @@ class BotTuiApp:
         bot_id = self._active_bot_id()
         if bot_id is None:
             return
+        # A stale row has no live supervisor to consume the command, in either direction
+        # (bots_state.control_refusal, DW-74): say so instead of sending into the void.
+        refusal = bots_state.control_refusal(bot_id)
+        if refusal is not None:
+            self._footer_hint.set_text(refusal)
+            return
         status = bots_state.latest_status(bot_id)
         running = bool(status.get("running")) if status is not None else False
         if running:
@@ -1120,12 +1281,31 @@ class BotTuiApp:
         # Publish-and-wait, never optimistic (AC3): no local running/stopped flip
         # happens here -- the row only reflects the new
         # state once the bot's own next bots:status heartbeat carries it back.
-        task = asyncio.ensure_future(bots_state.publish_control(self._redis_url, bot_id, action))
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+        self._track_background(
+            bots_state.publish_control(self._redis_url, bot_id, action),
+            f"bots:control {action} {bot_id}",
+        )
         # AC3's literal footer-echo format: "sent: start bot-07" -- confirms the
         # command was sent, not that it succeeded.
         self._footer_hint.set_text(f"sent: {action} {bot_id}")
+
+    def _track_background(
+        self,
+        coro: Coroutine[object, object, object],
+        name: str,
+        held_in: set[asyncio.Task] | None = None,
+    ) -> asyncio.Task:
+        """
+        Schedule `coro` as a background task named `name`, held in `held_in` (default
+        `_background_tasks`, the commands) until it is done, so it is never garbage-collected
+        mid-flight and a quit can drain it (`_shutdown_tasks`, which names it in the ledger).
+        """
+        tasks = self._background_tasks if held_in is None else held_in
+        task = asyncio.ensure_future(coro)
+        task.set_name(name)
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        return task
 
     def _open_stop_confirm(self, bot_id: str) -> None:
         self._stop_confirm_active = True
@@ -1154,12 +1334,11 @@ class BotTuiApp:
             if instrument_id is None
             else collector_state.venue_of_row(instrument_id)
         )
-        task = asyncio.ensure_future(
-            collector_state.publish_control(self._redis_url, action, instrument_id, venue)
-        )
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
         label = f" {instrument_id}" if instrument_id is not None else ""
+        task = self._track_background(
+            collector_state.publish_control(self._redis_url, action, instrument_id, venue),
+            f"collector:control {action}{label}",
+        )
         self._footer_hint.set_text(f"sent: {action}{label}")
 
         def _on_published(done: asyncio.Future) -> None:
@@ -1228,9 +1407,8 @@ class BotTuiApp:
     def _submit_collector_confirm(self) -> None:
         action = self._collector_confirm_action
         instrument_id = self._collector_confirm_id
-        # Both are set only while the confirm is active.
-        assert action is not None
-        assert instrument_id is not None
+        if action is None or instrument_id is None:
+            raise RuntimeError("collector confirm submitted with no action/instrument (not open)")
         text = self._stop_confirm_edit.edit_text.strip().lower()
         if text != action:
             verb = self._COLLECTOR_CONFIRM_VERBS[action]
@@ -1248,7 +1426,8 @@ class BotTuiApp:
             return
         sent_at = None
         if action == "add":
-            sent_at = time.time()
+            # Monotonic, like every add-answer time it is compared with (DW-60).
+            sent_at = time.monotonic()
             collector_state.record_sent_add(instrument_id, sent_at)
         self._publish_collector_action(
             self._COLLECTOR_WIRE_ACTIONS.get(action, action), instrument_id, sent_at
@@ -1277,7 +1456,8 @@ class BotTuiApp:
 
     def _submit_stop_confirm(self) -> None:
         bot_id = self._stop_confirm_bot_id
-        assert bot_id is not None  # only reachable while _stop_confirm_active is True
+        if bot_id is None:
+            raise RuntimeError("stop confirm submitted with no bot (prompt not open)")
         text = self._stop_confirm_edit.edit_text.strip().lower()
         if text != "stop":
             # Same "stay open, echo, let them retry" idiom as _submit_command's
@@ -1288,6 +1468,17 @@ class BotTuiApp:
             self._stop_confirm_edit.set_edit_text("")
             return
         self._close_stop_confirm()
+        # Re-checked, like _submit_collector_confirm's: the bot may have gone stale while the
+        # operator was typing (DW-74).
+        refusal = bots_state.control_refusal(bot_id)
+        if refusal is not None:
+            self._footer_hint.set_text(refusal)
+            return
+        # ...or a fresh heartbeat may already say it stopped: nothing left to stop.
+        status = bots_state.latest_status(bot_id)
+        if status is None or not status.get("running"):
+            self._footer_hint.set_text(f"{bot_id} already stopped: nothing sent")
+            return
         self._publish_bot_action(bot_id, "stop")
 
     def _open_bot_detail(self, bot_id: str) -> None:
@@ -1339,22 +1530,20 @@ class BotTuiApp:
     def _open_url(self, url: str) -> None:
         """
         Open `url` on the operator's machine: the local open_listener hand-off first,
-        else webbrowser.open() plus an OSC 52 clipboard copy. Bot-detail's `o` is the
-        only caller since Story 25.1a deleted the Coins-pane/Coin-detail chart links
-        that used to share it.
+        else a browser launched in the background (`_launch_browser`) plus an OSC 52
+        clipboard copy. Bot-detail's `o` is the only caller since Story 25.1a deleted the
+        Coins-pane/Coin-detail chart links that used to share it.
         """
         if self._open_via_local_listener(url):
             self._footer_hint.set_text(f"dashboard: {url}")
             return
-        # webbrowser.open() is a harmless no-op inside this product's headless
-        # Docker/SSH deployment (no DISPLAY reachable) but genuinely opens a real
-        # browser when bot_tui is run on-host -- both are real deployment shapes, so
-        # the footer text below is shown unconditionally, never gated on this
-        # attempt's (unreliable, environment-dependent) outcome.
-        try:
-            webbrowser.open(url)
-        except Exception:
-            logger.warning("webbrowser.open failed for %s", url)
+        # The launch finds no browser inside this product's headless Docker/SSH
+        # deployment (no DISPLAY reachable) but genuinely opens one when bot_tui is run
+        # on-host -- both are real deployment shapes, so the footer text below is shown
+        # unconditionally, never gated on the launch's (environment-dependent) outcome.
+        self._track_background(
+            _launch_browser(url), f"browser launch {url}", held_in=self._browser_tasks
+        )
         sys.stdout.write(bots_pane.osc52_copy_sequence(url))
         sys.stdout.flush()
         self._footer_hint.set_text(f"dashboard (copied to clipboard): {url}")
@@ -1365,13 +1554,13 @@ class BotTuiApp:
         Best-effort hand-off to platform/scripts/open_listener.go running on the
         operator's own machine (see troll-tui's -R reverse SSH tunnel in
         ~/.zshrc) -- lets an `o` press on a VPS-hosted bot_tui actually pop a
-        Firefox tab locally, which webbrowser.open() alone can't do with no
-        DISPLAY on the remote host.
+        Firefox tab locally, which a browser launched on the remote host can't do with
+        no DISPLAY there.
 
         BOT_TUI_OPEN_URL_PORT unset (a local, non-SSH bot_tui run, or troll-tui
         without the listener running) short-circuits to False immediately --
-        same fast, silent fallthrough to the existing webbrowser.open()+OSC52
-        path as a refused/timed-out connection.
+        same fast, silent fallthrough to the browser-launch+OSC52 path as a
+        refused/timed-out connection.
         """
         port = os.environ.get("BOT_TUI_OPEN_URL_PORT")
         if not port:
@@ -1399,9 +1588,10 @@ class BotTuiApp:
 
     def _open_dashboard_bot(self) -> None:
         # Only reachable via "o" while self._view == "bot_detail", which
-        # _open_bot_detail always sets alongside a real bot_id -- never None in
-        # practice; the assert narrows the Optional for the type checker.
-        assert self._bot_detail_bot_id is not None
+        # _open_bot_detail always sets alongside a real bot_id. A raise (DW-92): under
+        # `python -O` an assertion would vanish and open `/bot/None`.
+        if self._bot_detail_bot_id is None:
+            raise RuntimeError("dashboard link requested with no bot open in Bot-detail")
         self._open_url(
             bots_pane.dashboard_bot_url(self._dashboard_base_url, self._bot_detail_bot_id)
         )
@@ -1558,7 +1748,7 @@ class BotTuiApp:
                     self._draw_screen()
                 elif self._view == "bot_detail":
                     # Breadcrumb (and its stale badge) needs to keep advancing purely
-                    # from wall-clock time. The body is rebuilt every tick too -- scroll
+                    # from the passage of time. The body is rebuilt every tick too -- scroll
                     # position is protected by _build_bot_detail_body itself (see the
                     # comment on self._bot_detail_listbox), not by gating this call.
                     self._refresh_breadcrumb()
@@ -1615,23 +1805,19 @@ class BotTuiApp:
             event_loop=evl,
         )
 
-        bots_listener_task = loop.create_task(bots_state._redis_listener(self._redis_url))
-        collector_listener_task = loop.create_task(collector_state._redis_listener(self._redis_url))
-        archive_listener_task = loop.create_task(archive_state._redis_listener(self._redis_url))
-        markets_listener_task = loop.create_task(markets_state._redis_listener(self._redis_url))
-        history_poll_task = loop.create_task(bot_history_state.poll_loop(self._redis_url))
-        incidents_poll_task = loop.create_task(bot_incidents_state.poll_loop(self._redis_url))
-        redraw_task = loop.create_task(self._redraw_loop())
+        tasks = [
+            loop.create_task(bots_state._redis_listener(self._redis_url)),
+            loop.create_task(collector_state._redis_listener(self._redis_url)),
+            loop.create_task(archive_state._redis_listener(self._redis_url)),
+            loop.create_task(markets_state._redis_listener(self._redis_url)),
+            loop.create_task(bot_history_state.poll_loop(self._redis_url)),
+            loop.create_task(bot_incidents_state.poll_loop(self._redis_url)),
+            loop.create_task(self._redraw_loop()),
+        ]
         try:
             self._main_loop.run()
         finally:
-            bots_listener_task.cancel()
-            collector_listener_task.cancel()
-            archive_listener_task.cancel()
-            markets_listener_task.cancel()
-            history_poll_task.cancel()
-            incidents_poll_task.cancel()
-            redraw_task.cancel()
+            _shutdown_tasks(loop, [*tasks, *self._browser_tasks], self._background_tasks)
 
 
 _LOG_PATH = os.environ.get("BOT_TUI_LOG_PATH", "bot_tui.log")

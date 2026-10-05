@@ -12,6 +12,9 @@ import type {
   ArchiveStep,
   CandlesResponse,
   DrawingsResponse,
+  FootprintItem,
+  FootprintResponse,
+  FootprintRow,
   HealthResponse,
   IndicatorCatalogEntry,
   IndicatorConfigEntry,
@@ -33,6 +36,9 @@ export type {
   ArchiveStatusResponse,
   ArchiveStep,
   CandlesResponse,
+  FootprintItem,
+  FootprintResponse,
+  FootprintRow,
   HealthResponse,
   IndicatorCatalogEntry,
   IndicatorConfigEntry,
@@ -103,15 +109,39 @@ export async function fetchCandles(
   beforeNs: number,
   limit: number,
   barSeconds: number,
+  // Optional: the session pager aborts a page superseded by a newer request (DW-153).
+  signal?: AbortSignal,
 ): Promise<CandlesResponse> {
   const params = new URLSearchParams({
     before_ns: String(beforeNs),
     limit: String(limit),
     bar_seconds: String(barSeconds),
   });
-  const res = await fetch(`/api/candles/${encodeURIComponent(instrumentId)}?${params}`);
+  const url = `/api/candles/${encodeURIComponent(instrumentId)}?${params}`;
+  const res = await (signal ? fetch(url, { signal }) : fetch(url));
   if (!res.ok) throw new HttpError(res.status, `GET /api/candles/${instrumentId} failed: ${res.status}`);
   return (await res.json()) as CandlesResponse;
+}
+
+// Story 32.8: the volume footprint of the chart's closed bars, on fetchCandles()'s cursor contract
+// plus `row_ticks` (price ticks per row; 0 = the server's per-bar auto size). Every price and size in
+// the answer is integer units, formatted by `lib/units.ts` at the response's precisions.
+export async function fetchFootprint(
+  instrumentId: string,
+  beforeNs: number,
+  limit: number,
+  barSeconds: number,
+  rowTicks: number,
+): Promise<FootprintResponse> {
+  const params = new URLSearchParams({
+    before_ns: String(beforeNs),
+    limit: String(limit),
+    bar_seconds: String(barSeconds),
+    row_ticks: rowTicks === 0 ? "auto" : String(rowTicks),
+  });
+  const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/footprint?${params}`);
+  if (!res.ok) throw new HttpError(res.status, `GET /api/coin/${instrumentId}/footprint failed: ${res.status}`);
+  return (await res.json()) as FootprintResponse;
 }
 
 // Story 15.4: cursor-paginated OFI/OBI/microprice/spread history (AD-F3) -- mirrors

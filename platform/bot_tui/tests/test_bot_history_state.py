@@ -19,6 +19,8 @@ poll_loop()'s actual GET/reconnect behavior is left to a manual smoke check, sam
 established precedent as every other *_state.py module's own listener/poll loop.
 """
 
+import pytest
+
 from bot_tui import bot_history_state
 
 
@@ -113,3 +115,14 @@ def test_stale_payload_from_a_bot_switched_away_from_is_dropped() -> None:
     bot_history_state.open_bot("bot-02")
     bot_history_state._handle_history_payload("bot-01", "day", _history(bot_id="bot-01"))
     assert bot_history_state.get_history("day") is None
+
+
+@pytest.mark.parametrize("step", [-3600.0, 3600.0])
+def test_a_wall_clock_step_does_not_change_a_ranges_staleness(
+    monkeypatch: pytest.MonkeyPatch, step: float
+) -> None:
+    bot_history_state.open_bot("bot-01")
+    bot_history_state._handle_history_payload("bot-01", "day", _history())
+    wall = bot_history_state.time.time()
+    monkeypatch.setattr(bot_history_state.time, "time", lambda: wall + step)
+    assert bot_history_state.get_history("day") is not None

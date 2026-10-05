@@ -45,8 +45,9 @@ from data_api.settings import CATALOG_PATH
 # much larger than a candle limit (`_MAX_CANDLES_LIMIT = 500` bars) since there is no
 # bar-aggregation step here: 5000 one-second rows is a bit under 1.5 hours of raw snapshot
 # history in one response, comfortably above the ~15-minute/900-row default page while
-# still bounding the per-request read/serialization cost.
-_MAX_SNAPSHOTS_LIMIT = 5_000
+# still bounding the per-request read/serialization cost. Public: app.py's legacy /catalog routes
+# bound their raw-second window by the same ceiling.
+MAX_SNAPSHOTS_LIMIT = 5_000
 
 router = APIRouter()
 
@@ -70,7 +71,7 @@ class SnapshotSeriesResponse(BaseModel):
 
 @router.get("/api/snapshots/{instrument_id}")
 def get_snapshots(instrument_id: str, before_ns: int, limit: int = 900) -> SnapshotSeriesResponse:
-    limit = max(1, min(limit, _MAX_SNAPSHOTS_LIMIT))
+    limit = max(1, min(limit, MAX_SNAPSHOTS_LIMIT))
     try:
         kept, has_more = chart_series.snapshot_series_page(
             CATALOG_PATH, instrument_id, before_ns, limit

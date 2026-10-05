@@ -46,6 +46,12 @@ interface IndicatorPickerProps {
    * state lives with the caller. The row shows only when both are given (not the Technicals tab). */
   volumeOn?: boolean;
   onVolumeChange?: (on: boolean) => void;
+  /** Story 32.8: the Footprint toggle, pinned next to Volume (its state is the coin's layout, held
+   * by the caller); shown only when both are given. `footprintCandlesOnly` notes that it draws in
+   * Candles mode only, while another mode is active. */
+  footprintOn?: boolean;
+  onFootprintChange?: (on: boolean) => void;
+  footprintCandlesOnly?: boolean;
   /** The legend's eye/gear/x land here (chart page only). */
   ref?: Ref<IndicatorPickerHandle>;
   /** The settings modal's title (the legend title) and Style rows for one instance id. */
@@ -92,6 +98,9 @@ export default function IndicatorPicker({
   multiInstance = false,
   volumeOn,
   onVolumeChange,
+  footprintOn,
+  onFootprintChange,
+  footprintCandlesOnly = false,
   ref,
   titleFor,
   outputsFor,
@@ -293,6 +302,9 @@ export default function IndicatorPicker({
           onAdd={addByName}
           volumeOn={volumeOn}
           onVolumeChange={onVolumeChange}
+          footprintOn={footprintOn}
+          onFootprintChange={onFootprintChange}
+          footprintCandlesOnly={footprintCandlesOnly}
         />
       )}
       {error && <p style={{ color: "var(--color-danger)" }}>{error}</p>}
@@ -410,6 +422,9 @@ function IndicatorDialog({
   onAdd,
   volumeOn,
   onVolumeChange,
+  footprintOn,
+  onFootprintChange,
+  footprintCandlesOnly,
 }: {
   open: boolean;
   onClose: () => void;
@@ -419,6 +434,9 @@ function IndicatorDialog({
   onAdd: (name: string) => void;
   volumeOn?: boolean;
   onVolumeChange?: (on: boolean) => void;
+  footprintOn?: boolean;
+  onFootprintChange?: (on: boolean) => void;
+  footprintCandlesOnly: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const [query, setQuery] = useState("");
@@ -457,17 +475,31 @@ function IndicatorDialog({
           &times;
         </button>
       </div>
-      {onVolumeChange && volumeOn !== undefined && (
+      {((onVolumeChange && volumeOn !== undefined) || (onFootprintChange && footprintOn !== undefined)) && (
         <div className="indicator-dialog-pinned">
-          <label>
-            <input
-              type="checkbox"
-              checked={volumeOn}
-              disabled={disabled}
-              onChange={(e) => onVolumeChange(e.target.checked)}
-            />
-            <span>Volume</span>
-          </label>
+          {onVolumeChange && volumeOn !== undefined && (
+            <label>
+              <input
+                type="checkbox"
+                checked={volumeOn}
+                disabled={disabled}
+                onChange={(e) => onVolumeChange(e.target.checked)}
+              />
+              <span>Volume</span>
+            </label>
+          )}
+          {onFootprintChange && footprintOn !== undefined && (
+            <label>
+              <input
+                type="checkbox"
+                checked={footprintOn}
+                disabled={disabled}
+                onChange={(e) => onFootprintChange(e.target.checked)}
+              />
+              <span>Footprint</span>
+              {footprintCandlesOnly && <span className="indicator-dialog-tag">Candles mode only</span>}
+            </label>
+          )}
         </div>
       )}
       <div className="indicator-dialog-cats" role="group" aria-label="Category">

@@ -625,3 +625,81 @@ def test_values_route_serves_one_series_per_source_keyed_by_the_source_id(
         "SimpleMovingAverage_period=2.value",
         "SimpleMovingAverage_period=2:hl2.value",
     }
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"name": "SimpleMovingAverage", "params": {"period": 0}},
+        {"name": "CandlePattern", "params": {"pattern": "hammer"}},
+        {"name": "BollingerBands", "params": {"ma_type": "ADAPTIVE"}},
+        {"name": "SimpleMovingAverage", "params": {"perod": 20}},
+        {"name": "HullMovingAverage", "params": {"period": 10**9}},
+        {"name": "OrderFlowImbalance", "params": {"window": 0}, "category": "custom"},
+        {"name": "SimpleMovingAverage", "params": []},
+    ],
+)
+def test_put_with_params_the_indicator_refuses_is_400_and_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: dict[str, Any]
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+    saved = [{"name": "RelativeStrengthIndex", "params": {"period": 14}, "category": "native"}]
+    assert client.put(f"/api/coin/{_IID}/indicators", json=saved).status_code == 200
+    before = Path(indicators_routes.CHART_INDICATOR_CONFIG_PATH).read_bytes()
+
+    response = client.put(f"/api/coin/{_IID}/indicators", json=[{"category": "native", **entry}])
+
+    assert response.status_code == 400
+    assert Path(indicators_routes.CHART_INDICATOR_CONFIG_PATH).read_bytes() == before
+
+
+def test_put_naming_the_indicator_and_param_it_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+    payload = [{"name": "SimpleMovingAverage", "params": {"period": 0}, "category": "native"}]
+
+    detail = client.put(f"/api/coin/{_IID}/indicators", json=payload).json()["detail"]
+
+    assert "SimpleMovingAverage" in detail
+    assert "period" in detail
+
+
+def test_put_with_on_balance_volume_default_period_zero_is_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+    payload = [{"name": "OnBalanceVolume", "params": {"period": 0}, "category": "native"}]
+
+    assert client.put(f"/api/coin/{_IID}/indicators", json=payload).status_code == 200
+    assert client.get(f"/api/coin/{_IID}/indicators").json()[0]["params"] == {"period": 0}
+
+
+def test_put_over_a_corrupt_stored_file_is_500_not_blamed_on_the_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+    Path(indicators_routes.CHART_INDICATOR_CONFIG_PATH).write_text("not [ valid toml")
+    payload = [{"name": "SimpleMovingAverage", "params": {}, "category": "native"}]
+
+    response = client.put(f"/api/coin/{_IID}/indicators", json=payload)
+
+    assert response.status_code == 500
+    assert "chart_indicators.toml is corrupt" in response.json()["detail"]
+
+
+def test_put_over_an_unreadable_stored_file_is_500(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+
+    def _unreadable(path: Path) -> dict[str, list[IndicatorEntry]]:
+        raise PermissionError(f"permission denied: {path}")
+
+    monkeypatch.setattr(indicators_routes.preferences, "load_chart_indicators", _unreadable)
+    payload = [{"name": "SimpleMovingAverage", "params": {}, "category": "native"}]
+
+    response = client.put(f"/api/coin/{_IID}/indicators", json=payload)
+
+    assert response.status_code == 500
+    assert "failed to read chart_indicators.toml" in response.json()["detail"]

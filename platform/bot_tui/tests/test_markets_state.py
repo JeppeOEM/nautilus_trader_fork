@@ -169,3 +169,14 @@ def test_an_unanswered_ping_raises_so_the_listener_resubscribes(
     with pytest.raises(ConnectionError, match="liveness PING"):
         asyncio.run(markets_state._receive(pubsub))
     assert pubsub.pings == 1
+
+
+@pytest.mark.parametrize("step", [-3600.0, 3600.0])
+def test_a_wall_clock_step_does_not_age_or_expire_a_venues_list(
+    monkeypatch: pytest.MonkeyPatch, step: float
+) -> None:
+    markets_state._handle_markets_message(_message())
+    wall = markets_state.time.time()
+    monkeypatch.setattr(markets_state.time, "time", lambda: wall + step)
+    assert markets_state.venue_markets_stale("BYBIT") is False
+    assert markets_state.live_venues() == ["BYBIT"]

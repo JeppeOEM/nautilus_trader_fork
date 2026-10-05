@@ -27,13 +27,19 @@ came from bot_tui's Coin-detail view: that view was their only reader, and it we
 """
 
 from kernel.second_snapshot import DydxSecondSnapshot
+from ranking.application.queries import HISTORY_MAX_DAYS
 from ranking.application.queries import history
 from ranking.application.queries import nearest
 
 from views.catalog_reads import query_second_snapshots
 
 
-def metrics_history(symbol: str, db_path: str, days: int = 31) -> list[dict]:
+# The `days` ceiling `metrics_history` serves: metrics.db's own retention, re-exposed here because
+# the interfaces read ranking only through views (AD-D2), so data_api bounds its query by this.
+METRICS_HISTORY_MAX_DAYS = HISTORY_MAX_DAYS
+
+
+def metrics_history(symbol: str, db_path: str, days: int = METRICS_HISTORY_MAX_DAYS) -> list[dict]:
     """One coin's `metrics.db` rows over the last `days` days, oldest first (ranking's own read)."""
     return history(symbol, db_path, days)
 

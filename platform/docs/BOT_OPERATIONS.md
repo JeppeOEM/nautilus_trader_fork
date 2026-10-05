@@ -257,7 +257,10 @@ python3 -c "from research.strategies.backtest_dydx import run; print(run(symbols
 ```
 or directly: `python3 -m research.strategies.backtest_dydx` (runs against the full live Watchlist
 by default — pass `symbols=[...]` explicitly for a quick single-coin check). `run()`
-also takes `catalog_path`, `bar_interval` (a plain bar-spec string, e.g. `"5-MINUTE"` —
+also takes `catalog_path` (default: `$CATALOG_PATH` if set, taken as given even when relative,
+else `platform/data/catalog`, resolved from the package rather than the cwd, so `cd platform` and
+the repo root read the same catalog),
+`bar_interval` (a plain bar-spec string, e.g. `"5-MINUTE"` —
 no code change needed), and per-strategy threshold kwargs; returns a
 `dict[str, BacktestResult]` keyed by symbol. No persistent process, no start/stop —
 each call is a complete, self-contained run.

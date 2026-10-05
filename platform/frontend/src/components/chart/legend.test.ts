@@ -279,3 +279,62 @@ describe("legend CSS (Story 32.3)", () => {
     expect(css).toMatch(/@media \(hover: none\)\s*\{\s*\.chart-legend-actions\s*\{\s*opacity:\s*1;/);
   });
 });
+
+describe("a legend row with its own number format (Story 32.7)", () => {
+  it("prints the value through the row's format, not the plain readout", () => {
+    const { chart, els } = makeChart(1);
+    const vwap = makeItem({
+      pane: null,
+      series: null,
+      group: "avwap-1",
+      groupLabel: "AVWAP (hlc3)",
+      data: [{ time: 0 as Time, value: 14.6 }],
+      format: (value) => value.toFixed(4), // the instrument's precision
+      actionable: false,
+    });
+
+    renderLegends(chart, [vwap], null);
+
+    const [row] = rows(els[0]);
+    expect(text(row)).toEqual(["AVWAP (hlc3)", "14.6000"]);
+    expect(row.querySelector(".chart-legend-actions")).toBeNull();
+  });
+
+  it("falls back to the dash while the row has no value", () => {
+    const { chart, els } = makeChart(1);
+    const vwap = makeItem({ pane: null, series: null, data: [], format: () => "never" });
+
+    renderLegends(chart, [vwap], null);
+
+    expect(text(rows(els[0])[0])).toEqual(["G", "—"]);
+  });
+});
+
+describe("the Footprint legend row (Story 32.8)", () => {
+  it("has the gear and the x but no eye, and shows its fixed readout over a gap too", () => {
+    const { chart, els } = makeChart(1);
+    const footprint = makeItem({
+      pane: null,
+      series: null,
+      group: "footprint",
+      groupLabel: "Footprint",
+      text: "bid×ask · auto rows",
+      hideable: false,
+    });
+    const onAction = vi.fn();
+    // Slot 120 of a 60 s series is a gap.
+    const price = [{ time: 60, open: 1 }, { time: 120 }, { time: 180, open: 1 }];
+    const gaps = gapRunsBySlot(findGapRuns(price, (d) => "open" in d));
+
+    renderLegends(chart, [footprint], { time: 120 as Time, seriesData: new Map() } as unknown as MouseEventParams<Time>, gaps, onAction);
+
+    const [row] = rows(els[0]);
+    expect([...row.querySelectorAll("button")].map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Settings for Footprint",
+      "Remove Footprint",
+    ]);
+    expect(text(row).slice(0, 2)).toEqual(["Footprint", "bid×ask · auto rows"]);
+    row.querySelector<HTMLElement>('button[aria-label="Remove Footprint"]')!.click();
+    expect(onAction).toHaveBeenCalledWith("remove", "footprint");
+  });
+});

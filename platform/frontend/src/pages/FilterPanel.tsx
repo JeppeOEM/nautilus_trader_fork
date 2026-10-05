@@ -1,13 +1,12 @@
 import { useState } from "react";
 
-import { FILTER_OPERATORS, type FilterCondition, type FilterOperator } from "./filters";
+import { type DisplayPrecision, FILTER_OPERATORS, type FilterCondition, type FilterOperator } from "./filters";
 
-export interface FilterField {
-  key: string;
-  label: string;
-  /** Free-text field (e.g. venue): the value stays a string and only `=` applies. */
-  text?: boolean;
-}
+/** A free-text field (e.g. venue: the value stays a string and only `=` applies), or a numeric
+ * one carrying its cell's display precision, which its `=` conditions match at. */
+export type FilterField =
+  | { key: string; label: string; text: true }
+  | { key: string; label: string; text?: false; precision: DisplayPrecision };
 
 interface FilterPanelProps {
   fields: FilterField[];
@@ -28,13 +27,16 @@ export default function FilterPanel({ fields, conditions, onChange, onOpen }: Fi
 
   // Fall back when the chosen field disappeared (e.g. its Technicals column was removed).
   const selectedField = fields.some((f) => f.key === field) ? field : (fields[0]?.key ?? "");
-  const isText = fields.find((f) => f.key === selectedField)?.text === true;
-  const parsed = isText ? value.trim() : Number(value);
-  const canAdd = selectedField !== "" && value.trim() !== "" && (isText || Number.isFinite(parsed));
+  const fieldDef = fields.find((f) => f.key === selectedField);
+  const isText = fieldDef?.text === true;
+  const canAdd = fieldDef !== undefined && value.trim() !== "" && (isText || Number.isFinite(Number(value)));
 
   function add(): void {
-    if (!canAdd) return;
-    onChange([...conditions, { field: selectedField, op: isText ? "=" : op, value: parsed }]);
+    if (fieldDef === undefined || !canAdd) return;
+    const condition: FilterCondition = fieldDef.text
+      ? { field: fieldDef.key, op: "=", value: value.trim() }
+      : { field: fieldDef.key, op, value: Number(value), precision: fieldDef.precision };
+    onChange([...conditions, condition]);
     setValue("");
     setOpen(false);
   }

@@ -176,9 +176,8 @@ totals.show()
 # formula `MultiLevelOFI` itself uses). The dashed lines are the strategy's `±ofi_threshold`; the
 # shaded span is its `warmup_seconds` from the first two-sided row, when it evaluates nothing
 # (the whole window when the window is shorter). The row right after a gap is blank: the OFI makes
-# no new reading there (the strategy still evaluates its pre-gap value on it -- a known limit of
-# the strategy, not reproduced here). A z-score that moves while the price is frozen does not
-# prove a live feed (OBS-02).
+# no new reading there, and the strategy takes no OFI-driven decision on it either. A z-score
+# that moves while the price is frozen does not prove a live feed (OBS-02).
 
 # %%
 imbalance = make_subplots(rows=len(titles), cols=1, subplot_titles=titles)

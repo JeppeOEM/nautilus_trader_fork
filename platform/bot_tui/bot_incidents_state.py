@@ -40,6 +40,8 @@ _POLL_INTERVAL_SECONDS: float = 15.0
 
 _TRACKED_BOT_ID: str | None = None
 _LATEST_INCIDENTS: dict[str, list[dict]] = {}
+# bot_id -> this TUI's `time.monotonic()` at receipt (DW-60), the same clock every other
+# *_state.py stamps with; absent until first fetched.
 _LATEST_RECEIVED_AT: dict[str, float] = {}
 
 
@@ -72,7 +74,7 @@ def _handle_incidents_payload(bot_id: str, payload: list) -> None:
         logger.warning("bots:incidents payload not a list, ignoring: %r", payload)
         return
     _LATEST_INCIDENTS[bot_id] = payload
-    _LATEST_RECEIVED_AT[bot_id] = time.time()
+    _LATEST_RECEIVED_AT[bot_id] = time.monotonic()
 
 
 def get_incidents(bot_id: str) -> list[dict] | None:

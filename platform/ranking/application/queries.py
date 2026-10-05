@@ -18,11 +18,17 @@ calls exactly these (`platform/tests/test_boundaries.py`'s `VIEWS_QUERY_SERVICES
 metrics themselves (pct-change, volatility) are read from here or `rankings:live`, never recomputed.
 """
 
+from ranking.infrastructure.metrics_store import RETAIN_DAYS
 from ranking.infrastructure.metrics_store import read_history
 from ranking.infrastructure.metrics_store import read_nearest
 
 
-def history(instrument_id: str, db_path: str, days: int = 31) -> list[dict]:
+# The widest `days` window `history` can answer truthfully: metrics.db prunes older rows on every
+# write, so a caller asking further back would get a silently shortened answer.
+HISTORY_MAX_DAYS = RETAIN_DAYS
+
+
+def history(instrument_id: str, db_path: str, days: int = HISTORY_MAX_DAYS) -> list[dict]:
     """Return one instrument's `metrics.db` rows over the last `days` days, ordered by ts."""
     return read_history(db_path, instrument_id, days)
 
