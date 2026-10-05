@@ -1,0 +1,254 @@
+{
+  "DW-157": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Trendline placed by press-drag-release like the other range tools, keeping two-click as fallback",
+    "key": "a",
+    "label": "Build click-drag placement via rangeDrag",
+    "resolution": ""
+  },
+  "DW-181": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Make CatalogFileSpan callers in kernel.catalog_files and rebuild_day skip+ledger foreign names.",
+    "key": "skip_ledger",
+    "label": "All readers skip and ledger it (like reconcile_day._overlaps_day)",
+    "resolution": ""
+  },
+  "DW-183": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Skip with error_ledger record.",
+    "key": "skip_ledger",
+    "label": "Skip and ledger the vanished file",
+    "resolution": ""
+  },
+  "DW-193": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Context-manage the store in the three composition roots.",
+    "key": "ctx",
+    "label": "Make CandleStore an AbstractContextManager used by each __main__ root",
+    "resolution": ""
+  },
+  "DW-195": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Add index in _SCHEMA with migration for existing stores.",
+    "key": "index",
+    "label": "Add a secondary index (bar_seconds, t) (schema change; nothing frozen until prod)",
+    "resolution": ""
+  },
+  "DW-198": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Drop the entry with an error_ledger record (alert is lost).",
+    "key": "skip_ledger",
+    "label": "Skip the entry and ledger it",
+    "resolution": ""
+  },
+  "DW-204": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Replace the flagged rows in-file through the maintenance rewriter.",
+    "key": "rewrite",
+    "label": "Rewrite via CatalogFiles.rewrite (verified temp-then-rename) instead of delete+write",
+    "resolution": ""
+  },
+  "DW-206": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Use archive Coverage.start to refuse repairing covered rows.",
+    "key": "coverage",
+    "label": "Refuse rows at or after the instrument's trade-archive coverage start (pre-archive rows only)",
+    "resolution": ""
+  },
+  "DW-208": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Gate rule (c) definition deletion on trade days.",
+    "key": "keep_defs",
+    "label": "Keep definition leaves until the coin's trade days are verified or released",
+    "resolution": ""
+  },
+  "DW-209": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Make marker appends one write, truncate back on failure.",
+    "key": "atomic",
+    "label": "Single O_APPEND os.write per line plus truncate-back on OSError",
+    "resolution": ""
+  },
+  "DW-213": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "consolidate exits 2 on refused days/leaves so the saga continues past it, ledgered as findings",
+    "key": "a",
+    "label": "Exit 2 (findings) for refused days",
+    "resolution": ""
+  },
+  "DW-215": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Age rule excludes dYdX instruments whose plan retain_hours is None",
+    "key": "a",
+    "label": "Plan wins: skip age rule for unlimited-plan instruments",
+    "resolution": ""
+  },
+  "DW-216": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Remove the `o` key and open_listener hand-off for bots",
+    "key": "b",
+    "label": "Remove the deep-link key",
+    "resolution": ""
+  },
+  "DW-219": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Stop tracking live files; ship *.default.toml and copy if missing",
+    "key": "a",
+    "label": "Untrack, gitignore, seed defaults at startup",
+    "resolution": ""
+  },
+  "DW-223": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Replace estimate scheme with per-position-close attribution Operator: record each PositionClosed live as it fires; never read closed positions back from the Cache (NETTING overwrites them, cf. DW-225 / Story 4.6).",
+    "key": "b",
+    "label": "Derive realized PnL from Nautilus position events only",
+    "resolution": ""
+  },
+  "DW-225": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "realized_pnl from fills.db total, consistent with bots:history",
+    "key": "a",
+    "label": "Source from fills.db",
+    "resolution": ""
+  },
+  "DW-244": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Run catalog read/backtest suite on pandas 3.x and document override",
+    "key": "b",
+    "label": "Prove 3.x",
+    "resolution": ""
+  },
+  "DW-247": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Retire the second path (NAUT-03)",
+    "key": "port",
+    "label": "Port callers to NodeRunner and delete snapshot_backtest",
+    "resolution": ""
+  },
+  "DW-250": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Hole-aware replay in views.indicator_picker.replay_native",
+    "key": "build",
+    "label": "Own story: reset indicators at bucket holes",
+    "resolution": ""
+  },
+  "DW-251": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Needs bid/ask/mark data in candles",
+    "key": "impl",
+    "label": "Feed the chosen price series",
+    "resolution": ""
+  },
+  "DW-252": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Treat partial bars as NaN/reset in replay_native Operator rule: if a bar is not 100% true it cannot be used for anything -- any bar not fully observed (not only below the 90% `partial` threshold) is a hole for the replay AND the scanner; the story must revisit the 90% partial threshold.",
+    "key": "build",
+    "label": "Bundle into hole-aware replay story",
+    "resolution": ""
+  },
+  "DW-259": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Trace root cause in live-paper book handling Operator: first check whether the Cache L2 skew reproduces on Hyperliquid and Bybit books (it may affect them, not only dYdX); root cause per DATA-02.",
+    "key": "investigate",
+    "label": "Open an investigation story",
+    "resolution": ""
+  },
+  "DW-261": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Distinct labels on both pages",
+    "key": "label",
+    "label": "Rename labels (Close vs Mid)",
+    "resolution": ""
+  },
+  "DW-266": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Memory canary ledger",
+    "key": "ledger",
+    "label": "Read cgroup memory each flush and ledger above threshold",
+    "resolution": ""
+  },
+  "DW-268": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Per-entry handling client-side",
+    "key": "client",
+    "label": "Client drops/repairs invalid entries before request",
+    "resolution": ""
+  },
+  "DW-282": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Persist and restore both Note: the session count is already persisted on troll by DW-153 (`sessions`); what remains is the Periodic-vs-Session preset.",
+    "key": "add",
+    "label": "Extend layout schema with preset and session_count",
+    "resolution": ""
+  },
+  "DW-78": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Refuse to start (or warn loudly) when a live bot_id is already heartbeating from a different mode/config",
+    "key": "build",
+    "label": "Detect collision at startup via Redis bots:status presence from another config/mode",
+    "resolution": ""
+  },
+  "DW-93": {
+    "answered_at": "2026-10-05",
+    "bundle_name": "",
+    "effect": "build",
+    "intent": "Remove dashboard_bot_url and the o binding until a web bot view exists",
+    "key": "remove",
+    "label": "Remove the `o` key from Bot-detail",
+    "resolution": ""
+  }
+}

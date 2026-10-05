@@ -1478,3 +1478,17 @@ PY
 - [ ] Record the result here with the date: lines checked, and each repaired line's original text
       and file (a repaired line is a backward wall-clock step on that collector's host, the same
       evidence an `archive_gaps.inverted_span` ledger entry carries today).
+
+### DW-154 live chart walkthrough (§A8.2) for Epics 18 and 32 (operator decision 2026-10-05; run after the Epic 33 chart stories)
+
+Every chart story so far is verified only in jsdom against a mocked lightweight-charts. Run this once
+Epic 33's chart stories (33.5, 33.9, 33.10, 33.12) are deployed, so one pass covers them too.
+
+- [ ] Open the deployed web app's chart page in a real browser and walk the §A8.2 operation checklist
+      (`_bmad-output/planning-artifacts/spec-multi-exchange-screener-chart.md`, "A8.2 Operation"):
+      pan/zoom, fit/latest, the pane-resize hit zone, every drawing tool's mouse mechanics (hline,
+      trendline, Fibonacci, long/short, measure, Anchored VP, Anchored VWAP), replay, and every volume
+      profile's real drawing (VRVP right-axis anchoring, the time-anchored session/FRVP/Auto Anchored/
+      TPO widths, FRVP edge grab, SVP HD's zoom response), plus the footprint toggle.
+- [ ] Record here, with the date, each behaviour that differs from §A8.2; each one becomes a
+      deferred-work entry.
