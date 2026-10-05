@@ -21,14 +21,18 @@ resolution: already resolved: platform/views/rankings_bus.py:44,68,100 QUEUE_MAX
 origin: migrated from legacy ledger ("Deferred from: code review of 15-2-live-coin-rankings-page (2026-09-14)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-15-2-live-coin-rankings-page.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-15-2-live-coin-rankings-page.md` summary: `RankingsBus.handle_message`'s `logger.warning` on every malformed `rankings:live` payload has no rate-limiting -- a misbehaving/partially-deployed publisher emitting malformed messages continuously would spam the log at full message-rate. evidence: Confirmed by reading the unconditional `logger.warning(..., %r, message)` call on every rejected payload with no counter/throttle. No real publisher misbehavior observed in production yet; flagged pre-emptively per this repo's TEST-04 "warnings are not noise" convention.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-live-channel-hardening
+resolution-undo: 9218902ccb75097d93a8b92f08359dcf9efaeb5e4be78a0192c010aee5086dda 2026-10-05 7374617475733a206f70656e
 
 ### DW-4: `useLiveChannel`'s reconnect backoff (`RECONNECT_BASE_MS * attempt`, capped at 10s) has no jitter, so every open client losing its connection at the same …
 
 origin: migrated from legacy ledger ("Deferred from: code review of 15-2-live-coin-rankings-page (2026-09-14)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-15-2-live-coin-rankings-page.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-15-2-live-coin-rankings-page.md` summary: `useLiveChannel`'s reconnect backoff (`RECONNECT_BASE_MS * attempt`, capped at 10s) has no jitter, so every open client losing its connection at the same moment (e.g. a `data_api` restart) reconnects on the same synchronized schedule. evidence: Confirmed by reading `useLiveChannel.ts`'s fixed linear-backoff formula. Low real-world impact for a single-operator internal dashboard (at most a handful of browser tabs), not fixed as part of this story.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-live-channel-hardening
+resolution-undo: 9218902ccb75097d93a8b92f08359dcf9efaeb5e4be78a0192c010aee5086dda 2026-10-05 7374617475733a206f70656e
 
 ### DW-5: No explicit graceful-drain path for open `/ws/live` connections when `data_api` shuts down -- only the background `RankingsBus.run()` task is cancelled in …
 
@@ -1716,7 +1720,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: bot_tui/collector_state.py
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1b-archive-service-nightly-maintenance-scheduled-no-host-cron.md` summary: Four pub/sub subscribers use a bare `pubsub.listen()` with no liveness check, so a half-open Redis connection leaves them frozen until their process restarts. They are `views.rankings_bus.RankingsBus.run`, `bot_tui/collector_state.py`, `bot_tui/bots_state.py` and `bot_tui/bot_history_state.py`. evidence: Story 25.1b's review found this pattern in the new archive:status readers. They were fixed with a heartbeat-silence resubscribe (`views/archive_status_bus.py` `_receive`, `bot_tui/archive_state.py` `_receive`). The pre-existing subscribers keep the bare `async for message in pubsub.listen()` loop, which only reconnects on a raised error, and a silently dropped TCP connection raises none.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-live-channel-hardening
+resolution-undo: 9218902ccb75097d93a8b92f08359dcf9efaeb5e4be78a0192c010aee5086dda 2026-10-05 7374617475733a206f70656e
 
 ### DW-235: A reconnect backfill that admits more unseen trades than the `seen_trade_ids` window (2000 by default; dYdX can page up to 20 x 1000 rows) evicts …
 
@@ -2059,3 +2065,7 @@ origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version le
 location: _bmad-output/implementation-artifacts/spec-32-6-chart-layout-restored-on-return-and-default-setup-for-a-new-coin.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-32-6-chart-layout-restored-on-return-and-default-setup-for-a-new-coin.md` summary: The session volume profile's session count and the Periodic-vs-Session preset are not in the layout's field list, so a Periodic profile on "daily" comes back as the Session Volume Profile and the count resets to 5. evidence: `pages/ChartPage.tsx` `initialSessionConfig` derives the preset from `session`/`hd` and sets `sessionCount: DEFAULT_SESSION_COUNT`; the spec's enumerated `volume_profile` keys have no field for either.
 status: open
+
+- source_spec: `_bmad-output/implementation-artifacts/bmad-dev-auto-result-live-channel-hardening.md`
+  summary: The heartbeat-silence `_receive` loop is now copied in four modules (`views/archive_status_bus.py`, `views/rankings_bus.py`, `bot_tui/archive_state.py`, `bot_tui/collector_state.py`) and two more subscribers (`bot_tui/bots_state.py`, `bot_tui/bot_history_state.py`) still need it, so it should become one shared helper taking an ingest callback.
+  evidence: The four `_receive` bodies are line-for-line the same poll/`heard`/`ConnectionError` loop with differently named constants (`STALE_AFTER_SECONDS`, `SILENCE_RESUBSCRIBE_SECONDS`, `_SILENCE_RESUBSCRIBE_SECONDS`); a shared home has to respect `tests/test_boundaries.py`'s context edges (views and bot_tui may not import each other).

@@ -92,6 +92,16 @@ UNKNOWN_VENUE = "UNKNOWN"
 # considered stale if nothing has updated it for several multiples of the slow cadence.
 _STATUS_STALE_SECONDS: float = 3600.0
 
+# Silence after which the listener resubscribes: the same window, which already outlasts the
+# slowest (1800 s) republish cadence, so a quiet-but-healthy publisher is never cut off. Without
+# it a half-open connection (which raises nothing) would leave `listen()` frozen until restart.
+# Known limit: a dead connection is noticed only after this hour, when every row has gone stale
+# anyway, and a `liquidity_check_seconds` above it would make the listener resubscribe every hour
+# (the same coupling `_STATUS_STALE_SECONDS` already has). The upgrade path is a dedicated
+# `collector:status` heartbeat at a short cadence, which would let this window shrink to minutes.
+_SILENCE_RESUBSCRIBE_SECONDS: float = _STATUS_STALE_SECONDS
+_POLL_SECONDS: float = 5.0
+
 
 def _handle_plan_message(message: dict) -> None:
     ids = message["unpinned_ids"]
@@ -325,6 +335,30 @@ async def publish_control(
     return True
 
 
+def _ingest(data: str) -> None:
+    try:
+        _handle_status_message(json.loads(data))
+    except Exception as exc:
+        logger.warning("collector:status message parse/ingest error: %s", exc)
+
+
+async def _receive(pubsub: aioredis.client.PubSub) -> None:
+    """
+    Ingest messages until `_SILENCE_RESUBSCRIBE_SECONDS` pass without one, then raise so the
+    listener resubscribes (`listen()` would block forever on a half-open connection).
+    """
+    heard = time.monotonic()
+    while True:
+        message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=_POLL_SECONDS)
+        if message is not None and message["type"] == "message":
+            heard = time.monotonic()
+            _ingest(message["data"])
+        elif time.monotonic() - heard > _SILENCE_RESUBSCRIBE_SECONDS:
+            raise ConnectionError(
+                f"no collector:status message for {_SILENCE_RESUBSCRIBE_SECONDS:.0f}s"
+            )
+
+
 async def _redis_listener(redis_url: str) -> None:
     logger.info("bot_tui collector:status listener starting, url=%s", redis_url)
     while True:
@@ -334,14 +368,7 @@ async def _redis_listener(redis_url: str) -> None:
                 pubsub = client.pubsub()
                 await pubsub.subscribe("collector:status")
                 logger.info("bot_tui collector:status listener subscribed")
-                async for message in pubsub.listen():
-                    if message["type"] != "message":
-                        continue
-                    try:
-                        payload = json.loads(message["data"])
-                        _handle_status_message(payload)
-                    except Exception as exc:
-                        logger.warning("collector:status message parse/ingest error: %s", exc)
+                await _receive(pubsub)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

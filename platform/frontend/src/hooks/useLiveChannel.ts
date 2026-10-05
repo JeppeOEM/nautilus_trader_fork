@@ -7,6 +7,12 @@ import { useEffect, useRef, useState } from "react";
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 10_000;
 
+/** Linear backoff capped at `RECONNECT_MAX_MS`, scaled to 50-100% by `random` (in [0, 1)). */
+export function reconnectDelayMs(attempt: number, random: number): number {
+  const base = Math.min(RECONNECT_BASE_MS * attempt, RECONNECT_MAX_MS);
+  return Math.round(base * (0.5 + 0.5 * random));
+}
+
 export interface LiveChannelState<T> {
   /** Most recently received, successfully-parsed message. `null` before the first one. */
   latest: T | null;
@@ -71,7 +77,7 @@ export function useLiveChannel<T>(): LiveChannelState<T> {
         if (cancelled) return;
         const attempt = attemptRef.current + 1;
         attemptRef.current = attempt;
-        const delay = Math.min(RECONNECT_BASE_MS * attempt, RECONNECT_MAX_MS);
+        const delay = reconnectDelayMs(attempt, Math.random());
         reconnectTimer = setTimeout(connect, delay);
       };
 
