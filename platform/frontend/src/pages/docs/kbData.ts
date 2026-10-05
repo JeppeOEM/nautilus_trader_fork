@@ -154,7 +154,7 @@ docker exec dydx-redis redis-cli PUBLISH bots:control '{"bot_id":"bot-01","actio
   },
   {
     id: "chart-profiles", group: "chart", name: "Volume Profiles: the Nine Tools",
-    tagline: "Nine TradingView-style profile tools, all computed by one engine from the candles on the chart: what each anchors to and what it counts.",
+    tagline: "Nine TradingView-style profile tools from the candles on the chart (eight profiles on one engine, plus the Anchored VWAP line): what each anchors to and what it counts.",
     html: `<div class="sec"><h2>One calculation</h2><p>Every tool below is the same calculation, <code>buildVolumeProfile</code> in <code>lib/volumeProfile.ts</code>, drawn by the same <code>VolumeProfilePrimitive</code>; only the window of candles and the trigger differ. The price range of the window is cut into rows; each candle gives its weight to every row its low&ndash;high touches; the row with the most weight is the <b>POC</b> and the <b>value area</b> (70&nbsp;% by default) grows outward from it. Up weight (close &ge; open) and down weight are told apart. Two weights exist: <b>volume</b> (the candle's volume, spread evenly over the rows it touches) and <b>time</b> (the candle counts once in every row it touches, whatever its volume, which is what the TPO needs). All of them read candles, so they draw in Candles mode only.</p></div>
 <div class="sec"><h2>The nine tools</h2><table><tr><th>Tool</th><th>Where</th><th>Anchors to</th><th>Counts</th></tr>
 <tr><td><b>FRVP</b> Fixed range</td><td>left rail drag</td><td>the two times you drag between (edges are draggable)</td><td>volume, computed once on release</td></tr>

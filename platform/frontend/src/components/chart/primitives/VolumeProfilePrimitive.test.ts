@@ -113,6 +113,22 @@ describe("VolumeProfilePrimitive time anchors (Story 18.6)", () => {
 
     expect(primitive.resolvedAnchor()).toBeNull();
   });
+
+  it("with throughEndBar, includes the end bar's slot, so a one-bar range is one bar wide (Story 32.7)", () => {
+    const oneBar = new VolumeProfilePrimitive({ ...timeSpec, width: { toTime: 100 as Time }, throughEndBar: true });
+    oneBar.attached({
+      chart: { timeScale: () => ({ timeToCoordinate: (t: number) => t / 2, options: () => ({ barSpacing: 8 }) }) },
+      series: { priceToCoordinate: (p: number) => p * 10 },
+      requestUpdate: vi.fn(),
+    } as never);
+    oneBar.updateAllViews();
+    expect(oneBar.resolvedAnchor()).toEqual({ xAnchor: 50, width: 8 });
+
+    const plain = new VolumeProfilePrimitive({ ...timeSpec, width: { toTime: 100 as Time } });
+    attach(plain, () => 0);
+    plain.updateAllViews();
+    expect(plain.resolvedAnchor()).toEqual({ xAnchor: 50, width: 0 }); // the other profiles: unchanged
+  });
 });
 
 describe("VolumeProfilePrimitive session options (Story 18.8)", () => {

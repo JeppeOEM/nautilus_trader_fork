@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   anchoredVwap,
+  breakAtGaps,
   sourcePrice,
   volumeWeightedStdDev,
   weightedStdDevFromSums,
@@ -94,5 +95,23 @@ describe("anchoredVwap (Story 32.7)", () => {
     expect(sourcePrice(b, "hlc3")).toBe(9); // (12 + 6 + 9) / 3
     expect(sourcePrice(b, "ohlc4")).toBe(7.5); // (3 + 12 + 6 + 9) / 4
     expect(anchoredVwap([b], 1, "ohlc4")[0].vwap).toBe(7.5);
+  });
+});
+
+describe("breakAtGaps (Story 32.7)", () => {
+  const p = (time: number) => anchoredVwap([bar(time, 12, 8, 10, 1)], time, "hlc3")[0];
+
+  it("marks the first point after a gap slot, and only that one", () => {
+    const points = [p(100), p(200), p(500), p(600)];
+    const chartBars = [{ time: 100, open: 1 }, { time: 200, open: 1 }, { time: 300 }, { time: 400 }, { time: 500, open: 1 }, { time: 600, open: 1 }];
+
+    expect(breakAtGaps(points, chartBars).map((q) => q.breakBefore === true)).toEqual([false, false, true, false]);
+  });
+
+  it("does not break across a real bar that has no point (zero volume), nor before the first point", () => {
+    const points = [p(200), p(400)];
+    const chartBars = [{ time: 100 }, { time: 200, open: 1 }, { time: 300, open: 1 }, { time: 400, open: 1 }];
+
+    expect(breakAtGaps(points, chartBars).map((q) => q.breakBefore === true)).toEqual([false, false]);
   });
 });

@@ -33,6 +33,10 @@ export interface VolumeProfileRenderSpec {
   showValueArea: boolean;
   /** Scales a `{toTime}` width (e.g. 0.7 = the longest bar spans 70% of the range). */
   widthFraction?: number;
+  /** Story 32.7 (Anchored VP, Auto Anchored): a `{toTime}` range includes the end bar's own slot
+   * (one bar spacing past its x), so a range of one bar (an anchor on the newest bar, a period
+   * whose first bar just closed) is drawn one bar wide instead of zero px wide. */
+  throughEndBar?: boolean;
   /** Story 18.8 (SVP HD): at draw time, drop the inter-row gap once rows get too short to
    * afford one, so a dense profile stays legible while zooming out. A redraw-only
    * adaptation -- the profile is never recomputed for it. */
@@ -234,8 +238,9 @@ export class VolumeProfilePrimitive implements ISeriesPrimitive<Time> {
     const anchorX = typeof xAnchor === "object" ? timeScale.timeToCoordinate(xAnchor.time) : xAnchor;
     const toX = typeof width === "object" ? timeScale.timeToCoordinate(width.toTime) : null;
     // An unresolvable time (no coordinate) means nothing drawable, never a guessed position.
+    const endSlot = this.spec.throughEndBar ? timeScale.options().barSpacing : 0;
     const rangeWidth =
-      toX === null || anchorX === "right" || anchorX === null ? null : Math.abs(toX - anchorX);
+      toX === null || anchorX === "right" || anchorX === null ? null : Math.abs(toX - anchorX) + endSlot;
     let widthPx: number | null;
     if (typeof width === "object") {
       widthPx = rangeWidth === null ? null : rangeWidth * (this.spec.widthFraction ?? 1);

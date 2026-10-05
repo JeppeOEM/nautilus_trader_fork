@@ -12,6 +12,11 @@ import type { TimedBar } from "./sessionProfile";
  * bar), which loses digits when the standard deviation is tiny against the price (below about
  * 1e-7 of it); the result is clamped at zero so it can never be NaN. Upgrade path: Welford's
  * weighted update, if bands on a nearly flat instrument ever need the digits.
+ *
+ * Known limit: the source is each chart bar's own price (hlc3/close/ohlc4 of the bar at the chart's
+ * timeframe), so the value depends on the bar size: a 1h bar's hlc3 is not the VWAP of its sixty 1m
+ * bars, and switching timeframe moves the line and its legend value slightly. Upgrade path: weight
+ * by per-trade prices once Story 32.8's per-trade data is on the chart.
  */
 
 export const VWAP_SOURCES = ["hlc3", "close", "ohlc4"] as const;
@@ -64,6 +69,9 @@ export interface VwapPoint {
   lower1: number;
   upper2: number;
   lower2: number;
+  /** A gap slot (Story 32.1) lies between the previous point and this one: the line breaks here
+   * instead of being drawn across the hole (`breakAtGaps`). */
+  breakBefore?: boolean;
 }
 
 /**
@@ -96,4 +104,28 @@ export function anchoredVwap(bars: readonly TimedBar[], anchorTime: number, sour
     });
   }
   return points;
+}
+
+/**
+ * `points` with `breakBefore` set on each point that follows a gap slot (a whitespace datum, no
+ * `open`) in `chartBars` since the previous point, so the drawn line breaks over a collection hole
+ * like an indicator line does, rather than joining its two sides. `chartBars` ascending.
+ */
+export function breakAtGaps(points: readonly VwapPoint[], chartBars: readonly { time: unknown }[]): VwapPoint[] {
+  const out: VwapPoint[] = [];
+  let i = 0;
+  let gapSeen = false;
+  for (const bar of chartBars) {
+    if (i >= points.length) break;
+    const t = bar.time as number;
+    if (t === points[i].time) {
+      out.push(gapSeen && i > 0 ? { ...points[i], breakBefore: true } : points[i]);
+      gapSeen = false;
+      i++;
+    } else if (!("open" in bar) && i > 0) {
+      gapSeen = true;
+    }
+  }
+  for (; i < points.length; i++) out.push(points[i]);
+  return out;
 }

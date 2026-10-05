@@ -25,7 +25,7 @@ import {
   type VolumeProfile,
 } from "../lib/volumeProfile";
 import { type AutoAnchorPreset, DEFAULT_AUTO_ANCHOR, anchorBars, anchorTime } from "../lib/autoAnchor";
-import { anchoredVwap } from "../lib/anchoredVwap";
+import { anchoredVwap, breakAtGaps } from "../lib/anchoredVwap";
 import {
   DEFAULT_IB_MINUTES,
   type InitialBalance,
@@ -478,6 +478,10 @@ function ChartInner({
   // placed on it draws at once, and the line and profile include it, like the candle beside them.
   const anchoredLive = replay.mode === "active" ? null : liveBar;
   const anchored = useMemo(() => {
+    // A coin with no anchored drawing (nearly every one) skips the per-tick copy of its bars.
+    if (mode !== "candles" || !allDrawings.some((d) => d.kind === "anchored_vp" || d.kind === "anchored_vwap")) {
+      return { specs: NONE, profiles: NONE, legend: NONE };
+    }
     const specs: DrawingSpec[] = [];
     const profiles: VolumeProfileSpec[] = [];
     const legend: LegendExtra[] = [];
@@ -488,10 +492,8 @@ function ChartInner({
     const times: number[] = [];
     for (const c of chartBars) if ("open" in c) times.push(c.time as number);
     const lastTime = times.at(-1);
-    const forLines = mode !== "candles";
     for (const d of allDrawings) {
       if (d.kind !== "anchored_vp" && d.kind !== "anchored_vwap") continue;
-      if (forLines) continue;
       // An anchor after the newest displayed bar (a replay cut before it) is omitted, not snapped back.
       if (lastTime !== undefined && d.time > lastTime) continue;
       const at = snapIndex(times, d.time);
@@ -511,6 +513,7 @@ function ChartInner({
             profile,
             xAnchor: { time: anchorBar as Time },
             width: { toTime: lastTime as Time },
+            throughEndBar: true,
             upColor: d.up_color,
             downColor: d.down_color,
             showPoc: true,
@@ -519,8 +522,9 @@ function ChartInner({
         }
         continue;
       }
-      const points = anchorBar === null ? [] : anchoredVwap(bars, anchorBar, d.source);
-      specs.push({ ...d, points });
+      const points = anchorBar === null ? [] : breakAtGaps(anchoredVwap(bars, anchorBar, d.source), chartBars);
+      // The snapped bar, like the Anchored VP: the anchor handle sits on the bar the line starts from.
+      specs.push({ ...d, time: anchorBar ?? d.time, points });
       const latest = points.at(-1);
       const color = d.color ?? chartVar("--chart-drawing");
       legend.push({
@@ -989,10 +993,12 @@ function ChartInner({
         settings,
       );
     }
-    const span = drawableSpan(replay.displayed, autoAnchor.time, end);
+    // The span starts at the bar holding the anchor: a calendar anchor inside a coarse bar (the 1st of
+    // the month inside a 1W bar) starts on that bar, not on the first bar opening after it.
+    const span = drawableSpan(replay.displayed, autoAnchor.time - barSeconds + 1, end);
     if (!span) return { specs: [], markerTime: null };
-    // The marker only where the chart holds the anchor bar itself (not a later bar standing in).
-    const markerTime = span.startTime - autoAnchor.time < barSeconds ? (span.startTime as Time) : null;
+    // The marker only where the chart holds the anchor's bar itself (not a later bar standing in).
+    const markerTime = span.startTime <= autoAnchor.time ? (span.startTime as Time) : null;
     if (profile.rows.length === 0) return { specs: [], markerTime };
     return {
       markerTime,
@@ -1002,6 +1008,7 @@ function ChartInner({
           profile,
           xAnchor: { time: span.startTime as Time },
           width: { toTime: span.endTime as Time },
+          throughEndBar: true,
           widthFraction: SESSION_WIDTH_FRACTION,
           upColor: settings.upColor,
           downColor: settings.downColor,
@@ -1218,9 +1225,9 @@ function ChartInner({
   const requestSettings = useCallback((id: string): void => {
     // No dialog without the instrument's precision (its fields are labelled and rounded by it):
     // the request is dropped, not parked to pop open when the precision arrives. The Anchored VP's
-    // dialog prints no price, so it opens without one.
+    // and VWAP's dialogs print no price, so they open without one.
     const kind = allDrawingsRef.current.find((d) => d.id === id)?.kind;
-    if (precisionRef.current === null && kind !== "anchored_vp") return;
+    if (precisionRef.current === null && kind !== "anchored_vp" && kind !== "anchored_vwap") return;
     setSettingsId(id);
   }, []);
   const applyDrawing = useCallback(
@@ -1462,7 +1469,7 @@ function ChartInner({
           {drawingsSaveError}
         </p>
       )}
-      {settingsDrawing && settingsDrawing.kind !== "hline" && settingsDrawing.kind !== "trendline" && (precision || settingsDrawing.kind === "anchored_vp") && (
+      {settingsDrawing && settingsDrawing.kind !== "hline" && settingsDrawing.kind !== "trendline" && (precision || settingsDrawing.kind === "anchored_vp" || settingsDrawing.kind === "anchored_vwap") && (
         <DrawingSettingsDialog
           key={settingsDrawing.id}
           drawing={settingsDrawing}

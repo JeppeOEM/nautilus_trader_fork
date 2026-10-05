@@ -29,6 +29,7 @@ interface Screen {
   lower1: number;
   upper2: number;
   lower2: number;
+  breakBefore: boolean;
 }
 
 const VWAP_LINE_PX = 2;
@@ -42,14 +43,17 @@ type Line = "vwap" | "upper1" | "lower1" | "upper2" | "lower2";
  * computed them, with no point for a bar without volume) in the drawing's colour, and with `bands`
  * the ±1σ lines solid and the ±2σ lines dashed in `band_color`. Screen positions are recomputed from
  * time and price on every `updateAllViews`, like every drawing. A point with no coordinate (off the
- * scrolled range) breaks the path rather than being guessed. The anchor handle (`"anchor"`) sits on
- * the first point of the line.
+ * scrolled range) breaks the path rather than being guessed, and so does a point marked
+ * `breakBefore` (a gap slot before it). The anchor handle (`"anchor"`) sits on
+ * the anchor bar (`drawing.time`, the bar the drag moves) at the line's first value, so it stays on
+ * that bar when the anchor bar or the bars after it have no volume (the line then starts later).
  */
 export class AnchoredVwapPrimitive implements DrawingPrimitive {
   private chart: IChartApi | null = null;
   private series: ISeriesApi<"Candlestick" | "Line"> | null = null;
   private requestUpdate: (() => void) | null = null;
   private screenPoints: (Screen | null)[] = [];
+  private anchorHandle: { x: number; y: number } | null = null;
   private handlesVisible = false;
   private drawing: AnchoredVwapDrawing;
   private points: readonly VwapPoint[];
@@ -73,6 +77,7 @@ export class AnchoredVwapPrimitive implements DrawingPrimitive {
     this.series = null;
     this.requestUpdate = null;
     this.screenPoints = [];
+    this.anchorHandle = null;
   }
 
   update(drawing: AnchoredVwapDrawing, points: readonly VwapPoint[]): void {
@@ -101,29 +106,28 @@ export class AnchoredVwapPrimitive implements DrawingPrimitive {
       const ys = [p.vwap, p.upper1, p.lower1, p.upper2, p.lower2].map((v) => series.priceToCoordinate(v));
       if (x === null || ys.some((y) => y === null)) return null;
       const [vwap, upper1, lower1, upper2, lower2] = ys as number[];
-      return { x, vwap, upper1, lower1, upper2, lower2 };
+      return { x, vwap, upper1, lower1, upper2, lower2, breakBefore: p.breakBefore === true };
     });
+    const first = this.points[0];
+    const handleX = first ? timeScale.timeToCoordinate(this.drawing.time as Time) : null;
+    const handleY = first ? series.priceToCoordinate(first.vwap) : null;
+    this.anchorHandle = handleX === null || handleY === null ? null : { x: handleX, y: handleY };
   }
 
   paneViews(): readonly IPrimitivePaneView[] {
     return [this.view];
   }
 
-  private firstPoint(): Screen | null {
-    return this.screenPoints.find((p) => p !== null) ?? null;
-  }
-
   /** The anchor handle within the grab radius, else the VWAP line within its tolerance. */
   hit(x: number, y: number): DrawingHit | null {
-    const first = this.firstPoint();
-    if (!first) return null;
-    const handle = nearestHandle([{ id: "anchor", x: first.x, y: first.vwap }], x, y);
+    const anchor = this.anchorHandle;
+    const handle = anchor ? nearestHandle([{ id: "anchor", x: anchor.x, y: anchor.y }], x, y) : null;
     if (handle) return handle;
     let best: number | null = null;
     for (let i = 1; i < this.screenPoints.length; i++) {
       const a = this.screenPoints[i - 1];
       const b = this.screenPoints[i];
-      if (!a || !b) continue;
+      if (!a || !b || b.breakBefore) continue;
       const d = distanceToSegment(x, y, a.x, a.vwap, b.x, b.vwap);
       if (best === null || d < best) best = d;
     }
@@ -140,7 +144,7 @@ export class AnchoredVwapPrimitive implements DrawingPrimitive {
     if (points.every((p) => p === null)) return null;
     const { bands, color, band_color: bandColor } = this.drawing;
     const lineColor = color ?? chartVar("--chart-drawing");
-    const first = this.firstPoint();
+    const anchor = this.anchorHandle;
     const handles = this.handlesVisible;
     const bg = chartVar("--chart-bg");
     return {
@@ -159,6 +163,7 @@ export class AnchoredVwapPrimitive implements DrawingPrimitive {
                 open = false;
                 continue;
               }
+              if (p.breakBefore) open = false;
               if (open) context.lineTo(p.x * hr, p[line] * vr);
               else context.moveTo(p.x * hr, p[line] * vr);
               open = true;
@@ -173,13 +178,13 @@ export class AnchoredVwapPrimitive implements DrawingPrimitive {
             stroke("lower1", bandColor, 1, [], BAND_ALPHA);
           }
           stroke("vwap", lineColor, VWAP_LINE_PX, [], 1);
-          if (!handles || !first) return;
+          if (!handles || !anchor) return;
           const half = (HANDLE_SIZE_PX / 2) * hr;
           context.fillStyle = bg;
           context.strokeStyle = lineColor;
           context.lineWidth = hr;
-          context.fillRect(first.x * hr - half, first.vwap * vr - half, half * 2, half * 2);
-          context.strokeRect(first.x * hr - half, first.vwap * vr - half, half * 2, half * 2);
+          context.fillRect(anchor.x * hr - half, anchor.y * vr - half, half * 2, half * 2);
+          context.strokeRect(anchor.x * hr - half, anchor.y * vr - half, half * 2, half * 2);
         });
       },
     };

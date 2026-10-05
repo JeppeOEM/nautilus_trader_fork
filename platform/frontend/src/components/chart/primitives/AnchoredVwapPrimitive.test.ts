@@ -56,6 +56,16 @@ describe("AnchoredVwapPrimitive (Story 32.7)", () => {
     expect(primitive.hit(150, 800)).toBeNull();
   });
 
+  it("keeps the anchor handle on the anchor bar when that bar has no volume (the line starts later)", () => {
+    const late = anchoredVwap([bar(100, 100, 0), bar(200, 110, 1), bar(300, 120, 1)], 100, "hlc3");
+    const primitive = new AnchoredVwapPrimitive(newAnchoredVwap("v", 100, "#2962ff", "#b26a00"), late);
+    attachTo(primitive);
+
+    expect(primitive.screen()[0]!.x).toBe(200); // the line's first point is the first bar with volume
+    expect(primitive.hit(101, 891)).toMatchObject({ handle: "anchor" }); // anchor bar x, first value y
+    expect(primitive.hit(201, 891)).not.toMatchObject({ handle: "anchor" });
+  });
+
   it("is not drawable, and not hittable, when no bar has volume yet", () => {
     const primitive = new AnchoredVwapPrimitive(newAnchoredVwap("v", 100, "#2962ff", "#b26a00"), []);
     attachTo(primitive);
@@ -75,5 +85,15 @@ describe("AnchoredVwapPrimitive (Story 32.7)", () => {
 
     expect(primitive.screen().map((p) => p === null)).toEqual([false, true, false]);
     expect(primitive.hit(250, 880)).toBeNull(); // no segment crosses the hole
+  });
+
+  it("breaks the path, and its hit line, at a point marked breakBefore (a gap slot before it)", () => {
+    const gapped = points.map((q) => (q.time === 400 ? { ...q, breakBefore: true } : q));
+    const primitive = new AnchoredVwapPrimitive(newAnchoredVwap("v", 100, "#2962ff", "#b26a00"), gapped);
+    attachTo(primitive);
+
+    expect(primitive.screen().map((q) => q?.breakBefore)).toEqual([false, false, true]);
+    expect(primitive.hit(150, 897)).toMatchObject({ handle: null }); // the first segment still hits
+    expect(primitive.hit(300, 1000 - (points[1].vwap + points[2].vwap) / 2)).toBeNull(); // none across the gap
   });
 });

@@ -26,7 +26,11 @@ import pytest
 
 from views.preferences import BUILTIN_DEFAULT_LAYOUT
 from views.preferences import LAYOUT_BAR_SECONDS
+from views.preferences import MAX_IB_MINUTES
 from views.preferences import MAX_PANE_ID_LENGTH
+from views.preferences import MAX_PROFILE_ROWS
+from views.preferences import MIN_IB_MINUTES
+from views.preferences import MIN_PROFILE_ROWS
 from views.preferences import PROFILE_ANCHORS
 from views.preferences import PROFILE_KINDS
 from views.preferences import PROFILE_SESSIONS
@@ -271,6 +275,26 @@ def test_profile_kinds_mirror_the_frontend() -> None:
     match = re.search(r"PROFILE_KINDS: readonly ProfileKind\[\] = \[([^\]]*)\]", source)
     assert match is not None
     assert tuple(re.findall(r'"(\w+)"', match.group(1))) == PROFILE_KINDS
+
+
+def _ts_int(path: str, name: str) -> int:
+    source = (Path(__file__).parents[2] / "frontend/src/lib" / path).read_text()
+    match = re.search(rf"export const {name} = (\d+);", source)
+    assert match is not None, name
+    return int(match.group(1))
+
+
+def test_profile_option_bounds_and_defaults_mirror_the_frontend() -> None:
+    assert _ts_int("tpo.ts", "MIN_IB_MINUTES") == MIN_IB_MINUTES
+    assert _ts_int("tpo.ts", "MAX_IB_MINUTES") == MAX_IB_MINUTES
+    assert (
+        _ts_int("tpo.ts", "DEFAULT_IB_MINUTES")
+        == BUILTIN_DEFAULT_LAYOUT["volume_profile"]["ib_minutes"]
+    )
+    # An Anchored VP's rows share the layout's row limits (one engine, one row limit).
+    assert _ts_int("drawings.ts", "MIN_AVP_ROWS") == MIN_PROFILE_ROWS
+    assert _ts_int("drawings.ts", "MAX_AVP_ROWS") == MAX_PROFILE_ROWS
+    assert _ts_int("volumeProfile.ts", "MAX_PROFILE_ROWS") == MAX_PROFILE_ROWS
 
 
 def test_the_new_session_type_kinds_are_accepted_and_keep_their_settings() -> None:

@@ -2587,7 +2587,7 @@ describe("ChartPage Anchored VP and Anchored VWAP drawings (Story 32.7)", () => 
     expect(spec.up_color).toBe(CHART_TOKENS["--chart-up"]);
     expect(spec.anchorPrice).toBe(15); // the profile's top
     expect(avpProfiles()).toHaveLength(1);
-    expect(avpProfiles()[0]).toMatchObject({ id: "avp-anchored_vp-1", xAnchor: { time: 200 }, width: { toTime: 400 } });
+    expect(avpProfiles()[0]).toMatchObject({ id: "avp-anchored_vp-1", xAnchor: { time: 200 }, width: { toTime: 400 }, throughEndBar: true });
     // volume of bars 200, 300, 400 = 2 + 3 + 4
     expect(avpProfiles()[0].profile.totalVolume).toBeCloseTo(9);
   });
@@ -2640,7 +2640,7 @@ describe("ChartPage Anchored VP and Anchored VWAP drawings (Story 32.7)", () => 
     expect(avpProfiles()[0].xAnchor).toEqual({ time: 200 });
   });
 
-  it("opens the Anchored VP's settings before the instrument's precision is known (its dialog prints no price)", async () => {
+  it("opens the Anchored VP's and VWAP's settings before the instrument's precision is known (their dialogs print no price)", async () => {
     drawingsApi.server = [
       { kind: "anchored_vp", id: "anchored_vp-1", time: 200, rows: 24, value_area_pct: 70, up_color: "#25a399", down_color: "#ef5350" },
       { kind: "anchored_vwap", id: "anchored_vwap-1", time: 100, source: "hlc3", bands: false, band_color: "#b26a00" },
@@ -2649,7 +2649,8 @@ describe("ChartPage Anchored VP and Anchored VWAP drawings (Story 32.7)", () => 
     await renderReady(page());
 
     act(() => lastChartProps.current!.onDrawingSettings!("anchored_vwap-1"));
-    expect(screen.queryByRole("dialog", { name: "Anchored VWAP settings" })).toBeNull();
+    const vwapDialog = screen.getByRole("dialog", { name: "Anchored VWAP settings" });
+    fireEvent.click(within(vwapDialog).getByRole("button", { name: "Cancel" }));
     act(() => lastChartProps.current!.onDrawingSettings!("anchored_vp-1"));
     expect(screen.getByRole("dialog", { name: "Anchored volume profile settings" })).toBeInTheDocument();
   });
@@ -2881,6 +2882,23 @@ describe("ChartPage Auto Anchored profile and TPO (Story 32.7)", () => {
     add("Add Auto Anchored Volume Profile");
 
     expect(mocks.sessionArgs).toMatchObject({ enabled: true, sinceSeconds: Date.UTC(2024, 0, 1) / 1000, barSeconds: 900 });
+  });
+
+  it("at 1W starts on the bar holding the month's start (not the first bar opening after it), marker there, one bar wide at least", () => {
+    const W1 = Date.UTC(2024, 0, 29) / 1000; // Monday; its week holds Thu 2024-02-01
+    const W2 = Date.UTC(2024, 1, 5) / 1000;
+    const weekly = [bar(W1 - 7 * 86_400, 10, 12), bar(W1, 11, 13), bar(W2, 12, 14)];
+    mocks.candles = weekly;
+    mocks.volume = weekly.map((b) => ({ time: b.time, value: 2 }));
+    const feb = Date.UTC(2024, 1, 1) / 1000;
+    mocks.session = { candles: [bar(feb, 11, 13), bar(W2, 12, 14)], volume: [{ time: feb, value: 2 }, { time: W2, value: 2 }], completeFrom: null };
+    layoutApi.server[IID] = layoutOf({ bar_seconds: 604_800 });
+    render(page());
+    add("Add Auto Anchored Volume Profile");
+
+    expect(mocks.sessionArgs.sinceSeconds).toBe(feb);
+    expect(autoSpec()).toMatchObject({ xAnchor: { time: W1 }, width: { toTime: W2 }, throughEndBar: true });
+    expect(lastChartProps.current!.anchorMarkerTime).toBe(W1);
   });
 
   it("highest high anchors at the chart's highest-high bar and reads the chart's own bars (no session fetch)", () => {
