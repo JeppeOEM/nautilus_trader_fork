@@ -17,6 +17,7 @@ names the offending key, the tolerant read of a stale coin timeframe and the `[d
 """
 
 import copy
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ import pytest
 from views.preferences import BUILTIN_DEFAULT_LAYOUT
 from views.preferences import LAYOUT_BAR_SECONDS
 from views.preferences import MAX_PANE_ID_LENGTH
+from views.preferences import MAX_PROFILE_SESSIONS
 from views.preferences import PROFILE_SESSIONS
 from views.preferences import ChartLayouts
 from views.preferences import IndicatorEntry
@@ -37,12 +39,51 @@ from views.preferences import validate_layout
 
 _IID = "BTC-USD-PERP.DYDX"
 _ETH = "ETH-USD-PERP.BYBIT"
+_FRONTEND = Path(__file__).parents[2] / "frontend/src"
+# DW-151/153: the profile keys a layout saved before them does not carry.
+_OPTIONAL_PROFILE_KEYS = ("sessions", "up_color", "down_color", "show_poc", "show_value_area")
+# A coin table as Story 32.6 wrote it, before the optional profile keys existed.
+_PRE_OPTIONS_FILE = f"""
+["{_IID}"]
+v = 1
+bar_seconds = 60
+mode = "candles"
+volume = true
+crosshair = true
+visible_bars = 120
+
+["{_IID}".pane_heights]
+
+["{_IID}".volume_profile]
+kind = "session"
+rows = 48
+value_area_pct = 70
+session = "weekly"
+hd = false
+"""
 
 
 def _layout(**over: Any) -> dict[str, Any]:
     layout = copy.deepcopy(BUILTIN_DEFAULT_LAYOUT)
     layout.update(over)
     return layout
+
+
+def _profile(**over: Any) -> dict[str, Any]:
+    return {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], **over}
+
+
+def _ts_value(source: str, name: str) -> str:
+    match = re.search(rf"\b{name}\b\s*[:=]\s*([^,;\n]+)", source)
+    assert match is not None, f"{name} not found"
+    return match.group(1).strip().strip('"')
+
+
+def _ts_block(path: str, declaration: str) -> str:
+    """Return the `{ ... }` literal of `declaration` in a frontend source file."""
+    source = (_FRONTEND / path).read_text()
+    start = source.index("{", source.index(declaration))
+    return source[start : source.index("}", start)]
 
 
 def test_the_builtin_default_is_valid_and_is_1m_candles() -> None:
@@ -117,6 +158,18 @@ def test_default_is_never_an_instrument_id(tmp_path: Path) -> None:
             {"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "value_area_pct": 101}},
             "value_area_pct",
         ),
+        ({"volume_profile": _profile(sessions=0)}, "volume_profile.sessions"),
+        (
+            {"volume_profile": _profile(sessions=MAX_PROFILE_SESSIONS + 1)},
+            "volume_profile.sessions",
+        ),
+        ({"volume_profile": _profile(sessions=True)}, "volume_profile.sessions"),
+        ({"volume_profile": _profile(up_color="red")}, "volume_profile.up_color"),
+        ({"volume_profile": _profile(up_color="#fff")}, "volume_profile.up_color"),
+        ({"volume_profile": _profile(down_color="#12345g")}, "volume_profile.down_color"),
+        ({"volume_profile": _profile(down_color=0x123456)}, "volume_profile.down_color"),
+        ({"volume_profile": _profile(show_poc=1)}, "volume_profile.show_poc"),
+        ({"volume_profile": _profile(show_value_area="yes")}, "volume_profile.show_value_area"),
         ({"pane_heights": {"x" * (MAX_PANE_ID_LENGTH + 1): 100}}, "pane_heights"),
         (
             {"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "kind": "fixed"}},
@@ -230,3 +283,53 @@ def test_a_file_error_carries_the_bare_reason(tmp_path: Path) -> None:
         load_chart_layouts(path)
     assert exc.value.key == f"{_IID}.volume_profile.hd"
     assert exc.value.reason == "must be a boolean"
+
+
+def test_the_optional_profile_keys_default_on_a_put_that_omits_them() -> None:
+    profile = _profile()
+    for key in _OPTIONAL_PROFILE_KEYS:
+        del profile[key]
+    layout = validate_layout(_layout(volume_profile=profile))
+    assert layout["volume_profile"] == BUILTIN_DEFAULT_LAYOUT["volume_profile"]
+
+
+def test_the_optional_profile_keys_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "l.toml"
+    profile = _profile(
+        kind="session",
+        sessions=MAX_PROFILE_SESSIONS,
+        up_color="#ABCDEF",
+        down_color="#010203",
+        show_poc=False,
+        show_value_area=False,
+    )
+    save_chart_layouts(ChartLayouts({_IID: _layout(volume_profile=profile)}), path)
+    assert load_chart_layouts(path).layouts[_IID]["volume_profile"] == profile
+
+
+def test_a_file_saved_before_the_optional_keys_loads_with_defaults_and_saves_back(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "l.toml"
+    path.write_text(_PRE_OPTIONS_FILE)
+    loaded = load_chart_layouts(path)
+    profile = loaded.layouts[_IID]["volume_profile"]
+    assert (profile["kind"], profile["rows"], profile["session"]) == ("session", 48, "weekly")
+    assert {k: profile[k] for k in _OPTIONAL_PROFILE_KEYS} == {
+        k: BUILTIN_DEFAULT_LAYOUT["volume_profile"][k] for k in _OPTIONAL_PROFILE_KEYS
+    }
+    save_chart_layouts(loaded, path)
+    assert load_chart_layouts(path) == loaded
+    assert tomllib.loads(path.read_text())[_IID]["volume_profile"]["sessions"] == 5
+
+
+def test_profile_defaults_mirror_the_frontend() -> None:
+    defaults = BUILTIN_DEFAULT_LAYOUT["volume_profile"]
+    sessions = (_FRONTEND / "lib/sessionProfile.ts").read_text()
+    settings = _ts_block("lib/volumeProfile.ts", "export const DEFAULT_VOLUME_PROFILE_SETTINGS")
+    assert int(_ts_value(sessions, "export const MAX_SESSIONS")) == MAX_PROFILE_SESSIONS
+    assert int(_ts_value(sessions, "export const DEFAULT_SESSION_COUNT")) == defaults["sessions"]
+    assert _ts_value(settings, "upColor") == defaults["up_color"]
+    assert _ts_value(settings, "downColor") == defaults["down_color"]
+    assert _ts_value(settings, "showPoc") == str(defaults["show_poc"]).lower()
+    assert _ts_value(settings, "showValueArea") == str(defaults["show_value_area"]).lower()

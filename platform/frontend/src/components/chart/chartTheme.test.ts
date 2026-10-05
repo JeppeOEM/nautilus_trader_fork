@@ -35,7 +35,9 @@ function contrast(a: string, b: string): number {
 }
 
 // Every token the chart draws as a line, bar, label or marker on the canvas. Grid, border and the
-// crosshair are deliberately faint guides, as on TradingView, and are not held to the floor.
+// crosshair are deliberately faint guides, as on TradingView, and are not held to the floor; nor is
+// `--chart-value-area`, a background fill painted at low alpha behind the profile bars (its contrast
+// on its own says nothing about what the eye sees).
 const DRAWN: (keyof typeof CHART_TOKENS)[] = [
   "--chart-text",
   "--chart-text-dim",

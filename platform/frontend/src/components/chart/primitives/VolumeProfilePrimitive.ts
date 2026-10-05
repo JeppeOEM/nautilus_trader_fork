@@ -4,6 +4,7 @@ import type {
   IPrimitivePaneView,
   ISeriesApi,
   ISeriesPrimitive,
+  Logical,
   SeriesAttachedParameter,
   Time,
 } from "lightweight-charts";
@@ -14,6 +15,15 @@ import { chartVar } from "../chartTheme";
 // Transitive fancy-canvas type, derived rather than imported (not a direct dependency).
 type CanvasRenderingTarget2D = Parameters<IPrimitivePaneRenderer["draw"]>[0];
 
+/** A time anchor: the chart bar at `time`, shifted by `offsetSeconds` (negative = earlier). The
+ * offset is converted to pixels through the chart's bar spacing (`offsetSeconds / barSeconds` bars),
+ * so an anchor can sit where no chart bar exists -- before the oldest loaded bar, or past the last
+ * bar of a session that ended mid-bar. */
+export interface TimeAnchor {
+  time: Time;
+  offsetSeconds?: number;
+}
+
 /** Everything one profile needs to be drawn -- the single input all five variants
  * (Stories 18.6-18.9) hand to the same primitive. */
 export interface VolumeProfileRenderSpec {
@@ -22,26 +32,34 @@ export interface VolumeProfileRenderSpec {
    * `"right"` to grow leftward from the pane's right edge (the price axis side); or a
    * `{time}` anchor, re-resolved to x on every redraw so a range-pinned profile (FRVP)
    * follows pan/zoom instead of being stranded at a fixed pixel. */
-  xAnchor: number | "right" | { time: Time };
+  xAnchor: number | "right" | TimeAnchor;
   /** Longest bar's length in px, or `{toTime}`: the px distance from the anchor to that
    * time (the longest bar spans the whole range). */
-  width: number | { toTime: Time };
+  width: number | { toTime: Time; offsetSeconds?: number };
+  /** The chart's bar size in seconds: required to resolve any non-zero `offsetSeconds`. */
+  barSeconds?: number;
   upColor: string;
   downColor: string;
   showPoc: boolean;
   showValueArea: boolean;
   /** Scales a `{toTime}` width (e.g. 0.7 = the longest bar spans 70% of the range). */
   widthFraction?: number;
+  /** Caps the resolved width at this fraction of the pane's width (DW-151: a fixed-px VRVP must
+   * not swallow a narrow pane). Applied at draw time, the only time the pane width is known. */
+  maxWidthFraction?: number;
   /** Story 18.8 (SVP HD): at draw time, drop the inter-row gap once rows get too short to
    * afford one, so a dense profile stays legible while zooming out. A redraw-only
-   * adaptation -- the profile is never recomputed for it. */
+   * adaptation -- the profile is never recomputed for it.
+   * Known limit: zooming never re-bins the rows, so a 120-row HD profile zoomed far out still
+   * paints 120 sub-pixel rows that merge into one block. Upgrade path: rebuild the profile at a
+   * row count derived from the pane's pixel height on a (debounced) price-scale change. */
   respondsToZoom?: boolean;
   /** Draws grab-able range edges (thin vertical lines) at these times. */
   edges?: { startTime: Time; endTime: Time };
 }
 
 /** A spec after time anchors were resolved to pixels -- what `layoutProfile` consumes. */
-export type ResolvedProfileSpec = Omit<VolumeProfileRenderSpec, "xAnchor" | "width" | "edges"> & {
+export type ResolvedProfileSpec = Omit<VolumeProfileRenderSpec, "xAnchor" | "width" | "edges" | "barSeconds"> & {
   xAnchor: number | "right";
   width: number;
 };
@@ -61,10 +79,18 @@ export interface RowRect {
   isPoc: boolean;
 }
 
+export interface BandRect {
+  x: number;
+  w: number;
+  y: number;
+  h: number;
+}
+
 export interface ProfileLayout {
   rows: RowRect[];
-  /** The Value Area band across the profile's full extent, or null when not drawable. */
-  band: { x: number; w: number; y: number; h: number } | null;
+  /** The Value Area band, one rect per contiguous run of drawable value-area rows: a row off the
+   * price scale splits the band rather than being bridged by it. Empty when none is drawable. */
+  bands: BandRect[];
 }
 
 /**
@@ -77,18 +103,28 @@ export function layoutProfile(
   ys: readonly (RowY | null)[],
   paneWidth: number,
 ): ProfileLayout {
-  const { profile, xAnchor, width } = spec;
+  const { profile, xAnchor } = spec;
+  const width = spec.maxWidthFraction === undefined ? spec.width : Math.min(spec.width, paneWidth * spec.maxWidthFraction);
   const maxTotal = Math.max(0, ...profile.rows.map((r) => r.upVolume + r.downVolume));
   const rightward = xAnchor !== "right";
   const edge = rightward ? xAnchor : paneWidth;
   const pocIndex = profile.rows.findIndex((r) => profile.poc >= r.priceLow && profile.poc <= r.priceHigh);
 
   const rows: RowRect[] = [];
-  let bandTop = Infinity;
-  let bandBottom = -Infinity;
+  const bands: BandRect[] = [];
+  const bandX = rightward ? edge : edge - width;
+  let run: { top: number; bottom: number } | null = null;
+  const closeRun = (): void => {
+    if (run) bands.push({ x: bandX, w: width, y: run.top, h: run.bottom - run.top });
+    run = null;
+  };
   profile.rows.forEach((row, i) => {
     const span = ys[i];
-    if (!span || maxTotal === 0) return;
+    const inValueArea = row.priceHigh <= profile.vah && row.priceLow >= profile.val;
+    if (!span || maxTotal === 0) {
+      closeRun();
+      return;
+    }
     const y = Math.min(span.y1, span.y2);
     const h = Math.abs(span.y2 - span.y1);
     const upW = (row.upVolume / maxTotal) * width;
@@ -102,22 +138,44 @@ export function layoutProfile(
       downW,
       isPoc: i === pocIndex,
     });
-    if (row.priceHigh <= profile.vah && row.priceLow >= profile.val) {
-      bandTop = Math.min(bandTop, y);
-      bandBottom = Math.max(bandBottom, y + h);
+    if (!inValueArea) {
+      closeRun();
+      return;
     }
+    run = run ? { top: Math.min(run.top, y), bottom: Math.max(run.bottom, y + h) } : { top: y, bottom: y + h };
   });
-  const band =
-    bandTop === Infinity ? null : { x: rightward ? edge : edge - width, w: width, y: bandTop, h: bandBottom - bandTop };
-  return { rows, band };
+  closeRun();
+  return { rows, bands };
+}
+
+/**
+ * A media-px span as whole bitmap pixels: both EDGES are rounded (not the start and the length),
+ * so spans that touch in media px still touch after scaling -- no seam and no overlap between an
+ * up bar and its down bar, or between two rows, at any device pixel ratio.
+ */
+export function snapSpan(start: number, length: number, ratio: number): { start: number; length: number } {
+  const from = Math.round(start * ratio);
+  return { start: from, length: Math.round((start + length) * ratio) - from };
+}
+
+/** A row's bitmap top and height: snapped edges, minus a gap of at least one device pixel (one
+ * media px, rounded) unless `gap` is false; never under one device pixel tall. */
+export function snapRow(y: number, h: number, ratio: number, gap: boolean): { top: number; height: number } {
+  const { start, length } = snapSpan(y, h, ratio);
+  const gapPx = gap ? Math.max(1, Math.round(ratio)) : 0;
+  return { top: start, height: Math.max(1, length - gapPx) };
 }
 
 // Rows shorter than this (px) lose their 1px gap when `respondsToZoom` is set.
 const ZOOM_GAP_MIN_ROW_PX = 3;
 
-// Story 32.4: the point-of-control line reads the chart token at draw time.
+// Story 32.4: the point-of-control line reads the chart token at draw time; DW-149: so does the
+// Value Area band, which used to borrow `upColor` and so read as part of the up volume.
 const pocColor = (): string => chartVar("--chart-poc");
+const valueAreaColor = (): string => chartVar("--chart-value-area");
 const VA_ALPHA = 0.12;
+
+type TimeScale = ReturnType<IChartApi["timeScale"]>;
 
 // Story 18.5 (AC #2): one primitive for every Volume Profile variant. Row y-spans are
 // recomputed from prices in `updateAllViews` (so pan/zoom on the price axis can't drift
@@ -174,16 +232,14 @@ export class VolumeProfilePrimitive implements ISeriesPrimitive<Time> {
     });
 
     const timeScale = chart.timeScale();
-    const anchorX = typeof xAnchor === "object" ? timeScale.timeToCoordinate(xAnchor.time) : xAnchor;
-    const toX = typeof width === "object" ? timeScale.timeToCoordinate(width.toTime) : null;
+    const anchorX = typeof xAnchor === "object" ? this.timeX(timeScale, xAnchor) : xAnchor;
     // An unresolvable time (no coordinate) means nothing drawable, never a guessed position.
-    const rangeWidth =
-      toX === null || anchorX === "right" || anchorX === null ? null : Math.abs(toX - anchorX);
-    let widthPx: number | null;
-    if (typeof width === "object") {
-      widthPx = rangeWidth === null ? null : rangeWidth * (this.spec.widthFraction ?? 1);
-    } else {
+    let widthPx: number | null = null;
+    if (typeof width !== "object") {
       widthPx = width;
+    } else if (anchorX !== null && anchorX !== "right") {
+      const toX = this.timeX(timeScale, { time: width.toTime, offsetSeconds: width.offsetSeconds });
+      widthPx = toX === null ? null : Math.abs(toX - anchorX) * (this.spec.widthFraction ?? 1);
     }
     this.resolved = anchorX === null || widthPx === null ? null : { xAnchor: anchorX, width: widthPx };
 
@@ -193,6 +249,24 @@ export class VolumeProfilePrimitive implements ISeriesPrimitive<Time> {
     const top = series.priceToCoordinate(profile.rows.at(-1)?.priceHigh ?? 0);
     const bottom = series.priceToCoordinate(profile.rows[0]?.priceLow ?? 0);
     this.edgeY = top === null || bottom === null ? null : { y1: top, y2: bottom };
+  }
+
+  /** A time anchor's x: the bar's coordinate plus its offset in bars at the chart's current bar
+   * spacing. Null when the bar has no coordinate, or an offset cannot be converted (no
+   * `barSeconds`, or no spacing yet) -- never a guess.
+   * Known limit: the offset assumes one chart bar per `barSeconds` beyond the anchor bar, so a
+   * gap in the unloaded or missing bars it extrapolates over is drawn as if it held bars. Upgrade
+   * path: resolve the offset against the loaded bar times where they exist (time-scale lookup per
+   * edge) and extrapolate only past the oldest loaded bar. */
+  private timeX(timeScale: TimeScale, anchor: TimeAnchor): number | null {
+    const x = timeScale.timeToCoordinate(anchor.time);
+    const offset = anchor.offsetSeconds ?? 0;
+    if (x === null || offset === 0) return x;
+    const { barSeconds } = this.spec;
+    const x0 = timeScale.logicalToCoordinate(0 as Logical);
+    const x1 = timeScale.logicalToCoordinate(1 as Logical);
+    if (!barSeconds || x0 === null || x1 === null) return null;
+    return x + (offset / barSeconds) * (x1 - x0);
   }
 
   /** The last resolved pixel anchor/width, or null when a time had no coordinate. */
@@ -210,25 +284,34 @@ export class VolumeProfilePrimitive implements ISeriesPrimitive<Time> {
     return {
       draw: (target: CanvasRenderingTarget2D): void => {
         target.useBitmapCoordinateSpace(({ context, bitmapSize, horizontalPixelRatio: hr, verticalPixelRatio: vr }) => {
-          const { rows, band } = layoutProfile({ ...spec, ...resolved }, ys, bitmapSize.width / hr);
-          if (spec.showValueArea && band) {
+          const { rows, bands } = layoutProfile({ ...spec, ...resolved }, ys, bitmapSize.width / hr);
+          // Every rect is snapped to whole bitmap pixels: a fractional edge is antialiased into a
+          // blurred seam, which at a 1px row gap reads as a gap of uneven width.
+          const fill = (color: string, x: number, w: number, top: number, height: number): void => {
+            const sx = snapSpan(x, w, hr);
+            context.fillStyle = color;
+            context.fillRect(sx.start, top, sx.length, height);
+          };
+          if (spec.showValueArea) {
             context.globalAlpha = VA_ALPHA;
-            context.fillStyle = spec.upColor;
-            context.fillRect(band.x * hr, band.y * vr, band.w * hr, band.h * vr);
+            for (const band of bands) {
+              const sy = snapSpan(band.y, band.h, vr);
+              fill(valueAreaColor(), band.x, band.w, sy.start, sy.length);
+            }
             context.globalAlpha = 1;
           }
           for (const r of rows) {
             // 1px gap between rows keeps neighbouring bars legible.
-            const gap = spec.respondsToZoom && r.h < ZOOM_GAP_MIN_ROW_PX ? 0 : 1;
-            const h = Math.max(1, r.h - gap) * vr;
-            context.fillStyle = spec.upColor;
-            context.fillRect(r.upX * hr, r.y * vr, r.upW * hr, h);
-            context.fillStyle = spec.downColor;
-            context.fillRect(r.downX * hr, r.y * vr, r.downW * hr, h);
+            const { top, height } = snapRow(r.y, r.h, vr, !(spec.respondsToZoom && r.h < ZOOM_GAP_MIN_ROW_PX));
+            fill(spec.upColor, r.upX, r.upW, top, height);
+            fill(spec.downColor, r.downX, r.downW, top, height);
             if (spec.showPoc && r.isPoc) {
+              const sx = snapSpan(Math.min(r.upX, r.downX), r.upW + r.downW, hr);
               context.strokeStyle = pocColor();
-              context.lineWidth = 2 * hr;
-              context.strokeRect(Math.min(r.upX, r.downX) * hr, r.y * vr, (r.upW + r.downW) * hr, h);
+              // An even whole-pixel width centred on the snapped edges keeps the outline's edges on
+              // whole pixels too (2 * hr at hr 1.5 would straddle them).
+              context.lineWidth = 2 * Math.max(1, Math.round(hr));
+              context.strokeRect(sx.start, top, sx.length, height);
             }
           }
           if (edgeXs && edgeY) {

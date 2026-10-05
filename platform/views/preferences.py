@@ -44,9 +44,13 @@ added `chart_drawings.toml`, Story 32.6 `chart_layouts.toml`). All four live in 
   `visible_bars` (a finite number in (0, 100000], the zoom; never a scroll position) and
   `volume_profile`, a table of `kind` (`off`|`visible`|`fixed`|`session`), `rows` (integer 2..500),
   `value_area_pct` (number in (0, 100]), `session` (one of `PROFILE_SESSIONS`, the frontend's
-  SESSION_PERIODS), `hd` (bool) and the fixed range's anchors `start`/`end` (integers, UTC
+  SESSION_PERIODS), `hd` (bool), the fixed range's anchors `start`/`end` (integers, UTC
   seconds, both required and in order when `kind = "fixed"`; omitted on disk when unset, `None`
-  in memory). Unknown keys are refused, never dropped. Coin tables are loaded tolerantly for
+  in memory) and, optional since DW-151/153 (absent = the default, on read and on PUT, so a file
+  saved before them loads unchanged; always written back), the saved kind's `sessions` (integer
+  1..`MAX_PROFILE_SESSIONS`, default 5), `up_color`/`down_color` (`#rrggbb`, defaults the
+  frontend's DEFAULT_VOLUME_PROFILE_SETTINGS) and `show_poc`/`show_value_area` (bool, default
+  true). Unknown keys are refused, never dropped. Coin tables are loaded tolerantly for
   `bar_seconds` and `mode` only (a value outside the supported set is returned as stored, so a
   timeframe retired later never fails the GET; the frontend falls back with one `console.error`),
   while the PUT validation and the `[default]` table stay strict. Drawings are never part of it.
@@ -67,6 +71,7 @@ The paths themselves are the interface's (env vars read in `data_api`), passed i
 import logging
 import math
 import os
+import re
 import tomllib
 from dataclasses import dataclass
 from dataclasses import field
@@ -501,6 +506,19 @@ _LAYOUT_KEYS = frozenset(
 )
 _PROFILE_KEYS = frozenset({"kind", "rows", "value_area_pct", "session", "hd", "start", "end"})
 _PROFILE_ANCHORS = ("start", "end")
+# DW-151/153: optional keys (AD-D12 allows adding a key with a default, never renaming or dropping
+# one). `MAX_PROFILE_SESSIONS` and the colours mirror the frontend's `MAX_SESSIONS`,
+# `DEFAULT_SESSION_COUNT` and `DEFAULT_VOLUME_PROFILE_SETTINGS`
+# (`test_profile_defaults_mirror_the_frontend` pins them).
+MAX_PROFILE_SESSIONS = 10
+_PROFILE_OPTIONAL_DEFAULTS: dict[str, Any] = {
+    "sessions": 5,
+    "up_color": "#55ff55",
+    "down_color": "#ff5555",
+    "show_poc": True,
+    "show_value_area": True,
+}
+_HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 
 # Mirrors the frontend's `SESSION_PERIODS` (the volume profile's session length); a change there
 # must change this tuple too (`test_session_periods_mirror_the_frontend` pins the pair). Story 32.7
@@ -521,6 +539,7 @@ BUILTIN_DEFAULT_LAYOUT: dict[str, Any] = {
         "hd": False,
         "start": None,
         "end": None,
+        **_PROFILE_OPTIONAL_DEFAULTS,
     },
 }
 
@@ -564,6 +583,17 @@ def _check_profile_scalars(profile: dict[str, Any]) -> None:
         raise LayoutError("volume_profile.hd", "must be a boolean")
 
 
+def _check_profile_options(options: dict[str, Any]) -> None:
+    _layout_int("volume_profile.sessions", options["sessions"], 1, MAX_PROFILE_SESSIONS)
+    for key in ("up_color", "down_color"):
+        value = options[key]
+        if not isinstance(value, str) or not _HEX_COLOR.fullmatch(value):
+            raise LayoutError(f"volume_profile.{key}", "must be a #rrggbb colour")
+    for key in ("show_poc", "show_value_area"):
+        if not isinstance(options[key], bool):
+            raise LayoutError(f"volume_profile.{key}", "must be a boolean")
+
+
 def _check_profile_anchor(key: str, value: Any) -> None:
     if value is None:
         return
@@ -576,9 +606,17 @@ def _check_profile_anchor(key: str, value: Any) -> None:
 def _validate_profile(profile: Any) -> dict[str, Any]:
     if not isinstance(profile, dict):
         raise LayoutError("volume_profile", "must be an object")
-    _check_keys(profile, _PROFILE_KEYS - set(_PROFILE_ANCHORS), _PROFILE_KEYS, "volume_profile.")
+    allowed = _PROFILE_KEYS | set(_PROFILE_OPTIONAL_DEFAULTS)
+    _check_keys(
+        profile, _PROFILE_KEYS - set(_PROFILE_ANCHORS), frozenset(allowed), "volume_profile."
+    )
     _check_profile_scalars(profile)
     out = {key: profile[key] for key in _PROFILE_KEYS - set(_PROFILE_ANCHORS)}
+    options = {
+        key: profile.get(key, default) for key, default in _PROFILE_OPTIONAL_DEFAULTS.items()
+    }
+    _check_profile_options(options)
+    out.update(options)
     for key in _PROFILE_ANCHORS:
         _check_profile_anchor(key, profile.get(key))
         out[key] = profile.get(key)

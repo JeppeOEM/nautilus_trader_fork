@@ -1144,7 +1144,9 @@ resolution: already resolved: platform/frontend/src/components/chart/primitives/
 origin: migrated from legacy ledger ("Deferred from: code review of story-18.5 (2026-09-19)"), 2026-10-05
 location: #ffff55
 reason: POC color hardcoded (`#ffff55`), Value Area band reuses `upColor`; rows with null y-spans can bridge a Value Area gap; row gaps not bitmap-pixel-snapped.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-volume-profile-polish
+resolution-undo: 338049af4fa3f4cf58d1fa9adcb5d39eb86748330420f70c6444135f7b50f1d1 2026-10-05 7374617475733a206f70656e
 
 ### DW-150: FRVP: dragging past the last bar has no coordinate->time so the endpoint is dropped/stale (same root as 18.2/18.3); edge ghost not cancelled if the edge effect …
 
@@ -1160,21 +1162,27 @@ resolution-undo: 988e15f4b5ef3bc15b0c3918fdddb8822929edd35fe148958cc5976427cb70d
 origin: migrated from legacy ledger ("Deferred from: code review of story-18.7 (2026-09-19)"), 2026-10-05
 location: n/a
 reason: VRVP recomputes on every pan frame (no rAF throttle or range quantization); a visible range extending past the loaded candles is clamped to the loaded part without a cue; fixed 150px width is not clamped to narrow panes; VRVP settings are not persisted across remounts.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-volume-profile-polish
+resolution-undo: 338049af4fa3f4cf58d1fa9adcb5d39eb86748330420f70c6444135f7b50f1d1 2026-10-05 7374617475733a206f70656e
 
 ### DW-152: Session profiles: `respondsToZoom` is a draw-time gap tweak only; partly loaded sessions draw narrow (0.7 x loaded span; zero width for a single bar) …
 
 origin: migrated from legacy ledger ("Deferred from: code review of story-18.8 (2026-09-19)"), 2026-10-05
 location: respondsToZoom
 reason: Session profiles: `respondsToZoom` is a draw-time gap tweak only; partly loaded sessions draw narrow (0.7 x loaded span; zero width for a single bar); `sinceSeconds` is fixed when the profile is added (no UTC-midnight re-anchor); every Sessions edit re-pages history from now; replay far in the past has no session history before the fetch window; an empty server page across a long outage stops paging early (see 18.5's `has_more` ceiling).
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-volume-profile-polish
+resolution-undo: 338049af4fa3f4cf58d1fa9adcb5d39eb86748330420f70c6444135f7b50f1d1 2026-10-05 7374617475733a206f70656e
 
 ### DW-153: Session/periodic profiles: every period/count change re-pages from now (no debounce or abort of in-flight pages, no loading indicator); `sinceSeconds` is not …
 
 origin: migrated from legacy ledger ("Deferred from: code review of story-18.9 (2026-09-19)"), 2026-10-05
 location: sinceSeconds
 reason: Session/periodic profiles: every period/count change re-pages from now (no debounce or abort of in-flight pages, no loading indicator); `sinceSeconds` is not re-anchored at a period rollover; the PVP period choice is not persisted; `SESSION_PRESETS.period` is a fixed period for SVP but only the dropdown default for PVP; dropdown shows raw values.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-volume-profile-polish
+resolution-undo: 338049af4fa3f4cf58d1fa9adcb5d39eb86748330420f70c6444135f7b50f1d1 2026-10-05 7374617475733a206f70656e
 
 ### DW-154: Live-app §A8.2 walkthrough owed for all of Epic 18
 

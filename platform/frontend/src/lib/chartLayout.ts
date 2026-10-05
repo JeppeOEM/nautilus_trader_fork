@@ -1,4 +1,5 @@
-import { SESSION_PERIODS } from "./sessionProfile";
+import { DEFAULT_SESSION_COUNT, MAX_SESSIONS, SESSION_PERIODS } from "./sessionProfile";
+import { DEFAULT_VOLUME_PROFILE_SETTINGS } from "./volumeProfile";
 import { TIMEFRAMES } from "../timeframes";
 
 // Story 32.6: one coin's chart layout, the shape of `GET/PUT /api/coin/{iid}/layout`
@@ -18,6 +19,14 @@ export interface VolumeProfileLayout {
   /** The fixed range's anchors (UTC seconds), `null` while the kind is not "fixed". */
   start: number | null;
   end: number | null;
+  /** DW-151/153: how many sessions a session profile draws (1..MAX_SESSIONS), and the saved
+   * kind's colours (`#rrggbb`) and POC / Value Area toggles. Optional on the server: a layout
+   * saved before them reads back with the defaults below. */
+  sessions: number;
+  up_color: string;
+  down_color: string;
+  show_poc: boolean;
+  show_value_area: boolean;
 }
 
 export interface ChartLayout {
@@ -47,6 +56,11 @@ export const BUILT_IN_LAYOUT: ChartLayout = {
     hd: false,
     start: null,
     end: null,
+    sessions: DEFAULT_SESSION_COUNT,
+    up_color: DEFAULT_VOLUME_PROFILE_SETTINGS.upColor,
+    down_color: DEFAULT_VOLUME_PROFILE_SETTINGS.downColor,
+    show_poc: DEFAULT_VOLUME_PROFILE_SETTINGS.showPoc,
+    show_value_area: DEFAULT_VOLUME_PROFILE_SETTINGS.showValueArea,
   },
 };
 
@@ -76,6 +90,22 @@ function copyHeights(raw: unknown, fallbacks: string[]): Record<string, number> 
   return out;
 }
 
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+
+/** An optional key (DW-151/153): absent is the default with no fallback reported (a layout saved
+ * before the key existed is not wrong), present but unusable is a named fallback. */
+function optional<T>(raw: Raw, key: string, ok: (value: unknown) => value is T, fallback: T, fallbacks: string[]): T {
+  if (!(key in raw)) return fallback;
+  const value = raw[key];
+  if (ok(value)) return value;
+  fallbacks.push(`volume_profile.${key}`);
+  return fallback;
+}
+
+const isBool = (value: unknown): value is boolean => typeof value === "boolean";
+const isHexColor = (value: unknown): value is string => typeof value === "string" && HEX_COLOR.test(value);
+const isSessionCount = (value: unknown): value is number => isInt(value, 1, MAX_SESSIONS);
+
 function profileOf(raw: unknown, fallbacks: string[]): VolumeProfileLayout {
   const base = BUILT_IN_LAYOUT.volume_profile;
   if (!isRecord(raw)) {
@@ -98,6 +128,11 @@ function profileOf(raw: unknown, fallbacks: string[]): VolumeProfileLayout {
     hd: typeof raw.hd === "boolean" ? raw.hd : base.hd,
     start: anchor(raw.start),
     end: anchor(raw.end),
+    sessions: optional(raw, "sessions", isSessionCount, base.sessions, fallbacks),
+    up_color: optional(raw, "up_color", isHexColor, base.up_color, fallbacks),
+    down_color: optional(raw, "down_color", isHexColor, base.down_color, fallbacks),
+    show_poc: optional(raw, "show_poc", isBool, base.show_poc, fallbacks),
+    show_value_area: optional(raw, "show_value_area", isBool, base.show_value_area, fallbacks),
   };
   // A session profile whose period this client does not know would silently draw nothing.
   if (profile.kind === "session" && !(SESSION_PERIODS as readonly string[]).includes(profile.session)) {

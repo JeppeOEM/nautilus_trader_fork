@@ -44,6 +44,11 @@ export function periodStartBack(timeSec: number, period: SessionPeriod, back: nu
   return periodStart(timeSec, period) - back * step;
 }
 
+/** End (UTC seconds, exclusive) of the period containing `timeSec`: the next period's start. */
+export function periodEnd(timeSec: number, period: SessionPeriod): number {
+  return periodStartBack(timeSec, period, -1);
+}
+
 /** The candle bar size each period is profiled from: the finest (1 minute) where the
  * needed history is affordable to page, coarser for the long periods (a month of 1-minute
  * bars is ~43k rows). */
@@ -54,6 +59,8 @@ export function sessionBarSeconds(period: SessionPeriod): number {
 export interface SessionProfileEntry {
   /** The period's start (UTC seconds) -- also the stable identity of the session. */
   periodStart: number;
+  /** The period's end (UTC seconds, exclusive): the next period's start. */
+  periodEnd: number;
   /** First and last real bar times inside the period. */
   startTime: number;
   endTime: number;
@@ -131,28 +138,38 @@ export function buildSessionProfiles(
     const fingerprint = [bars.length, first, last, totalVolume, newest.high, newest.low, newest.close].join("|");
     const hit = cache.get(key);
     if (hit && hit.fingerprint === fingerprint) {
-      return { periodStart: start, startTime: first, endTime: last, profile: hit.profile };
+      return { periodStart: start, periodEnd: periodEnd(start, period), startTime: first, endTime: last, profile: hit.profile };
     }
     const profile = buildVolumeProfile(bars, settings.rowCount, settings.valueAreaPercent / 100);
     cache.set(key, { fingerprint, profile });
-    return { periodStart: start, startTime: first, endTime: last, profile };
+    return { periodStart: start, periodEnd: periodEnd(start, period), startTime: first, endTime: last, profile };
   });
   for (const key of [...cache.keys()]) if (!used.has(key)) cache.delete(key);
   return entries;
 }
 
 /** Story 18.8 AC #3: SVP HD is a preset of the same component, not a fork -- only the
- * default row count and the redraw-on-zoom flag differ. */
+ * default row count and the redraw-on-zoom flag differ. `defaultPeriod` is the period a preset
+ * starts on; `fixedPeriod` says whether the operator may change it (DW-153: one field used to
+ * mean "the period" for SVP and "the dropdown's starting value" for PVP). */
 export const SESSION_PRESETS = {
-  svp: { label: "Session Volume Profile", period: "daily" as SessionPeriod, rowCount: 24, respondsToZoom: false },
-  "svp-hd": { label: "Session Volume Profile HD", period: "daily" as SessionPeriod, rowCount: 120, respondsToZoom: true },
-  // Story 18.9: the same component with a user-chosen period (`period` here is only the
-  // default the dropdown starts on).
-  pvp: { label: "Periodic Volume Profile", period: "weekly" as SessionPeriod, rowCount: 24, respondsToZoom: false },
+  svp: { label: "Session Volume Profile", defaultPeriod: "daily" as SessionPeriod, fixedPeriod: true, rowCount: 24, respondsToZoom: false },
+  "svp-hd": { label: "Session Volume Profile HD", defaultPeriod: "daily" as SessionPeriod, fixedPeriod: true, rowCount: 120, respondsToZoom: true },
+  // Story 18.9: the same component with a user-chosen period.
+  pvp: { label: "Periodic Volume Profile", defaultPeriod: "weekly" as SessionPeriod, fixedPeriod: false, rowCount: 24, respondsToZoom: false },
 } as const;
 
+// `views/tests/test_chart_layouts.py` parses this declaration's one line: keep it on one line.
 /** The period dropdown's fixed set (Story 18.9 AC #1) -- nothing user-defined. */
 export const SESSION_PERIODS: readonly SessionPeriod[] = ["4h", "daily", "weekly", "monthly"];
+
+/** The period dropdown's labels. */
+export const SESSION_PERIOD_LABELS: Record<SessionPeriod, string> = {
+  "4h": "4 hours",
+  daily: "Daily",
+  weekly: "Weekly",
+  monthly: "Monthly",
+};
 
 export type SessionPreset = keyof typeof SESSION_PRESETS;
 

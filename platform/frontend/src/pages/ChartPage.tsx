@@ -22,12 +22,14 @@ import {
   DEFAULT_VOLUME_PROFILE_SETTINGS,
   buildRangeProfile,
   type VolumeProfile,
+  type VolumeProfileSettings,
 } from "../lib/volumeProfile";
 import {
   DEFAULT_SESSION_COUNT,
   SESSION_PRESETS,
   buildSessionProfiles,
   drawableSpan,
+  periodEnd,
   periodStartBack,
   sessionBarSeconds,
   type SessionPeriod,
@@ -78,23 +80,35 @@ const DEFAULT_PANE_IDS = ["volume"];
 // table (Story 32.7 adds auto-anchored and TPO settings to this table).
 const EMPTY_PROFILE: VolumeProfile = { rows: [], poc: 0, vah: 0, val: 0, totalVolume: 0 };
 
-function profileSettings(vp: VolumeProfileLayout): typeof DEFAULT_VOLUME_PROFILE_SETTINGS {
-  return { ...DEFAULT_VOLUME_PROFILE_SETTINGS, rowCount: vp.rows, valueAreaPercent: vp.value_area_pct };
+function profileSettings(vp: VolumeProfileLayout): VolumeProfileSettings {
+  return {
+    rowCount: vp.rows,
+    valueAreaPercent: vp.value_area_pct,
+    upColor: vp.up_color,
+    downColor: vp.down_color,
+    showPoc: vp.show_poc,
+    showValueArea: vp.show_value_area,
+  };
 }
 
 function initialSessionConfig(vp: VolumeProfileLayout): SessionConfig | null {
   if (vp.kind !== "session") return null;
   const period = vp.session as SessionPeriod; // checked against SESSION_PERIODS by normalizeLayout
   const preset: SessionPreset = vp.hd ? "svp-hd" : period === "daily" ? "svp" : "pvp";
-  const settings = { ...profileSettings(vp), sessionCount: DEFAULT_SESSION_COUNT };
-  return { preset, period, settings, sinceSeconds: sessionSince(period, settings.sessionCount) };
+  return { preset, period, settings: { ...profileSettings(vp), sessionCount: vp.sessions } };
 }
 
-/** The row count and value-area percent as the resource stores them (the inputs allow more). */
-function storable(settings: { rowCount: number; valueAreaPercent: number }): { rows: number; value_area_pct: number } {
+/** A profile's settings as the resource stores them (the row and value-area inputs allow more). */
+function storable(
+  settings: VolumeProfileSettings,
+): Pick<VolumeProfileLayout, "rows" | "value_area_pct" | "up_color" | "down_color" | "show_poc" | "show_value_area"> {
   return {
     rows: Math.min(500, Math.max(2, Math.round(settings.rowCount))),
     value_area_pct: Math.min(100, Math.max(1, settings.valueAreaPercent)),
+    up_color: settings.upColor,
+    down_color: settings.downColor,
+    show_poc: settings.showPoc,
+    show_value_area: settings.showValueArea,
   };
 }
 
@@ -198,21 +212,24 @@ function trimAfter<T extends { time: Time }>(rows: T[], cutoff: number | null): 
   return cutoff === null ? rows : rows.filter((row) => (row.time as number) <= cutoff);
 }
 
+// The wanted start of its history is not part of it: that follows the clock (see `sessionNowMs`).
 interface SessionConfig {
   preset: SessionPreset;
   period: SessionPeriod;
   settings: SessionProfileSettings;
-  sinceSeconds: number;
 }
-
-const sessionSince = (period: SessionPeriod, count: number): number =>
-  periodStartBack(Math.floor(Date.now() / 1000), period, count - 1);
 
 // Story 18.8: each session's longest bar spans this fraction of the session's width.
 const SESSION_WIDTH_FRACTION = 0.7;
 
-// Story 18.7: the longest VRVP bar, growing leftward from the price axis.
+// DW-152: the rollover timer re-arms at least this often. `setTimeout` keeps its delay in a signed
+// 32-bit ms counter (~24.8 days), so a monthly period's delay would overflow into an immediate fire.
+const ROLLOVER_TIMER_CAP_MS = 24 * 3600 * 1000;
+
+// Story 18.7: the longest VRVP bar, growing leftward from the price axis -- but never over this
+// share of the pane (DW-151), so a narrow pane keeps its candles visible.
 const VRVP_WIDTH_PX = 150;
+const VRVP_MAX_WIDTH_FRACTION = 0.3;
 
 // Story 18.6: a placed fixed-range profile. The profile is computed once when the range
 // is confirmed (drag-release, edge-drag release, or a settings change) and stored -- never
@@ -365,9 +382,12 @@ function ChartInner({
   const nextFrvpIdRef = useRef(frvps.length + 1);
   // Story 18.7: the single visible-range profile ("always recompute", unlike FRVP above).
   const [vrvpActive, setVrvpActive] = useState(savedProfile.kind === "visible");
-  // Story 18.8: the single session-profile slot (SVP / SVP HD presets). `sinceSeconds` is
-  // fixed when the config is set (an event handler), so render stays pure.
+  // Story 18.8: the single session-profile slot (SVP / SVP HD presets).
   const [sessionCfg, setSessionCfg] = useState<SessionConfig | null>(() => initialSessionConfig(savedProfile));
+  // DW-152: the clock the session history is anchored to. State, not a read of `Date.now()` in
+  // render: set by the handlers that turn a profile on and re-armed by a timer at every period
+  // rollover (see below), so a long-open tab moves its wanted start forward instead of growing.
+  const [sessionNowMs, setSessionNowMs] = useState(() => Date.now());
   const [sessionCache] = useState<SessionProfileCache>(() => new Map());
   const [vrvpSettings, setVrvpSettings] = useState(() =>
     savedProfile.kind === "visible" ? profileSettings(savedProfile) : DEFAULT_VOLUME_PROFILE_SETTINGS,
@@ -759,22 +779,41 @@ function ChartInner({
   // entries, kept as its own single-instance state, not folded into `frvps`. Candles mode
   // only (Lines mode's time axis is snapshot seconds, not the candle bars profiled here).
   // Subscribed only while the VRVP is on (Task 2: unsubscribe when removed).
+  // DW-151: the range is read once per animation frame, however many pan events the frame held.
   const visibleRange = useVisibleRange(vrvpActive && mode === "candles" ? chart : null);
+  const visibleFrom = visibleRange?.from ?? null;
+  const visibleTo = visibleRange?.to ?? null;
   const vrvpProfile = useMemo(
     () =>
-      vrvpActive && mode === "candles" && visibleRange
-        ? buildRangeProfile(replay.displayed, volume, visibleRange.from, visibleRange.to, vrvpSettings)
+      vrvpActive && mode === "candles" && visibleFrom !== null && visibleTo !== null
+        ? buildRangeProfile(replay.displayed, volume, visibleFrom, visibleTo, vrvpSettings)
         : null,
-    [vrvpActive, mode, visibleRange, replay.displayed, volume, vrvpSettings],
+    [vrvpActive, mode, visibleFrom, visibleTo, replay.displayed, volume, vrvpSettings],
   );
 
   // Story 18.8: one independent profile per session, from its own finest-timeframe fetch;
   // only the newest session is rebuilt as bars arrive (buildSessionProfiles' cache).
   const sessionActive = sessionCfg !== null && mode === "candles";
+  const sessionPeriod = sessionActive ? sessionCfg.period : null;
+  // While replaying, the sessions end at the replay cutoff, so the history is wanted back from there.
+  const sessionAnchor = cutoffTime ?? Math.floor(sessionNowMs / 1000);
+  const sessionSince = sessionCfg
+    ? periodStartBack(sessionAnchor, sessionCfg.period, sessionCfg.settings.sessionCount - 1)
+    : 0;
+  // The clock keeps ticking through a replay, so leaving it never resumes from a stale period.
+  useEffect(() => {
+    if (sessionPeriod === null) return;
+    const untilRollover = periodEnd(Math.floor(sessionNowMs / 1000), sessionPeriod) * 1000 - Date.now();
+    const id = setTimeout(
+      () => setSessionNowMs(Date.now()),
+      Math.min(Math.max(0, untilRollover), ROLLOVER_TIMER_CAP_MS),
+    );
+    return () => clearTimeout(id);
+  }, [sessionPeriod, sessionNowMs]);
   const sessionData = useSessionCandles(
     instrumentId,
     sessionActive,
-    sessionCfg?.sinceSeconds ?? 0,
+    sessionSince,
     sessionCfg ? sessionBarSeconds(sessionCfg.period) : 60,
   );
   const sessionSpecs = useMemo<VolumeProfileSpec[]>(() => {
@@ -789,15 +828,24 @@ function ChartInner({
       sessionData.completeFrom,
     );
     const preset = SESSION_PRESETS[sessionCfg.preset];
+    const sessionBar = sessionBarSeconds(sessionCfg.period);
     return entries.flatMap((entry) => {
       const span = drawableSpan(replay.displayed, entry.startTime, entry.endTime);
       if (!span) return [];
+      // DW-152: a session spans from its first bar to the end of its elapsed period, not just the
+      // chart bars that fall in it -- so a session partly before the oldest loaded bar, or held in
+      // a single chart bar, keeps its true width. The edges are offsets from the drawable bars,
+      // converted by the chart's bar spacing; the first bar (not the period start) keeps a coin
+      // listed mid-period from spanning empty space, and the forming session ends at its newest
+      // bar, never in the future.
+      const extentEnd = Math.min(entry.periodEnd, entry.endTime + sessionBar);
       return [
         {
           id: `session-${entry.periodStart}`,
           profile: entry.profile,
-          xAnchor: { time: span.startTime as Time },
-          width: { toTime: span.endTime as Time },
+          xAnchor: { time: span.startTime as Time, offsetSeconds: entry.startTime - span.startTime },
+          width: { toTime: span.endTime as Time, offsetSeconds: extentEnd - span.endTime },
+          barSeconds,
           widthFraction: SESSION_WIDTH_FRACTION,
           respondsToZoom: preset.respondsToZoom,
           upColor: sessionCfg.settings.upColor,
@@ -807,28 +855,27 @@ function ChartInner({
         },
       ];
     });
-  }, [sessionCfg, sessionActive, sessionData, cutoffTime, sessionCache, replay.displayed]);
+  }, [sessionCfg, sessionActive, sessionData, cutoffTime, sessionCache, replay.displayed, barSeconds]);
 
   const addSessionProfile = (preset: SessionPreset): void => {
-    const { period, rowCount } = SESSION_PRESETS[preset];
+    const { defaultPeriod, rowCount } = SESSION_PRESETS[preset];
     // Switching presets keeps the user's colors/toggles/session count; only the row count
     // takes the new preset's default.
     const settings: SessionProfileSettings = {
       ...(sessionCfg?.settings ?? { ...DEFAULT_VOLUME_PROFILE_SETTINGS, sessionCount: DEFAULT_SESSION_COUNT }),
       rowCount,
     };
-    setSessionCfg({ preset, period, settings, sinceSeconds: sessionSince(period, settings.sessionCount) });
+    setSessionNowMs(Date.now());
+    setSessionCfg({ preset, period: defaultPeriod, settings });
   };
 
-  const changeSessionPeriod = (period: SessionPeriod): void =>
-    setSessionCfg((cfg) =>
-      cfg ? { ...cfg, period, sinceSeconds: sessionSince(period, cfg.settings.sessionCount) } : cfg,
-    );
+  const changeSessionPeriod = (period: SessionPeriod): void => {
+    setSessionNowMs(Date.now());
+    setSessionCfg((cfg) => (cfg ? { ...cfg, period } : cfg));
+  };
 
   const changeSessionSettings = (settings: SessionProfileSettings): void =>
-    setSessionCfg((cfg) =>
-      cfg ? { ...cfg, settings, sinceSeconds: sessionSince(cfg.period, settings.sessionCount) } : cfg,
-    );
+    setSessionCfg((cfg) => (cfg ? { ...cfg, settings } : cfg));
 
   // Story 32.6: a restored fixed range is profiled once the candles it needs are loaded. A range
   // outside the loaded window stays empty (drawn as nothing, removable) rather than dropped, so the
@@ -854,13 +901,21 @@ function ChartInner({
   // at `EMPTY_PROFILE`). The saved layout's own table is the base, so an inactive kind keeps its values.
   const savedProfileRef = useRef(layout.volume_profile);
   savedProfileRef.current = layout.volume_profile;
-  const sessionKey = sessionCfg ? `${sessionCfg.preset}|${sessionCfg.period}|${sessionCfg.settings.rowCount}|${sessionCfg.settings.valueAreaPercent}` : "";
   const firstFrvp = frvps[0];
   useEffect(() => {
     const base = savedProfileRef.current;
     let next: VolumeProfileLayout;
     if (sessionCfg) {
-      next = { ...base, ...storable(sessionCfg.settings), kind: "session", session: sessionCfg.period, hd: sessionCfg.preset === "svp-hd", start: null, end: null };
+      next = {
+        ...base,
+        ...storable(sessionCfg.settings),
+        kind: "session",
+        session: sessionCfg.period,
+        hd: sessionCfg.preset === "svp-hd",
+        sessions: sessionCfg.settings.sessionCount,
+        start: null,
+        end: null,
+      };
     } else if (firstFrvp) {
       next = { ...base, ...storable(frvpSettings), kind: "fixed", start: Math.round(firstFrvp.startTime), end: Math.round(firstFrvp.endTime) };
     } else if (vrvpActive) {
@@ -869,9 +924,10 @@ function ChartInner({
       next = { ...base, kind: "off", start: null, end: null };
     }
     patchLayout({ volume_profile: next });
-    // `sessionCfg` is keyed by what is saved from it: its `sinceSeconds` changes on every period tick.
+    // The first range is keyed by its anchors, the part that is saved: its entry is replaced every
+    // time its profile is refilled (a restored range hydrating), which changes nothing saved.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionKey, firstFrvp?.startTime, firstFrvp?.endTime, frvpSettings, vrvpActive, vrvpSettings, patchLayout]);
+  }, [sessionCfg, firstFrvp?.startTime, firstFrvp?.endTime, frvpSettings, vrvpActive, vrvpSettings, patchLayout]);
 
   // Story 32.6: dragged pane heights and the zoom, merged into the layout as the chart reports them.
   // A saved height whose indicator is no longer on the coin is dropped with the next drag, so the
@@ -898,6 +954,7 @@ function ChartInner({
               profile: vrvpProfile,
               xAnchor: "right",
               width: VRVP_WIDTH_PX,
+              maxWidthFraction: VRVP_MAX_WIDTH_FRACTION,
               upColor: vrvpSettings.upColor,
               downColor: vrvpSettings.downColor,
               showPoc: vrvpSettings.showPoc,
@@ -1248,6 +1305,7 @@ function ChartInner({
         active={vrvpActive}
         candlesMode={mode === "candles"}
         settings={vrvpSettings}
+        pastOldest={visibleRange?.pastOldest ?? false}
         onAdd={() => setVrvpActive(true)}
         onRemove={() => setVrvpActive(false)}
         onSettingsChange={setVrvpSettings}
@@ -1256,6 +1314,7 @@ function ChartInner({
         active={sessionCfg ? { preset: sessionCfg.preset, period: sessionCfg.period, settings: sessionCfg.settings } : null}
         candlesMode={mode === "candles"}
         renderedCount={sessionSpecs.length}
+        loading={sessionData.loading}
         onAdd={addSessionProfile}
         onRemove={() => setSessionCfg(null)}
         onPeriodChange={changeSessionPeriod}

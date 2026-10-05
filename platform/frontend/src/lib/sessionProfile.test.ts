@@ -5,6 +5,7 @@ import type { ChartDatum, VolumeDatum } from "../hooks/useCandles";
 import { gapRun } from "./gaps";
 import {
   buildSessionProfiles,
+  periodEnd,
   periodStart,
   periodStartBack,
   sessionBarSeconds,
@@ -41,6 +42,14 @@ describe("periodStart (Story 18.8/18.9)", () => {
     expect(periodStartBack(utc(2024, 1, 10), "weekly", 1)).toBe(utc(2024, 1, 1));
     expect(periodStartBack(utc(2024, 1, 20), "monthly", 2)).toBe(utc(2023, 11, 1));
     expect(periodStartBack(utc(2024, 1, 3, 13), "4h", 1)).toBe(utc(2024, 1, 3, 8));
+  });
+
+  it("ends a period where the next one starts, across a month end, a leap February and a year end", () => {
+    expect(periodEnd(utc(2024, 1, 3, 13, 59), "4h")).toBe(utc(2024, 1, 3, 16));
+    expect(periodEnd(utc(2024, 1, 3), "daily")).toBe(utc(2024, 1, 4)); // a period's own start
+    expect(periodEnd(utc(2024, 1, 3, 12), "weekly")).toBe(utc(2024, 1, 8));
+    expect(periodEnd(utc(2024, 2, 10), "monthly")).toBe(utc(2024, 3, 1));
+    expect(periodEnd(utc(2023, 12, 31, 23, 59), "monthly")).toBe(utc(2024, 1, 1));
   });
 
   it("profiles long periods from coarser bars", () => {
@@ -81,6 +90,7 @@ describe("buildSessionProfiles (Story 18.8)", () => {
     const entries = build();
 
     expect(entries.map((e) => e.periodStart)).toEqual([D1, D2, D3]);
+    expect(entries.map((e) => e.periodEnd)).toEqual([D2, D3, D3 + 86_400]);
     expect(entries.map((e) => e.startTime)).toEqual([D1, D2, D3]);
     expect(entries.map((e) => e.endTime)).toEqual([D1 + 60, D2 + 60, D3 + 60]);
     // Each session's price range is its own -- never merged across days.

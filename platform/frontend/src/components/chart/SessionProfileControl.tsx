@@ -1,5 +1,6 @@
 import {
   SESSION_PERIODS,
+  SESSION_PERIOD_LABELS,
   SESSION_PRESETS,
   type SessionPeriod,
   type SessionPreset, type SessionProfileSettings,
@@ -13,6 +14,8 @@ interface Props {
   candlesMode: boolean;
   /** How many sessions/periods are actually drawn right now (0 while history loads). */
   renderedCount: number;
+  /** Older session history is being paged in right now. */
+  loading: boolean;
   onAdd: (preset: SessionPreset) => void;
   onRemove: () => void;
   onPeriodChange: (period: SessionPeriod) => void;
@@ -22,7 +25,7 @@ interface Props {
 // Story 18.8/18.9 (AC #1/#3): SVP, SVP HD and PVP are buttons over ONE component/state -- picking
 // one while the other is on switches the preset (one session profile per chart). Placed next
 // to the VRVP control for the same reason (chart-only overlay, not a server-catalog entry).
-export default function SessionProfileControl({ active, candlesMode, renderedCount, onAdd, onRemove, onPeriodChange, onSettingsChange }: Props) {
+export default function SessionProfileControl({ active, candlesMode, renderedCount, loading, onAdd, onRemove, onPeriodChange, onSettingsChange }: Props) {
   return (
     <div role="group" aria-label="Session volume profiles">
       {(Object.keys(SESSION_PRESETS) as SessionPreset[]).map((preset) => (
@@ -42,7 +45,7 @@ export default function SessionProfileControl({ active, candlesMode, renderedCou
           <button type="button" aria-label="Remove session volume profile" onClick={onRemove}>
             Remove
           </button>
-          {active.preset === "pvp" && (
+          {!SESSION_PRESETS[active.preset].fixedPeriod && (
             <label>
               Period
               <select
@@ -52,12 +55,13 @@ export default function SessionProfileControl({ active, candlesMode, renderedCou
               >
                 {SESSION_PERIODS.map((period) => (
                   <option key={period} value={period}>
-                    {period}
+                    {SESSION_PERIOD_LABELS[period]}
                   </option>
                 ))}
               </select>
             </label>
           )}
+          {candlesMode && loading && <span role="status">Loading session history…</span>}
           {candlesMode && renderedCount < active.settings.sessionCount && (
             <span>
               Showing {renderedCount} of {active.settings.sessionCount} (history still loading, or beyond the fetch window)

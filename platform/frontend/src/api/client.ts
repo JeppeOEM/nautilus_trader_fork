@@ -103,13 +103,16 @@ export async function fetchCandles(
   beforeNs: number,
   limit: number,
   barSeconds: number,
+  // Optional: the session pager aborts a page superseded by a newer request (DW-153).
+  signal?: AbortSignal,
 ): Promise<CandlesResponse> {
   const params = new URLSearchParams({
     before_ns: String(beforeNs),
     limit: String(limit),
     bar_seconds: String(barSeconds),
   });
-  const res = await fetch(`/api/candles/${encodeURIComponent(instrumentId)}?${params}`);
+  const url = `/api/candles/${encodeURIComponent(instrumentId)}?${params}`;
+  const res = await (signal ? fetch(url, { signal }) : fetch(url));
   if (!res.ok) throw new HttpError(res.status, `GET /api/candles/${instrumentId} failed: ${res.status}`);
   return (await res.json()) as CandlesResponse;
 }

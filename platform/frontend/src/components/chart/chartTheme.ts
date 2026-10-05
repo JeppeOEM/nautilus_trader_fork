@@ -20,6 +20,7 @@ export const CHART_TOKENS = {
   "--chart-marker": "#455a64", // the replay vertical marker
   "--chart-drawing": "#2962ff", // new trendlines, horizontal lines, measurements and the drawing menu's default
   "--chart-poc": "#1b5e20", // the volume profile's point-of-control line
+  "--chart-value-area": "#2196f3", // the volume profile's Value Area band: a fill drawn at low alpha behind the bars, never a mark
   "--chart-pane-1": "#2962ff", // indicator slot 1 (TradingView blue)
   "--chart-pane-2": "#f23645", // indicator slot 2
   "--chart-pane-3": "#089981", // indicator slot 3
