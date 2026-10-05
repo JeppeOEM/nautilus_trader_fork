@@ -27,11 +27,13 @@ import { DEFAULT_LINE_STYLE, DEFAULT_LINE_WIDTH, type LineStyleName } from "../.
 import { chartVar, fibLevelColor } from "./chartTheme";
 import { assignPaneColor, cssVar } from "./paneColors";
 import {
+  type MeasurementIndex,
   MeasurementPrimitive,
+  buildMeasurementIndex,
   computeMeasurement,
   formatMeasurement,
 } from "./primitives/MeasurementPrimitive";
-import { attachRangeDrag } from "./rangeDrag";
+import { attachRangeDrag, localPoint, plotPoint, timeAtX } from "./rangeDrag";
 import { VolumeProfilePrimitive, type VolumeProfileRenderSpec } from "./primitives/VolumeProfilePrimitive";
 import { VerticalMarkerPrimitive } from "./primitives/VerticalMarkerPrimitive";
 import { GapPrimitive } from "./primitives/GapPrimitive";
@@ -259,6 +261,10 @@ interface LightweightChartProps {
   profileEdgesEditable?: boolean;
   onProfileEdgeDrag?: (id: string, edge: "start" | "end", time: Time) => void;
   onProfileEdgeCommit?: (id: string, edge: "start" | "end", time: Time) => void;
+  /** DW-150: an edge drag ended without a release -- the edge effect was torn down mid-drag (a
+   * tool armed, the mode flipped, unmount). Called once; nothing is committed, so the caller only
+   * clears its ghost. */
+  onProfileEdgeCancel?: () => void;
   /** Story 15.5: the currently-forming candle bar, from `useLiveCandle`. Applied via
    * `series.update()` (not `setData()`) on the candlestick series only -- independent of
    * the `data`/`setData()` effect above and Story 15.4's `panes` effect below; neither of
@@ -504,6 +510,9 @@ function overPriceLine(param: MouseEventParams, series: ISeriesApi<"Candlestick"
   return series !== null && info?.objectKind === "custom-price-line" && info.series === series;
 }
 
+// The measurement index before the first history arrives; the effect replaces it.
+const EMPTY_MEASUREMENT_INDEX: MeasurementIndex = buildMeasurementIndex([], []);
+
 /**
  * Owns the one `lightweight-charts` `createChart()` call for a coin's chart page
  * (AD-F4) -- the main pane (candlestick series in Candles mode, or 5 line series in Lines
@@ -513,6 +522,7 @@ function overPriceLine(param: MouseEventParams, series: ISeriesApi<"Candlestick"
  * long-lived instance, since `lightweight-charts` has no supported "re-point this chart at
  * different data" API.
  */
+
 export default function LightweightChart({
   mode = "candles",
   data,
@@ -545,6 +555,7 @@ export default function LightweightChart({
   profileEdgesEditable = true,
   onProfileEdgeDrag,
   onProfileEdgeCommit,
+  onProfileEdgeCancel,
   liveBar,
   onLegendAction,
   initialPaneHeights,
@@ -593,11 +604,14 @@ export default function LightweightChart({
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const editRef = useRef({ priceLines, drawEditable, onDrawingDrag });
   editRef.current = { priceLines, drawEditable, onDrawingDrag };
-  const measureDataRef = useRef<{ data: ChartDatum[]; volume: VolumeDatum[] }>({ data, volume });
+  // Filled by the effect below before any drag can read it; the forming bar is read per move.
+  const measureIndexRef = useRef<MeasurementIndex>(EMPTY_MEASUREMENT_INDEX);
+  const liveBarRef = useRef(liveBar);
+  liveBarRef.current = liveBar;
   const profileRegistryRef = useRef<Map<string, VolumeProfilePrimitive>>(new Map());
   // Latest-callback/latest-specs refs: the drag effects below must not re-subscribe (and
   // lose an in-flight drag) whenever the caller re-renders with fresh closures or specs.
-  const latestRef = useRef({ volumeProfiles, onRangeSelect, onProfileEdgeDrag, onProfileEdgeCommit });
+  const latestRef = useRef({ volumeProfiles, onRangeSelect, onProfileEdgeDrag, onProfileEdgeCommit, onProfileEdgeCancel });
   const markerRef = useRef<VerticalMarkerPrimitive | null>(null);
   const drawingRegistryRef = useRef<Map<string, DrawingEntry>>(new Map());
   // Story 32.5: the bar times every drawing primitive snaps its anchors to (one grid per chart).
@@ -1208,7 +1222,8 @@ export default function LightweightChart({
   }, [priceLines, mode]);
 
   useEffect(() => {
-    measureDataRef.current = { data, volume };
+    // DW-144: built once per history change, read by every measurement mouse-move.
+    measureIndexRef.current = buildMeasurementIndex(data, volume);
   }, [data, volume]);
 
   useEffect(() => {
@@ -1275,7 +1290,7 @@ export default function LightweightChart({
   }, [markerTime, mode]);
 
   useEffect(() => {
-    latestRef.current = { volumeProfiles, onRangeSelect, onProfileEdgeDrag, onProfileEdgeCommit };
+    latestRef.current = { volumeProfiles, onRangeSelect, onProfileEdgeDrag, onProfileEdgeCommit, onProfileEdgeCancel };
   });
 
   useEffect(() => {
@@ -1289,7 +1304,7 @@ export default function LightweightChart({
 
     const preview = new MeasurementPrimitive(chartVar("--chart-drawing"));
     let attached = false;
-    const stopDrag = attachRangeDrag(container, chart, host, {
+    const stopDrag = attachRangeDrag(container, chart, host, gridRef.current, {
       onMove: (start, end) => {
         if (!attached) {
           host.attachPrimitive(preview);
@@ -1312,23 +1327,28 @@ export default function LightweightChart({
 
   useEffect(() => {
     // Story 18.6 (AC #3): edge grab-and-drag for placed profiles. Off while a range tool
-    // is armed (their capture-phase drags own the mouse then).
+    // (FRVP, measure, Fibonacci) is armed: their capture-phase drags own the mouse then, and a
+    // sibling capture listener's stopPropagation could not keep both from starting.
     const container = containerRef.current;
     const chart = chartRef.current;
     const host = seriesRef.current;
-    if (!container || !chart || !host || !profileEdgesEditable || rangeSelectActive || measureActive || mode !== "candles") return;
+    if (!container || !chart || !host || !profileEdgesEditable || rangeSelectActive || measureActive || fibActive) return;
+    if (mode !== "candles") return;
 
     const EDGE_TOLERANCE_PX = 6;
     let grabbed: { id: string; edge: "start" | "end" } | null = null;
     let lastTime: Time | null = null;
 
+    // DW-150: past the newest bar the edge follows the pointer to the last grid slot (the
+    // forming bar included) instead of freezing at the last bar `coordinateToTime` resolved.
     const timeAt = (event: MouseEvent): Time | null =>
-      chart.timeScale().coordinateToTime(event.clientX - container.getBoundingClientRect().left);
+      timeAtX(chart, gridRef.current, localPoint(container, chart, event.clientX, event.clientY).x);
 
     const findEdge = (event: MouseEvent): { id: string; edge: "start" | "end" } | null => {
-      const box = container.getBoundingClientRect();
-      const x = event.clientX - box.left;
-      const y = event.clientY - box.top;
+      // An edge is only grabbable inside the price pane's plot, never on an axis strip (DW-144's guard).
+      const point = plotPoint(container, chart, event.clientX, event.clientY);
+      if (!point) return null;
+      const { x, y } = point;
       for (const spec of latestRef.current.volumeProfiles) {
         if (!spec.edges || spec.profile.rows.length === 0) continue;
         const top = host.priceToCoordinate(spec.profile.rows[spec.profile.rows.length - 1].priceHigh);
@@ -1355,6 +1375,18 @@ export default function LightweightChart({
       grabbed = findEdge(event);
       if (grabbed) event.stopPropagation();
     };
+    // DW-150: the resize cursor tells an edge is grabbable before the press. While grabbed the
+    // cursor stays as it was at the press, wherever the drag goes.
+    const setCursor = (cursor: string): void => {
+      if (container.style.cursor !== cursor) container.style.cursor = cursor;
+    };
+    const handleHover = (event: MouseEvent): void => {
+      // A held button is a library pan (or another tool's drag): no edge can be grabbed mid-press.
+      if (!grabbed) setCursor(event.buttons === 0 && findEdge(event) ? "ew-resize" : "");
+    };
+    const handleLeave = (): void => {
+      if (!grabbed) setCursor("");
+    };
     const handleMouseMove = (event: MouseEvent): void => {
       if (!grabbed) return;
       // No button held = the release happened outside the window (blur): finish the drag
@@ -1374,18 +1406,28 @@ export default function LightweightChart({
       const time = lastTime;
       grabbed = null;
       lastTime = null;
+      // A release outside the chart gets no hover to clear the cursor; inside, the next move restores it.
+      setCursor("");
       if (time !== null) latestRef.current.onProfileEdgeCommit?.(done.id, done.edge, time);
     };
 
     container.addEventListener("mousedown", handleMouseDown, true);
+    container.addEventListener("mousemove", handleHover);
+    container.addEventListener("mouseleave", handleLeave);
     window.addEventListener("mousemove", handleMouseMove);
     window.addEventListener("mouseup", handleMouseUp);
     return () => {
       container.removeEventListener("mousedown", handleMouseDown, true);
+      container.removeEventListener("mousemove", handleHover);
+      container.removeEventListener("mouseleave", handleLeave);
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
+      setCursor("");
+      // DW-150: torn down mid-drag (a tool armed, the mode flipped): the release this drag waited
+      // for will never arrive here, so the caller's ghost is cleared -- never committed.
+      if (grabbed) latestRef.current.onProfileEdgeCancel?.();
     };
-  }, [profileEdgesEditable, rangeSelectActive, measureActive, mode]);
+  }, [profileEdgesEditable, rangeSelectActive, measureActive, fibActive, mode]);
 
   useEffect(() => {
     // Story 18.3 (AC #2/#3/#5): the transient click-drag measurement, on the shared
@@ -1400,14 +1442,13 @@ export default function LightweightChart({
     const primitive = new MeasurementPrimitive(chartVar("--chart-drawing"));
     let attached = false;
 
-    const stopDrag = attachRangeDrag(container, chart, host, {
+    const stopDrag = attachRangeDrag(container, chart, host, gridRef.current, {
       onMove: (start, end) => {
-        const { data: candles, volume: volumes } = measureDataRef.current;
         if (!attached) {
           host.attachPrimitive(primitive);
           attached = true;
         }
-        primitive.setSelection(start, end, formatMeasurement(computeMeasurement(start, end, candles, volumes)));
+        primitive.setSelection(start, end, formatMeasurement(computeMeasurement(start, end, measureIndexRef.current, liveBarRef.current)));
       },
       onRelease: (last) => {
         if (!last || !attached) return;
@@ -1433,7 +1474,7 @@ export default function LightweightChart({
     if (!container || !chart || !host || !fibActive) return;
 
     let preview: FibPrimitive | null = null;
-    const stopDrag = attachRangeDrag(container, chart, host, {
+    const stopDrag = attachRangeDrag(container, chart, host, gridRef.current, {
       onMove: (start, end) => {
         const shape: FibDrawing = {
           kind: "fib",

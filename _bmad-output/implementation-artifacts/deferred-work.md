@@ -1092,14 +1092,18 @@ resolution: already resolved: platform/frontend/src/components/chart/Lightweight
 origin: migrated from legacy ledger ("Deferred from: code review of story-18.3 (2026-09-19)"), 2026-10-05
 location: n/a
 reason: Measurement drag past the last bar freezes at the last valid point (no coordinate->time there); same root cause as 18.2's empty-margin item.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-chart-edge-coordinates
+resolution-undo: 988e15f4b5ef3bc15b0c3918fdddb8822929edd35fe148958cc5976427cb70dd 2026-10-05 7374617475733a206f70656e
 
 ### DW-144: Measure mousedown on price/time axis strips starts a measurement; mouse events only (no touch); label unclamped at pane edges; O(n) `computeMeasurement` per …
 
 origin: migrated from legacy ledger ("Deferred from: code review of story-18.3 (2026-09-19)"), 2026-10-05
 location: computeMeasurement
 reason: Measure mousedown on price/time axis strips starts a measurement; mouse events only (no touch); label unclamped at pane edges; O(n) `computeMeasurement` per mousemove; forming live bar not in the label counts.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-chart-edge-coordinates
+resolution-undo: 988e15f4b5ef3bc15b0c3918fdddb8822929edd35fe148958cc5976427cb70dd 2026-10-05 7374617475733a206f70656e
 
 ### DW-145: Replay: no follow-scroll -- revealed bars may end up off-screen right after `setData`; verify in a real browser and add `scrollToPosition`/`scrollToRealTime` …
 
@@ -1143,7 +1147,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of story-18.6 (2026-09-19)"), 2026-10-05
 location: n/a
 reason: FRVP: dragging past the last bar has no coordinate->time so the endpoint is dropped/stale (same root as 18.2/18.3); edge ghost not cancelled if the edge effect is torn down mid-drag; no hover cursor on edges; shared settings panel only appears once a profile is placed; removal is a text button outside the chart rather than an in-chart x.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-chart-edge-coordinates
+resolution-undo: 988e15f4b5ef3bc15b0c3918fdddb8822929edd35fe148958cc5976427cb70dd 2026-10-05 7374617475733a206f70656e
 
 ### DW-151: VRVP recomputes on every pan frame (no rAF throttle or range quantization); a visible range extending past the loaded candles is clamped to the loaded part …
 
@@ -2125,3 +2131,7 @@ status: open
 - source_spec: `_bmad-output/implementation-artifacts/spec-dw-data-api-input-validation.md`
   summary: `GET /api/coin/{iid}/indicator-values` builds whatever params its `entries` query carries with no magnitude cap, so a request for `HullMovingAverage {period: 10**9}` still stalls `data_api` for ~16 s per entry; save-time validation (`check_params`) now covers both PUTs and the technicals-values GET, but not this read path.
   evidence: `data_api/routes/indicators.py` `get_indicator_values` runs only `_parse_entries` + `_check_sources` before `chart_series.indicator_values_page`; the fix must keep the route's per-entry `errors` contract (one bad entry must not blank the others), e.g. by calling `indicator_picker.check_params` inside the per-entry replay and reporting its `ValueError` per entry. Predates the input-validation bundle.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-chart-edge-coordinates.md`
+  summary: An FRVP whose range (placement or edge drag) ends on the forming live bar builds its profile from `candles`/`fullVolume`, which exclude that bar, and is not rebuilt once the bar closes, so the profile silently stops one bar short of its drawn range.
+  evidence: `ChartPage.tsx` `handleRangeSelect`/`handleEdgeCommit` call `buildRangeProfile(candles, fullVolume, ...)`; the refill at ~806 only rebuilds profiles that are not `filled`; the live bar was already reachable through `coordinateToTime` before DW-143/DW-150, which only made the margin drag land there more easily.

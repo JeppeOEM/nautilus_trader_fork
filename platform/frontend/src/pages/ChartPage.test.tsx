@@ -185,6 +185,7 @@ interface ChartStubProps {
   onRangeSelect?: (start: { time: number; price: number }, end: { time: number; price: number }) => void;
   onProfileEdgeDrag?: (id: string, edge: "start" | "end", time: number) => void;
   onProfileEdgeCommit?: (id: string, edge: "start" | "end", time: number) => void;
+  onProfileEdgeCancel?: () => void;
 }
 
 const lastChartProps: { current: ChartStubProps | null } = { current: null };
@@ -1137,6 +1138,29 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
     act(() => lastChartProps.current!.onProfileEdgeCommit!("frvp-1", "end", 5));
     expect(lastChartProps.current!.volumeProfiles).toHaveLength(1);
     expect(lastChartProps.current!.volumeProfiles![0].profile.totalVolume).toBe(40);
+  });
+
+  it("clears the ghost edge on a cancelled edge drag, leaving the profile as placed (DW-150)", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    select(2, 4);
+    const placed = lastChartProps.current!.volumeProfiles![0];
+
+    act(() => lastChartProps.current!.onProfileEdgeDrag!("frvp-1", "end", 5));
+    act(() => lastChartProps.current!.onProfileEdgeCancel!());
+
+    expect(lastChartProps.current!.volumeProfiles![0].width).toEqual({ toTime: 4 });
+    expect(lastChartProps.current!.volumeProfiles![0].profile).toBe(placed.profile);
+  });
+
+  it("shows the FRVP settings as soon as the tool is armed, with no remove button yet (DW-150)", () => {
+    render(<ChartPage />);
+    expect(screen.queryByRole("group", { name: "Fixed range volume profile settings" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+
+    expect(screen.getByRole("group", { name: "Fixed range volume profile settings" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Remove volume profile/ })).toBeNull();
   });
 
   it("supports several profiles, removable independently (AC #4)", () => {

@@ -659,6 +659,10 @@ function ChartInner({
     setEdgeGhost({ id, edge, time: time as number });
   }, []);
 
+  // DW-150: the chart tore its edge drag down before the release (a tool armed mid-drag): the
+  // ghost goes, the profile stays as it was.
+  const handleEdgeCancel = useCallback((): void => setEdgeGhost(null), []);
+
   const handleEdgeCommit = (id: string, edge: "start" | "end", time: Time): void => {
     setEdgeGhost(null);
     setFrvps((all) =>
@@ -1140,6 +1144,7 @@ function ChartInner({
             onRangeSelect={handleRangeSelect}
             onProfileEdgeDrag={handleEdgeDrag}
             onProfileEdgeCommit={handleEdgeCommit}
+            onProfileEdgeCancel={handleEdgeCancel}
             measureActive={activeTool === "measure"}
             volume={volume}
             onMeasureEnd={handleMeasureEnd}
@@ -1193,7 +1198,9 @@ function ChartInner({
           )}
         </p>
       ))}
-      {frvps.length > 0 && (
+      {/* DW-150: the settings are reachable as soon as the FRVP tool is armed, so the first
+          profile is placed with them already set. */}
+      {(frvps.length > 0 || activeTool === "frvp") && (
         <div role="group" aria-label="Volume profiles">
           {frvps.map((f) => (
             <button
