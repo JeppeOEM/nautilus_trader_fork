@@ -777,7 +777,9 @@ resolution-undo: 0494e1d5631fbe7841cf0d7cfefba53aa18067a35474cd982d05d4012b815cd
 origin: migrated from legacy ledger ("Deferred from: code review of spec-12-1-read-only-data-api-fastapi-service.md (2026-09-12)"), 2026-10-05
 location: data_api/tests/test_data_api.py
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-12-1-read-only-data-api-fastapi-service.md` summary: `make test` (inside the `troll-collector` image) now emits a new `StarletteDeprecationWarning: Using httpx with starlette.testclient is deprecated; install httpx2 instead`, introduced by this story's `data_api/tests/test_data_api.py` importing `fastapi.testclient.TestClient`. Per troll/CLAUDE.md TEST-04 this is recorded rather than suppressed; not fixed in this story since the fix is an unverified dependency swap outside this story's declared scope (adding `fastapi`/`uvicorn`/`httpx` per the spec's Code Map, not `httpx2`). evidence: Warning fires unconditionally at `import starlette.testclient` (starlette 1.6.0, installed via `troll-requirements.txt`'s `fastapi==0.141.1` -> `starlette` dep), re-exported by `fastapi/testclient.py:1`; reproduced directly via `python3 -c "import starlette.testclient"` inside the built `troll-collector:latest` container. `httpx2` is confirmed to exist as a real published PyPI package (checked `https://pypi.org/pypi/httpx2/json`, latest `2.12.0`) so a fix path exists, but swapping `troll-requirements.txt`'s `httpx==0.28.1` pin for `httpx2` and re-verifying `data_api/tests` still pass has not been attempted or validated here.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-httpx-test-client-swap
+resolution-undo: 4c1afab883e641f497ef3955752a01d50bf2edd5105183651c9b7aba7c97f1dd 2026-10-05 7374617475733a206f70656e
 
 ### DW-104: The module-level global `_http_session` in `ml_signals/dashboard.py` has no re-entrancy guard against two `make_app()` instances sharing/fighting over one …
 

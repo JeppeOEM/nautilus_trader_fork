@@ -23,7 +23,13 @@ jupytext==1.19.3
 # data_api's read-only FastAPI service (Story 12.1).
 fastapi==0.141.1
 uvicorn[standard]==0.52.4
-# TestClient's transport -- a separate install path from the httpx already pinned in
-# the top-level pyproject.toml's dev dependency group, listed here too so data_api's
-# tests work inside this image without depending on that unrelated install.
-httpx==0.28.1
+# fastapi.testclient's transport (DW-103). starlette.testclient imports httpx2 first and falls
+# back to httpx with a StarletteDeprecationWarning, so httpx2 replaces the old httpx==0.28.1
+# pin here. Separate from the httpx in the top-level pyproject.toml's dev group
+# (nautilus_trader's own, not installed by this file). starlette is pinned beside it because
+# fastapi only floors it (>=0.46.0): 1.7.0 is the release the images already resolved, verified
+# to pick httpx2. Bump fastapi, starlette and httpx2 together, after re-running data_api's tests
+# with `-W error::starlette.exceptions.StarletteDeprecationWarning` -- that warning subclasses
+# UserWarning, not DeprecationWarning, and the repo-root pytest config ignores UserWarning.
+starlette==1.7.0
+httpx2==2.13.1
