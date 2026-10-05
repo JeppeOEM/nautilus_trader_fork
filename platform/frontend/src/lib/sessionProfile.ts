@@ -1,7 +1,9 @@
 import type { ChartDatum, VolumeDatum } from "../hooks/useCandles";
+import type { LiveBar } from "../hooks/useLiveCandle";
 import {
   buildVolumeProfile,
   type ProfileCandle,
+  type ProfileWeight,
   type VolumeProfile,
   type VolumeProfileSettings,
 } from "./volumeProfile";
@@ -65,6 +67,8 @@ export interface SessionProfileEntry {
   startTime: number;
   endTime: number;
   profile: VolumeProfile;
+  /** The period's bars, ascending: what the TPO's per-row letters and initial balance read. */
+  bars: readonly TimedBar[];
 }
 
 interface CacheEntry {
@@ -78,17 +82,43 @@ interface CacheEntry {
 /** Mutable memo shared across `buildSessionProfiles` calls (see there). */
 export type SessionProfileCache = Map<string, CacheEntry>;
 
-interface TimedBar extends ProfileCandle {
+export interface TimedBar extends ProfileCandle {
   time: number;
 }
 
-function timedBars(candles: readonly ChartDatum[], volume: readonly VolumeDatum[]): TimedBar[] {
+/**
+ * `candles` / `volume` with the live forming bar appended (Story 32.7: an anchored drawing runs to
+ * the latest bar, the forming one included, so one placed on the forming bar draws at once). The
+ * inputs come back unchanged with no forming bar or one not newer than the newest point.
+ */
+export function withFormingBar(
+  candles: readonly ChartDatum[],
+  volume: readonly VolumeDatum[],
+  bar: LiveBar | null,
+): { candles: readonly ChartDatum[]; volume: readonly VolumeDatum[] } {
+  if (bar === null) return { candles, volume };
+  const newest = candles.at(-1)?.time as number | undefined;
+  if (newest !== undefined && (bar.time as number) <= newest) return { candles, volume };
+  const { time, open, high, low, close } = bar;
+  return { candles: [...candles, { time, open, high, low, close }], volume: [...volume, { time, value: bar.volume }] };
+}
+
+/**
+ * The real candles paired with their volume by time (gap slots dropped). Under the volume weight a
+ * candle with no volume datum is dropped; under the time weight (the TPO) it still counts, with
+ * volume 0, because a TPO counts every real candle whatever its volume.
+ */
+export function timedBars(
+  candles: readonly ChartDatum[],
+  volume: readonly VolumeDatum[],
+  weight: ProfileWeight = "volume",
+): TimedBar[] {
   const volumeByTime = new Map<number, number>();
   for (const v of volume) if ("value" in v) volumeByTime.set(v.time as number, v.value);
   const bars: TimedBar[] = [];
   for (const c of candles) {
     if (!("open" in c)) continue;
-    const v = volumeByTime.get(c.time as number);
+    const v = volumeByTime.get(c.time as number) ?? (weight === "time" ? 0 : undefined);
     if (v !== undefined) bars.push({ time: c.time as number, open: c.open, high: c.high, low: c.low, close: c.close, volume: v });
   }
   return bars;
@@ -100,6 +130,8 @@ function timedBars(candles: readonly ChartDatum[], volume: readonly VolumeDatum[
  * VAH/VAL, never merged. Only the newest (in-progress) period ever changes as bars arrive,
  * so a session whose bar count and first/last bar are unchanged is served from `cache`
  * instead of being rebuilt (the cache is pruned to the sessions still in view).
+ *
+ * `weight` "time" builds the TPO's counts instead of volume (Story 32.7).
  *
  * `completeFrom`: periods starting before it are omitted -- they are only partially
  * covered by the fetched history, and a truncated profile would silently misstate the
@@ -113,9 +145,10 @@ export function buildSessionProfiles(
   settings: Pick<VolumeProfileSettings, "rowCount" | "valueAreaPercent">,
   cache: SessionProfileCache,
   completeFrom: number | null = null,
+  weight: ProfileWeight = "volume",
 ): SessionProfileEntry[] {
   const groups = new Map<number, TimedBar[]>();
-  for (const bar of timedBars(candles, volume)) {
+  for (const bar of timedBars(candles, volume, weight)) {
     const start = periodStart(bar.time, period);
     if (completeFrom !== null && start < completeFrom) continue;
     const group = groups.get(start);
@@ -132,17 +165,17 @@ export function buildSessionProfiles(
     const first = bars[0].time;
     const newest = bars[bars.length - 1];
     const last = newest.time;
-    const key = `${period}|${start}|${settings.rowCount}|${settings.valueAreaPercent}`;
+    const key = `${period}|${start}|${settings.rowCount}|${settings.valueAreaPercent}|${weight}`;
     used.add(key);
     const totalVolume = bars.reduce((sum, b) => sum + b.volume, 0);
     const fingerprint = [bars.length, first, last, totalVolume, newest.high, newest.low, newest.close].join("|");
     const hit = cache.get(key);
     if (hit && hit.fingerprint === fingerprint) {
-      return { periodStart: start, periodEnd: periodEnd(start, period), startTime: first, endTime: last, profile: hit.profile };
+      return { periodStart: start, periodEnd: periodEnd(start, period), startTime: first, endTime: last, profile: hit.profile, bars };
     }
-    const profile = buildVolumeProfile(bars, settings.rowCount, settings.valueAreaPercent / 100);
+    const profile = buildVolumeProfile(bars, settings.rowCount, settings.valueAreaPercent / 100, weight);
     cache.set(key, { fingerprint, profile });
-    return { periodStart: start, periodEnd: periodEnd(start, period), startTime: first, endTime: last, profile };
+    return { periodStart: start, periodEnd: periodEnd(start, period), startTime: first, endTime: last, profile, bars };
   });
   for (const key of [...cache.keys()]) if (!used.has(key)) cache.delete(key);
   return entries;
@@ -157,6 +190,12 @@ export const SESSION_PRESETS = {
   "svp-hd": { label: "Session Volume Profile HD", defaultPeriod: "daily" as SessionPeriod, fixedPeriod: true, rowCount: 120, respondsToZoom: true },
   // Story 18.9: the same component with a user-chosen period.
   pvp: { label: "Periodic Volume Profile", defaultPeriod: "weekly" as SessionPeriod, fixedPeriod: false, rowCount: 24, respondsToZoom: false },
+  // Story 32.7: the same slot (still ONE session-type profile per chart) with two more presets. The
+  // TPO counts 30-minute candle touches per session/day (`lib/tpo.ts`), over a user-chosen period;
+  // the Auto Anchored profile spans an anchor to the latest bar (`lib/autoAnchor.ts`), so its
+  // `defaultPeriod` is only the unused default and it is fixed.
+  tpo: { label: "Time Price Opportunity (TPO)", defaultPeriod: "daily" as SessionPeriod, fixedPeriod: false, rowCount: 48, respondsToZoom: false },
+  auto: { label: "Auto Anchored Volume Profile", defaultPeriod: "daily" as SessionPeriod, fixedPeriod: true, rowCount: 24, respondsToZoom: false },
 } as const;
 
 // `views/tests/test_chart_layouts.py` parses this declaration's one line: keep it on one line.

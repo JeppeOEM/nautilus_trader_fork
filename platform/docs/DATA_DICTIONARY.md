@@ -123,6 +123,8 @@ Its archived days stay in the catalog and the `archive` service keeps verifying 
   Bybit/Hyperliquid majors are far busier (the 200 s run archived ~7.2k BTCUSDT-LINEAR and
   ~1.4k Hyperliquid BTC trades). **Not measured** per venue-day yet (operator action, see
   `DEPLOY_CHECKLIST.md`).
+- **Chart use (Story 32.8):** the chart's volume footprint reads it column-projected, in integer
+  units, per closed bar (§2.14).
 - **Retention:** see §5 -- released only after the day reconciles `pass`.
 - **History:** files written before the earlier retention cutover (when trades stopped being stored)
   are still readable; story 22.13 reversed that cutover.
@@ -2360,6 +2362,7 @@ gross `bid_added`/`bid_removed`/`ask_added`/`ask_removed` size (not just net, so
 churning level is visible). Input: `OrderBookDelta`s + `Candle`s (§2.5). No consumer since
 Story 15.10 retired the aiohttp dashboard, whose footprint chart was not ported to the React UI;
 kept as a tested `views` function — no ranking/live-tick consumer either.
+The chart's *volume* footprint of executed trades (Story 32.8) is a different read model, §2.14.
 
 ### 2.5 Candles (the `candles/` context, Story 24.1)
 
@@ -2739,6 +2742,81 @@ spread divided into ticks or bps (`research.application.microstructure.spread_fr
 one-tick spread at 8.578755) -- was fixed at its source (`kernel.indicators.spread` rounds, §2.1),
 not tolerated. Run with `pytest -s` to print every signal's counts; the numbers are
 in `docs/VERIFICATION_REPORT.md`.
+
+### 2.14 Volume footprint (`views.chart_series.footprint_page`, Story 32.8)
+
+Not stored data: a read-time view of the raw trade archive (§1.1) per closed chart bar, served by
+`GET /api/coin/{instrument_id}/footprint?before_ns&limit=120&bar_seconds=60&row_ticks=auto` and
+drawn by the chart's `FootprintPrimitive`. Not the order-book footprint of §2.4 (resting size
+changes); this one is executed trades.
+
+- **Reader.** `kernel.catalog_files.query_trade_columns(catalog, iid, start_ns, end_ns,
+  price_precision, size_precision)` reads only `price`, `size`, `aggressor_side`, `ts_event` and
+  `trade_id` of the `trade_tick` files whose `ts_init` span, widened by `MAX_TS_INIT_SKEW_NS`
+  (300 s), meets the half-open `ts_event` window `[start, end)` -- consolidated day files and live
+  minute files alike. The `binary(16)` raws are decoded exactly, vectorised: reinterpreted as
+  `decimal128(38, 16)`, rescaled by Arrow to `decimal128(38, p)` (a lossy rescale is refused),
+  reinterpreted as `decimal128(38, 0)` and cast to int64 (overflow refused). Units are taken at the
+  **instrument definition's** precisions, not each file's label, so history written under
+  different labels lands on one grid. A raw finer than the definition, a null, a raw width this
+  build does not write or a file without its `price_precision`/`size_precision` metadata raises
+  `TradeDecodeError` (ledgered `views.footprint_trade_decode`, a 500), never rounded or skipped. A
+  trade stored twice (same `ts_event` and `trade_id`: a restart replay, or a minute file beside its
+  consolidated day file) counts once; two copies that disagree on price, size or side are an
+  archive fault and raise `TradeDecodeError`, never one of them silently picked. A file removed
+  between the listing and its read (the nightly consolidation replacing minute files by their day
+  file) makes the read list again, once; a second loss raises `TradeDecodeError`.
+- **Bars.** The bar list is the chart's own `candle_page` (§2.7) for the same `before_ns`, `limit`
+  (clamped to `MAX_FOOTPRINT_BARS` = 200) and `bar_seconds`, so boundaries, gaps and the 1W Monday
+  rule are the candles' (one bar more is asked for, since the bar holding the page's end is not
+  closed). A bar is served only when **closed and settled**:
+  `t + bar <= min(before_ns, now - FOOTPRINT_SETTLE_SECONDS)` (420 s: the reconnect trade
+  backfill can archive a trade up to `MAX_TS_INIT_SKEW_NS` = 300 s after its `ts_event`, plus two
+  60 s collector flushes). The candle page itself ends there, so `limit` counts servable bars. The
+  forming bar never has a footprint. Bars are trimmed to the newest
+  `MAX_QUERY_SPAN_SECONDS` (7 days) of span (`has_more` is then true). Trades are read one UTC day
+  slice at a time and folded into per-bar accumulators before the next slice (MEM-01; peak memory
+  is a small multiple of one instrument-day of trades' decoded columns: the per-file parts, their
+  concatenation and the dedup's sort keys are alive together). A trade belongs to the bar whose `[t, t + bar)` holds its
+  `ts_event`. A trade in no served bar (a candle gap) is not drawn.
+- **Fields.** Response `{items, has_more, price_precision, size_precision}`; per item:
+
+  | Field | Unit | Meaning |
+  |---|---|---|
+  | `t` | ms (UTC) | bar start, as the candle's `t` |
+  | `row_ticks` | price units | the row size used for this bar (`row_ticks=auto`: the smallest size with `high // rt - low // rt + 1 <= 24` over the bar's traded prices; else the request's fixed size, coarsened to its smallest multiple giving at most `FOOTPRINT_MAX_ROWS_FIXED` = 1000 rows). `null` on a `no_trades` bar |
+  | `rows[].p` | price units (`10^-price_precision`) | the row's floor price, `units // row_ticks * row_ticks` (a grid aligned to multiples, stable across bars at a fixed size); only rows that traded, ascending |
+  | `rows[].b` | size units (`10^-size_precision`) | buy volume: BUYER-aggressor trades |
+  | `rows[].s` | size units | sell volume: SELLER **and NO_AGGRESSOR** trades (`kernel.fold.fold_trades`' rule, §1.1) |
+  | `delta` | size units | `sum(b) - sum(s)` |
+  | `total` | size units | `sum(b) + sum(s)` |
+  | `poc_row` | price units | the `p` of the row with the largest `b + s`, ties to the lower `p` |
+  | `no_trades` | bool | the archive holds no trade for this bar: `rows` empty and `row_ticks`/`delta`/`total`/`poc_row` null, drawn as a gap (`--chart-gap`), never zeros |
+
+  Every number is an integer, formatted only by the frontend's `lib/units.ts`; a value past
+  `2^53 - 1` (a JSON number's exact range) raises `FootprintOverflow` (ledgered
+  `views.footprint_overflow`, a 500). `row_ticks` other than `auto` or an integer 1..1,000,000 (the layout's `MAX_FOOTPRINT_ROW_TICKS`)
+  is a 422.
+- **Parity.** A bar's `total` equals its candle's `v` (in size units) on days whose snapshot trade
+  columns are the trade fold, i.e. **rebuilt days** (`archive.rebuild_seconds`, §6; Story 31.8's
+  candle proof), for every bar holding no rebuild exception: a bar with an **orphan** trade (its
+  second has no snapshot row, the collector was not sampling) has a `total` above `v`, and a bar
+  inside an `ArchiveGap` span keeps its live values in the candle while the footprint reads only
+  the trades the archive holds (both counted in the rebuild's report, §6). On a live, not yet rebuilt day the two can differ by the trades the live second
+  did not fold: late trades (`collector.late_trade`), REST-backfilled trades and orphans are in the
+  archive, so in the footprint, but not in the live second's columns (§1.1). Proven on a fixture
+  day by `views/tests/test_footprint_page.py::test_each_bars_rows_sum_to_its_candle_volume`.
+- **Known limits.** Historical only: a bar inside the settle window or still forming shows no
+  footprint (upgrade path: fold the `trades` Redis stream in the candles context, never a
+  footprint fabricated from the 1 s snapshot's buy/sell totals). The settle is tied to the 60 s
+  default flush. Retention: `TradeTick` is released 7 days after its day reconciles `pass` (§5),
+  so an older bar has no archived trades and is served `no_trades` (a gap) while its candle stays
+  (upgrade path: a stored per-bar footprint folded by the candles context). Tick change: after a
+  venue coarsens an instrument's tick or lot, trades archived before the change are finer than the
+  definition, so a page holding them is refused (`TradeDecodeError`, a 500) until they leave the
+  retention (upgrade path: decode each file at its own label and serve the window's finest
+  precision). The chart polls for a new bar only once one can have closed (`useFootprint`), so a
+  1D/1W chart does not re-read days of trades every minute.
 
 ---
 

@@ -30,6 +30,8 @@ indicator_series,indicators}.py`, bodies verbatim unless noted):
   returning the kernel's `DepthProfile` (Story 27.3 moved the type and the snapshot -> depth
   derivation, `snapshot_depth`, to `kernel.indicators`), `book_imbalance`,
   `CancellationTracker`, ...), `compute_chart_series` and `build_footprint`.
+- **Volume footprint** -- `footprint_page` (Story 32.8): the raw trade archive's executed trades in
+  integer price rows per closed bar of the same `candle_page`, historical bars only.
 
 Two rendering rules, and nothing else, change what is drawn: `with_gap_markers` (one
 `{"t": earlier + k * bar_ms}` row per missing bar wherever two kept bars are more than a bar
@@ -54,11 +56,14 @@ from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
 
+import numpy as np
 from candles.application import queries
 from candles.domain.candle import Candle
 from candles.domain.candle import is_valid_candle
 from candles.domain.fold import bucket_start_ms
 from kernel import catalog_files
+from kernel.clocks import MAX_TS_INIT_SKEW_NS
+from kernel.clocks import NS_PER_S
 from kernel.indicators import OFI_GAP_NS
 from kernel.indicators import DepthProfile
 from kernel.indicators import MultiLevelOBI
@@ -1106,3 +1111,278 @@ def indicator_values_page(
     by_time, errors = indicator_picker.values_by_time(kept, entries, window)
     rows = [{"t": t, "values": values} for t, values in sorted(by_time.items())]
     return with_gap_markers(rows, bar_seconds), has_more, errors
+
+
+# =============================================================================================
+# Volume footprint: the raw trade archive bucketed per closed bar (Story 32.8)
+#
+# Not `build_footprint` above (resting order-book size changes): this one is executed trades,
+# read as integer units from the `TradeTick` archive (`kernel.catalog_files.query_trade_columns`)
+# and bucketed into integer price rows over the chart's own `candle_page` bars, so its bar
+# boundaries, gaps and timeframe are the candles' own (no second bucket rule).
+#
+# Known limit (historical only): only closed, settled bars are served -- the forming bar and the
+# last `FOOTPRINT_SETTLE_SECONDS` never show a footprint, because the archive holds a trade only
+# after the collector's flush. Upgrade path: fold the `trades` Redis stream in the candles context
+# (one owner, like the live candle), never a footprint fabricated from the 1 s snapshot's
+# buy/sell totals.
+# =============================================================================================
+
+# Server-enforced cap on bars per footprint page (MEM-01 on the API surface; silently clamped).
+MAX_FOOTPRINT_BARS = 200
+
+# Auto row size: the smallest `row_ticks` giving at most this many rows over a bar's trade range.
+FOOTPRINT_MAX_ROWS_AUTO = 24
+
+# A fixed row size never lays out more rows than this over one bar's trade range: past it the bar
+# is bucketed at the smallest multiple of the asked size that fits, and carries that `row_ticks`
+# (each bar states its own size, so nothing is silently re-gridded). 480 rows of the 1-tick case
+# fit; an unbounded fixed size would put one row per traded tick of a wide 4h/1W bar on the wire.
+FOOTPRINT_MAX_ROWS_FIXED = 1000
+
+# A bar is served once `t + bar <= now - FOOTPRINT_SETTLE_SECONDS`: the reconnect trade backfill can
+# still archive a trade up to `MAX_TS_INIT_SKEW_NS` (300 s) after its `ts_event`, and that write
+# lands within two collector flushes (60 s each, the default `flush_interval_seconds`), so by then
+# every trade of the bar is archived.
+# Known limit: tied to the 60 s default flush; a longer flush interval needs a longer settle, or a
+# bar settles with trades still unflushed. Upgrade path: the archive publishes a per-instrument
+# flushed-through watermark and the settle reads it.
+FOOTPRINT_SETTLE_SECONDS = MAX_TS_INIT_SKEW_NS // NS_PER_S + 2 * 60
+
+# The largest integer a JSON number carries exactly into the browser (`Number.MAX_SAFE_INTEGER`).
+# Known limit: a price, size, delta or total past it raises `FootprintOverflow` (ledgered) rather
+# than reaching the chart rounded. Upgrade path: serialise the units as decimal strings.
+MAX_JSON_SAFE_INT = 2**53 - 1
+
+_NS_PER_S = 1_000_000_000
+_NS_PER_DAY = 86_400 * _NS_PER_S
+
+
+class FootprintOverflow(Exception):
+    """A footprint value a JSON number cannot carry exactly (DATA-07: ledgered, never rounded)."""
+
+
+@dataclass(frozen=True)
+class FootprintBar:
+    """
+    One bar's footprint. `rows` are `{p, b, s}` (row floor price units, buy and sell size units),
+    ascending `p`, only rows that traded. A bar the archive holds no trade for is a gap:
+    `no_trades`, `rows` empty, `row_ticks`/`delta`/`total`/`poc_row` None -- never zeros as data.
+    """
+
+    t: int  # bar start, ms
+    row_ticks: int | None
+    rows: list[dict[str, int]]
+    delta: int | None
+    total: int | None
+    poc_row: int | None
+    no_trades: bool
+
+    def as_dict(self) -> dict:
+        return {
+            "t": self.t,
+            "row_ticks": self.row_ticks,
+            "rows": self.rows,
+            "delta": self.delta,
+            "total": self.total,
+            "poc_row": self.poc_row,
+            "no_trades": self.no_trades,
+        }
+
+
+# Per bar: price units -> [buy units, sell units], Python ints (exact, unbounded).
+_Levels = dict[int, list[int]]
+
+
+def auto_row_ticks(low: int, high: int) -> int:
+    """Return the smallest `row_ticks >= 1` with `high // rt - low // rt + 1 <= FOOTPRINT_MAX_ROWS_AUTO`."""
+    return _fitting_row_ticks(low, high, 1, FOOTPRINT_MAX_ROWS_AUTO)
+
+
+def _fitting_row_ticks(low: int, high: int, step: int, max_rows: int) -> int:
+    """Return the smallest multiple of `step` laying `[low, high]` out in at most `max_rows` rows."""
+    k = max(1, -(-(high - low + 1) // (max_rows * step)))
+    while high // (k * step) - low // (k * step) + 1 > max_rows:
+        k += 1
+    return k * step
+
+
+def _checked_int(instrument_id: str, t_ms: int, name: str, value: int) -> int:
+    if abs(value) > MAX_JSON_SAFE_INT:
+        detail = (
+            f"footprint {name} {value} for {instrument_id} at bar t={t_ms} exceeds the JSON-safe "
+            f"integer range"
+        )
+        error_ledger.record("views.footprint_overflow", detail)
+        raise FootprintOverflow(detail)
+    return value
+
+
+def footprint_bar(
+    instrument_id: str, t_ms: int, levels: _Levels, row_ticks: int | None
+) -> FootprintBar:
+    """
+    Bucket one bar's per-price buy/sell units into rows `units // rt * rt` (a grid aligned to
+    multiples of `rt`, stable across bars at a fixed size); `row_ticks` None = auto, a fixed size
+    coarsened to a multiple past `FOOTPRINT_MAX_ROWS_FIXED` rows. POC = the largest `b + s`, ties
+    to the lower `p`.
+    """
+    if not levels:
+        return FootprintBar(t_ms, None, [], None, None, None, no_trades=True)
+    low, high = min(levels), max(levels)
+    if row_ticks is None:
+        rt = auto_row_ticks(low, high)
+    else:
+        rt = _fitting_row_ticks(low, high, row_ticks, FOOTPRINT_MAX_ROWS_FIXED)
+    buckets: dict[int, list[int]] = {}
+    for price, (buy, sell) in levels.items():
+        row = buckets.setdefault(price // rt * rt, [0, 0])
+        row[0] += buy
+        row[1] += sell
+    check = partial(_checked_int, instrument_id, t_ms)
+    rows = [
+        {"p": check("p", p), "b": check("b", b), "s": check("s", s)}
+        for p, (b, s) in sorted(buckets.items())
+    ]
+    buys = sum(r["b"] for r in rows)
+    sells = sum(r["s"] for r in rows)
+    poc = min(rows, key=lambda r: (-(r["b"] + r["s"]), r["p"]))["p"]
+    return FootprintBar(
+        t_ms, rt, rows, check("delta", buys - sells), check("total", buys + sells), poc, False
+    )
+
+
+def _day_slices(start_ns: int, end_ns: int) -> Iterator[tuple[int, int]]:
+    """Split `[start_ns, end_ns)` at UTC midnights (MEM-01: one instrument-day read at a time)."""
+    lo = start_ns
+    while lo < end_ns:
+        hi = min(end_ns, (lo // _NS_PER_DAY + 1) * _NS_PER_DAY)
+        yield lo, hi
+        lo = hi
+
+
+def _fold_slice(
+    columns: catalog_files.TradeColumns, starts_ns: np.ndarray, bar_ns: int, acc: list[_Levels]
+) -> None:
+    """
+    Add one slice's trades to the per-bar accumulators: a trade belongs to the bar whose
+    `[t, t + bar)` holds its `ts_event`; one in no served bar (a candle gap) is not drawn. A
+    non-BUYER aggressor counts as a sell (`kernel.fold.fold_trades`' rule, so totals equal the
+    candle's volume).
+    """
+    idx = np.searchsorted(starts_ns, columns.ts_event, side="right") - 1
+    inside = idx >= 0
+    inside[inside] = columns.ts_event[inside] < starts_ns[idx[inside]] + bar_ns
+    idx, price = idx[inside], columns.price[inside]
+    size, buyer = columns.size[inside], columns.buyer[inside]
+    if not len(idx):
+        return
+    order = np.lexsort((price, idx))
+    idx, price, size, buyer = idx[order], price[order], size[order], buyer[order]
+    first = np.flatnonzero(np.r_[True, (np.diff(idx) != 0) | (np.diff(price) != 0)])
+    # Each group's sums are int64: the slice's whole volume is bounded first, so none can wrap.
+    buys = np.add.reduceat(np.where(buyer, size, 0), first)
+    sells = np.add.reduceat(np.where(buyer, 0, size), first)
+    for k, i in enumerate(first):
+        level = acc[idx[i]].setdefault(int(price[i]), [0, 0])
+        level[0] += int(buys[k])
+        level[1] += int(sells[k])
+
+
+def _require_int64_sum(instrument_id: str, size: np.ndarray) -> None:
+    """
+    Refuse a slice whose total size units could wrap an int64 sum (`_fold_slice`'s precondition).
+    The float64 sum of non-negative units is within a relative 1e-12 of the exact one, so a total
+    under 2^62 leaves int64 (2^63) a wide margin; only a slice truly near the limit is refused.
+    """
+    if len(size) and float(size.sum(dtype=np.float64)) >= 2.0**62:
+        detail = f"footprint size units of {instrument_id} could overflow an int64 sum"
+        error_ledger.record("views.footprint_overflow", detail)
+        raise FootprintOverflow(detail)
+
+
+def _read_trades(
+    instrument_id: str, catalog_path: str, lo: int, hi: int, precision: tuple[int, int]
+) -> catalog_files.TradeColumns:
+    try:
+        columns = catalog_files.query_trade_columns(catalog_path, instrument_id, lo, hi, *precision)
+    except catalog_files.TradeDecodeError as exc:
+        error_ledger.record("views.footprint_trade_decode", str(exc), exc)
+        raise
+    _require_int64_sum(instrument_id, columns.size)
+    return columns
+
+
+def _settled_bars(candles: list[dict], bar_seconds: int, end_ns: int) -> tuple[list[int], bool]:
+    """
+    Return the closed bars' starts (ms) ending by `end_ns`, trimmed to the newest
+    `MAX_QUERY_SPAN_SECONDS` of span (MEM-01), and whether the trim dropped one.
+    """
+    bar_ms = bar_seconds * 1000
+    closed = [c["t"] for c in candles if (c["t"] + bar_ms) * 1_000_000 <= end_ns]
+    if not closed:
+        return [], False
+    floor_ms = closed[-1] + bar_ms - MAX_QUERY_SPAN_SECONDS * 1000
+    kept = [t for t in closed if t >= floor_ms]
+    return kept, len(kept) < len(closed)
+
+
+def footprint_page(
+    instrument_id: str,
+    before_ns: int,
+    limit: int,
+    bar_seconds: int,
+    row_ticks: int | None,
+    *,
+    catalog_path: str,
+    candles_dir: str,
+    recent_rows: RecentRows,
+    price_precision: int,
+    size_precision: int,
+    now_ns: int,
+) -> tuple[list[dict], bool]:
+    """
+    `(bars oldest-first, has_more)`: the footprint (`FootprintBar.as_dict`) of every closed,
+    settled bar of the same `candle_page` the chart shows (`limit` clamped to `MAX_FOOTPRINT_BARS`),
+    from the archive's trades in integer units at the definition's precisions. `row_ticks` None =
+    auto per bar. Raises `ImpossibleCandle`, `TradeDecodeError` and `FootprintOverflow` (each
+    ledgered).
+
+    Known limit (MEM-01): trades are read one UTC day slice at a time and folded into per-bar
+    accumulators before the next, so peak memory is one instrument-day of trades (~65 MB per 800k
+    Bybit BTC trades). Upgrade path: row-group streaming, or a stored per-bar footprint folded by
+    the candles context.
+    """
+    if row_ticks is not None and row_ticks < 1:
+        raise ValueError(f"row_ticks must be at least 1 (or None for auto), got {row_ticks}")
+    limit = max(1, min(limit, MAX_FOOTPRINT_BARS))
+    # The page ends where settled bars end, so `limit` counts bars that can be served (a small
+    # refresh page is not all forming and unsettled bars). The bar holding `end_ns` is not closed
+    # yet and is dropped, so one bar more is asked for and the oldest one past `limit` is cut.
+    end_ns = min(before_ns, now_ns - FOOTPRINT_SETTLE_SECONDS * _NS_PER_S)
+    candles, has_more = candle_page(
+        instrument_id,
+        end_ns,
+        limit + 1,
+        bar_seconds,
+        catalog_path=catalog_path,
+        candles_dir=candles_dir,
+        recent_rows=recent_rows,
+    )
+    starts_ms, trimmed = _settled_bars(candles, bar_seconds, end_ns)
+    if len(starts_ms) > limit:
+        starts_ms, trimmed = starts_ms[-limit:], True
+    if not starts_ms:
+        return [], has_more or trimmed
+    bar_ns = bar_seconds * _NS_PER_S
+    starts_ns = np.asarray(starts_ms, dtype=np.int64) * 1_000_000
+    acc: list[_Levels] = [{} for _ in starts_ms]
+    precision = (price_precision, size_precision)
+    for lo, hi in _day_slices(int(starts_ns[0]), int(starts_ns[-1]) + bar_ns):
+        columns = _read_trades(instrument_id, catalog_path, lo, hi, precision)
+        _fold_slice(columns, starts_ns, bar_ns, acc)
+    bars = [
+        footprint_bar(instrument_id, t, levels, row_ticks).as_dict()
+        for t, levels in zip(starts_ms, acc, strict=True)
+    ]
+    return bars, has_more or trimmed

@@ -10,6 +10,7 @@ import {
   periodStartBack,
   sessionBarSeconds,
   type SessionProfileCache,
+  withFormingBar,
 } from "./sessionProfile";
 
 const utc = (y: number, mo: number, d: number, h = 0, mi = 0): number => Date.UTC(y, mo - 1, d, h, mi) / 1000;
@@ -229,5 +230,40 @@ describe("period grouping for PVP (Story 18.9)", () => {
     const times = [utc(2024, 1, 1), utc(2024, 1, 8), utc(2024, 1, 15)];
 
     expect(build(times, "weekly", 2).map((e) => e.periodStart)).toEqual([utc(2024, 1, 8), utc(2024, 1, 15)]);
+  });
+});
+
+describe("timedBars weights (Story 32.7 review)", () => {
+  const candles = [
+    { time: 1 as never, open: 1, high: 2, low: 1, close: 2 },
+    { time: 2 as never, open: 1, high: 2, low: 1, close: 2 },
+  ];
+  const volume = [{ time: 1 as never, value: 5 }];
+
+  it("drops a candle with no volume datum under the volume weight, keeps it (volume 0) under the time weight", async () => {
+    const { timedBars } = await import("./sessionProfile");
+
+    expect(timedBars(candles, volume).map((b) => b.time)).toEqual([1]);
+    expect(timedBars(candles, volume, "time").map((b) => [b.time, b.volume])).toEqual([[1, 5], [2, 0]]);
+  });
+});
+
+describe("withFormingBar (Story 32.7)", () => {
+  const candles: ChartDatum[] = [{ time: 100 as Time, open: 1, high: 2, low: 1, close: 2 }];
+  const volume: VolumeDatum[] = [{ time: 100 as Time, value: 3 }];
+  const live = (time: number) => ({ time: time as Time, open: 2, high: 3, low: 2, close: 3, volume: 4 });
+
+  it("appends a forming bar newer than the newest point, with its volume", () => {
+    const out = withFormingBar(candles, volume, live(160));
+
+    expect(out.candles).toEqual([...candles, { time: 160, open: 2, high: 3, low: 2, close: 3 }]);
+    expect(out.volume).toEqual([...volume, { time: 160, value: 4 }]);
+  });
+
+  it("hands the inputs back unchanged with no forming bar or one history already holds", () => {
+    expect(withFormingBar(candles, volume, null)).toEqual({ candles, volume });
+    const same = withFormingBar(candles, volume, live(100));
+    expect(same.candles).toBe(candles);
+    expect(same.volume).toBe(volume);
   });
 });

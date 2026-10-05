@@ -10,6 +10,7 @@ import type { LegendAction } from "../components/chart/legend";
 import LightweightChart, {
   type ChartMode,
   type DrawingSpec,
+  type LegendExtra,
   type VolumeProfileSpec,
   type IndicatorPaneSpec,
   type PriceLineSpec,
@@ -24,6 +25,17 @@ import {
   type VolumeProfile,
   type VolumeProfileSettings,
 } from "../lib/volumeProfile";
+import { type AutoAnchorPreset, DEFAULT_AUTO_ANCHOR, anchorBars, anchorTime } from "../lib/autoAnchor";
+import { anchoredVwap, breakAtGaps } from "../lib/anchoredVwap";
+import {
+  DEFAULT_IB_MINUTES,
+  type InitialBalance,
+  TPO_BAR_SECONDS,
+  TPO_MAX_BLOCKS_PER_ROW,
+  type TpoRow,
+  initialBalance,
+  tpoRows,
+} from "../lib/tpo";
 import {
   DEFAULT_SESSION_COUNT,
   SESSION_PRESETS,
@@ -32,13 +44,18 @@ import {
   periodEnd,
   periodStartBack,
   sessionBarSeconds,
+  timedBars,
+  withFormingBar,
   type SessionPeriod,
   type SessionPreset,
   type SessionProfileCache,
+  type SessionProfileEntry,
   type SessionProfileSettings,
 } from "../lib/sessionProfile";
 import { chartVar, fibLevelColor } from "../components/chart/chartTheme";
 import DrawingSettingsDialog from "../components/chart/DrawingSettingsDialog";
+import FootprintSettingsDialog from "../components/chart/FootprintSettingsDialog";
+import type { FootprintRenderSpec } from "../components/chart/primitives/FootprintPrimitive";
 import {
   type Drawing,
   type DragPoint,
@@ -47,7 +64,11 @@ import {
   applyHandleDrag,
   defaultFibLevels,
   nextDrawingId,
+  newAnchoredVp,
+  newAnchoredVwap,
   newPosition,
+  safeDecimal,
+  snapIndex,
   storedTime,
 } from "../lib/drawings";
 import { roundToPrecision } from "../lib/units";
@@ -58,7 +79,8 @@ import { assignPaneColor } from "../components/chart/paneColors";
 import type { IndicatorCatalogEntry, IndicatorConfigEntry } from "../api/schema";
 import { useCandles } from "../hooks/useCandles";
 import { TIMEFRAMES } from "../timeframes";
-import { type ChartLayout, type VolumeProfileLayout } from "../lib/chartLayout";
+import { type ChartLayout, type FootprintSettings, type VolumeProfileLayout } from "../lib/chartLayout";
+import { useFootprint } from "../hooks/useFootprint";
 import { useChartLayout } from "../hooks/useChartLayout";
 import { useReplay } from "../hooks/useReplay";
 import { useSessionCandles } from "../hooks/useSessionCandles";
@@ -91,11 +113,30 @@ function profileSettings(vp: VolumeProfileLayout): VolumeProfileSettings {
   };
 }
 
+// Story 32.7: the one session slot holds svp / svp-hd / pvp (layout kind "session"), the Auto Anchored
+// profile ("auto") or the TPO ("tpo"); the three optional layout keys ride along whichever is on.
+const SESSION_KINDS: readonly VolumeProfileLayout["kind"][] = ["session", "auto", "tpo"];
+
 function initialSessionConfig(vp: VolumeProfileLayout): SessionConfig | null {
-  if (vp.kind !== "session") return null;
+  if (!SESSION_KINDS.includes(vp.kind)) return null;
   const period = vp.session as SessionPeriod; // checked against SESSION_PERIODS by normalizeLayout
-  const preset: SessionPreset = vp.hd ? "svp-hd" : period === "daily" ? "svp" : "pvp";
-  return { preset, period, settings: { ...profileSettings(vp), sessionCount: vp.sessions } };
+  let preset: SessionPreset = vp.hd ? "svp-hd" : period === "daily" ? "svp" : "pvp";
+  if (vp.kind === "auto") preset = "auto";
+  if (vp.kind === "tpo") preset = "tpo";
+  const settings = { ...profileSettings(vp), sessionCount: vp.sessions };
+  return {
+    preset,
+    period,
+    settings,
+    anchor: vp.anchor,
+    ibMinutes: vp.ib_minutes,
+    letters: vp.letters,
+  };
+}
+
+/** The layout kind a session-slot preset is saved as. */
+function sessionKindOf(preset: SessionPreset): VolumeProfileLayout["kind"] {
+  return preset === "auto" ? "auto" : preset === "tpo" ? "tpo" : "session";
 }
 
 /** A profile's settings as the resource stores them (the row and value-area inputs allow more). */
@@ -136,7 +177,17 @@ function legendTitle(entry: IndicatorConfigEntry): string {
 
 // Story 18.1 (AC #1): the chart's drawing-tool state -- "cursor" is the inert default.
 // Stories 18.2/18.3 extend this union with their tools, never a second state variable.
-export type ChartTool = "cursor" | "hline" | "trendline" | "fib" | "long" | "short" | "measure" | "frvp";
+export type ChartTool =
+  | "cursor"
+  | "hline"
+  | "trendline"
+  | "fib"
+  | "long"
+  | "short"
+  | "measure"
+  | "frvp"
+  | "avp"
+  | "avwap";
 
 interface ChartToolDef {
   id: ChartTool;
@@ -204,7 +255,43 @@ const DRAWING_TOOLS: readonly ChartToolDef[] = [
   },
   { id: "measure", label: "Measure", ariaLabel: "Measurement tool", candlesOnly: true },
   { id: "frvp", label: "FRVP", ariaLabel: "Fixed range volume profile tool", candlesOnly: true },
+  // Story 32.7: single-click drawings, saved with the coin's drawings; both read the candle bars.
+  {
+    id: "avp",
+    label: "AVP",
+    ariaLabel: "Anchored volume profile tool",
+    title: "Anchored volume profile: click the bar it starts at",
+    candlesOnly: true,
+    placesDrawing: true,
+  },
+  {
+    id: "avwap",
+    label: "AVWAP",
+    ariaLabel: "Anchored VWAP tool",
+    title: "Anchored VWAP: click the bar it starts at",
+    candlesOnly: true,
+    placesDrawing: true,
+    needsPrecision: true,
+  },
 ];
+
+type TpoDetail = { rows: TpoRow[]; balance: InitialBalance | null; ibMinutes: number };
+type TpoDetailCache = WeakMap<VolumeProfile, TpoDetail>;
+
+// A TPO session's blocks, letters and initial balance, kept per profile object: `buildSessionProfiles`
+// hands back the same profile for a session that did not change, so only the forming one is recounted.
+function tpoDetail(cache: TpoDetailCache, entry: SessionProfileEntry, ibMinutes: number): TpoDetail {
+  const hit = cache.get(entry.profile);
+  if (hit && hit.ibMinutes === ibMinutes) return hit;
+  const clock = { sessionStart: entry.periodStart, barSeconds: TPO_BAR_SECONDS };
+  const detail: TpoDetail = {
+    rows: hit?.rows ?? tpoRows(entry.profile, entry.bars, TPO_MAX_BLOCKS_PER_ROW, clock),
+    balance: initialBalance(entry.bars, entry.periodStart, ibMinutes),
+    ibMinutes,
+  };
+  cache.set(entry.profile, detail);
+  return detail;
+}
 
 // Identity-preserving when no replay is active (`cutoff === null`), so an ordinary
 // re-render never hands the chart's pane registry a "changed" data reference.
@@ -217,6 +304,11 @@ interface SessionConfig {
   preset: SessionPreset;
   period: SessionPeriod;
   settings: SessionProfileSettings;
+  /** Story 32.7: the Auto Anchored preset, the TPO's initial balance (minutes) and letters switch;
+   * kept whichever preset is on, so switching back restores them. */
+  anchor: AutoAnchorPreset;
+  ibMinutes: number;
+  letters: boolean;
 }
 
 // Story 18.8: each session's longest bar spans this fraction of the session's width.
@@ -248,6 +340,7 @@ interface EdgeGhost {
 }
 
 const NO_BARS = (): number | null => null;
+const NONE: never[] = [];
 
 /** Story 18.4's replay control bar. DW-146: a click that would do nothing is never silently
  * ignored -- a pick on a data gap says so, Play/Step forward at the newest loaded bar are disabled
@@ -351,14 +444,6 @@ function ChartInner({
       ),
     [allDrawings],
   );
-  const drawings = useMemo<DrawingSpec[]>(
-    () =>
-      allDrawings.flatMap((d): DrawingSpec[] => {
-        if (d.kind === "hline") return [];
-        return [d.kind === "trendline" ? { ...d, color: d.color ?? chartVar("--chart-drawing") } : d];
-      }),
-    [allDrawings],
-  );
   const [crosshairOn, setCrosshairOn] = useState(initialLayout.crosshair);
   useEffect(() => patchLayout({ crosshair: crosshairOn }), [crosshairOn, patchLayout]);
   const [indicatorDialogOpen, setIndicatorDialogOpen] = useState(false);
@@ -389,6 +474,7 @@ function ChartInner({
   // rollover (see below), so a long-open tab moves its wanted start forward instead of growing.
   const [sessionNowMs, setSessionNowMs] = useState(() => Date.now());
   const [sessionCache] = useState<SessionProfileCache>(() => new Map());
+  const [tpoCache] = useState<TpoDetailCache>(() => new WeakMap());
   const [vrvpSettings, setVrvpSettings] = useState(() =>
     savedProfile.kind === "visible" ? profileSettings(savedProfile) : DEFAULT_VOLUME_PROFILE_SETTINGS,
   );
@@ -419,6 +505,7 @@ function ChartInner({
   // Volume and every indicator pane are cut at the same replay time as the candles, or
   // they would show the "future" the replay hides.
   const volume = useMemo(() => trimAfter(fullVolume, cutoffTime), [fullVolume, cutoffTime]);
+
   const snapshotLines = useSnapshotSeries(instrumentId, chart, mode === "lines");
   // Story 15.5: the forming right-edge bar, over its own dedicated /ws/live socket
   // (AD-F7) -- same BAR_SECONDS constant useCandles uses, so the two paths can't drift.
@@ -438,6 +525,94 @@ function ChartInner({
   useEffect(() => {
     if (liveTime !== undefined && historyLoaded) openGapTo(liveTime);
   }, [liveTime, historyLoaded, openGapTo]);
+
+  // Known limit: this memo recomputes every anchored profile and VWAP on each bar update and each
+  // forming-bar tick (the live socket's ~1/s, O(bars) per drawing). Upgrade path: cache per drawing like `buildSessionProfiles`, and extend the VWAP
+  // incrementally from its last point.
+  // Story 32.7: every drawing as the chart takes it. The Anchored VP and VWAP are computed here from
+  // the candles the chart holds (what a replay has revealed): the profile by the one engine, the
+  // line by `lib/anchoredVwap.ts`. Known limit: an anchor older than the oldest loaded bar draws
+  // nothing until a scroll-back pages that bar in (the convention of every drawing, `BarGrid.snap`),
+  // because a VWAP started mid-history would misstate it. Upgrade path: fetch the bars from the
+  // anchor like the session profiles do (`useSessionCandles`). Both read candle bars, so Lines mode
+  // (snapshot seconds on the time axis) shows neither.
+  // The forming bar is part of "the latest bar" here (not under a replay, which hides it): a drawing
+  // placed on it draws at once, and the line and profile include it, like the candle beside them.
+  const anchoredLive = replay.mode === "active" ? null : liveBar;
+  const anchored = useMemo(() => {
+    // A coin with no anchored drawing (nearly every one) skips the per-tick copy of its bars.
+    if (mode !== "candles" || !allDrawings.some((d) => d.kind === "anchored_vp" || d.kind === "anchored_vwap")) {
+      return { specs: NONE, profiles: NONE, legend: NONE };
+    }
+    const specs: DrawingSpec[] = [];
+    const profiles: VolumeProfileSpec[] = [];
+    const legend: LegendExtra[] = [];
+    const { candles: chartBars, volume: chartVolume } = withFormingBar(replay.displayed, volume, anchoredLive);
+    const bars = timedBars(chartBars, chartVolume);
+    // Anchors snap on the chart's real bars (gap slots excluded), volume or not; the primitive is
+    // handed the snapped bar, so its anchor line and the profile start on the same bar.
+    const times: number[] = [];
+    for (const c of chartBars) if ("open" in c) times.push(c.time as number);
+    const lastTime = times.at(-1);
+    for (const d of allDrawings) {
+      if (d.kind !== "anchored_vp" && d.kind !== "anchored_vwap") continue;
+      // An anchor after the newest displayed bar (a replay cut before it) is omitted, not snapped back.
+      if (lastTime !== undefined && d.time > lastTime) continue;
+      const at = snapIndex(times, d.time);
+      const anchorBar = at === null ? null : times[at];
+      if (d.kind === "anchored_vp") {
+        const profile =
+          anchorBar === null || lastTime === undefined
+            ? EMPTY_PROFILE
+            : buildRangeProfile(chartBars, chartVolume, anchorBar, lastTime, {
+                rowCount: d.rows,
+                valueAreaPercent: d.value_area_pct,
+              });
+        specs.push({ ...d, time: anchorBar ?? d.time, anchorPrice: profile.rows.at(-1)?.priceHigh ?? null });
+        if (profile.rows.length > 0 && anchorBar !== null && lastTime !== undefined) {
+          profiles.push({
+            id: `avp-${d.id}`,
+            profile,
+            xAnchor: { time: anchorBar as Time },
+            width: { toTime: lastTime as Time },
+            throughEndBar: true,
+            upColor: d.up_color,
+            downColor: d.down_color,
+            showPoc: true,
+            showValueArea: true,
+          });
+        }
+        continue;
+      }
+      const points = anchorBar === null ? [] : breakAtGaps(anchoredVwap(bars, anchorBar, d.source), chartBars);
+      // The snapped bar, like the Anchored VP: the anchor handle sits on the bar the line starts from.
+      specs.push({ ...d, time: anchorBar ?? d.time, points });
+      const latest = points.at(-1);
+      const color = d.color ?? chartVar("--chart-drawing");
+      legend.push({
+        id: `avwap-${d.id}`,
+        label: `AVWAP (${d.source})`,
+        color,
+        value: latest === undefined || precision === null ? null : latest.vwap,
+        format: (value) => (precision === null ? String(value) : safeDecimal(value, precision.price)),
+      });
+    }
+    // Shared empty arrays: a coin with none (nearly every one) must not hand the chart a fresh
+    // array, hence a "changed" prop, on every bar.
+    return { specs: specs.length > 0 ? specs : NONE, profiles: profiles.length > 0 ? profiles : NONE, legend: legend.length > 0 ? legend : NONE };
+  }, [allDrawings, mode, replay.displayed, volume, anchoredLive, precision]);
+  const plainDrawings = useMemo<DrawingSpec[]>(
+    () =>
+      allDrawings.flatMap((d): DrawingSpec[] => {
+        if (d.kind === "hline" || d.kind === "anchored_vp" || d.kind === "anchored_vwap") return [];
+        return [d.kind === "trendline" ? { ...d, color: d.color ?? chartVar("--chart-drawing") } : d];
+      }),
+    [allDrawings],
+  );
+  const drawings = useMemo<DrawingSpec[]>(
+    () => (anchored.specs.length === 0 ? plainDrawings : [...plainDrawings, ...anchored.specs]),
+    [plainDrawings, anchored.specs],
+  );
 
   // Story 15.6: the picker's persisted selection for this coin -- IndicatorPicker owns
   // the GET (initial load)/PUT (every add/remove/param-apply) round trip and reports the
@@ -536,11 +711,39 @@ function ChartInner({
     [volumeOn, volumeHidden, volume, pickerSeriesKeys, pickerValues, catalog, entriesById, cutoffTime],
   );
 
+  // Story 32.8: the volume footprint, a field of the coin's layout (on/off and its settings). It is
+  // fetched only while on AND in Candles mode (its primitive draws on the candle series); off, no
+  // request is issued and the chart gets no footprint. Only a row-size change refetches.
+  const [footprint, setFootprint] = useState<FootprintSettings>(initialLayout.footprint);
+  useEffect(() => patchLayout({ footprint }), [footprint, patchLayout]);
+  const [footprintDialogOpen, setFootprintDialogOpen] = useState(false);
+  const changeFootprintOn = useCallback((on: boolean): void => setFootprint((prev) => ({ ...prev, on })), []);
+  const footprintActive = footprint.on && mode === "candles";
+  const footprintData = useFootprint(instrumentId, chart, barSeconds, footprintActive, footprint.row_ticks);
+  const footprintSpec = useMemo<FootprintRenderSpec | null>(
+    () =>
+      footprintActive
+        ? {
+            // Replay hides the bars after its cursor; their footprints with them.
+            items: cutoffTime === null ? footprintData.items : footprintData.items.filter((b) => b.t / 1000 <= cutoffTime),
+            precision: footprintData.precision,
+            settings: footprint,
+          }
+        : null,
+    [footprintActive, footprintData.items, footprintData.precision, footprint, cutoffTime],
+  );
+
   // The legend's eye / gear / x. Picker indicators go through the picker's own persist path (the
-  // same one an add uses); Volume is page state (eye) and the Indicators dialog's toggle (x).
+  // same one an add uses); Volume is page state (eye) and the Indicators dialog's toggle (x); the
+  // Footprint row has the gear (its settings modal) and the x (off).
   const pickerRef = useRef<IndicatorPickerHandle>(null);
   const handleLegendAction = useCallback(
     (action: LegendAction, group: string): void => {
+      if (group === "footprint") {
+        if (action === "settings") setFootprintDialogOpen(true);
+        else if (action === "remove") changeFootprintOn(false);
+        return;
+      }
       if (group === "volume") {
         if (action === "hide") setVolumeHidden((h) => !h);
         else if (action === "remove") {
@@ -553,7 +756,7 @@ function ChartInner({
       else if (action === "settings") picker?.openSettings(group);
       else picker?.remove(group);
     },
-    [changeVolumeOn],
+    [changeVolumeOn, changeFootprintOn],
   );
   // Seeded with what the chart draws while the entry stores nothing: the palette colour, which a
   // histogram also paints both signs with (and the side whose colour is not set keeps).
@@ -646,6 +849,18 @@ function ChartInner({
         setAllDrawings((all) => [
           ...all,
           newPosition(nextDrawingId(all, "position"), side, point.time as number, point.price, places),
+        ]);
+        setActiveTool("cursor");
+        return;
+      }
+      if (activeTool === "avp" || activeTool === "avwap") {
+        // Story 32.7: one click at a bar places an anchored drawing; its colours are chart tokens.
+        const time = point.time as number;
+        setAllDrawings((all) => [
+          ...all,
+          activeTool === "avp"
+            ? newAnchoredVp(nextDrawingId(all, "anchored_vp"), time, chartVar("--chart-up"), chartVar("--chart-down"))
+            : newAnchoredVwap(nextDrawingId(all, "anchored_vwap"), time, chartVar("--chart-drawing"), chartVar("--chart-pane-4")),
         ]);
         setActiveTool("cursor");
         return;
@@ -794,7 +1009,8 @@ function ChartInner({
   // Story 18.8: one independent profile per session, from its own finest-timeframe fetch;
   // only the newest session is rebuilt as bars arrive (buildSessionProfiles' cache).
   const sessionActive = sessionCfg !== null && mode === "candles";
-  const sessionPeriod = sessionActive ? sessionCfg.period : null;
+  // The Auto Anchored profile has no period of its own (its anchor follows the chart's bars).
+  const sessionPeriod = sessionActive && sessionCfg.preset !== "auto" ? sessionCfg.period : null;
   // While replaying, the sessions end at the replay cutoff, so the history is wanted back from there.
   const sessionAnchor = cutoffTime ?? Math.floor(sessionNowMs / 1000);
   const sessionSince = sessionCfg
@@ -810,14 +1026,36 @@ function ChartInner({
     );
     return () => clearTimeout(id);
   }, [sessionPeriod, sessionNowMs]);
-  const sessionData = useSessionCandles(
-    instrumentId,
-    sessionActive,
-    sessionSince,
-    sessionCfg ? sessionBarSeconds(sessionCfg.period) : 60,
+  // Story 32.7: the Auto Anchored profile re-resolves its anchor from the chart's bars on every change
+  // (a bar that crosses a session boundary, a timeframe change remounts this component), so the
+  // anchor, its marker and its profile always follow the latest bar. A calendar anchor (session /
+  // week / month) is profiled from its own fetch, like the session profiles, because the chart's
+  // loaded window may start after the period does; the extreme anchors read the chart's loaded bars.
+  const autoPreset = sessionCfg?.preset === "auto" ? sessionCfg.anchor : null;
+  const chartAnchorBars = useMemo(() => anchorBars(replay.displayed), [replay.displayed]);
+  const autoAnchor = useMemo(
+    () => (autoPreset !== null && mode === "candles" ? anchorTime(autoPreset, chartAnchorBars, barSeconds) : null),
+    [autoPreset, mode, chartAnchorBars, barSeconds],
   );
+  const calendarAnchor = useMemo(
+    () => (autoAnchor?.period ? { time: autoAnchor.time, period: autoAnchor.period } : null),
+    [autoAnchor],
+  );
+  // What the session fetch loads: the session profiles' own windows, the TPO's 30-minute bars, or the
+  // calendar anchor's span at its period's bar size.
+  let fetchBarSeconds = sessionCfg ? sessionBarSeconds(sessionCfg.period) : 60;
+  let fetchSince = sessionSince;
+  let fetchActive = sessionActive;
+  if (sessionCfg?.preset === "tpo") fetchBarSeconds = TPO_BAR_SECONDS;
+  if (sessionCfg?.preset === "auto") {
+    fetchActive = sessionActive && calendarAnchor !== null;
+    fetchSince = calendarAnchor?.time ?? 0;
+    fetchBarSeconds = calendarAnchor ? sessionBarSeconds(calendarAnchor.period) : 60;
+  }
+  const sessionData = useSessionCandles(instrumentId, fetchActive, fetchSince, fetchBarSeconds);
   const sessionSpecs = useMemo<VolumeProfileSpec[]>(() => {
-    if (!sessionCfg || !sessionActive) return [];
+    if (!sessionCfg || !sessionActive || sessionCfg.preset === "auto") return [];
+    const tpo = sessionCfg.preset === "tpo";
     const entries = buildSessionProfiles(
       trimAfter(sessionData.candles, cutoffTime),
       trimAfter(sessionData.volume, cutoffTime),
@@ -826,12 +1064,16 @@ function ChartInner({
       sessionCfg.settings,
       sessionCache,
       sessionData.completeFrom,
+      tpo ? "time" : "volume",
     );
     const preset = SESSION_PRESETS[sessionCfg.preset];
-    const sessionBar = sessionBarSeconds(sessionCfg.period);
+    // The bar size the session was fetched at: its last bar closes this long after it opens.
+    const sessionBar = tpo ? TPO_BAR_SECONDS : sessionBarSeconds(sessionCfg.period);
     return entries.flatMap((entry) => {
       const span = drawableSpan(replay.displayed, entry.startTime, entry.endTime);
       if (!span) return [];
+      const detail = tpo ? tpoDetail(tpoCache, entry, sessionCfg.ibMinutes) : null;
+      const balance = detail?.balance ?? null;
       // DW-152: a session spans from its first bar to the end of its elapsed period, not just the
       // chart bars that fall in it -- so a session partly before the oldest loaded bar, or held in
       // a single chart bar, keeps its true width. The edges are offsets from the drawable bars,
@@ -852,10 +1094,55 @@ function ChartInner({
           downColor: sessionCfg.settings.downColor,
           showPoc: sessionCfg.settings.showPoc,
           showValueArea: sessionCfg.settings.showValueArea,
+          ...(detail ? { tpo: { rows: detail.rows, letters: sessionCfg.letters } } : {}),
+          ...(balance ? { initialBalance: { high: balance.high, low: balance.low } } : {}),
         },
       ];
     });
-  }, [sessionCfg, sessionActive, sessionData, cutoffTime, sessionCache, replay.displayed, barSeconds]);
+  }, [sessionCfg, sessionActive, sessionData, cutoffTime, sessionCache, tpoCache, replay.displayed, barSeconds]);
+
+  const autoView = useMemo<{ specs: VolumeProfileSpec[]; markerTime: Time | null }>(() => {
+    if (!sessionCfg || sessionCfg.preset !== "auto" || !autoAnchor) return { specs: [], markerTime: null };
+    const settings = sessionCfg.settings;
+    const end = Number.MAX_SAFE_INTEGER;
+    let profile: VolumeProfile = EMPTY_PROFILE;
+    if (calendarAnchor === null) {
+      profile = buildRangeProfile(replay.displayed, volume, autoAnchor.time, end, settings);
+    } else if (sessionData.completeFrom === null || autoAnchor.time >= sessionData.completeFrom) {
+      // A period the fetch did not fully cover is not profiled: a truncated profile misstates it.
+      profile = buildRangeProfile(
+        trimAfter(sessionData.candles, cutoffTime),
+        trimAfter(sessionData.volume, cutoffTime),
+        autoAnchor.time,
+        end,
+        settings,
+      );
+    }
+    // The span starts at the bar holding the anchor: a calendar anchor inside a coarse bar (the 1st of
+    // the month inside a 1W bar) starts on that bar, not on the first bar opening after it.
+    const span = drawableSpan(replay.displayed, autoAnchor.time - barSeconds + 1, end);
+    if (!span) return { specs: [], markerTime: null };
+    // The marker only where the chart holds the anchor's bar itself (not a later bar standing in).
+    const markerTime = span.startTime <= autoAnchor.time ? (span.startTime as Time) : null;
+    if (profile.rows.length === 0) return { specs: [], markerTime };
+    return {
+      markerTime,
+      specs: [
+        {
+          id: "auto-anchored",
+          profile,
+          xAnchor: { time: span.startTime as Time },
+          width: { toTime: span.endTime as Time },
+          throughEndBar: true,
+          widthFraction: SESSION_WIDTH_FRACTION,
+          upColor: settings.upColor,
+          downColor: settings.downColor,
+          showPoc: settings.showPoc,
+          showValueArea: settings.showValueArea,
+        },
+      ],
+    };
+  }, [sessionCfg, autoAnchor, calendarAnchor, sessionData, cutoffTime, replay.displayed, volume, barSeconds]);
 
   const addSessionProfile = (preset: SessionPreset): void => {
     const { defaultPeriod, rowCount } = SESSION_PRESETS[preset];
@@ -865,9 +1152,20 @@ function ChartInner({
       ...(sessionCfg?.settings ?? { ...DEFAULT_VOLUME_PROFILE_SETTINGS, sessionCount: DEFAULT_SESSION_COUNT }),
       rowCount,
     };
+    const saved = layout.volume_profile;
     setSessionNowMs(Date.now());
-    setSessionCfg({ preset, period: defaultPeriod, settings });
+    setSessionCfg({
+      preset,
+      period: defaultPeriod,
+      settings,
+      anchor: sessionCfg?.anchor ?? saved.anchor ?? DEFAULT_AUTO_ANCHOR,
+      ibMinutes: sessionCfg?.ibMinutes ?? saved.ib_minutes ?? DEFAULT_IB_MINUTES,
+      letters: sessionCfg?.letters ?? saved.letters ?? false,
+    });
   };
+
+  const changeSessionOptions = (options: Partial<Pick<SessionConfig, "anchor" | "ibMinutes" | "letters">>): void =>
+    setSessionCfg((cfg) => (cfg ? { ...cfg, ...options } : cfg));
 
   const changeSessionPeriod = (period: SessionPeriod): void => {
     setSessionNowMs(Date.now());
@@ -909,10 +1207,13 @@ function ChartInner({
       next = {
         ...base,
         ...storable(sessionCfg.settings),
-        kind: "session",
+        kind: sessionKindOf(sessionCfg.preset),
         session: sessionCfg.period,
         hd: sessionCfg.preset === "svp-hd",
         sessions: sessionCfg.settings.sessionCount,
+        anchor: sessionCfg.anchor,
+        ib_minutes: sessionCfg.ibMinutes,
+        letters: sessionCfg.letters,
         start: null,
         end: null,
       };
@@ -965,8 +1266,11 @@ function ChartInner({
     [volumeProfiles, vrvpProfile, vrvpSettings],
   );
   const chartVolumeProfiles = useMemo(
-    () => (sessionSpecs.length > 0 ? [...allVolumeProfiles, ...sessionSpecs] : allVolumeProfiles),
-    [allVolumeProfiles, sessionSpecs],
+    () =>
+      sessionSpecs.length + autoView.specs.length + anchored.profiles.length === 0
+        ? allVolumeProfiles
+        : [...allVolumeProfiles, ...sessionSpecs, ...autoView.specs, ...anchored.profiles],
+    [allVolumeProfiles, sessionSpecs, autoView.specs, anchored.profiles],
   );
 
   // Stable identity: LightweightChart's measure effect must not re-subscribe mid-drag.
@@ -989,7 +1293,13 @@ function ChartInner({
       // A Fibonacci has a colour per level: the menu's one colour recolours them all.
       setAllDrawings((all) =>
         all.map((d) =>
-          d.id !== id ? d : d.kind === "fib" ? { ...d, color, levels: d.levels.map((l) => ({ ...l, color })) } : { ...d, color },
+          d.id !== id
+            ? d
+            : d.kind === "fib"
+              ? { ...d, color, levels: d.levels.map((l) => ({ ...l, color })) }
+              : d.kind === "anchored_vp"
+                ? { ...d, up_color: color } // a profile has no single colour: the menu's is its up colour
+                : { ...d, color },
         ),
       );
     },
@@ -1023,10 +1333,16 @@ function ChartInner({
   );
 
   const settingsDrawing = allDrawings.find((d) => d.id === settingsId);
+  const allDrawingsRef = useRef(allDrawings);
+  useEffect(() => {
+    allDrawingsRef.current = allDrawings;
+  }, [allDrawings]);
   const requestSettings = useCallback((id: string): void => {
     // No dialog without the instrument's precision (its fields are labelled and rounded by it):
-    // the request is dropped, not parked to pop open when the precision arrives.
-    if (precisionRef.current === null) return;
+    // the request is dropped, not parked to pop open when the precision arrives. The Anchored VP's
+    // and VWAP's dialogs print no price, so they open without one.
+    const kind = allDrawingsRef.current.find((d) => d.id === id)?.kind;
+    if (precisionRef.current === null && kind !== "anchored_vp" && kind !== "anchored_vwap") return;
     setSettingsId(id);
   }, []);
   const applyDrawing = useCallback(
@@ -1236,6 +1552,9 @@ function ChartInner({
             markerTime={replay.markerTime}
             // DW-145: keep the replay head in view as it advances.
             followNewest={replay.mode === "active"}
+            anchorMarkerTime={autoView.markerTime}
+            legendExtras={anchored.legend}
+            footprint={footprintSpec}
           />
         </div>
       </div>
@@ -1249,7 +1568,7 @@ function ChartInner({
           {drawingsSaveError}
         </p>
       )}
-      {settingsDrawing && settingsDrawing.kind !== "hline" && settingsDrawing.kind !== "trendline" && precision && (
+      {settingsDrawing && settingsDrawing.kind !== "hline" && settingsDrawing.kind !== "trendline" && (precision || settingsDrawing.kind === "anchored_vp" || settingsDrawing.kind === "anchored_vwap") && (
         <DrawingSettingsDialog
           key={settingsDrawing.id}
           drawing={settingsDrawing}
@@ -1257,6 +1576,19 @@ function ChartInner({
           onApply={applyDrawing}
           onRemove={() => handleDrawingDelete(settingsDrawing.id)}
           onClose={() => setSettingsId(null)}
+        />
+      )}
+      {footprintActive && footprintData.error !== null && (
+        <p role="alert" className="chart-load-error">
+          Footprint: {footprintData.error}
+        </p>
+      )}
+      {footprintDialogOpen && (
+        <FootprintSettingsDialog
+          settings={footprint}
+          onApply={setFootprint}
+          onRemove={() => changeFootprintOn(false)}
+          onClose={() => setFootprintDialogOpen(false)}
         />
       )}
       {Object.entries(indicatorErrors).map(([id, message]) => (
@@ -1311,13 +1643,25 @@ function ChartInner({
         onSettingsChange={setVrvpSettings}
       />
       <SessionProfileControl
-        active={sessionCfg ? { preset: sessionCfg.preset, period: sessionCfg.period, settings: sessionCfg.settings } : null}
+        active={
+          sessionCfg
+            ? {
+                preset: sessionCfg.preset,
+                period: sessionCfg.period,
+                settings: sessionCfg.settings,
+                anchor: sessionCfg.anchor,
+                ibMinutes: sessionCfg.ibMinutes,
+                letters: sessionCfg.letters,
+              }
+            : null
+        }
         candlesMode={mode === "candles"}
-        renderedCount={sessionSpecs.length}
+        renderedCount={sessionCfg?.preset === "auto" ? autoView.specs.length : sessionSpecs.length}
         loading={sessionData.loading}
         onAdd={addSessionProfile}
         onRemove={() => setSessionCfg(null)}
         onPeriodChange={changeSessionPeriod}
+        onOptionsChange={changeSessionOptions}
         onSettingsChange={changeSessionSettings}
       />
       <AlertDialog
@@ -1341,6 +1685,9 @@ function ChartInner({
         multiInstance
         volumeOn={volumeOn}
         onVolumeChange={changeVolumeOn}
+        footprintOn={footprint.on}
+        onFootprintChange={changeFootprintOn}
+        footprintCandlesOnly={mode !== "candles"}
       />
       </div>
     </div>

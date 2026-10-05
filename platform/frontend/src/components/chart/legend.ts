@@ -33,8 +33,15 @@ export interface LegendSeries {
   hidden?: boolean;
   /** False for Volume: eye and x only, no settings. Default true. */
   configurable?: boolean;
+  /** How the row's number is printed, where the plain readout would lose the instrument's precision
+   * (Story 32.7's Anchored VWAP prints through `lib/units.ts`). */
+  format?: (value: number) => string;
   /** False when no configured entry owns the row: no buttons at all. Default true. */
   actionable?: boolean;
+  /** False for a row with nothing to hide in place (Story 32.8's Footprint: gear and x only). Default true. */
+  hideable?: boolean;
+  /** A fixed readout shown instead of a value (the Footprint's mode and row size). */
+  text?: string;
 }
 
 export function formatLegendValue(value: number | null | undefined): string {
@@ -115,6 +122,7 @@ interface RowModel {
   hidden: boolean;
   configurable: boolean;
   actionable: boolean;
+  hideable: boolean;
 }
 
 /** Everything about a row except its values: when it is unchanged the row is updated in place, so
@@ -126,13 +134,17 @@ function rowSignature(row: RowModel, actions: boolean): string {
     row.hidden,
     row.configurable,
     row.actionable,
+    row.hideable,
     actions,
     row.members.map((m) => [m.outputLabel, m.color]),
   ]);
 }
 
 function valueText(member: LegendSeries, param: MouseEventParams<Time> | null, gap: GapRun | undefined): string {
-  return gap && !member.hidden ? gapLabel(gap) : formatLegendValue(valueAt(member, param));
+  if (member.text !== undefined) return member.text;
+  if (gap && !member.hidden) return gapLabel(gap);
+  const value = valueAt(member, param);
+  return value !== null && member.format ? member.format(value) : formatLegendValue(value);
 }
 
 function legendRow(row: RowModel, param: MouseEventParams<Time> | null, gap: GapRun | undefined, actions: boolean): HTMLElement {
@@ -155,7 +167,7 @@ function legendRow(row: RowModel, param: MouseEventParams<Time> | null, gap: Gap
   if (actions && row.actionable) {
     const bar = document.createElement("span");
     bar.className = "chart-legend-actions";
-    bar.appendChild(iconButton("hide", `${row.hidden ? "Show" : "Hide"} ${row.title}`, row.hidden));
+    if (row.hideable) bar.appendChild(iconButton("hide", `${row.hidden ? "Show" : "Hide"} ${row.title}`, row.hidden));
     if (row.configurable) bar.appendChild(iconButton("settings", `Settings for ${row.title}`));
     bar.appendChild(iconButton("remove", `Remove ${row.title}`));
     el.appendChild(bar);
@@ -217,6 +229,7 @@ export function renderLegends(
       hidden: members[0].hidden === true,
       configurable: members[0].configurable !== false,
       actionable: members[0].actionable !== false,
+      hideable: members[0].hideable !== false,
     }));
     const existing = [...container.children] as HTMLElement[];
     const same =

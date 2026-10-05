@@ -25,9 +25,19 @@ from typing import Any
 import pytest
 
 from views.preferences import BUILTIN_DEFAULT_LAYOUT
+from views.preferences import FOOTPRINT_DEFAULT_IMBALANCE_RATIO
+from views.preferences import FOOTPRINT_DEFAULTS
+from views.preferences import FOOTPRINT_MODES
 from views.preferences import LAYOUT_BAR_SECONDS
+from views.preferences import MAX_FOOTPRINT_ROW_TICKS
+from views.preferences import MAX_IB_MINUTES
 from views.preferences import MAX_PANE_ID_LENGTH
+from views.preferences import MAX_PROFILE_ROWS
 from views.preferences import MAX_PROFILE_SESSIONS
+from views.preferences import MIN_IB_MINUTES
+from views.preferences import MIN_PROFILE_ROWS
+from views.preferences import PROFILE_ANCHORS
+from views.preferences import PROFILE_KINDS
 from views.preferences import PROFILE_SESSIONS
 from views.preferences import ChartLayouts
 from views.preferences import IndicatorEntry
@@ -149,6 +159,30 @@ def test_default_is_never_an_instrument_id(tmp_path: Path) -> None:
         ({"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "kind": "x"}}, "kind"),
         ({"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "rows": 1}}, "rows"),
         ({"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "hd": 0}}, "hd"),
+        (
+            {"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "anchor": "day"}},
+            "anchor",
+        ),
+        (
+            {"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "ib_minutes": 0}},
+            "ib_minutes",
+        ),
+        (
+            {"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "ib_minutes": 1441}},
+            "ib_minutes",
+        ),
+        (
+            {"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "ib_minutes": 30.5}},
+            "ib_minutes",
+        ),
+        (
+            {"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "ib_minutes": True}},
+            "ib_minutes",
+        ),
+        (
+            {"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "letters": 1}},
+            "letters",
+        ),
         ({"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "start": 1.5}}, "start"),
         (
             {"volume_profile": {**BUILTIN_DEFAULT_LAYOUT["volume_profile"], "z": 1}},
@@ -333,3 +367,186 @@ def test_profile_defaults_mirror_the_frontend() -> None:
     assert _ts_value(settings, "downColor") == defaults["down_color"]
     assert _ts_value(settings, "showPoc") == str(defaults["show_poc"]).lower()
     assert _ts_value(settings, "showValueArea") == str(defaults["show_value_area"]).lower()
+
+
+def test_profile_anchors_mirror_the_frontend() -> None:
+    source = (Path(__file__).parents[2] / "frontend/src/lib/autoAnchor.ts").read_text()
+    match = re.search(r"AUTO_ANCHOR_PRESETS = \[([^\]]*)\]", source)
+    assert match is not None
+    assert tuple(re.findall(r'"(\w+)"', match.group(1))) == PROFILE_ANCHORS
+
+
+def test_profile_kinds_mirror_the_frontend() -> None:
+    source = (Path(__file__).parents[2] / "frontend/src/lib/chartLayout.ts").read_text()
+    match = re.search(r"PROFILE_KINDS: readonly ProfileKind\[\] = \[([^\]]*)\]", source)
+    assert match is not None
+    assert tuple(re.findall(r'"(\w+)"', match.group(1))) == PROFILE_KINDS
+
+
+def _ts_int(path: str, name: str) -> int:
+    source = (Path(__file__).parents[2] / "frontend/src/lib" / path).read_text()
+    match = re.search(rf"export const {name} = (\d+);", source)
+    assert match is not None, name
+    return int(match.group(1))
+
+
+def test_profile_option_bounds_and_defaults_mirror_the_frontend() -> None:
+    assert _ts_int("tpo.ts", "MIN_IB_MINUTES") == MIN_IB_MINUTES
+    assert _ts_int("tpo.ts", "MAX_IB_MINUTES") == MAX_IB_MINUTES
+    assert (
+        _ts_int("tpo.ts", "DEFAULT_IB_MINUTES")
+        == BUILTIN_DEFAULT_LAYOUT["volume_profile"]["ib_minutes"]
+    )
+    # An Anchored VP's rows share the layout's row limits (one engine, one row limit).
+    assert _ts_int("drawings.ts", "MIN_AVP_ROWS") == MIN_PROFILE_ROWS
+    assert _ts_int("drawings.ts", "MAX_AVP_ROWS") == MAX_PROFILE_ROWS
+    assert _ts_int("volumeProfile.ts", "MAX_PROFILE_ROWS") == MAX_PROFILE_ROWS
+
+
+def test_footprint_settings_mirror_the_frontend() -> None:
+    source = (Path(__file__).parents[2] / "frontend/src/lib/chartLayout.ts").read_text()
+    match = re.search(r"FOOTPRINT_MODES: readonly FootprintMode\[\] = \[([^\]]*)\]", source)
+    assert match is not None
+    assert tuple(re.findall(r'"(\w+)"', match.group(1))) == FOOTPRINT_MODES
+    assert (
+        _ts_int("chartLayout.ts", "FOOTPRINT_DEFAULT_IMBALANCE_RATIO")
+        == FOOTPRINT_DEFAULT_IMBALANCE_RATIO
+    )
+    assert _ts_int("chartLayout.ts", "MAX_FOOTPRINT_ROW_TICKS") == MAX_FOOTPRINT_ROW_TICKS
+
+
+def test_the_new_session_type_kinds_are_accepted_and_keep_their_settings() -> None:
+    for kind in ("auto", "tpo"):
+        profile = {
+            **BUILTIN_DEFAULT_LAYOUT["volume_profile"],
+            "kind": kind,
+            "anchor": "highest_high",
+            "ib_minutes": 90,
+            "letters": True,
+        }
+        out = validate_layout(_layout(volume_profile=profile))["volume_profile"]
+        assert (out["kind"], out["anchor"], out["ib_minutes"], out["letters"]) == (
+            kind,
+            "highest_high",
+            90,
+            True,
+        )
+
+
+def test_a_profile_saved_before_story_32_7_loads_with_the_defaults() -> None:
+    old = {
+        key: value
+        for key, value in BUILTIN_DEFAULT_LAYOUT["volume_profile"].items()
+        if key not in ("anchor", "ib_minutes", "letters")
+    }
+    out = validate_layout(_layout(volume_profile=old))["volume_profile"]
+    assert (out["anchor"], out["ib_minutes"], out["letters"]) == ("auto", 60, False)
+
+
+def test_the_new_profile_keys_round_trip_through_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    profile = {
+        **BUILTIN_DEFAULT_LAYOUT["volume_profile"],
+        "kind": "tpo",
+        "ib_minutes": 30,
+        "letters": True,
+    }
+    layout = validate_layout(_layout(volume_profile=profile))
+    save_chart_layouts(ChartLayouts(layouts={_IID: layout}), path)
+    assert load_chart_layouts(path).layouts[_IID] == layout
+
+
+_PRE_32_8_FILE = f"""
+["{_IID}"]
+v = 1
+bar_seconds = 60
+mode = "candles"
+volume = true
+crosshair = true
+visible_bars = 120
+
+["{_IID}".pane_heights]
+
+["{_IID}".volume_profile]
+kind = "off"
+rows = 24
+value_area_pct = 70
+session = "daily"
+hd = false
+anchor = "auto"
+ib_minutes = 60
+letters = false
+"""
+
+
+def test_a_layout_saved_before_story_32_8_loads_with_footprint_off(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    path.write_text(_PRE_32_8_FILE)  # verbatim as Story 32.7 wrote it: no [footprint] table
+    loaded = load_chart_layouts(path).layouts[_IID]
+    assert {k: v for k, v in loaded.items() if k != "footprint"} == {
+        k: v for k, v in _layout().items() if k != "footprint"
+    }
+    assert loaded["footprint"] == FOOTPRINT_DEFAULTS
+    assert loaded["footprint"]["on"] is False
+
+
+def test_footprint_settings_round_trip_through_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    footprint = {
+        "on": True,
+        "row_ticks": 0,
+        "mode": "volume",
+        "imbalance_ratio": 4.5,
+        "text": False,
+        "sell_color": "#ef5350",
+    }
+    save_chart_layouts(ChartLayouts({_IID: _layout(footprint=footprint)}), path)
+    assert load_chart_layouts(path).layouts[_IID]["footprint"] == footprint
+    assert "buy_color" not in tomllib.loads(path.read_text())[_IID]["footprint"]
+
+
+@pytest.mark.parametrize(
+    ("over", "key"),
+    [
+        ({"glow": True}, "footprint.glow"),
+        ({"on": "yes"}, "footprint.on"),
+        ({"text": 1}, "footprint.text"),
+        ({"row_ticks": -1}, "footprint.row_ticks"),
+        ({"row_ticks": 2.5}, "footprint.row_ticks"),
+        ({"row_ticks": MAX_FOOTPRINT_ROW_TICKS + 1}, "footprint.row_ticks"),
+        ({"mode": "bidask"}, "footprint.mode"),
+        ({"imbalance_ratio": 0.5}, "footprint.imbalance_ratio"),
+        ({"imbalance_ratio": True}, "footprint.imbalance_ratio"),
+        ({"buy_color": 7}, "footprint.buy_color"),
+        ({"sell_color": ""}, "footprint.sell_color"),
+    ],
+)
+def test_a_bad_footprint_setting_is_refused_naming_it(over: dict[str, Any], key: str) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(footprint={**FOOTPRINT_DEFAULTS, **over}))
+    assert raised.value.key == key
+
+
+def test_a_present_footprint_table_carries_every_setting() -> None:
+    partial = {k: v for k, v in FOOTPRINT_DEFAULTS.items() if k != "mode"}
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(footprint=partial))
+    assert raised.value.key == "footprint.mode"
+
+
+def test_a_footprint_that_is_not_a_table_is_refused() -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(footprint=True))
+    assert raised.value.key == "footprint"
+
+
+def test_the_footprint_defaults_are_off_auto_bid_ask_ratio_3_with_text() -> None:
+    assert FOOTPRINT_DEFAULTS == {
+        "on": False,
+        "row_ticks": 0,
+        "mode": "bid_ask",
+        "imbalance_ratio": FOOTPRINT_DEFAULT_IMBALANCE_RATIO,
+        "text": True,
+    }
+    assert FOOTPRINT_MODES == ("bid_ask", "delta", "volume")
+    assert FOOTPRINT_DEFAULT_IMBALANCE_RATIO == 3

@@ -179,3 +179,62 @@ describe("buildRangeProfile (Story 18.6)", () => {
     );
   });
 });
+
+describe("buildVolumeProfile weight: time (Story 32.7, the TPO)", () => {
+  // Range 0..4 in four rows of 1. Hand-built slice: A touches row 0 only (and carries NO volume),
+  // B, C, D touch row 1 only, E (a down candle) touches rows 2 and 3, F touches row 3 only.
+  const slice = [
+    c(0.2, 0.5, 0, 0.3, 0), // A: zero volume, still a touch
+    c(1.2, 1.9, 1.1, 1.5, 100), // B
+    c(1.3, 1.8, 1.2, 1.6, 1), // C
+    c(1.4, 1.7, 1.3, 1.5, 50), // D
+    c(3.5, 3.5, 2.2, 2.4, 7), // E: down (close < open), rows 2..3
+    c(3.6, 4, 3.6, 3.9, 9), // F
+  ];
+
+  it("counts each candle once in EVERY row it touches, undivided, whatever its volume", () => {
+    const p = buildVolumeProfile(slice, 4, 0.7, "time");
+
+    expect(p.rows.map((r) => r.upVolume + r.downVolume)).toEqual([1, 3, 1, 2]);
+    expect(p.totalVolume).toBe(7);
+  });
+
+  it("makes the row with the most touches the POC", () => {
+    const p = buildVolumeProfile(slice, 4, 0.7, "time");
+
+    expect(p.poc).toBe(1.5); // row 1 (1..2): 3 touches
+  });
+
+  it("keeps the up / down split by close >= open", () => {
+    const p = buildVolumeProfile(slice, 4, 0.7, "time");
+
+    expect([p.rows[2].upVolume, p.rows[2].downVolume]).toEqual([0, 1]); // E closed down
+    expect([p.rows[1].upVolume, p.rows[1].downVolume]).toEqual([3, 0]);
+    expect([p.rows[3].upVolume, p.rows[3].downVolume]).toEqual([1, 1]); // F up, E down
+  });
+
+  it("grows the value area over touches: 70 % of 7 = 4.9 -> POC row (3) + the upper neighbour (1) + the next (2)", () => {
+    const p = buildVolumeProfile(slice, 4, 0.7, "time");
+
+    // POC row 1 (3); neighbours row 0 (1) and row 2 (1): the upper wins the tie -> 4; then row 3 (2) beats row 0 -> 6.
+    expect([p.val, p.vah]).toEqual([1, 4]);
+  });
+
+  it("does not let the volume weight count a zero-volume candle, nor widen the range for it", () => {
+    const p = buildVolumeProfile(slice, 4, 0.7, "volume");
+
+    expect(p.rows[0].priceLow).toBe(1.1); // A (low 0) was dropped, so the range starts at B's low
+  });
+
+  it("leaves the volume weight (the default) exactly as before", () => {
+    const sameAsDefault = buildVolumeProfile(slice, 4, 0.7, "volume");
+    expect(sameAsDefault).toEqual(buildVolumeProfile(slice, 4, 0.7));
+    expect(buildVolumeProfile([c(10, 20, 10, 15, 4)], 5, 0.7, "volume").totalVolume).toBe(4);
+  });
+
+  it("ignores a candle with a non-finite price even under the time weight", () => {
+    const p = buildVolumeProfile([c(1, 2, 1, 2, 1), c(Number.NaN, 2, 1, 2, 1)], 2, 0.7, "time");
+
+    expect(p.totalVolume).toBe(2); // one candle, both its rows
+  });
+});

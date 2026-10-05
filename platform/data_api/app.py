@@ -62,6 +62,7 @@ from data_api.routes import alerts as alerts_routes
 from data_api.routes import archive as archive_routes
 from data_api.routes import candles as candles_routes
 from data_api.routes import drawings as drawings_routes
+from data_api.routes import footprint as footprint_routes
 from data_api.routes import indicator_series as indicator_series_routes
 from data_api.routes import indicators as indicators_routes
 from data_api.routes import layout as layout_routes
@@ -278,6 +279,7 @@ app.include_router(alerts_routes.router)
 app.include_router(archive_routes.router)
 app.include_router(rankings_routes.router)
 app.include_router(candles_routes.router)
+app.include_router(footprint_routes.router)
 app.include_router(indicator_series_routes.router)
 app.include_router(drawings_routes.router)
 app.include_router(indicators_routes.router)

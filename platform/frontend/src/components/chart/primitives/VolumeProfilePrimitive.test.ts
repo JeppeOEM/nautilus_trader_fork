@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import { tpoRows } from "../../../lib/tpo";
 import { buildVolumeProfile } from "../../../lib/volumeProfile";
+import { attachTo, drawPrimitive, fakeContext } from "../../../test/drawingKit";
 import type { Time } from "lightweight-charts";
 import { vi } from "vitest";
 
@@ -8,6 +10,7 @@ import { CHART_TOKENS } from "../chartTheme";
 import {
   VolumeProfilePrimitive,
   layoutProfile,
+  layoutTpo,
   snapRow,
   snapSpan,
   type ResolvedProfileSpec,
@@ -175,6 +178,22 @@ describe("VolumeProfilePrimitive time anchors (Story 18.6)", () => {
 
     expect(primitive.resolvedAnchor()).toBeNull();
   });
+
+  it("with throughEndBar, includes the end bar's slot, so a one-bar range is one bar wide (Story 32.7)", () => {
+    const oneBar = new VolumeProfilePrimitive({ ...timeSpec, width: { toTime: 100 as Time }, throughEndBar: true });
+    oneBar.attached({
+      chart: { timeScale: () => ({ timeToCoordinate: (t: number) => t / 2, options: () => ({ barSpacing: 8 }) }) },
+      series: { priceToCoordinate: (p: number) => p * 10 },
+      requestUpdate: vi.fn(),
+    } as never);
+    oneBar.updateAllViews();
+    expect(oneBar.resolvedAnchor()).toEqual({ xAnchor: 50, width: 8 });
+
+    const plain = new VolumeProfilePrimitive({ ...timeSpec, width: { toTime: 100 as Time } });
+    attach(plain, () => 0);
+    plain.updateAllViews();
+    expect(plain.resolvedAnchor()).toEqual({ xAnchor: 50, width: 0 }); // the other profiles: unchanged
+  });
 });
 
 describe("VolumeProfilePrimitive anchor offsets (DW-152)", () => {
@@ -313,3 +332,117 @@ describe("VolumeProfilePrimitive session options (Story 18.8)", () => {
     expect(fills.flatMap((f) => f.rect).every(Number.isInteger)).toBe(true);
   });
 });
+
+describe("TPO rendering (Story 32.7)", () => {
+  // Four rows of 20 over 0..80: row 0 touched once, row 1 three times (two up, one down), row 2 never,
+  // row 3 41 times (40 candles and the last one).
+  const touching = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ open: 70, high: 79, low: 61, close: i % 2 === 0 ? 75 : 65, volume: 1 }));
+  const candles = [
+    { open: 1, high: 10, low: 0, close: 5, volume: 1 },
+    ...[1, 2, 3].map((i) => ({ open: 30, high: 39, low: 21, close: i === 2 ? 25 : 35, volume: 1 })),
+    ...touching(40),
+    { open: 79, high: 80, low: 79.5, close: 79.8, volume: 1 },
+  ];
+  const timeProfile = buildVolumeProfile(candles, 4, 0.7, "time");
+  const rows = tpoRows(timeProfile, candles);
+
+  const tpoSpec = (over: Partial<VolumeProfileRenderSpec> = {}): VolumeProfileRenderSpec => ({
+    profile: timeProfile,
+    xAnchor: { time: 100 as Time },
+    width: { toTime: 700 as Time },
+    upColor: "#0f0",
+    downColor: "#f00",
+    showPoc: true,
+    showValueArea: false,
+    tpo: { rows, letters: false },
+    ...over,
+  });
+  // y of price p is 1000 - p (the drawing kit), so each 20-wide row is 20 px tall.
+  const draw = (spec: VolumeProfileRenderSpec) => {
+    const primitive = new VolumeProfilePrimitive(spec);
+    attachTo(primitive);
+    return drawPrimitive(primitive, 1000);
+  };
+
+  it("counts the rows from the one engine: the 41-touch row dominates and overflows by 11", () => {
+    expect(rows.map((r) => r.count)).toEqual([1, 3, 0, 41]);
+    expect(rows[3]).toMatchObject({ blocks: 30, overflow: 11 });
+  });
+
+  it("lays blocks side by side from the anchor, the fullest row spanning the width, with one longer overflow bar", () => {
+    const resolved = { ...spec(), profile: timeProfile, xAnchor: 100, width: 600, tpo: { rows, letters: false } };
+    const laid = layoutTpo(resolved, [0, 1, 2, 3].map((i) => ({ y1: (3 - i) * 20, y2: (4 - i) * 20 })), 1000);
+    const fullest = Math.max(...rows.map((r) => r.count));
+    const unit = 600 / fullest;
+    const overflowing = laid.find((r) => r.overflow !== null)!;
+
+    expect(overflowing.blocks).toHaveLength(30);
+    expect(overflowing.blocks[0]).toMatchObject({ x: 100, w: unit });
+    expect(overflowing.blocks[1].x).toBeCloseTo(100 + unit);
+    expect(overflowing.overflow!.x).toBeCloseTo(100 + 30 * unit);
+    expect(overflowing.overflow!.w).toBeCloseTo(11 * unit);
+    // a row's whole length is proportional to its touches
+    const lengthOf = (r: (typeof laid)[number]) => r.blocks.length * unit + (r.overflow?.w ?? 0);
+    expect(Math.max(...laid.map(lengthOf))).toBeCloseTo(600);
+  });
+
+  it("marks exactly one row as the POC (the fullest)", () => {
+    const resolved = { ...spec(), profile: timeProfile, xAnchor: 0, width: 600, tpo: { rows, letters: false } };
+    // row 2 has no touches and no span: it is skipped, as a row off the price scale is
+    const laid = layoutTpo(resolved, [{ y1: 3, y2: 4 }, { y1: 2, y2: 3 }, null, { y1: 0, y2: 1 }], 1000);
+
+    expect(laid.filter((r) => r.isPoc)).toHaveLength(1);
+    expect(laid.find((r) => r.isPoc)!.overflow).not.toBeNull(); // the 41-touch row
+  });
+
+  it("draws one filled block per touch (capped) and one bar per overflowing row, in the candle's side colour", () => {
+    const { fills } = draw(tpoSpec());
+    const expectedBlocks = rows.reduce((n, r) => n + r.blocks, 0);
+    const expectedOverflow = rows.filter((r) => r.overflow > 0).length;
+
+    expect(fills).toHaveLength(expectedBlocks + expectedOverflow);
+    expect(new Set(fills.map((f) => f.style))).toEqual(new Set(["#0f0", "#f00"]));
+  });
+
+  it("draws letters instead of nothing extra only when asked, and only where a block is wide enough", () => {
+    expect(draw(tpoSpec()).texts).toHaveLength(0);
+
+    const lettered = draw(tpoSpec({ tpo: { rows, letters: true } }));
+    expect(lettered.texts.length).toBeGreaterThan(0);
+    expect(lettered.texts.every((t) => /^[A-Za-z]$/.test(t.text))).toBe(true);
+    // A very narrow profile makes blocks too thin to hold a letter.
+    const narrow = draw(tpoSpec({ width: { toTime: 101 as Time }, tpo: { rows, letters: true } }));
+    expect(narrow.texts).toHaveLength(0);
+  });
+
+  it("outlines the initial balance between its prices across the profile, and only for a TPO", () => {
+    const primitive = new VolumeProfilePrimitive(tpoSpec({ initialBalance: { high: 60, low: 20 } }));
+    attachTo(primitive);
+    const strokeRect = vi.fn();
+    const recorded = drawWith(primitive, strokeRect);
+
+    // x from the anchor (100) across the width (600), y from the high (940) to the low (980)
+    expect(recorded).toContainEqual([100, 940, 600, 40]);
+
+    const plain = new VolumeProfilePrimitive({ ...tpoSpec(), tpo: undefined, initialBalance: { high: 60, low: 20 } });
+    attachTo(plain);
+    const plainRects: number[][] = [];
+    drawWith(plain, (...args: number[]) => plainRects.push(args));
+    expect(plainRects).not.toContainEqual([100, 940, 600, 40]);
+  });
+});
+
+function drawWith(primitive: VolumeProfilePrimitive, strokeRect: (...args: number[]) => void): number[][] {
+  const calls: number[][] = [];
+  const recorded = fakeContext();
+  recorded.context.strokeRect = ((...args: number[]) => {
+    calls.push(args);
+    strokeRect(...args);
+  }) as never;
+  primitive.paneViews()[0].renderer()!.draw({
+    useBitmapCoordinateSpace: (cb: (scope: unknown) => void) =>
+      cb({ context: recorded.context, bitmapSize: { width: 1000, height: 500 }, horizontalPixelRatio: 1, verticalPixelRatio: 1 }),
+  } as never);
+  return calls;
+}

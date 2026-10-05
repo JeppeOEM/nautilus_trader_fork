@@ -4,13 +4,33 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CreatePriceLineOptions, Time } from "lightweight-charts";
 
-import type { ChartMode, DrawingSpec, IndicatorPaneSpec, PriceLineSpec, TrendlineSpec, VolumeProfileSpec } from "./LightweightChart";
+import type {
+  AnchoredVpSpec,
+  AnchoredVwapSpec,
+  ChartMode,
+  DrawingSpec,
+  IndicatorPaneSpec,
+  PriceLineSpec,
+  TrendlineSpec,
+  VolumeProfileSpec,
+} from "./LightweightChart";
+import { AnchoredVpPrimitive } from "./primitives/AnchoredVpPrimitive";
+import { AnchoredVwapPrimitive } from "./primitives/AnchoredVwapPrimitive";
 import { TrendlinePrimitive } from "./primitives/TrendlinePrimitive";
 import { FibPrimitive } from "./primitives/FibPrimitive";
 import { PositionPrimitive } from "./primitives/PositionPrimitive";
-import { type DragPoint, type FibDrawing, type PositionDrawing, defaultFibLevels, newPosition } from "../../lib/drawings";
+import {
+  type DragPoint,
+  type FibDrawing,
+  type PositionDrawing,
+  defaultFibLevels,
+  newAnchoredVp,
+  newAnchoredVwap,
+  newPosition,
+} from "../../lib/drawings";
 import { GapPrimitive } from "./primitives/GapPrimitive";
 import { MeasurementPrimitive } from "./primitives/MeasurementPrimitive";
+import { FootprintPrimitive, type FootprintRenderSpec } from "./primitives/FootprintPrimitive";
 
 const addSeriesMock = vi.fn();
 const seriesUpdateMock = vi.fn();
@@ -200,6 +220,7 @@ type ChartTestProps = {
   data?: { time: Time; open: number; high: number; low: number; close: number }[];
   markerTime?: Time | null;
   followNewest?: boolean;
+  anchorMarkerTime?: Time | null;
   volumeProfiles?: VolumeProfileSpec[];
   crosshairVisible?: boolean;
   viewCommand?: { kind: "fit" | "latest"; seq: number } | null;
@@ -2506,5 +2527,175 @@ describe("LightweightChart layout restore and reports (Story 32.6)", () => {
 
     expect(onVisibleBars).not.toHaveBeenCalled();
     expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("anchored drawings and the Auto Anchored marker (Story 32.7)", () => {
+  const bar = (n: number) => ({ time: n as Time, open: 1, high: 2, low: 1, close: 1 });
+  const bars = [bar(100), bar(200), bar(300)];
+  const vpSpec = (id = "anchored_vp-1"): AnchoredVpSpec => ({
+    ...newAnchoredVp(id, 200, "#25a399", "#ef5350"),
+    anchorPrice: 100,
+  });
+  const vwapSpec = (id = "anchored_vwap-1"): AnchoredVwapSpec => ({
+    ...newAnchoredVwap(id, 100, "#2962ff", "#b26a00"),
+    points: [],
+  });
+
+  it("attaches an anchor primitive for an Anchored VP and a line primitive for an Anchored VWAP, and updates them in place", () => {
+    const { rerender } = render(chartElement({ drawings: [vpSpec(), vwapSpec()], data: bars }));
+
+    expect(attachPrimitiveMock.mock.calls.map((c) => c[0].constructor)).toEqual([AnchoredVpPrimitive, AnchoredVwapPrimitive]);
+    const vwap = attachPrimitiveMock.mock.calls[1][0] as AnchoredVwapPrimitive;
+    const spy = vi.spyOn(vwap, "update");
+    const edited = { ...vwapSpec(), bands: true };
+    rerender(chartElement({ drawings: [vpSpec(), edited], data: bars }));
+
+    expect(spy).toHaveBeenCalledWith(edited, edited.points);
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("detaches a removed anchored drawing", () => {
+    const { rerender } = render(chartElement({ drawings: [vpSpec()], data: bars }));
+    const attached = attachPrimitiveMock.mock.calls[0][0];
+
+    rerender(chartElement({ drawings: [], data: bars }));
+
+    expect(detachPrimitiveMock).toHaveBeenCalledWith(attached);
+  });
+
+  it("offers Settings... in the edit menu of both kinds (they have a modal), and the colour of the VP is its up colour", () => {
+    const onDrawingSettings = vi.fn();
+    const hit = (x: number, y: number) => {
+      const click = subscribeClickMock.mock.calls.at(-1)![0];
+      act(() => click({ point: { x, y }, sourceEvent: { clientX: 5, clientY: 5 } }));
+    };
+    const vwap: AnchoredVwapSpec = {
+      ...vwapSpec(),
+      points: [
+        { time: 100, vwap: 50, sd: 0, upper1: 50, lower1: 50, upper2: 50, lower2: 50 },
+        { time: 300, vwap: 60, sd: 0, upper1: 60, lower1: 60, upper2: 60, lower2: 60 },
+      ],
+    };
+    render(chartElement({ drawings: [vpSpec(), vwap], data: bars, drawEditable: true, onDrawingSettings, onDrawingColor: () => {} }));
+    for (const call of attachPrimitiveMock.mock.calls) {
+      const primitive = call[0];
+      primitive.attached({
+        chart: { timeScale: () => ({ timeToCoordinate: (t: number) => t, logicalToCoordinate: (i: number) => i * 10 }) },
+        series: { priceToCoordinate: (p: number) => p },
+        requestUpdate: vi.fn(),
+      } as never);
+      primitive.updateAllViews();
+    }
+
+    hit(200, 400); // on the VP's anchor line (x 200), far from its handle
+    expect(screen.getByLabelText("Line color")).toHaveValue("#25a399");
+    fireEvent.click(screen.getByText("Settings…"));
+    expect(onDrawingSettings).toHaveBeenCalledWith("anchored_vp-1");
+
+    hit(250, 55); // on the VWAP line
+    fireEvent.click(screen.getByText("Settings…"));
+    expect(onDrawingSettings).toHaveBeenCalledWith("anchored_vwap-1");
+  });
+
+  it("attaches, moves and detaches the anchor marker apart from the replay marker", () => {
+    const { rerender } = render(chartElement({ anchorMarkerTime: 100 as Time, markerTime: 200 as Time }));
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(2);
+    const [replayMarker, anchorMarker] = attachPrimitiveMock.mock.calls.map((c) => c[0]);
+    expect(replayMarker).not.toBe(anchorMarker);
+    expect(anchorMarker).toMatchObject({ time: 100, token: "--chart-drawing" });
+
+    rerender(chartElement({ anchorMarkerTime: 300 as Time, markerTime: 200 as Time }));
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(2); // moved, not re-attached
+    expect(anchorMarker).toMatchObject({ time: 300 });
+
+    rerender(chartElement({ anchorMarkerTime: null, markerTime: 200 as Time }));
+    expect(detachPrimitiveMock).toHaveBeenCalledTimes(1);
+    expect(detachPrimitiveMock).toHaveBeenCalledWith(anchorMarker);
+  });
+
+  it("re-attaches the anchor marker to the new host after a Candles -> Lines -> Candles flip", () => {
+    const { rerender } = render(chartElement({ anchorMarkerTime: 100 as Time, data: bars }));
+    const before = attachPrimitiveMock.mock.calls.length;
+
+    rerender(chartElement({ anchorMarkerTime: 100 as Time, data: bars, mode: "lines" }));
+    rerender(chartElement({ anchorMarkerTime: 100 as Time, data: bars, mode: "candles" }));
+
+    const markers = attachPrimitiveMock.mock.calls
+      .slice(before)
+      .map((c) => c[0])
+      .filter((p) => p.constructor.name === "VerticalMarkerPrimitive");
+    expect(markers).toHaveLength(1);
+    expect(markers[0]).toMatchObject({ time: 100 });
+  });
+});
+
+describe("the volume footprint (Story 32.8)", () => {
+  const settings = { on: true, row_ticks: 0, mode: "bid_ask" as const, imbalance_ratio: 3, text: true };
+  const spec = (over: Partial<FootprintRenderSpec> = {}): FootprintRenderSpec => ({
+    items: [],
+    precision: { price: 2, size: 3 },
+    settings,
+    ...over,
+  });
+  const footprints = () => attachPrimitiveMock.mock.calls.map((c) => c[0]).filter((p) => p instanceof FootprintPrimitive);
+  const pricePane = (): HTMLElement => {
+    const paneEl = document.createElement("div");
+    document.body.appendChild(paneEl);
+    const base = createChartMock.getMockImplementation()!;
+    createChartMock.mockImplementation((...args: unknown[]) => ({
+      ...base(...args),
+      panes: () => [{ ...pricePaneMock, getHTMLElement: () => paneEl }],
+    }));
+    return paneEl;
+  };
+
+  it("attaches one primitive on the candle series, updates it in place and detaches it when off", () => {
+    const first = spec();
+    const { rerender } = render(<LightweightChart data={[]} onChartApi={() => {}} footprint={first} />);
+    expect(footprints()).toHaveLength(1);
+    const [primitive] = footprints();
+    const update = vi.spyOn(primitive, "update");
+
+    const next = spec({ settings: { ...settings, mode: "delta" } });
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} footprint={next} />);
+    expect(footprints()).toHaveLength(1);
+    expect(update).toHaveBeenCalledWith(next);
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} footprint={null} />);
+    expect(detachPrimitiveMock).toHaveBeenCalledWith(primitive);
+  });
+
+  it("draws nothing in Lines mode and re-attaches on the return to Candles", () => {
+    const footprint = spec();
+    const { rerender } = render(<LightweightChart mode="lines" data={[]} onChartApi={() => {}} footprint={footprint} />);
+    expect(footprints()).toHaveLength(0);
+
+    rerender(<LightweightChart mode="candles" data={[]} onChartApi={() => {}} footprint={footprint} />);
+    rerender(<LightweightChart mode="lines" data={[]} onChartApi={() => {}} footprint={footprint} />);
+    rerender(<LightweightChart mode="candles" data={[]} onChartApi={() => {}} footprint={footprint} />);
+
+    expect(footprints()).toHaveLength(2);
+    expect(footprints()[0]).not.toBe(footprints()[1]);
+  });
+
+  it("has a price-pane legend row with its mode and row size, a gear and an x, reported as 'footprint'", () => {
+    const onLegendAction = vi.fn();
+    const paneEl = pricePane();
+    const { rerender } = render(
+      <LightweightChart data={[]} onChartApi={() => {}} footprint={spec()} onLegendAction={onLegendAction} />,
+    );
+
+    const row = paneEl.querySelector('.chart-legend-row[data-group="footprint"]')!;
+    expect(row.textContent).toBe("Footprintbid×ask · auto rows");
+    expect([...row.querySelectorAll("button")].map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Settings for Footprint",
+      "Remove Footprint",
+    ]);
+    (row.querySelector('button[aria-label="Settings for Footprint"]') as HTMLElement).click();
+    expect(onLegendAction).toHaveBeenCalledWith("settings", "footprint");
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} footprint={null} onLegendAction={onLegendAction} />);
+    expect(paneEl.querySelector('.chart-legend-row[data-group="footprint"]')).toBeNull();
   });
 });

@@ -88,6 +88,29 @@ export interface ErrorsResponse {
   services: Record<string, ServiceErrorSummary>;
 }
 
+export interface FootprintItem {
+  t: number;
+  row_ticks: number | null;
+  rows: FootprintRow[];
+  delta: number | null;
+  total: number | null;
+  poc_row: number | null;
+  no_trades: boolean;
+}
+
+export interface FootprintResponse {
+  items: FootprintItem[];
+  has_more: boolean;
+  price_precision: number;
+  size_precision: number;
+}
+
+export interface FootprintRow {
+  p: number;
+  b: number;
+  s: number;
+}
+
 export interface HealthResponse {
   status: string;
 }

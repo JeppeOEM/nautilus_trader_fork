@@ -38,6 +38,8 @@ vi.mock("../api/client", () => ({
   saveCoinDrawings: (...args: unknown[]) => drawingsApi.save(...args),
   fetchCoinIndicatorConfig: vi.fn().mockResolvedValue([]),
   saveCoinIndicatorConfig: saveConfigMock,
+  // Story 32.8: never reached (useFootprint is mocked below); listed so a stray call fails loudly.
+  fetchFootprint: vi.fn(() => Promise.reject(new Error("fetchFootprint is not stubbed in this test"))),
   // IndicatorPicker (rendered by ChartPage) fetches the catalog on mount.
   fetchIndicatorCatalog: vi.fn().mockResolvedValue({
     SimpleMovingAverage: { params: {}, panel: "overlay", category: "native", source_selectable: true },
@@ -57,6 +59,7 @@ const hooks = vi.hoisted(() => ({
   liveBar: [] as number[],
   pickerBar: [] as number[],
   openGapTo: [] as number[],
+  footprint: [] as { enabled: boolean; rowTicks: number; barSeconds: number }[],
 }));
 // Stable references (a fresh array per render would churn useReplay's memo) that the
 // replay tests swap in.
@@ -86,6 +89,18 @@ vi.mock("../hooks/useCandles", () => ({
       precision: mocks.precision,
       openGapTo: (time: number) => hooks.openGapTo.push(time),
     };
+  },
+}));
+
+// Story 32.8: the footprint hook records what the page asks of it; `footprintResult` is what it
+// answers (a stable object, like the real hook's state).
+const footprintResult = vi.hoisted(() => ({
+  current: { items: [] as unknown[], precision: null as { price: number; size: number } | null, error: null as string | null },
+}));
+vi.mock("../hooks/useFootprint", () => ({
+  useFootprint: (_iid: string, _chart: unknown, barSeconds: number, enabled: boolean, rowTicks: number) => {
+    hooks.footprint.push({ enabled, rowTicks, barSeconds });
+    return footprintResult.current;
   },
 }));
 
@@ -182,6 +197,9 @@ interface ChartStubProps {
   liveBar?: unknown;
   markerTime?: number | null;
   followNewest?: boolean;
+  anchorMarkerTime?: number | null;
+  legendExtras?: { id: string; label: string; color: string; value: number | null; format: (value: number) => string }[];
+  footprint?: { items: { t: number }[]; precision: { price: number; size: number } | null; settings: Record<string, unknown> } | null;
   volumeProfiles?: {
     id: string;
     profile: { totalVolume: number; rows: unknown[] };
@@ -194,6 +212,8 @@ interface ChartStubProps {
     barSeconds?: number;
     upColor?: string;
     showPoc?: boolean;
+    tpo?: { rows: { count: number; blocks: number; overflow: number }[]; letters: boolean };
+    initialBalance?: { high: number; low: number };
   }[];
   rangeSelectActive?: boolean;
   profileEdgesEditable?: boolean;
@@ -273,6 +293,8 @@ beforeEach(() => {
   hooks.liveBar = [];
   hooks.pickerBar = [];
   hooks.openGapTo = [];
+  hooks.footprint = [];
+  footprintResult.current = { items: [], precision: null, error: null };
   localStorage.clear();
   mocks.candles = [];
   mocks.volume = [];
@@ -730,6 +752,8 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
       "Short position tool",
       "Measurement tool",
       "Fixed range volume profile tool",
+      "Anchored volume profile tool",
+      "Anchored VWAP tool",
     ]);
   });
 });
@@ -2843,5 +2867,653 @@ describe("ChartPage layout that comes back as it was left (Story 32.6)", () => {
       await act(async () => {});
       expect(screen.getByRole("alert")).toHaveTextContent(/could not be reset to the default/);
     });
+  });
+});
+
+describe("ChartPage Anchored VP and Anchored VWAP drawings (Story 32.7)", () => {
+  // Four 1-minute bars; the volume of each is its time / 100.
+  const bar = (t: number, low: number, high: number) => ({ time: t, open: low, high, low, close: high });
+  const bars = [bar(100, 10, 12), bar(200, 11, 13), bar(300, 12, 14), bar(400, 13, 15)];
+  const volumes = (list = bars) => list.map((b) => ({ time: b.time, value: b.time / 100 }));
+  const avpProfiles = () => lastChartProps.current!.volumeProfiles!.filter((p) => p.id.startsWith("avp-"));
+  const place = (toolName: string, time: number) => {
+    fireEvent.click(screen.getByRole("button", { name: toolName }));
+    act(() => lastChartProps.current!.onPointClick!({ time, price: 12 }));
+  };
+
+  beforeEach(() => {
+    mocks.candles = bars;
+    mocks.volume = volumes();
+  });
+
+  it("one click places an Anchored VP: the engine's profile from that bar to the latest, and the tool disarms", async () => {
+    await renderReady(page());
+    place("Anchored volume profile tool", 200);
+
+    expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true");
+    const spec = lastChartProps.current!.drawings!.find((d) => d.kind === "anchored_vp")!;
+    expect(spec).toMatchObject({ id: "anchored_vp-1", time: 200, rows: 24, value_area_pct: 70 });
+    expect(spec.up_color).toBe(CHART_TOKENS["--chart-up"]);
+    expect(spec.anchorPrice).toBe(15); // the profile's top
+    expect(avpProfiles()).toHaveLength(1);
+    expect(avpProfiles()[0]).toMatchObject({ id: "avp-anchored_vp-1", xAnchor: { time: 200 }, width: { toTime: 400 }, throughEndBar: true });
+    // volume of bars 200, 300, 400 = 2 + 3 + 4
+    expect(avpProfiles()[0].profile.totalVolume).toBeCloseTo(9);
+  });
+
+  it("follows new bars: the profile grows to the latest bar", async () => {
+    const { rerender } = await renderReady(page());
+    place("Anchored volume profile tool", 200);
+
+    const more = [...bars, bar(500, 14, 16)];
+    mocks.candles = more;
+    mocks.volume = volumes(more);
+    rerender(page());
+
+    expect(avpProfiles()[0]).toMatchObject({ xAnchor: { time: 200 }, width: { toTime: 500 } });
+    expect(avpProfiles()[0].profile.totalVolume).toBeCloseTo(14);
+  });
+
+  it("a click on the forming bar draws at once: both include the live bar, and it closes into history unchanged", async () => {
+    mocks.liveBar = { time: 500, open: 14, high: 16, low: 14, close: 16, volume: 5 };
+    const { rerender } = await renderReady(page());
+    place("Anchored volume profile tool", 500);
+    place("Anchored VWAP tool", 400);
+
+    expect(avpProfiles()).toHaveLength(1);
+    expect(avpProfiles()[0]).toMatchObject({ xAnchor: { time: 500 }, width: { toTime: 500 } });
+    expect(avpProfiles()[0].profile.totalVolume).toBeCloseTo(5);
+    const vwap = () =>
+      lastChartProps.current!.drawings!.find((d) => d.kind === "anchored_vwap")! as unknown as { points: { time: number }[] };
+    expect(vwap().points.map((p) => p.time)).toEqual([400, 500]);
+
+    // The live bar closes: history holds it now, and the drawings read the same bars.
+    const closed = [...bars, bar(500, 14, 16)];
+    mocks.candles = closed;
+    mocks.volume = [...volumes(bars), { time: 500, value: 5 }];
+    mocks.liveBar = null;
+    rerender(page());
+    expect(avpProfiles()[0]).toMatchObject({ xAnchor: { time: 500 }, width: { toTime: 500 } });
+    expect(avpProfiles()[0].profile.totalVolume).toBeCloseTo(5);
+    expect(vwap().points.map((p) => p.time)).toEqual([400, 500]);
+  });
+
+  it("an anchor in a gap slot is drawn on the real bar the profile starts at, not on the slot", async () => {
+    mocks.candles = [bar(100, 10, 12), bar(200, 11, 13), { time: 250 }, bar(300, 12, 14), bar(400, 13, 15)];
+    drawingsApi.server = [
+      { kind: "anchored_vp", id: "anchored_vp-1", time: 250, rows: 24, value_area_pct: 70, up_color: "#25a399", down_color: "#ef5350" },
+    ];
+    await renderReady(page());
+
+    expect(lastChartProps.current!.drawings!.find((d) => d.kind === "anchored_vp")).toMatchObject({ time: 200 });
+    expect(avpProfiles()[0].xAnchor).toEqual({ time: 200 });
+  });
+
+  it("opens the Anchored VP's and VWAP's settings before the instrument's precision is known (their dialogs print no price)", async () => {
+    drawingsApi.server = [
+      { kind: "anchored_vp", id: "anchored_vp-1", time: 200, rows: 24, value_area_pct: 70, up_color: "#25a399", down_color: "#ef5350" },
+      { kind: "anchored_vwap", id: "anchored_vwap-1", time: 100, source: "hlc3", bands: false, band_color: "#b26a00" },
+    ];
+    mocks.precision = null;
+    await renderReady(page());
+
+    act(() => lastChartProps.current!.onDrawingSettings!("anchored_vwap-1"));
+    const vwapDialog = screen.getByRole("dialog", { name: "Anchored VWAP settings" });
+    fireEvent.click(within(vwapDialog).getByRole("button", { name: "Cancel" }));
+    act(() => lastChartProps.current!.onDrawingSettings!("anchored_vp-1"));
+    expect(screen.getByRole("dialog", { name: "Anchored volume profile settings" })).toBeInTheDocument();
+  });
+
+  it("the VWAP's line colour picker shows the colour the line is drawn in when none is stored", async () => {
+    drawingsApi.server = [{ kind: "anchored_vwap", id: "anchored_vwap-1", time: 100, source: "hlc3", bands: false, band_color: "#b26a00" }];
+    await renderReady(page());
+
+    act(() => lastChartProps.current!.onDrawingSettings!("anchored_vwap-1"));
+    const dialog = screen.getByRole("dialog", { name: "Anchored VWAP settings" });
+    expect(within(dialog).getByLabelText("Line colour")).toHaveValue(CHART_TOKENS["--chart-drawing"].toLowerCase());
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    expect(lastChartProps.current!.drawings!.find((d) => d.id === "anchored_vwap-1")).not.toHaveProperty("color");
+  });
+
+  it("saves only what the wire holds (no computed rows) and restores both kinds after a reload", async () => {
+    vi.useFakeTimers();
+    try {
+      const first = await renderReady(page());
+      place("Anchored volume profile tool", 200);
+      place("Anchored VWAP tool", 300);
+      await act(async () => {
+        vi.advanceTimersByTime(SAVE_DEBOUNCE_MS + 1);
+      });
+
+      const saved = drawingsApi.save.mock.calls.at(-1)![1] as Record<string, unknown>[];
+      expect(saved).toEqual([
+        {
+          kind: "anchored_vp",
+          id: "anchored_vp-1",
+          time: 200,
+          rows: 24,
+          value_area_pct: 70,
+          up_color: CHART_TOKENS["--chart-up"],
+          down_color: CHART_TOKENS["--chart-down"],
+        },
+        {
+          kind: "anchored_vwap",
+          id: "anchored_vwap-1",
+          time: 300,
+          source: "hlc3",
+          bands: false,
+          color: CHART_TOKENS["--chart-drawing"],
+          band_color: CHART_TOKENS["--chart-pane-4"],
+        },
+      ]);
+      first.unmount();
+
+      drawingsApi.server = saved;
+      await renderReady(page());
+      expect(avpProfiles()).toHaveLength(1);
+      expect(lastChartProps.current!.drawings!.map((d) => d.kind)).toEqual(["anchored_vp", "anchored_vwap"]);
+      expect(lastChartProps.current!.legendExtras).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an Anchored VWAP carries the line from its anchor and the current value in the legend at the instrument precision", async () => {
+    await renderReady(page());
+    place("Anchored VWAP tool", 100);
+
+    const spec = lastChartProps.current!.drawings!.find((d) => d.kind === "anchored_vwap")! as unknown as {
+      points: { time: number; vwap: number }[];
+    };
+    expect(spec.points.map((p) => p.time)).toEqual([100, 200, 300, 400]);
+    // hlc3 = (high + low + close) / 3 per bar; volumes 1..4
+    const hlc3 = bars.map((b) => (b.high + b.low + b.close) / 3);
+    const expected = hlc3.reduce((sum, v, i) => sum + v * (i + 1), 0) / 10;
+    const legend = lastChartProps.current!.legendExtras![0];
+    expect(legend.label).toBe("AVWAP (hlc3)");
+    expect(legend.value).toBeCloseTo(expected, 10);
+    expect(legend.format(legend.value!)).toBe(expected.toFixed(2)); // precision 2
+  });
+
+  it("leaves no point and no legend value for a VWAP over zero-volume bars", async () => {
+    mocks.volume = bars.map((b) => ({ time: b.time, value: 0 }));
+    await renderReady(page());
+    place("Anchored VWAP tool", 100);
+
+    const spec = lastChartProps.current!.drawings!.find((d) => d.kind === "anchored_vwap")! as unknown as { points: unknown[] };
+    expect(spec.points).toEqual([]);
+    expect(lastChartProps.current!.legendExtras![0].value).toBeNull();
+  });
+
+  it("draws nothing for an anchor older than the loaded bars, until a scroll-back pages them in", async () => {
+    drawingsApi.server = [
+      { kind: "anchored_vwap", id: "anchored_vwap-1", time: 50, source: "hlc3", bands: false, band_color: "#b26a00" },
+      { kind: "anchored_vp", id: "anchored_vp-1", time: 50, rows: 24, value_area_pct: 70, up_color: "#25a399", down_color: "#ef5350" },
+    ];
+    const { rerender } = await renderReady(page());
+    const specs = lastChartProps.current!.drawings! as unknown as { kind: string; points?: unknown[]; anchorPrice?: number | null }[];
+    expect(specs.find((d) => d.kind === "anchored_vwap")!.points).toEqual([]);
+    expect(specs.find((d) => d.kind === "anchored_vp")!.anchorPrice).toBeNull();
+    expect(avpProfiles()).toHaveLength(0);
+
+    const older = [bar(40, 9, 11), ...bars];
+    mocks.candles = older;
+    mocks.volume = volumes(older);
+    rerender(page());
+    expect(avpProfiles()).toHaveLength(1);
+    expect(avpProfiles()[0].xAnchor).toEqual({ time: 40 }); // drawn on the bar at or before the anchor... which is 40
+  });
+
+  it("dragging the anchor handle moves the anchor to the pointer's bar and the profile with it", async () => {
+    await renderReady(page());
+    place("Anchored volume profile tool", 200);
+
+    act(() => lastChartProps.current!.onDrawingDrag!("anchored_vp-1", "anchor", { price: 11, time: 300, barsSince: () => null }));
+
+    expect(avpProfiles()[0].xAnchor).toEqual({ time: 300 });
+    expect(avpProfiles()[0].profile.totalVolume).toBeCloseTo(7); // bars 300 and 400
+  });
+
+  it("shows neither in Lines mode (their bars are candles)", async () => {
+    await renderReady(page());
+    place("Anchored volume profile tool", 200);
+    place("Anchored VWAP tool", 100);
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+
+    expect(lastChartProps.current!.drawings).toEqual([]);
+    expect(avpProfiles()).toHaveLength(0);
+    expect(lastChartProps.current!.legendExtras).toEqual([]);
+    expect(screen.getByRole("button", { name: "Anchored volume profile tool" })).toBeDisabled();
+  });
+
+  it("the settings modal edits the VWAP's source and bands, and the VP's rows and value area", async () => {
+    await renderReady(page());
+    place("Anchored VWAP tool", 100);
+    place("Anchored volume profile tool", 200);
+
+    act(() => lastChartProps.current!.onDrawingSettings!("anchored_vwap-1"));
+    const vwapDialog = screen.getByRole("dialog", { name: "Anchored VWAP settings" });
+    fireEvent.change(within(vwapDialog).getByLabelText("Source"), { target: { value: "close" } });
+    fireEvent.click(within(vwapDialog).getByLabelText("Bands on"));
+    fireEvent.click(within(vwapDialog).getByRole("button", { name: "Apply" }));
+    expect(lastChartProps.current!.drawings!.find((d) => d.id === "anchored_vwap-1")).toMatchObject({ source: "close", bands: true });
+    expect(lastChartProps.current!.legendExtras![0].label).toBe("AVWAP (close)");
+
+    act(() => lastChartProps.current!.onDrawingSettings!("anchored_vp-1"));
+    const vpDialog = screen.getByRole("dialog", { name: "Anchored volume profile settings" });
+    fireEvent.change(within(vpDialog).getByLabelText("Rows"), { target: { value: "8" } });
+    fireEvent.change(within(vpDialog).getByLabelText("Value area %"), { target: { value: "60" } });
+    fireEvent.click(within(vpDialog).getByRole("button", { name: "Apply" }));
+    expect(lastChartProps.current!.drawings!.find((d) => d.id === "anchored_vp-1")).toMatchObject({ rows: 8, value_area_pct: 60 });
+    expect(avpProfiles()[0].profile.rows).toHaveLength(8);
+  });
+
+  it("a refused VP setting keeps the dialog open with the reason and changes nothing", async () => {
+    await renderReady(page());
+    place("Anchored volume profile tool", 200);
+    act(() => lastChartProps.current!.onDrawingSettings!("anchored_vp-1"));
+    const dialog = screen.getByRole("dialog", { name: "Anchored volume profile settings" });
+
+    fireEvent.change(within(dialog).getByLabelText("Rows"), { target: { value: "1" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(/Rows must be/);
+    expect(lastChartProps.current!.drawings!.find((d) => d.id === "anchored_vp-1")).toMatchObject({ rows: 24 });
+  });
+
+  it("the context menu's colour is the VWAP's colour and the VP's up colour; Delete removes the drawing and its profile", async () => {
+    await renderReady(page());
+    place("Anchored VWAP tool", 100);
+    place("Anchored volume profile tool", 200);
+
+    act(() => lastChartProps.current!.onDrawingColor!("anchored_vwap-1", "#112233"));
+    act(() => lastChartProps.current!.onDrawingColor!("anchored_vp-1", "#445566"));
+    expect(lastChartProps.current!.drawings!.find((d) => d.id === "anchored_vwap-1")).toMatchObject({ color: "#112233" });
+    expect(lastChartProps.current!.drawings!.find((d) => d.id === "anchored_vp-1")).toMatchObject({ up_color: "#445566" });
+    expect(avpProfiles()[0]).toMatchObject({ upColor: "#445566" });
+
+    act(() => lastChartProps.current!.onDrawingDelete!("anchored_vp-1"));
+    expect(avpProfiles()).toHaveLength(0);
+    expect(lastChartProps.current!.drawings!.map((d) => d.id)).toEqual(["anchored_vwap-1"]);
+  });
+});
+
+describe("ChartPage Auto Anchored profile and TPO (Story 32.7)", () => {
+  const D1 = Date.UTC(2024, 0, 3) / 1000; // a Wednesday; its week starts Mon 2024-01-01
+  const D2 = D1 + 86_400;
+  const bar = (t: number, low: number, high: number) => ({ time: t, open: low, high, low, close: high });
+  // Chart bars over two sessions; the highest high is on D1 + 120 and the lowest low on D2 + 60.
+  const chartBars = [bar(D1, 10, 12), bar(D1 + 120, 20, 30), bar(D2, 15, 18), bar(D2 + 60, 5, 17)];
+  const autoSpec = () => lastChartProps.current!.volumeProfiles!.find((p) => p.id === "auto-anchored");
+  const add = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
+
+  beforeEach(() => {
+    mocks.candles = chartBars;
+    mocks.volume = chartBars.map((b) => ({ time: b.time, value: 2 }));
+    mocks.session = {
+      candles: chartBars.filter((b) => b.time >= D2),
+      volume: chartBars.filter((b) => b.time >= D2).map((b) => ({ time: b.time, value: 2 })),
+      completeFrom: null,
+    };
+  });
+
+  it("auto at 1m is the current session: fetched from the day's start, the profile from the anchor to the latest bar, with its marker", () => {
+    render(page());
+    add("Add Auto Anchored Volume Profile");
+
+    expect(mocks.sessionArgs).toMatchObject({ enabled: true, sinceSeconds: D2, barSeconds: 60 });
+    expect(autoSpec()).toMatchObject({ xAnchor: { time: D2 }, width: { toTime: D2 + 60 } });
+    expect(autoSpec()!.profile.totalVolume).toBeCloseTo(4); // two bars of volume 2
+    expect(lastChartProps.current!.anchorMarkerTime).toBe(D2);
+  });
+
+  it("re-anchors when a live bar crosses a session boundary: the profile, the fetch and the marker move", () => {
+    const { rerender } = render(page());
+    add("Add Auto Anchored Volume Profile");
+    expect(lastChartProps.current!.anchorMarkerTime).toBe(D2);
+
+    const D3 = D2 + 86_400;
+    const more = [...chartBars, bar(D3, 16, 19)];
+    mocks.candles = more;
+    mocks.volume = more.map((b) => ({ time: b.time, value: 2 }));
+    mocks.session = { candles: more.filter((b) => b.time >= D2), volume: more.filter((b) => b.time >= D2).map((b) => ({ time: b.time, value: 2 })), completeFrom: null };
+    rerender(page());
+
+    expect(mocks.sessionArgs.sinceSeconds).toBe(D3);
+    expect(lastChartProps.current!.anchorMarkerTime).toBe(D3);
+    expect(autoSpec()).toMatchObject({ xAnchor: { time: D3 } });
+  });
+
+  it("re-resolves by the new bar size's rule on a timeframe change: 1D is a month (fetched at 15m bars)", () => {
+    layoutApi.server[IID] = layoutOf({ bar_seconds: 86_400 });
+    render(page());
+    add("Add Auto Anchored Volume Profile");
+
+    expect(mocks.sessionArgs).toMatchObject({ enabled: true, sinceSeconds: Date.UTC(2024, 0, 1) / 1000, barSeconds: 900 });
+  });
+
+  it("at 1W starts on the bar holding the month's start (not the first bar opening after it), marker there, one bar wide at least", () => {
+    const W1 = Date.UTC(2024, 0, 29) / 1000; // Monday; its week holds Thu 2024-02-01
+    const W2 = Date.UTC(2024, 1, 5) / 1000;
+    const weekly = [bar(W1 - 7 * 86_400, 10, 12), bar(W1, 11, 13), bar(W2, 12, 14)];
+    mocks.candles = weekly;
+    mocks.volume = weekly.map((b) => ({ time: b.time, value: 2 }));
+    const feb = Date.UTC(2024, 1, 1) / 1000;
+    mocks.session = { candles: [bar(feb, 11, 13), bar(W2, 12, 14)], volume: [{ time: feb, value: 2 }, { time: W2, value: 2 }], completeFrom: null };
+    layoutApi.server[IID] = layoutOf({ bar_seconds: 604_800 });
+    render(page());
+    add("Add Auto Anchored Volume Profile");
+
+    expect(mocks.sessionArgs.sinceSeconds).toBe(feb);
+    expect(autoSpec()).toMatchObject({ xAnchor: { time: W1 }, width: { toTime: W2 }, throughEndBar: true });
+    expect(lastChartProps.current!.anchorMarkerTime).toBe(W1);
+  });
+
+  it("highest high anchors at the chart's highest-high bar and reads the chart's own bars (no session fetch)", () => {
+    render(page());
+    add("Add Auto Anchored Volume Profile");
+    fireEvent.change(screen.getByLabelText("Anchor"), { target: { value: "highest_high" } });
+
+    expect(mocks.sessionArgs.enabled).toBe(false);
+    expect(autoSpec()).toMatchObject({ xAnchor: { time: D1 + 120 }, width: { toTime: D2 + 60 } });
+    expect(lastChartProps.current!.anchorMarkerTime).toBe(D1 + 120);
+    // three bars from the anchor on, volume 2 each
+    expect(autoSpec()!.profile.totalVolume).toBeCloseTo(6);
+
+    fireEvent.change(screen.getByLabelText("Anchor"), { target: { value: "lowest_low" } });
+    expect(autoSpec()).toMatchObject({ xAnchor: { time: D2 + 60 } });
+  });
+
+  it("is one session-type profile: adding the TPO replaces it, and Remove clears the marker", () => {
+    render(page());
+    add("Add Auto Anchored Volume Profile");
+    add("Add Time Price Opportunity (TPO)");
+
+    expect(autoSpec()).toBeUndefined();
+    expect(lastChartProps.current!.anchorMarkerTime).toBeNull();
+    expect(screen.getAllByRole("group", { name: "Session volume profile settings" })).toHaveLength(1);
+  });
+
+  it("does not draw a calendar anchor whose period the fetch did not fully cover", () => {
+    mocks.session = { ...mocks.session, completeFrom: D2 + 86_400 };
+    render(page());
+    add("Add Auto Anchored Volume Profile");
+
+    expect(autoSpec()).toBeUndefined();
+    expect(screen.getByText(/Not drawn yet/)).toBeInTheDocument();
+  });
+
+  it("saves the Auto Anchored preset to the layout and restores it", async () => {
+    vi.useFakeTimers();
+    const first = render(page());
+    add("Add Auto Anchored Volume Profile");
+    fireEvent.change(screen.getByLabelText("Anchor"), { target: { value: "week" } });
+    await flushSave();
+
+    expect(lastSaved().volume_profile).toMatchObject({ kind: "auto", anchor: "week", rows: 24, value_area_pct: 70 });
+    first.unmount();
+    layoutApi.server[IID] = lastSaved();
+    layoutApi.save.mockClear();
+
+    render(page());
+    expect((screen.getByLabelText("Anchor") as HTMLSelectElement).value).toBe("week");
+    expect(mocks.sessionArgs).toMatchObject({ enabled: true, sinceSeconds: Date.UTC(2024, 0, 1) / 1000, barSeconds: 300 });
+    await flushSave();
+    expect(layoutApi.save).not.toHaveBeenCalled(); // what was restored is not saved back
+  });
+
+  describe("TPO", () => {
+    // Half-hour bars of one session, 12 of them.
+    const tpoBars = Array.from({ length: 12 }, (_, i) => {
+      const low = 100 + (i % 4) * 2;
+      return bar(D2 + i * 1800, low, low + 5);
+    });
+    beforeEach(() => {
+      mocks.session = {
+        candles: tpoBars,
+        volume: tpoBars.map((b) => ({ time: b.time, value: 0 })), // volume plays no part in a TPO
+        completeFrom: null,
+      };
+      mocks.candles = [...chartBars.slice(0, 2), ...tpoBars];
+    });
+    const sessions = () => lastChartProps.current!.volumeProfiles!.filter((p) => p.id.startsWith("session-"));
+
+    it("counts 30-minute candle touches per day through the one engine and the one primitive", () => {
+      render(page());
+      add("Add Time Price Opportunity (TPO)");
+
+      expect(mocks.sessionArgs).toMatchObject({ enabled: true, barSeconds: 1800 });
+      expect(sessions()).toHaveLength(1);
+      const [tpo] = sessions();
+      expect(tpo.tpo!.letters).toBe(false);
+      expect(tpo.tpo!.rows.reduce((n, r) => n + r.count, 0)).toBe(tpo.profile.totalVolume);
+      expect(tpo.profile.totalVolume).toBeGreaterThan(12); // zero-volume bars still count, each in every row it touches
+    });
+
+    it("outlines the initial balance: the first hour, 2 x 30m, high to low", () => {
+      render(page());
+      add("Add Time Price Opportunity (TPO)");
+
+      // the first two bars: lows 100 and 102, highs 105 and 107
+      expect(sessions()[0].initialBalance).toEqual({ high: 107, low: 100 });
+
+      fireEvent.change(screen.getByLabelText("Initial balance minutes"), { target: { value: "30" } });
+      expect(sessions()[0].initialBalance).toEqual({ high: 105, low: 100 }); // one bar
+    });
+
+    it("shows letters when asked, off by default", () => {
+      render(page());
+      add("Add Time Price Opportunity (TPO)");
+      expect(sessions()[0].tpo!.letters).toBe(false);
+
+      fireEvent.click(screen.getByLabelText("TPO letters"));
+      expect(sessions()[0].tpo!.letters).toBe(true);
+    });
+
+    it("takes a day (the default) or another period", () => {
+      render(page());
+      add("Add Time Price Opportunity (TPO)");
+
+      fireEvent.change(screen.getByLabelText("Profile period"), { target: { value: "weekly" } });
+      expect(sessions()).toHaveLength(1);
+    });
+
+    it("saves kind, period, initial balance and letters, and restores them", async () => {
+      vi.useFakeTimers();
+      const first = render(page());
+      add("Add Time Price Opportunity (TPO)");
+      fireEvent.change(screen.getByLabelText("Initial balance minutes"), { target: { value: "90" } });
+      fireEvent.click(screen.getByLabelText("TPO letters"));
+      await flushSave();
+
+      expect(lastSaved().volume_profile).toMatchObject({ kind: "tpo", session: "daily", ib_minutes: 90, letters: true, rows: 48 });
+      first.unmount();
+      layoutApi.server[IID] = lastSaved();
+      layoutApi.save.mockClear();
+
+      render(page());
+      expect(sessions()[0].tpo!.letters).toBe(true);
+      expect((screen.getByLabelText("Initial balance minutes") as HTMLInputElement).value).toBe("90");
+      expect(mocks.sessionArgs.barSeconds).toBe(1800);
+      await flushSave();
+      expect(layoutApi.save).not.toHaveBeenCalled();
+    });
+
+    it("ignores an initial balance the server would refuse", () => {
+      render(page());
+      add("Add Time Price Opportunity (TPO)");
+
+      fireEvent.change(screen.getByLabelText("Initial balance minutes"), { target: { value: "5000" } });
+      fireEvent.change(screen.getByLabelText("Initial balance minutes"), { target: { value: "0" } });
+      fireEvent.blur(screen.getByLabelText("Initial balance minutes"));
+
+      expect((screen.getByLabelText("Initial balance minutes") as HTMLInputElement).value).toBe("60");
+    });
+
+    it("an old layout without the new keys restores an SVP exactly as before", () => {
+      const { anchor: _a, ib_minutes: _i, letters: _l, ...old } = BUILT_IN_LAYOUT.volume_profile;
+      layoutApi.server[IID] = { ...layoutOf(), volume_profile: { ...old, kind: "session", session: "daily" } };
+      render(page());
+
+      expect(screen.getByText("Session Volume Profile")).toBeInTheDocument();
+      expect(screen.queryByLabelText("Anchor")).toBeNull();
+    });
+  });
+
+  it("lets the initial balance field be cleared and retyped without snapping back", () => {
+    render(page());
+    add("Add Time Price Opportunity (TPO)");
+    const input = screen.getByLabelText("Initial balance minutes") as HTMLInputElement;
+
+    fireEvent.change(input, { target: { value: "" } });
+    expect(input.value).toBe(""); // the draft is kept while empty
+    fireEvent.change(input, { target: { value: "45" } });
+    expect(input.value).toBe("45");
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.blur(input);
+    expect(input.value).toBe("45"); // blur restores the last committed value
+  });
+
+  it("a TPO counts a candle that has no volume datum", () => {
+    mocks.session = {
+      candles: [bar(D2, 100, 105), bar(D2 + 1800, 100, 105)],
+      volume: [{ time: D2, value: 3 }], // the second candle has no volume row
+      completeFrom: null,
+    };
+    mocks.candles = mocks.session.candles;
+    render(page());
+    add("Add Time Price Opportunity (TPO)");
+
+    const tpo = lastChartProps.current!.volumeProfiles!.find((p) => p.id.startsWith("session-"))!;
+    expect(tpo.profile.totalVolume).toBe(2 * tpo.profile.rows.length); // both candles touch every row
+  });
+});
+
+describe("ChartPage anchored drawing past the newest bar (Story 32.7 review)", () => {
+  it("omits an anchored drawing whose anchor is after the newest displayed bar", async () => {
+    mocks.candles = [100, 200].map((t) => ({ time: t, open: 1, high: 2, low: 1, close: 2 }));
+    mocks.volume = [100, 200].map((t) => ({ time: t, value: 1 }));
+    drawingsApi.server = [
+      { kind: "anchored_vwap", id: "anchored_vwap-1", time: 900, source: "hlc3", bands: false, band_color: "#b26a00" },
+      { kind: "anchored_vp", id: "anchored_vp-1", time: 900, rows: 24, value_area_pct: 70, up_color: "#25a399", down_color: "#ef5350" },
+    ];
+    await renderReady(page());
+
+    expect(lastChartProps.current!.drawings).toEqual([]);
+    expect(lastChartProps.current!.volumeProfiles).toEqual([]);
+    expect(lastChartProps.current!.legendExtras).toEqual([]);
+  });
+
+  it("snaps the anchor on the chart's own bars even when the bar has no volume datum", async () => {
+    mocks.candles = [100, 200, 300].map((t) => ({ time: t, open: 1, high: 2, low: 1, close: 2 }));
+    mocks.volume = [100, 300].map((t) => ({ time: t, value: 1 })); // 200 has none
+    drawingsApi.server = [
+      { kind: "anchored_vp", id: "anchored_vp-1", time: 200, rows: 4, value_area_pct: 70, up_color: "#25a399", down_color: "#ef5350" },
+    ];
+    await renderReady(page());
+
+    expect(lastChartProps.current!.volumeProfiles![0].xAnchor).toEqual({ time: 200 });
+  });
+});
+
+describe("ChartPage volume footprint (Story 32.8)", () => {
+  const ITEMS = [{ t: 60_000 }, { t: 120_000 }];
+  const lastFootprintCall = () => hooks.footprint.at(-1)!;
+  async function openIndicators(): Promise<HTMLElement> {
+    render(page());
+    await act(async () => {}); // catalog load
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "Chart controls" })).getByRole("button", { name: "Indicators" }));
+    return screen.getByRole("dialog", { name: "Indicators" });
+  }
+  const legend = (action: "hide" | "settings" | "remove") => act(() => lastChartProps.current!.onLegendAction!(action, "footprint"));
+
+  it("is off by default: the hook is disabled (no request) and the chart gets no footprint", async () => {
+    const dialog = await openIndicators();
+
+    expect(within(dialog).getByRole("checkbox", { name: /Footprint/ })).not.toBeChecked();
+    expect(hooks.footprint.every((c) => !c.enabled)).toBe(true);
+    expect(lastChartProps.current!.footprint).toBeNull();
+  });
+
+  it("is pinned next to Volume, and switching it on fetches, draws and saves it in the coin's layout", async () => {
+    footprintResult.current = { items: ITEMS, precision: { price: 2, size: 6 }, error: null };
+    const dialog = await openIndicators();
+    const pinned = within(dialog).getByRole("checkbox", { name: "Volume" }).closest(".indicator-dialog-pinned")!;
+
+    fireEvent.click(within(pinned as HTMLElement).getByRole("checkbox", { name: /Footprint/ }));
+
+    expect(lastFootprintCall()).toEqual({ enabled: true, rowTicks: 0, barSeconds: 60 });
+    expect(lastChartProps.current!.footprint).toMatchObject({ items: ITEMS, precision: { price: 2, size: 6 }, settings: { on: true } });
+    cleanup(); // flushes the pending save
+    expect(lastSaved().footprint).toMatchObject({ on: true, row_ticks: 0, mode: "bid_ask" });
+  });
+
+  it("restores the on state from the layout, and the legend x turns it off with no further request", () => {
+    layoutApi.server[IID] = layoutOf({ footprint: { ...BUILT_IN_LAYOUT.footprint, on: true } });
+    render(page());
+    expect(lastFootprintCall().enabled).toBe(true);
+
+    legend("remove");
+
+    expect(lastFootprintCall().enabled).toBe(false);
+    expect(lastChartProps.current!.footprint).toBeNull();
+    cleanup();
+    expect(lastSaved().footprint.on).toBe(false);
+  });
+
+  it("is not fetched or drawn in Lines mode, and says so in the Indicators dialog", async () => {
+    layoutApi.server[IID] = layoutOf({ footprint: { ...BUILT_IN_LAYOUT.footprint, on: true } });
+    const dialog = await openIndicators();
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+
+    expect(lastFootprintCall().enabled).toBe(false);
+    expect(lastChartProps.current!.footprint).toBeNull();
+    expect(within(dialog).getByText("Candles mode only")).toBeInTheDocument();
+  });
+
+  it("opens its settings from the legend gear; a style-only Apply keeps the row size (no refetch)", () => {
+    layoutApi.server[IID] = layoutOf({ footprint: { ...BUILT_IN_LAYOUT.footprint, on: true } });
+    render(page());
+    legend("settings");
+    const dialog = screen.getByRole("dialog", { name: "Footprint settings" });
+
+    fireEvent.change(within(dialog).getByLabelText("Display mode"), { target: { value: "delta" } });
+    fireEvent.click(within(dialog).getByLabelText("Show numbers"));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+    expect(screen.queryByRole("dialog", { name: "Footprint settings" })).toBeNull();
+    expect(new Set(hooks.footprint.filter((c) => c.enabled).map((c) => c.rowTicks))).toEqual(new Set([0]));
+    expect(lastChartProps.current!.footprint!.settings).toMatchObject({ mode: "delta", text: false, row_ticks: 0 });
+    cleanup();
+    expect(lastSaved().footprint).toMatchObject({ on: true, mode: "delta", text: false, row_ticks: 0 });
+  });
+
+  it("refetches with the new row size when Apply changes it, and refuses a row size it cannot use", () => {
+    layoutApi.server[IID] = layoutOf({ footprint: { ...BUILT_IN_LAYOUT.footprint, on: true } });
+    render(page());
+    legend("settings");
+    const dialog = screen.getByRole("dialog", { name: "Footprint settings" });
+
+    fireEvent.change(within(dialog).getByLabelText("Row size"), { target: { value: "fixed" } });
+    fireEvent.change(within(dialog).getByLabelText("Ticks per row"), { target: { value: "0" } });
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("Row size must be a whole number of ticks");
+    expect(within(dialog).getByRole("button", { name: "Apply" })).toBeDisabled();
+
+    fireEvent.change(within(dialog).getByLabelText("Ticks per row"), { target: { value: "5" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+    expect(lastFootprintCall()).toMatchObject({ enabled: true, rowTicks: 5 });
+    cleanup();
+    expect(lastSaved().footprint.row_ticks).toBe(5);
+  });
+
+  it("shows the hook's error under the chart", () => {
+    layoutApi.server[IID] = layoutOf({ footprint: { ...BUILT_IN_LAYOUT.footprint, on: true } });
+    footprintResult.current = { items: [], precision: null, error: "Data API answered 500 -- footprint not loaded (see error bar)" };
+    render(page());
+
+    expect(screen.getByText(/Footprint: Data API answered 500/)).toBeInTheDocument();
   });
 });

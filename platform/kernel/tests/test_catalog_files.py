@@ -16,14 +16,17 @@
 
 import ast
 import math
+import shutil
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
 from kernel import catalog_files
 from kernel.catalog_files import TopOfBook
+from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import NS_PER_DAY
 from kernel.clocks import NS_PER_S
 from kernel.clocks import READ_SPAN_MARGIN_NS
@@ -35,8 +38,12 @@ from kernel.second_snapshot import quantity_of
 from kernel.tests.snapshot_factory import make_snapshot
 from kernel.tests.snapshot_factory import units
 from nautilus_trader.model.data import IndexPriceUpdate
+from nautilus_trader.model.data import TradeTick
+from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.identifiers import TradeId
 from nautilus_trader.model.objects import Price
+from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from nautilus_trader.persistence.catalog.parquet import _timestamps_to_filename
 
@@ -373,3 +380,233 @@ def test_price_precision_labels_name_the_file_of_a_malformed_label(tmp_path: Pat
     pq.write_table(table.replace_schema_metadata({b"price_precision": b"x"}), path)
     with pytest.raises(ValueError, match=path.name):
         catalog_files.price_precision_labels(catalog, IndexPriceUpdate, _IID, 0, 1 << 62)
+
+
+# -- raw trades (Story 32.8) -------------------------------------------------------------------------
+
+
+def _tick(
+    price: str, size: str, side: AggressorSide, trade_id: str, ts_event: int, ts_init: int
+) -> TradeTick:
+    return TradeTick(
+        InstrumentId.from_str(_IID),
+        Price.from_str(price),
+        Quantity.from_str(size),
+        side,
+        TradeId(trade_id),
+        ts_event,
+        ts_init,
+    )
+
+
+def _write_trades(root: Path | str, ticks: list[TradeTick]) -> str:
+    ParquetDataCatalog(str(root)).write_data(ticks)
+    return str(root)
+
+
+def _trade_rows(columns: catalog_files.TradeColumns) -> list[tuple[int, int, bool, int]]:
+    return [(int(p), int(s), bool(b), int(t) - _DAY0) for p, s, b, t in zip(*columns, strict=True)]
+
+
+def test_trade_dir_is_what_the_catalog_writes(tmp_path: Path) -> None:
+    root = _write_trades(tmp_path, [_tick("1.5", "2", AggressorSide.BUYER, "a", _DAY0, _DAY0)])
+    assert catalog_files.TRADE_DIRNAME == "trade_tick"
+    assert len(catalog_files.trade_files(root, _IID)) == 1
+
+
+def test_trade_units_are_exact_at_precision_2(tmp_path: Path) -> None:
+    root = _write_trades(
+        tmp_path,
+        [
+            _tick("100.25", "0.003", AggressorSide.BUYER, "a", _DAY0, _DAY0),
+            _tick("99.50", "1.000", AggressorSide.SELLER, "b", _DAY0 + 1, _DAY0 + 1),
+            _tick("99.00", "0.500", AggressorSide.NO_AGGRESSOR, "c", _DAY0 + 2, _DAY0 + 2),
+        ],
+    )
+    columns = catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + NS_PER_S, 2, 3)
+    assert _trade_rows(columns) == [
+        (10025, 3, True, 0),
+        (9950, 1000, False, 1),
+        (9900, 500, False, 2),
+    ]
+    assert columns.price.dtype == np.int64
+    assert columns.size.dtype == np.int64
+
+
+def test_trade_units_are_exact_at_precision_6(tmp_path: Path) -> None:
+    root = _write_trades(
+        tmp_path, [_tick("0.123457", "1234.5", AggressorSide.SELLER, "a", _DAY0, _DAY0)]
+    )
+    columns = catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + 1, 6, 1)
+    assert _trade_rows(columns) == [(123457, 12345, False, 0)]
+
+
+def test_trade_units_take_the_requested_precision_not_the_files_label(tmp_path: Path) -> None:
+    """A file labelled 1 decimal read at the definition's 4: one grid for mixed-label history."""
+    root = _write_trades(tmp_path, [_tick("100.5", "2", AggressorSide.BUYER, "a", _DAY0, _DAY0)])
+    columns = catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + 1, 4, 2)
+    assert _trade_rows(columns) == [(1_005_000, 200, True, 0)]
+
+
+def test_a_raw_finer_than_the_precision_is_refused_never_rounded(tmp_path: Path) -> None:
+    root = _write_trades(tmp_path, [_tick("100.25", "1", AggressorSide.BUYER, "a", _DAY0, _DAY0)])
+    with pytest.raises(catalog_files.TradeDecodeError, match="column price is not exact"):
+        catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + 1, 1, 0)
+
+
+def test_units_outside_int64_are_refused(tmp_path: Path) -> None:
+    root = _write_trades(
+        tmp_path, [_tick("1", "1000000000.000000", AggressorSide.BUYER, "a", _DAY0, _DAY0)]
+    )
+    with pytest.raises(catalog_files.TradeDecodeError, match="column size"):
+        catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + 1, 0, 16)
+
+
+def test_the_trade_window_is_half_open_on_ts_event(tmp_path: Path) -> None:
+    root = _write_trades(
+        tmp_path,
+        [
+            _tick("1", "1", AggressorSide.BUYER, str(k), _DAY0 + k * NS_PER_S, _DAY0 + k * NS_PER_S)
+            for k in range(4)
+        ],
+    )
+    columns = catalog_files.query_trade_columns(
+        root, _IID, _DAY0 + NS_PER_S, _DAY0 + 3 * NS_PER_S, 0, 0
+    )
+    assert [int(t) - _DAY0 for t in columns.ts_event] == [NS_PER_S, 2 * NS_PER_S]
+
+
+def test_a_file_starting_after_the_window_within_the_skew_margin_is_read(tmp_path: Path) -> None:
+    late = _DAY0 + 200 * NS_PER_S  # arrived 200 s after its venue time (a backfill)
+    root = _write_trades(tmp_path, [_tick("1", "1", AggressorSide.BUYER, "a", _DAY0, late)])
+    assert MAX_TS_INIT_SKEW_NS > 200 * NS_PER_S
+    columns = catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + NS_PER_S, 0, 0)
+    assert len(columns.ts_event) == 1
+
+
+def test_a_file_beyond_the_skew_margin_is_not_opened(tmp_path: Path) -> None:
+    far = _DAY0 + MAX_TS_INIT_SKEW_NS + 2 * NS_PER_S
+    root = _write_trades(tmp_path, [_tick("1", "1", AggressorSide.BUYER, "a", _DAY0, far)])
+    columns = catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + NS_PER_S, 0, 0)
+    assert len(columns.ts_event) == 0
+
+
+def test_a_replayed_trade_is_counted_once(tmp_path: Path) -> None:
+    root = _write_trades(tmp_path, [_tick("1", "3", AggressorSide.BUYER, "a", _DAY0, _DAY0)])
+    replay = _DAY0 + 5 * NS_PER_S  # the same trade again after a restart, in a later file
+    _write_trades(
+        root,
+        [
+            _tick("1", "3", AggressorSide.BUYER, "a", _DAY0, replay),
+            _tick("1", "4", AggressorSide.SELLER, "b", _DAY0, replay),
+        ],
+    )
+    columns = catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + NS_PER_S, 0, 0)
+    assert sorted(_trade_rows(columns)) == [(1, 3, True, 0), (1, 4, False, 0)]
+
+
+def test_two_copies_of_a_trade_that_disagree_are_refused(tmp_path: Path) -> None:
+    root = _write_trades(tmp_path, [_tick("1", "3", AggressorSide.BUYER, "a", _DAY0, _DAY0)])
+    replay = _DAY0 + 5 * NS_PER_S
+    _write_trades(root, [_tick("1", "4", AggressorSide.BUYER, "a", _DAY0, replay)])
+    with pytest.raises(catalog_files.TradeDecodeError, match="'a' is stored twice"):
+        catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + NS_PER_S, 0, 0)
+
+
+def test_a_consolidated_day_file_and_minute_files_are_read_together(tmp_path: Path) -> None:
+    """A day file beside a minute file (one row shared, as before a consolidation's cleanup)."""
+    day = [
+        _tick("2", "1", AggressorSide.BUYER, str(k), _DAY0 + k * NS_PER_S, _DAY0 + k * NS_PER_S)
+        for k in (0, 60, 3_600)
+    ]
+    root = _write_trades(tmp_path / "root", day)
+    minute = [
+        day[1],
+        _tick("3", "1", AggressorSide.SELLER, "m", _DAY0 + 61 * NS_PER_S, _DAY0 + 61 * NS_PER_S),
+    ]
+    other = _write_trades(tmp_path / "other", minute)  # its own catalog: the spans overlap
+    (path,) = catalog_files.trade_files(other, _IID)
+    leaf = Path(catalog_files.trade_files(root, _IID)[0]).parent
+    shutil.copy(path, leaf / Path(path).name)
+    assert len(catalog_files.trade_files(root, _IID)) == 2
+    columns = catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + NS_PER_DAY, 0, 0)
+    assert [
+        (int(p), int(t - _DAY0) // NS_PER_S)
+        for p, t in zip(columns.price, columns.ts_event, strict=True)
+    ] == [
+        (2, 0),
+        (2, 60),
+        (3, 61),
+        (2, 3_600),
+    ]
+
+
+def test_a_trade_file_without_its_precision_labels_is_refused(tmp_path: Path) -> None:
+    root = _write_trades(tmp_path, [_tick("1", "1", AggressorSide.BUYER, "a", _DAY0, _DAY0)])
+    (path,) = catalog_files.trade_files(root, _IID)
+    table = pq.read_table(path)
+    pq.write_table(table.replace_schema_metadata({}), path)
+    with pytest.raises(catalog_files.TradeDecodeError, match="price_precision, size_precision"):
+        catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + 1, 0, 0)
+
+
+def test_no_trades_is_an_empty_read(tmp_path: Path) -> None:
+    columns = catalog_files.query_trade_columns(str(tmp_path), _IID, _DAY0, _DAY0 + 1, 2, 3)
+    assert [len(c) for c in columns] == [0, 0, 0, 0]
+
+
+def test_a_file_removed_by_a_consolidation_mid_read_is_listed_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The consolidation wrote the day file and removed its minute source after the listing."""
+    root = _write_trades(tmp_path, [_tick("1", "2", AggressorSide.BUYER, "a", _DAY0, _DAY0)])
+    (path,) = catalog_files.trade_files(root, _IID)
+    gone = str(Path(path).parent / "removed" / Path(path).name)  # a span the read wants, no file
+    listings = iter([[gone, path], [path]])
+    monkeypatch.setattr(catalog_files, "trade_files", lambda *_: next(listings))
+    columns = catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + 1, 0, 0)
+    assert _trade_rows(columns) == [(1, 2, True, 0)]
+
+
+def test_a_listing_that_keeps_losing_files_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _write_trades(tmp_path, [_tick("1", "2", AggressorSide.BUYER, "a", _DAY0, _DAY0)])
+    (path,) = catalog_files.trade_files(root, _IID)
+    gone = str(Path(path).parent / "removed" / Path(path).name)  # a span the read wants, no file
+    monkeypatch.setattr(catalog_files, "trade_files", lambda *_: [gone])
+    with pytest.raises(catalog_files.TradeDecodeError, match="kept disappearing"):
+        catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + 1, 0, 0)
+
+
+def test_a_raw_width_other_than_16_bytes_is_refused(tmp_path: Path) -> None:
+    root = _write_trades(tmp_path, [_tick("1", "2", AggressorSide.BUYER, "a", _DAY0, _DAY0)])
+    (path,) = catalog_files.trade_files(root, _IID)
+    table = pq.read_table(path)
+    narrow = pa.array([b"\x00" * 8], type=pa.binary(8))
+    index = table.schema.get_field_index("price")
+    pq.write_table(
+        table.set_column(index, "price", narrow).replace_schema_metadata(table.schema.metadata),
+        path,
+    )
+    with pytest.raises(catalog_files.TradeDecodeError, match="column price is fixed_size_binary"):
+        catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + 1, 0, 0)
+
+
+def test_copies_of_a_trade_that_disagree_only_on_seller_or_no_aggressor_are_refused(
+    tmp_path: Path,
+) -> None:
+    """Both fold as a sell, but they are two stored versions of one trade: compared as stored."""
+    root = _write_trades(tmp_path, [_tick("1", "3", AggressorSide.SELLER, "a", _DAY0, _DAY0)])
+    replay = _DAY0 + 5 * NS_PER_S
+    _write_trades(root, [_tick("1", "3", AggressorSide.NO_AGGRESSOR, "a", _DAY0, replay)])
+    with pytest.raises(catalog_files.TradeDecodeError, match="'a' is stored twice"):
+        catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + NS_PER_S, 0, 0)
+
+
+def test_an_unreadable_trade_file_is_refused_naming_it(tmp_path: Path) -> None:
+    root = _write_trades(tmp_path, [_tick("1", "2", AggressorSide.BUYER, "a", _DAY0, _DAY0)])
+    (path,) = catalog_files.trade_files(root, _IID)
+    Path(path).write_bytes(Path(path).read_bytes()[:64])  # truncated: no Parquet footer
+    with pytest.raises(catalog_files.TradeDecodeError, match="unreadable, refused"):
+        catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + 1, 0, 0)

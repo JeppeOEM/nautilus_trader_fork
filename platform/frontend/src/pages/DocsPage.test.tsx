@@ -46,4 +46,40 @@ describe("DocsPage", () => {
     expect(screen.getByRole("heading", { name: "Where it is saved" })).toBeInTheDocument();
     expect(screen.getAllByText(/chart_drawings\.toml/).length).toBeGreaterThan(0);
   });
+
+  it("documents the footprint's modes, imbalances and historical-only limit (Story 32.8)", () => {
+    render(
+      <MemoryRouter initialEntries={["/docs/kb/chart-footprint"]}>
+        <DocsPage />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole("heading", { name: /Volume Footprint/ })).toBeInTheDocument();
+    for (const name of ["Display modes", "Imbalances", "Known limits"]) {
+      expect(screen.getByRole("heading", { name })).toBeInTheDocument();
+    }
+    expect(screen.getByText(/Historical only\./)).toBeInTheDocument();
+  });
+
+  it("lists all nine profile tools with what each anchors to and counts (Story 32.7)", () => {
+    render(
+      <MemoryRouter initialEntries={["/docs/kb/chart-profiles"]}>
+        <DocsPage />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole("heading", { name: "Volume Profiles: the Nine Tools" })).toBeInTheDocument();
+    const table = screen.getByRole("heading", { name: "The nine tools" }).closest(".sec")!.querySelector("table")!;
+    const tools = [...table.querySelectorAll("tbody tr")].filter((row) => row.querySelector("td")).map((row) => row.querySelector("td")!.textContent);
+    expect(tools).toEqual([
+      "FRVP Fixed range",
+      "VRVP Visible range",
+      "SVP Session",
+      "SVP HD",
+      "PVP Periodic",
+      "Auto Anchored VP",
+      "Anchored VP (AVP)",
+      "Anchored VWAP (AVWAP)",
+      "TPO Time Price Opportunity",
+    ]);
+    expect(screen.getAllByText(/buildVolumeProfile/).length).toBeGreaterThan(0);
+  });
 });
