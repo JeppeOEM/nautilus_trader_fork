@@ -2082,6 +2082,10 @@ location: _bmad-output/implementation-artifacts/spec-32-6-chart-layout-restored-
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-32-6-chart-layout-restored-on-return-and-default-setup-for-a-new-coin.md` summary: The session volume profile's session count and the Periodic-vs-Session preset are not in the layout's field list, so a Periodic profile on "daily" comes back as the Session Volume Profile and the count resets to 5. evidence: `pages/ChartPage.tsx` `initialSessionConfig` derives the preset from `session`/`hd` and sets `sessionCount: DEFAULT_SESSION_COUNT`; the spec's enumerated `volume_profile` keys have no field for either.
 status: open
 
-- source_spec: `_bmad-output/implementation-artifacts/bmad-dev-auto-result-live-channel-hardening.md`
-  summary: The heartbeat-silence `_receive` loop is now copied in four modules (`views/archive_status_bus.py`, `views/rankings_bus.py`, `bot_tui/archive_state.py`, `bot_tui/collector_state.py`) and two more subscribers (`bot_tui/bots_state.py`, `bot_tui/bot_history_state.py`) still need it, so it should become one shared helper taking an ingest callback.
-  evidence: The four `_receive` bodies are line-for-line the same poll/`heard`/`ConnectionError` loop with differently named constants (`STALE_AFTER_SECONDS`, `SILENCE_RESUBSCRIBE_SECONDS`, `_SILENCE_RESUBSCRIBE_SECONDS`); a shared home has to respect `tests/test_boundaries.py`'s context edges (views and bot_tui may not import each other).
+### DW-283: Extract the heartbeat-silence `_receive` loop, now copied in four pub/sub subscribers, into one shared helper taking an ingest callback
+
+origin: migrated from legacy ledger (flat append from sweep bundle dw-live-channel-hardening, bmad-dev-auto-result-live-channel-hardening.md), 2026-10-05
+location: platform/views/archive_status_bus.py, platform/views/rankings_bus.py, platform/bot_tui/archive_state.py, platform/bot_tui/collector_state.py
+source_spec: `_bmad-output/implementation-artifacts/bmad-dev-auto-result-live-channel-hardening.md`
+reason: The heartbeat-silence `_receive` loop is now copied in four modules (`views/archive_status_bus.py`, `views/rankings_bus.py`, `bot_tui/archive_state.py`, `bot_tui/collector_state.py`) and two more subscribers (`bot_tui/bots_state.py`, `bot_tui/bot_history_state.py`) still need it, so it should become one shared helper taking an ingest callback. evidence: The four `_receive` bodies are line-for-line the same poll/`heard`/`ConnectionError` loop with differently named constants (`STALE_AFTER_SECONDS`, `SILENCE_RESUBSCRIBE_SECONDS`, `_SILENCE_RESUBSCRIBE_SECONDS`); a shared home has to respect `tests/test_boundaries.py`'s context edges (views and bot_tui may not import each other).
+status: open
