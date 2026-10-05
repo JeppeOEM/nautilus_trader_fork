@@ -2254,3 +2254,10 @@ status: open
 - source_spec: `_bmad-output/implementation-artifacts/spec-33-1-bybit-liquidations-captured-over-a-second-socket-into-one-shared-liquidation-type.md`
   summary: Story 33.2's planned `price_kind` (`dictionary<int8,string>`) and nullable `confirmed` (`bool`) columns on `kernel.liquidation.Liquidation` will leave `custom_liquidation/` holding Bybit files written under 33.1's 9-column schema beside files with the extended schema, so 33.2 must prove `ParquetDataCatalog` reads and consolidates the mixed-schema directory, or rewrite the 33.1 files (`price_kind="bankruptcy"`, `confirmed=null`) in the same story.
   evidence: The epic assigns both columns to 33.2 ("added to the type in this story"); 33.1's `Liquidation.schema()` has neither, and `register_arrow` binds one schema per class, so files written before and after 33.2 differ in column set. Raised by the 33.1 Blind Hunter review (finding 10).
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-quick-volume-overlays-modal-and-grouped-tool-rail.md`
+  summary: The Volume overlays dialog lists VRVP, the session slot and placed FRVPs but not the Anchored VP / Anchored VWAP drawings, which are volume overlays too and are still edited only from their chart context menu.
+  evidence: `VolumeOverlaysDialog.tsx` takes no drawings; Anchored VP/VWAP live in `useChartDrawings` with their own `DrawingSettingsDialog` (Story 32.7). Raised by the quick-dev Blind Hunter review; left out because the operator's request named FRVPs only and these already have a working edit path.
+- source_spec: `_bmad-output/implementation-artifacts/spec-quick-volume-overlays-modal-and-grouped-tool-rail.md`
+  summary: The rail's last-used tool per group (`ChartPage`'s `toolMemory`) is not persisted, so a page reload shows each group's first tool again (Known limit in `ChartPage.tsx`).
+  evidence: TradingView keeps the last-used tool across sessions; persisting it needs a per-viewer UI preference beside the coin layout, since the layout table's shape (`lib/chartLayout.ts`, `views/preferences.py`) was out of scope for this change.

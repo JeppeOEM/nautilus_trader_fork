@@ -3,6 +3,8 @@ import { type ReactNode, useEffect, useRef } from "react";
 interface Props {
   /** The dialog's accessible name. */
   title: string;
+  /** Extra class on the dialog, for a dialog that needs its own size (the Volume overlays list). */
+  className?: string;
   onClose: () => void;
   children: ReactNode;
 }
@@ -15,7 +17,7 @@ interface Props {
  * always start from the saved state. The padding sits on the body, not the dialog: a click on the
  * dialog's own padding would read as a backdrop click and close it with the drafts.
  */
-export default function SettingsDialogShell({ title, onClose, children }: Props) {
+export default function SettingsDialogShell({ title, className, onClose, children }: Props) {
   const ref = useRef<HTMLDialogElement>(null);
   const pressedOnBackdrop = useRef(false);
 
@@ -30,7 +32,7 @@ export default function SettingsDialogShell({ title, onClose, children }: Props)
   return (
     <dialog
       ref={ref}
-      className="indicator-dialog indicator-settings"
+      className={className ? `indicator-dialog indicator-settings ${className}` : "indicator-dialog indicator-settings"}
       aria-label={title}
       onClose={onClose}
       onMouseDown={(e) => {

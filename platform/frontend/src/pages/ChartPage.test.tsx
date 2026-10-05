@@ -284,6 +284,35 @@ const page = () => (
   </MemoryRouter>
 );
 
+const { TOOL_GROUPS } = await import("../lib/chartTools");
+/** The rail group a tool (by its accessible name) is declared in. */
+function groupOf(name: string): (typeof TOOL_GROUPS)[number] {
+  const group = TOOL_GROUPS.find((g) => g.tools.some((t) => t.ariaLabel === name));
+  if (!group) throw new Error(`no rail group holds ${name}`);
+  return group;
+}
+/** A rail tool's control: its group's button when the group shows it, else its item in the group's
+ * flyout menu (opened here if it is not open yet). */
+function toolControl(name: string): HTMLElement {
+  const button = screen.queryByRole("button", { name });
+  if (button) return button;
+  const item = screen.queryByRole("menuitemradio", { name });
+  if (item) return item;
+  fireEvent.click(screen.getByRole("button", { name: `${groupOf(name).label} tools` }));
+  return screen.getByRole("menuitemradio", { name });
+}
+/** Arms a rail tool the way the operator does: its group's button, or the group's flyout menu. */
+const armTool = (name: string) => fireEvent.click(toolControl(name));
+/** Opens the Volume overlays dialog from the top bar (a no-op while it is open). */
+function openOverlays(): HTMLElement {
+  const open = screen.queryByRole("dialog", { name: "Volume overlays" });
+  if (open) return open;
+  fireEvent.click(screen.getByRole("button", { name: "Volume overlays" }));
+  return screen.getByRole("dialog", { name: "Volume overlays" });
+}
+/** Clicks a control of the Volume overlays dialog by its accessible name, opening the dialog first. */
+const overlayClick = (name: string) => fireEvent.click(within(openOverlays()).getByRole("button", { name }));
+
 beforeEach(() => {
   lastChartProps.current = null;
   picker.values = {};
@@ -336,9 +365,9 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
 
     expect(screen.getByTestId("chart-stub")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: "Horizontal line tool" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByRole("button", { name: "Horizontal line tool", pressed: true })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    armTool("Horizontal line tool");
 
     expect(screen.getByRole("button", { name: "Horizontal line tool" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "false");
@@ -346,7 +375,7 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
 
   it("places exactly one line from an armed hline's chart click, then disarms (AC #2)", async () => {
     await renderReady(page());
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    armTool("Horizontal line tool");
 
     // act(): the handler's state updates must flush before the assertions read the
     // props the re-render hands the stub.
@@ -365,9 +394,9 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
     expect(lastChartProps.current!.priceLines).toHaveLength(1);
   });
 
-  it("resets an armed tool to cursor on Escape (AC #5)", () => {
-    render(page());
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+  it("resets an armed tool to cursor on Escape (AC #5)", async () => {
+    await renderReady(page());
+    armTool("Horizontal line tool");
 
     fireEvent.keyDown(window, { key: "Escape" });
 
@@ -379,15 +408,15 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
     await renderReady(page());
 
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
-    expect(screen.getByRole("button", { name: "Horizontal line tool" })).toBeDisabled();
+    expect(toolControl("Horizontal line tool")).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: "Candles" }));
-    expect(screen.getByRole("button", { name: "Horizontal line tool" })).toBeEnabled();
+    expect(toolControl("Horizontal line tool")).toBeEnabled();
   });
 
-  it("disarms an armed hline when the chart switches to Lines mode", () => {
-    render(page());
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+  it("disarms an armed hline when the chart switches to Lines mode", async () => {
+    await renderReady(page());
+    armTool("Horizontal line tool");
 
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
 
@@ -397,7 +426,7 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
 
   it("updates the dragged line's price in the priceLines prop (AC #3)", async () => {
     await renderReady(page());
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    armTool("Horizontal line tool");
     act(() => {
       lastChartProps.current!.onPriceClick!(61000.5);
     });
@@ -411,11 +440,11 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
 
   it("gives each placed line its own counter id, and a drag updates only its own spec", async () => {
     await renderReady(page());
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    armTool("Horizontal line tool");
     act(() => {
       lastChartProps.current!.onPriceClick!(61000.5);
     });
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    armTool("Horizontal line tool");
     act(() => {
       lastChartProps.current!.onPriceClick!(62000);
     });
@@ -508,7 +537,7 @@ describe("ChartPage default layout and per-coin persistence", () => {
     vi.useFakeTimers();
     try {
       const first = await renderReady(page());
-      fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+      armTool("Horizontal line tool");
       act(() => lastChartProps.current?.onPriceClick?.(123.5));
       // A drag changes the line on every mouse move: still one save once the burst ends.
       act(() => lastChartProps.current?.onPriceLineDrag?.("hline-1", 128));
@@ -531,7 +560,7 @@ describe("ChartPage default layout and per-coin persistence", () => {
       expect(lastChartProps.current?.priceLines).toEqual([expect.objectContaining({ id: "hline-1", price: 130 })]);
 
       // a second placement continues the counter instead of colliding with the restored id
-      fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+      armTool("Horizontal line tool");
       act(() => lastChartProps.current?.onPriceClick?.(99));
       expect(lastChartProps.current?.priceLines?.map((l) => l.id)).toEqual(["hline-1", "hline-2"]);
     } finally {
@@ -541,7 +570,7 @@ describe("ChartPage default layout and per-coin persistence", () => {
 
   it("flushes a save still pending when the chart goes away", async () => {
     const view = await renderReady(page());
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    armTool("Horizontal line tool");
     act(() => lastChartProps.current?.onPriceClick?.(123.5));
     view.unmount();
     expect(drawingsApi.save).toHaveBeenCalledTimes(1);
@@ -554,7 +583,7 @@ describe("ChartPage default layout and per-coin persistence", () => {
       let land: () => void = () => {};
       drawingsApi.save.mockImplementationOnce(() => new Promise<void>((resolve) => (land = resolve)));
       const view = await renderReady(page());
-      fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+      armTool("Horizontal line tool");
       act(() => lastChartProps.current?.onPriceClick?.(123.5));
       await act(async () => {
         vi.advanceTimersByTime(SAVE_DEBOUNCE_MS + 1);
@@ -578,7 +607,7 @@ describe("ChartPage default layout and per-coin persistence", () => {
       let land: () => void = () => {};
       drawingsApi.save.mockImplementationOnce(() => new Promise<void>((resolve) => (land = resolve)));
       await renderReady(page());
-      fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+      armTool("Horizontal line tool");
       act(() => lastChartProps.current?.onPriceClick?.(123.5));
       await act(async () => {
         vi.advanceTimersByTime(SAVE_DEBOUNCE_MS + 1);
@@ -634,7 +663,7 @@ describe("ChartPage default layout and per-coin persistence", () => {
     const view = await renderReady(page());
     expect(screen.getByRole("alert")).toHaveTextContent("Drawings could not be loaded");
     for (const name of ["Trendline tool", "Horizontal line tool", "Fibonacci retracement tool", "Long position tool"]) {
-      expect(screen.getByRole("button", { name })).toBeDisabled();
+      expect(toolControl(name)).toBeDisabled();
     }
     view.unmount();
     expect(drawingsApi.save).not.toHaveBeenCalled();
@@ -669,11 +698,11 @@ describe("ChartPage default layout and per-coin persistence", () => {
     try {
       drawingsApi.server = [{ kind: "hline", id: "hline-1", price: 130 }];
       await renderReady(page());
-      expect(screen.getByRole("button", { name: "Horizontal line tool" })).toBeDisabled();
+      expect(toolControl("Horizontal line tool")).toBeDisabled();
       await act(async () => {
         vi.advanceTimersByTime(SAVE_RETRY_MS + 1);
       });
-      expect(screen.getByRole("button", { name: "Horizontal line tool" })).toBeEnabled();
+      expect(toolControl("Horizontal line tool")).toBeEnabled();
       expect(lastChartProps.current?.priceLines).toEqual([expect.objectContaining({ id: "hline-1", price: 130 })]);
     } finally {
       errors.mockRestore();
@@ -726,6 +755,7 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
       "Candles",
       "Lines",
       "Indicators",
+      "Volume overlays",
       "Layout",
       "Alert",
       "Fit",
@@ -736,7 +766,7 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("BTC-USD-PERP.DYDX");
   });
 
-  it("orders the left toolbar cursor, crosshair | horizontal line", async () => {
+  it("orders the left toolbar cursor, crosshair | the tool groups, each with its first tool shown", async () => {
     await renderReady(page());
 
     const names = within(screen.getByRole("toolbar", { name: "Chart tools" }))
@@ -746,15 +776,139 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
       "Cursor tool",
       "Crosshair toggle",
       "Trendline tool",
-      "Horizontal line tool",
+      "Lines tools",
       "Fibonacci retracement tool",
       "Long position tool",
-      "Short position tool",
+      "Projection tools",
       "Measurement tool",
+      "Fixed range volume profile tool",
+      "Volume-based tools",
+    ]);
+  });
+
+  it("groups the tools TradingView-style: each group's flyout lists its tools, Long and Short in one", async () => {
+    await renderReady(page());
+    const menuOf = (group: string): string[] => {
+      fireEvent.click(screen.getByRole("button", { name: `${group} tools` }));
+      const items = within(screen.getByRole("menu", { name: group }))
+        .getAllByRole("menuitemradio")
+        .map((b) => b.getAttribute("aria-label")!);
+      fireEvent.click(screen.getByRole("button", { name: `${group} tools` })); // closes it again
+      return items;
+    };
+
+    expect(menuOf("Lines")).toEqual(["Trendline tool", "Horizontal line tool"]);
+    expect(menuOf("Projection")).toEqual(["Long position tool", "Short position tool"]);
+    expect(menuOf("Volume-based")).toEqual([
       "Fixed range volume profile tool",
       "Anchored volume profile tool",
       "Anchored VWAP tool",
     ]);
+    // A one-tool group has no flyout.
+    expect(screen.queryByRole("button", { name: "Fibonacci tools" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cursor tools" })).toBeNull();
+  });
+
+  it("opens a group's flyout as a menu, arms the picked tool and shows it on the group button from then on", async () => {
+    await renderReady(page());
+    const expander = screen.getByRole("button", { name: "Projection tools" });
+    expect(expander).toHaveAttribute("aria-haspopup", "menu");
+    expect(expander).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(expander);
+    expect(expander).toHaveAttribute("aria-expanded", "true");
+    const menu = screen.getByRole("menu", { name: "Projection" });
+    expect(within(menu).getByRole("menuitemradio", { name: "Long position tool" })).toHaveFocus();
+    fireEvent.click(within(menu).getByRole("menuitemradio", { name: "Short position tool" }));
+
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByRole("button", { name: "Short position tool" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByRole("button", { name: "Long position tool" })).toBeNull();
+    act(() => lastChartProps.current!.onPointClick!({ time: 100, price: 100 }));
+    expect(lastChartProps.current!.drawings!.at(-1)).toMatchObject({ kind: "position", side: "short" });
+
+    // Placed: the cursor is back, and the group's button still shows (and re-arms) the Short.
+    expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Short position tool" }));
+    expect(screen.getByRole("button", { name: "Short position tool" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("remembers each group's last-used tool across a timeframe change", async () => {
+    await renderReady(page());
+    armTool("Horizontal line tool");
+    fireEvent.click(screen.getByRole("button", { name: "Timeframe 5m" }));
+
+    expect(screen.getByRole("button", { name: "Horizontal line tool" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Trendline tool" })).toBeNull();
+  });
+
+  it("closes a flyout on Escape (the armed tool stays armed) and on a click outside it", async () => {
+    await renderReady(page());
+    armTool("Fibonacci retracement tool");
+    fireEvent.click(screen.getByRole("button", { name: "Lines tools" }));
+    const item = screen.getByRole("menuitemradio", { name: "Trendline tool" });
+
+    fireEvent.keyDown(item, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByRole("button", { name: "Lines tools" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Fibonacci retracement tool" })).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines tools" }));
+    expect(screen.getByRole("menu", { name: "Lines" })).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByTestId("chart-stub"));
+    expect(screen.queryByRole("menu")).toBeNull();
+
+    // Focus leaving the group by keyboard closes it too.
+    fireEvent.click(screen.getByRole("button", { name: "Lines tools" }));
+    fireEvent.blur(screen.getByRole("menuitemradio", { name: "Trendline tool" }), {
+      relatedTarget: screen.getByRole("button", { name: "Crosshair toggle" }),
+    });
+    expect(screen.queryByRole("menu")).toBeNull();
+    // Esc outside a flyout disarms, as before.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("closes on Escape a flyout whose every item is disabled (focus sits on the menu itself)", async () => {
+    mocks.precision = null;
+    await renderReady(page());
+    fireEvent.click(screen.getByRole("button", { name: "Projection tools" }));
+    const menu = screen.getByRole("menu", { name: "Projection" });
+    expect(menu).toHaveFocus();
+
+    fireEvent.keyDown(menu, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("keeps one flyout open at a time, and arrow keys move through its items", async () => {
+    await renderReady(page());
+    fireEvent.click(screen.getByRole("button", { name: "Lines tools" }));
+    fireEvent.click(screen.getByRole("button", { name: "Volume-based tools" }));
+    expect(screen.getAllByRole("menu")).toHaveLength(1);
+    const menu = screen.getByRole("menu", { name: "Volume-based" });
+
+    fireEvent.keyDown(within(menu).getByRole("menuitemradio", { name: "Fixed range volume profile tool" }), { key: "ArrowDown" });
+    expect(within(menu).getByRole("menuitemradio", { name: "Anchored volume profile tool" })).toHaveFocus();
+    fireEvent.keyDown(within(menu).getByRole("menuitemradio", { name: "Anchored volume profile tool" }), { key: "ArrowUp" });
+    expect(within(menu).getByRole("menuitemradio", { name: "Fixed range volume profile tool" })).toHaveFocus();
+  });
+
+  it("disables a candles-only tool in its flyout in Lines mode, with its title, while the group stays usable", async () => {
+    await renderReady(page());
+    armTool("Horizontal line tool");
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+
+    // The group shows the HLine (disabled), but its flyout still offers the Trend line, which Lines mode allows.
+    expect(screen.getByRole("button", { name: "Horizontal line tool" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Lines tools" }));
+    expect(screen.getByRole("menuitemradio", { name: "Horizontal line tool" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Trendline tool" }));
+    expect(screen.getByRole("button", { name: "Trendline tool" })).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Volume-based tools" }));
+    const avp = screen.getByRole("menuitemradio", { name: "Anchored volume profile tool" });
+    expect(avp).toBeDisabled();
+    expect(avp).toHaveAttribute("title", "Anchored volume profile: click the bar it starts at");
   });
 });
 
@@ -873,7 +1027,7 @@ describe("ChartPage volume toggle (Story 32.2)", () => {
     mocks.candles = bars;
     mocks.volume = bars.map((b) => ({ time: b.time, value: 10 }));
     const totalWith = (): number => {
-      fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+      armTool("Fixed range volume profile tool");
       act(() => {
         lastChartProps.current!.onRangeSelect!({ time: 2, price: 1 }, { time: 4, price: 2 });
       });
@@ -908,7 +1062,7 @@ describe("ChartPage volume toggle (Story 32.2)", () => {
 });
 
 describe("ChartPage trendline tool (Story 18.2)", () => {
-  const arm = () => fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+  const arm = () => armTool("Trendline tool");
   const click = (time: number, price: number) =>
     act(() => {
       lastChartProps.current!.onPointClick!({ time, price });
@@ -965,7 +1119,7 @@ describe("ChartPage trendline tool (Story 18.2)", () => {
     arm();
     click(100, 10);
 
-    fireEvent.click(screen.getByRole("button", { name: "Cursor tool" }));
+    armTool("Cursor tool");
     arm();
     click(200, 20);
     click(300, 30);
@@ -977,14 +1131,14 @@ describe("ChartPage trendline tool (Story 18.2)", () => {
     await renderReady(<ChartPage />);
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
 
-    expect(screen.getByRole("button", { name: "Trendline tool" })).toBeEnabled();
+    expect(toolControl("Trendline tool")).toBeEnabled();
   });
 });
 
 describe("ChartPage measurement tool (Story 18.3)", () => {
   it("arms the measurement tool and disarms it when the drag ends (AC #1/#5)", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Measurement tool" }));
+    armTool("Measurement tool");
     expect(lastChartProps.current!.measureActive).toBe(true);
 
     act(() => {
@@ -997,7 +1151,7 @@ describe("ChartPage measurement tool (Story 18.3)", () => {
 
   it("cancels an armed measurement on Escape", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Measurement tool" }));
+    armTool("Measurement tool");
 
     fireEvent.keyDown(window, { key: "Escape" });
 
@@ -1008,7 +1162,7 @@ describe("ChartPage measurement tool (Story 18.3)", () => {
     render(<ChartPage />);
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
 
-    expect(screen.getByRole("button", { name: "Measurement tool" })).toBeDisabled();
+    expect(toolControl("Measurement tool")).toBeDisabled();
   });
 });
 
@@ -1166,7 +1320,7 @@ describe("ChartPage bar replay (Story 18.4)", () => {
 
     pickBar(120);
 
-    fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+    armTool("Trendline tool");
     pickBar(60);
     pickBar(120);
     expect(lastChartProps.current!.drawings).toHaveLength(1);
@@ -1194,7 +1348,7 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
 
   it("arms the FRVP tool, computes the profile for the dragged range once, then disarms (AC #1/#2)", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    armTool("Fixed range volume profile tool");
     expect(lastChartProps.current!.rangeSelectActive).toBe(true);
 
     select(2, 4);
@@ -1209,7 +1363,7 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
 
   it("stays static: new candles/pan never recompute a placed profile (AC #3)", () => {
     const { rerender } = render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    armTool("Fixed range volume profile tool");
     select(2, 4);
     const placed = lastChartProps.current!.volumeProfiles![0].profile;
 
@@ -1222,7 +1376,7 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
 
   it("moves a ghost edge without recomputing, then recomputes once on commit (AC #3)", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    armTool("Fixed range volume profile tool");
     select(2, 4);
     const placed = lastChartProps.current!.volumeProfiles![0].profile;
 
@@ -1237,7 +1391,7 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
 
   it("clears the ghost edge on a cancelled edge drag, leaving the profile as placed (DW-150)", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    armTool("Fixed range volume profile tool");
     select(2, 4);
     const placed = lastChartProps.current!.volumeProfiles![0];
 
@@ -1248,32 +1402,58 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
     expect(lastChartProps.current!.volumeProfiles![0].profile).toBe(placed.profile);
   });
 
-  it("shows the FRVP settings as soon as the tool is armed, with no remove button yet (DW-150)", () => {
+  it("shows the FRVP settings in the Volume overlays dialog as soon as the tool is armed, with no remove button yet (DW-150)", () => {
     render(<ChartPage />);
-    expect(screen.queryByRole("group", { name: "Fixed range volume profile settings" })).toBeNull();
+    expect(within(openOverlays()).queryByRole("group", { name: "Fixed range volume profile settings" })).toBeNull();
+    fireEvent.click(within(openOverlays()).getByRole("button", { name: "Close volume overlays" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    armTool("Fixed range volume profile tool");
 
-    expect(screen.getByRole("group", { name: "Fixed range volume profile settings" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Remove volume profile/ })).toBeNull();
+    const dialog = openOverlays();
+    expect(within(dialog).getByRole("group", { name: "Fixed range volume profile settings" })).toBeInTheDocument();
+    expect(within(dialog).getByText("Drag a range on the chart to place one.")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: /Remove volume profile/ })).toBeNull();
+  });
+
+  it("draws an FRVP from the Volume overlays dialog: it closes and arms the rail's tool", () => {
+    render(<ChartPage />);
+    overlayClick("Draw fixed range volume profile");
+
+    expect(screen.queryByRole("dialog", { name: "Volume overlays" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Fixed range volume profile tool" })).toHaveAttribute("aria-pressed", "true");
+    expect(lastChartProps.current!.rangeSelectActive).toBe(true);
+  });
+
+  it("lists each placed range by its UTC span in the dialog, with one shared settings set", () => {
+    render(<ChartPage />);
+    for (const [a, b] of [[1, 2], [3, 5]]) {
+      armTool("Fixed range volume profile tool");
+      select(a, b);
+    }
+    const dialog = openOverlays();
+    const entry = within(dialog).getByRole("region", { name: "Fixed Range Volume Profile" });
+    expect(within(entry).getByText("1970-01-01 00:00:01 to 1970-01-01 00:00:02 UTC")).toBeInTheDocument();
+    expect(within(entry).getByText("1970-01-01 00:00:03 to 1970-01-01 00:00:05 UTC")).toBeInTheDocument();
+    expect(within(entry).getAllByRole("button", { name: /Remove volume profile/ })).toHaveLength(2);
+    expect(within(entry).getAllByRole("group", { name: "Fixed range volume profile settings" })).toHaveLength(1);
   });
 
   it("supports several profiles, removable independently (AC #4)", () => {
     render(<ChartPage />);
     for (const [a, b] of [[1, 2], [3, 5]]) {
-      fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+      armTool("Fixed range volume profile tool");
       select(a, b);
     }
     expect(lastChartProps.current!.volumeProfiles!.map((p) => p.id)).toEqual(["frvp-1", "frvp-2"]);
 
-    fireEvent.click(screen.getByRole("button", { name: "Remove volume profile frvp-1" }));
+    overlayClick("Remove volume profile frvp-1");
 
     expect(lastChartProps.current!.volumeProfiles!.map((p) => p.id)).toEqual(["frvp-2"]);
   });
 
   it("ignores a range with no candles in it and cancels the armed tool on Escape", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    armTool("Fixed range volume profile tool");
 
     select(50, 60);
     expect(lastChartProps.current!.volumeProfiles).toEqual([]);
@@ -1284,18 +1464,18 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
 
   it("rebuilds placed profiles when the shared settings change (row count)", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    armTool("Fixed range volume profile tool");
     select(1, 5);
     expect(lastChartProps.current!.volumeProfiles![0].profile.rows).toHaveLength(24);
 
-    fireEvent.change(screen.getByLabelText("Row count"), { target: { value: "6" } });
+    fireEvent.change(within(openOverlays()).getByLabelText("Row count"), { target: { value: "6" } });
 
     expect(lastChartProps.current!.volumeProfiles![0].profile.rows).toHaveLength(6);
   });
 
   it("shows only revealed bars during a replay and the full stored profile after it ends", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    armTool("Fixed range volume profile tool");
     select(1, 5);
     expect(lastChartProps.current!.volumeProfiles![0].profile.totalVolume).toBeCloseTo(50);
 
@@ -1311,7 +1491,7 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
     await renderReady(<ChartPage />);
     expect(lastChartProps.current!.profileEdgesEditable).toBe(true);
 
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    armTool("Horizontal line tool");
 
     expect(lastChartProps.current!.profileEdgesEditable).toBe(false);
   });
@@ -1320,7 +1500,7 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
     render(<ChartPage />);
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
 
-    expect(screen.getByRole("button", { name: "Fixed range volume profile tool" })).toBeDisabled();
+    expect(toolControl("Fixed range volume profile tool")).toBeDisabled();
   });
 });
 
@@ -1375,7 +1555,7 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
     attachChart();
     expect(vrvp()).toHaveLength(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    overlayClick("Add visible range volume profile");
 
     expect(vrvp()).toHaveLength(1);
     expect(vrvp()[0].xAnchor).toBe("right");
@@ -1385,7 +1565,7 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
   it("caps its width at a share of the pane, so a narrow pane keeps its candles (DW-151)", () => {
     render(<ChartPage />);
     attachChart();
-    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    overlayClick("Add visible range volume profile");
 
     expect(vrvp()[0]).toMatchObject({ width: 150, maxWidthFraction: 0.3 });
   });
@@ -1393,7 +1573,7 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
   it("recomputes once per animation frame and updates the same entry, never adding one (AC #3, DW-151)", () => {
     render(<ChartPage />);
     attachChart();
-    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    overlayClick("Add visible range volume profile");
     const first = vrvp()[0].profile;
 
     pan({ from: 2, to: 4 }); // unchanged range
@@ -1413,16 +1593,19 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
   it("says it covers the loaded bars only while the view reaches past the oldest bar (DW-151)", () => {
     render(<ChartPage />);
     attachChart();
-    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    overlayClick("Add visible range volume profile");
     expect(screen.queryByText(/Covers loaded bars only/)).toBeNull();
 
     pan({ from: 1, to: 4 }, { from: -12, to: 3 });
     nextFrame();
     expect(screen.getByText(/Covers loaded bars only/)).toBeInTheDocument();
+    // Under the chart too, where it is read with the dialog closed.
+    expect(screen.getByText("Visible Range Volume Profile: covers the loaded bars only")).toBeInTheDocument();
 
     pan({ from: 1, to: 4 }, { from: 0, to: 3 });
     nextFrame();
     expect(screen.queryByText(/Covers loaded bars only/)).toBeNull();
+    expect(screen.queryByText("Visible Range Volume Profile: covers the loaded bars only")).toBeNull();
   });
 
   it("subscribes to the visible range only while active, and shows revealed bars only during a replay", () => {
@@ -1430,7 +1613,7 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
     attachChart();
     expect(handlers).toHaveLength(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    overlayClick("Add visible range volume profile");
     expect(handlers).toHaveLength(1);
     expect(vrvp()[0].profile.totalVolume).toBeCloseTo(30); // bars 2..4
 
@@ -1442,25 +1625,29 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
   it("disables Add while active or outside Candles mode", () => {
     render(<ChartPage />);
     attachChart();
-    const add = () => screen.getByRole("button", { name: "Add visible range volume profile" });
+    const add = () => within(openOverlays()).getByRole("button", { name: "Add visible range volume profile" });
     expect(add()).toBeEnabled();
 
     fireEvent.click(add());
     expect(add()).toBeDisabled();
+    expect(add()).toHaveTextContent("on the chart");
 
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
     expect(screen.getByText("Shown in Candles mode only")).toBeInTheDocument();
+    const svp = within(openOverlays()).getByRole("button", { name: "Add Session Volume Profile" });
+    expect(svp).toBeDisabled();
+    expect(svp).toHaveTextContent("Candles mode only");
   });
 
   it("is a single instance: adding again does not stack, Remove clears it (AC #4)", () => {
     render(<ChartPage />);
     attachChart();
-    const add = () => fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    const add = () => overlayClick("Add visible range volume profile");
     add();
     add();
     expect(vrvp()).toHaveLength(1);
 
-    fireEvent.click(screen.getByRole("button", { name: "Remove visible range volume profile" }));
+    overlayClick("Remove visible range volume profile");
 
     expect(vrvp()).toHaveLength(0);
   });
@@ -1468,14 +1655,163 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
   it("coexists with a placed FRVP and is hidden in Lines mode", () => {
     render(<ChartPage />);
     attachChart();
-    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    overlayClick("Add visible range volume profile");
+    armTool("Fixed range volume profile tool");
     act(() => lastChartProps.current!.onRangeSelect!({ time: 1, price: 1 }, { time: 3, price: 2 }));
     expect(lastChartProps.current!.volumeProfiles!.map((p) => p.id)).toEqual(["frvp-1", "vrvp"]);
 
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
 
     expect(vrvp()).toHaveLength(0);
+  });
+});
+
+describe("ChartPage Volume overlays dialog", () => {
+  const D1 = Date.UTC(2024, 0, 1) / 1000;
+  const times = [D1, D1 + 60, D1 + 86_400, D1 + 86_460];
+  const bar = (t: number, p: number) => ({ time: t, open: p, high: p + 1, low: p, close: p + 1 });
+
+  beforeEach(() => {
+    const candles = times.map((t, i) => bar(t, 10 + i * 10));
+    mocks.candles = candles;
+    mocks.volume = times.map((t) => ({ time: t, value: 5 }));
+    mocks.session = { candles, volume: mocks.volume, completeFrom: null };
+  });
+
+  it("opens from the top bar's Volume overlays button, next to Indicators, with the overlays to add and nothing on", () => {
+    render(page());
+    const topbar = screen.getByRole("toolbar", { name: "Chart controls" });
+    const labels = within(topbar).getAllByRole("button").map((b) => b.textContent);
+    expect(labels.indexOf("Volume overlays")).toBe(labels.indexOf("Indicators") + 1);
+    expect(screen.queryByRole("dialog", { name: "Volume overlays" })).toBeNull();
+
+    fireEvent.click(within(topbar).getByRole("button", { name: "Volume overlays" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Volume overlays" });
+    const adds = within(within(dialog).getByRole("region", { name: "Add a volume overlay" }))
+      .getAllByRole("button")
+      .map((b) => b.getAttribute("aria-label"));
+    expect(adds).toEqual([
+      "Add visible range volume profile",
+      "Draw fixed range volume profile",
+      "Add Session Volume Profile",
+      "Add Session Volume Profile HD",
+      "Add Periodic Volume Profile",
+      "Add Time Price Opportunity (TPO)",
+      "Add Auto Anchored Volume Profile",
+    ]);
+    expect(within(dialog).getByText("Nothing added yet")).toBeInTheDocument();
+  });
+
+  it("adds an overlay into the list below with its settings, applies a setting at once, and removes it", () => {
+    render(page());
+    overlayClick("Add Periodic Volume Profile");
+
+    const dialog = screen.getByRole("dialog", { name: "Volume overlays" });
+    const entry = within(dialog).getByRole("region", { name: "Periodic Volume Profile" });
+    expect(within(dialog).queryByText("Nothing added yet")).toBeNull();
+    expect(within(dialog).getByRole("button", { name: "Add Periodic Volume Profile" })).toBeDisabled();
+    fireEvent.change(within(entry).getByLabelText("Profile period"), { target: { value: "daily" } });
+    expect(lastChartProps.current!.volumeProfiles!.filter((p) => p.id.startsWith("session-")).length).toBeGreaterThan(0);
+    expect(mocks.sessionArgs).toMatchObject({ enabled: true, barSeconds: 60 }); // the daily period's fetch
+
+    fireEvent.click(within(entry).getByRole("button", { name: "Remove session volume profile" }));
+    expect(within(dialog).queryByRole("region", { name: "Periodic Volume Profile" })).toBeNull();
+    expect(lastChartProps.current!.volumeProfiles!.some((p) => p.id.startsWith("session-"))).toBe(false);
+    expect(within(dialog).getByRole("button", { name: "Add Periodic Volume Profile" })).toBeEnabled();
+  });
+
+  it("says a session-type preset replaces the one on, then switches the one slot", () => {
+    render(page());
+    overlayClick("Add Session Volume Profile");
+    const dialog = screen.getByRole("dialog", { name: "Volume overlays" });
+    const tpo = within(dialog).getByRole("button", { name: "Add Time Price Opportunity (TPO)" });
+    expect(tpo).toHaveTextContent("replaces Session Volume Profile");
+    expect(within(dialog).getByRole("button", { name: "Add visible range volume profile" })).not.toHaveTextContent("replaces");
+
+    fireEvent.click(tpo);
+
+    expect(within(dialog).queryByRole("region", { name: "Session Volume Profile" })).toBeNull();
+    expect(within(dialog).getByRole("region", { name: "Time Price Opportunity (TPO)" })).toBeInTheDocument();
+    expect(within(dialog).getAllByRole("group", { name: "Session volume profile settings" })).toHaveLength(1);
+    expect(within(dialog).getByRole("button", { name: "Add Session Volume Profile" })).toHaveTextContent(
+      "replaces Time Price Opportunity (TPO)",
+    );
+  });
+
+  it("keeps VRVP, a session profile and placed FRVPs on together, each with its own entry", () => {
+    render(page());
+    overlayClick("Add visible range volume profile");
+    overlayClick("Add Session Volume Profile HD");
+    armTool("Fixed range volume profile tool");
+    act(() => lastChartProps.current!.onRangeSelect!({ time: times[0] as never, price: 0 }, { time: times[1] as never, price: 0 }));
+
+    const dialog = openOverlays();
+    for (const name of ["Visible Range Volume Profile", "Session Volume Profile HD", "Fixed Range Volume Profile"]) {
+      expect(within(dialog).getByRole("region", { name })).toBeInTheDocument();
+    }
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove volume profile frvp-1" }));
+    expect(within(dialog).queryByRole("region", { name: "Fixed Range Volume Profile" })).toBeNull();
+    expect(lastChartProps.current!.volumeProfiles!.some((p) => p.id === "frvp-1")).toBe(false);
+  });
+
+  it("disables every Add and the FRVP draw in Lines mode, saying why", () => {
+    render(page());
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    const dialog = openOverlays();
+
+    expect(within(dialog).getByText(/Volume overlays draw in Candles mode only/)).toBeInTheDocument();
+    for (const button of within(within(dialog).getByRole("region", { name: "Add a volume overlay" })).getAllByRole("button")) {
+      expect(button).toBeDisabled();
+      expect(button).toHaveTextContent("Candles mode only");
+    }
+  });
+
+  it("closes from its close button and from Esc (the dialog's own close event), keeping what was added", () => {
+    render(page());
+    overlayClick("Add Session Volume Profile");
+    fireEvent.click(within(openOverlays()).getByRole("button", { name: "Close volume overlays" }));
+    expect(screen.queryByRole("dialog", { name: "Volume overlays" })).toBeNull();
+    expect(lastChartProps.current!.volumeProfiles!.some((p) => p.id.startsWith("session-"))).toBe(true);
+
+    // jsdom has no showModal: Esc's effect on a native modal dialog is its `close` event.
+    fireEvent(openOverlays(), new Event("close"));
+    expect(screen.queryByRole("dialog", { name: "Volume overlays" })).toBeNull();
+  });
+
+  it("keeps the partial-data notices under the chart while the dialog is closed (DW-151/153)", () => {
+    mocks.session = { ...mocks.session, loading: true };
+    render(page());
+    expect(screen.queryByRole("list", { name: "Volume overlay notices" })).toBeNull();
+    overlayClick("Add Session Volume Profile");
+    fireEvent.click(within(openOverlays()).getByRole("button", { name: "Close volume overlays" }));
+
+    const notices = screen.getByRole("list", { name: "Volume overlay notices" });
+    expect(within(notices).getByText("Session Volume Profile: loading session history")).toBeInTheDocument();
+    expect(within(notices).getByText("Session Volume Profile: 2 of 5 sessions drawn")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    expect(screen.queryByRole("list", { name: "Volume overlay notices" })).toBeNull();
+  });
+
+  it("an Esc inside it does not disarm an FRVP tool armed before it opened", () => {
+    render(page());
+    armTool("Fixed range volume profile tool");
+    const dialog = openOverlays();
+
+    fireEvent.keyDown(within(dialog).getByRole("button", { name: "Close volume overlays" }), { key: "Escape" });
+
+    expect(screen.getByRole("button", { name: "Fixed range volume profile tool" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("shows the session status messages in the overlay's entry", () => {
+    mocks.session = { ...mocks.session, loading: true };
+    render(page());
+    overlayClick("Add Session Volume Profile");
+    const entry = within(openOverlays()).getByRole("region", { name: "Session Volume Profile" });
+
+    expect(within(entry).getByRole("status")).toHaveTextContent("Loading session history…");
+    expect(within(entry).getByText(/Showing 2 of 5/)).toBeInTheDocument();
   });
 });
 
@@ -1498,7 +1834,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
     render(<ChartPage />);
     expect(sessions()).toHaveLength(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
 
     expect(sessions().map((s) => s.id)).toEqual([`session-${D1}`, `session-${D2}`, `session-${D3}`]);
     expect(sessions()[1].xAnchor).toEqual({ time: D2, offsetSeconds: 0 });
@@ -1513,11 +1849,11 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
   it("SVP HD is the same component with a higher row count and respondsToZoom (AC #3)", () => {
     render(<ChartPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
     expect(sessions()[0].profile.rows).toHaveLength(24);
     expect(sessions()[0].respondsToZoom).toBe(false);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile HD" }));
+    overlayClick("Add Session Volume Profile HD");
     expect(sessions()).toHaveLength(3); // switched preset, not stacked
     expect(sessions()[0].profile.rows).toHaveLength(120);
     expect(sessions()[0].respondsToZoom).toBe(true);
@@ -1525,10 +1861,10 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
 
   it("keeps the session count and colors when switching presets", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
     fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "2" } });
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile HD" }));
+    overlayClick("Add Session Volume Profile HD");
 
     expect(sessions()).toHaveLength(2);
     expect((screen.getByLabelText("Sessions to render") as HTMLInputElement).value).toBe("2");
@@ -1536,7 +1872,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
 
   it("says so when fewer sessions than requested can be drawn", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
     expect(screen.getByText(/Showing 3 of 5/)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "3" } });
@@ -1546,7 +1882,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
 
   it("limits the rendered sessions with the sessions setting (AC #4)", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
 
     fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "2" } });
 
@@ -1555,14 +1891,14 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
 
   it("can be removed, and is hidden in Lines mode", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
     expect(sessions()).toHaveLength(0);
     expect(screen.getByText("Shown in Candles mode only")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Candles" }));
     expect(sessions()).toHaveLength(3);
-    fireEvent.click(screen.getByRole("button", { name: "Remove session volume profile" }));
+    overlayClick("Remove session volume profile");
     expect(sessions()).toHaveLength(0);
   });
 
@@ -1570,7 +1906,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
     mocks.candles = [bar(D3, 50), bar(D3 + 60, 60)]; // chart only loaded the last day
     render(<ChartPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
 
     expect(sessions().map((s) => s.id)).toEqual([`session-${D3}`]);
   });
@@ -1586,7 +1922,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
     mocks.candles = [bar(D3 + 600, 50), bar(D3 + 660, 60)];
     render(<ChartPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
 
     const [session] = sessions();
     expect(session.xAnchor).toEqual({ time: D3 + 600, offsetSeconds: -600 }); // 10 bars left of it
@@ -1598,7 +1934,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
     layoutApi.server[IID] = layoutOf({ bar_seconds: 86_400 });
     render(page());
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
 
     // D2's newest 1-minute bar is D2 + 60: the session has elapsed to D2 + 120 (the past one ends
     // where its newest bar does; it never stretches to a period end the data does not reach).
@@ -1610,7 +1946,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
   it("shows a loading status while older session history is paged in (DW-153)", () => {
     mocks.session = { ...mocks.session, loading: true };
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
 
     expect(screen.getByRole("status")).toHaveTextContent("Loading session history…");
   });
@@ -1620,7 +1956,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
     try {
       vi.setSystemTime(Date.UTC(2024, 0, 10, 23, 59, 30));
       render(<ChartPage />);
-      fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+      overlayClick("Add Session Volume Profile");
       expect(mocks.sessionArgs.sinceSeconds).toBe(Date.UTC(2024, 0, 6) / 1000); // 5 days: Jan 6..10
 
       await act(async () => {
@@ -1639,7 +1975,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
     try {
       vi.setSystemTime(Date.UTC(2024, 0, 2));
       render(<ChartPage />);
-      fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+      overlayClick("Add Periodic Volume Profile");
       fireEvent.change(screen.getByLabelText("Profile period"), { target: { value: "monthly" } });
       expect(mocks.sessionArgs.sinceSeconds).toBe(Date.UTC(2023, 8, 1) / 1000); // Sep..Jan
       // A browser fires a delay past 2^31 - 1 ms at once; the fake clock would not, so check them.
@@ -1663,7 +1999,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
 
   it("anchors the session history to the replay cutoff while replaying (DW-153)", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
     fireEvent.click(screen.getByRole("button", { name: "Replay" }));
 
     act(() => lastChartProps.current!.onPointClick!({ time: D2 + 60, price: 1 }));
@@ -1688,7 +2024,7 @@ describe("ChartPage periodic volume profile (Story 18.9)", () => {
   it("adds a periodic profile (weekly by default) with one profile per period (AC #1/#2)", () => {
     render(<ChartPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    overlayClick("Add Periodic Volume Profile");
 
     expect(periods().map((p) => p.id)).toEqual([`session-${MON1}`, `session-${MON2}`]);
     expect(periods().map((p) => p.profile.totalVolume)).toEqual([10, 10]);
@@ -1697,7 +2033,7 @@ describe("ChartPage periodic volume profile (Story 18.9)", () => {
 
   it("regroups when the period dropdown changes, offering only the fixed set", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    overlayClick("Add Periodic Volume Profile");
     const select = screen.getByLabelText("Profile period") as HTMLSelectElement;
     expect([...select.options].map((o) => o.value)).toEqual(["4h", "daily", "weekly", "monthly"]);
     expect([...select.options].map((o) => o.textContent)).toEqual(["4 hours", "Daily", "Weekly", "Monthly"]);
@@ -1709,7 +2045,7 @@ describe("ChartPage periodic volume profile (Story 18.9)", () => {
 
   it("switching the period refetches at that period's bar size and a deeper wanted start", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    overlayClick("Add Periodic Volume Profile");
     const weekly = { ...mocks.sessionArgs };
     expect(weekly).toMatchObject({ enabled: true, barSeconds: 300 });
 
@@ -1721,23 +2057,23 @@ describe("ChartPage periodic volume profile (Story 18.9)", () => {
 
   it("switching PVP -> SVP -> PVP restarts on the preset's default period", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    overlayClick("Add Periodic Volume Profile");
     fireEvent.change(screen.getByLabelText("Profile period"), { target: { value: "monthly" } });
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
     expect(mocks.sessionArgs.barSeconds).toBe(60);
-    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    overlayClick("Add Periodic Volume Profile");
 
     expect((screen.getByLabelText("Profile period") as HTMLSelectElement).value).toBe("weekly");
   });
 
   it("reuses the shared sessions-to-render setting (AC #3), and only PVP shows a period dropdown", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    overlayClick("Add Periodic Volume Profile");
     fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "1" } });
     expect(periods()).toHaveLength(1);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
     expect(screen.queryByLabelText("Profile period")).toBeNull();
     expect(screen.getAllByLabelText("Sessions to render")).toHaveLength(1);
   });
@@ -1761,10 +2097,10 @@ describe("cross-story: drawing tools during replay (Story 18.4 AC #5, verified e
     point(3, 1);
     expect(lastChartProps.current!.data).toHaveLength(3);
 
-    fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+    armTool("Trendline tool");
     point(1, 1);
     point(3, 2);
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    armTool("Horizontal line tool");
     act(() => lastChartProps.current!.onPriceClick!(1.5));
     const drawings = lastChartProps.current!.drawings;
     expect(drawings).toHaveLength(1);
@@ -1780,7 +2116,7 @@ describe("cross-story: drawing tools during replay (Story 18.4 AC #5, verified e
     render(<ChartPage />);
     fireEvent.click(screen.getByRole("button", { name: "Replay" }));
     point(3, 1);
-    fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+    armTool("Trendline tool");
     point(1, 1);
 
     fireEvent.keyDown(window, { key: "Escape" });
@@ -1812,7 +2148,7 @@ describe("ChartPage legend controls (Story 32.3)", () => {
     const cursor = screen.getByRole("button", { name: "Cursor tool" });
     expect(cursor).toHaveAttribute("title", "Select / edit drawings (Esc)");
 
-    fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+    armTool("Trendline tool");
     expect(cursor).toHaveAttribute("aria-pressed", "false");
     act(() => lastChartProps.current!.onPointClick!({ time: 1, price: 1 }));
     act(() => lastChartProps.current!.onPointClick!({ time: 2, price: 2 }));
@@ -1822,13 +2158,15 @@ describe("ChartPage legend controls (Story 32.3)", () => {
     expect(lastChartProps.current).toMatchObject({ drawEditable: true });
   });
 
-  it("has no indicator list, select or Add below the chart, and keeps the div#indicators anchor", async () => {
+  it("has no indicator list, select or Add, and no volume-overlay controls, below the chart", async () => {
     await mountWith([SMA], { [`${SMA_ID}.value`]: [] });
 
     expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Indicators" })).toBeNull();
-    expect(document.querySelector("div#indicators")).not.toBeNull();
-    expect(document.querySelector("div#indicators")?.contains(screen.getByRole("heading", { name: "Chart overlays" }))).toBe(true);
+    // The volume overlays are added and edited in their own dialog (nothing links to the old anchor).
+    expect(screen.queryByRole("button", { name: /^Add / })).toBeNull();
+    expect(screen.queryByRole("group", { name: /volume profile settings/ })).toBeNull();
+    expect(document.querySelector("div#indicators")).toBeNull();
   });
 
   it("titles the legend row per instance: RSI(14) and RSI(21) are two rows, each with its own params", async () => {
@@ -2170,9 +2508,6 @@ describe("ChartPage legend controls (Story 32.3)", () => {
 
 describe("ChartPage Fibonacci and position tools (Story 32.5)", () => {
   const drag = (price: number, time: number | null = null, barsSince = (): number | null => null) => ({ price, time, barsSince });
-  const armTool = (name: string): void => {
-    fireEvent.click(screen.getByRole("button", { name }));
-  };
   const drawings = (): ChartStubProps["drawings"] => lastChartProps.current!.drawings;
 
   it("arms the Fibonacci tool for a drag, and Esc cancels it with nothing placed", async () => {
@@ -2263,9 +2598,9 @@ describe("ChartPage Fibonacci and position tools (Story 32.5)", () => {
     mocks.precision = null;
     await renderReady(page());
     for (const name of ["Fibonacci retracement tool", "Long position tool", "Short position tool"]) {
-      expect(screen.getByRole("button", { name })).toBeDisabled();
+      expect(toolControl(name)).toBeDisabled();
     }
-    expect(screen.getByRole("button", { name: "Trendline tool" })).toBeEnabled();
+    expect(toolControl("Trendline tool")).toBeEnabled();
     expect(lastChartProps.current!.precision).toBeNull();
   });
 
@@ -2416,7 +2751,7 @@ describe("ChartPage Fibonacci and position tools (Story 32.5)", () => {
 
 describe("drawing settings and failed saves (Story 32.5 review)", () => {
   const placeLong = (): void => {
-    fireEvent.click(screen.getByRole("button", { name: "Long position tool" }));
+    armTool("Long position tool");
     act(() => lastChartProps.current!.onPointClick!({ time: 100, price: 100 }));
   };
 
@@ -2449,7 +2784,7 @@ describe("drawing settings and failed saves (Story 32.5 review)", () => {
     try {
       drawingsApi.save.mockRejectedValue(Object.assign(new Error("PUT failed: 422"), { status: 422 }));
       await renderReady(page());
-      fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+      armTool("Horizontal line tool");
       act(() => lastChartProps.current?.onPriceClick?.(123.5));
       await act(async () => {
         vi.advanceTimersByTime(SAVE_DEBOUNCE_MS + 1);
@@ -2479,7 +2814,7 @@ describe("drawing settings and failed saves (Story 32.5 review)", () => {
     try {
       drawingsApi.save.mockRejectedValueOnce(Object.assign(new Error("PUT failed: 500"), { status: 500 }));
       await renderReady(page());
-      fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+      armTool("Horizontal line tool");
       act(() => lastChartProps.current?.onPriceClick?.(123.5));
       await act(async () => {
         vi.advanceTimersByTime(SAVE_DEBOUNCE_MS + 1);
@@ -2501,7 +2836,7 @@ describe("drawing settings and failed saves (Story 32.5 review)", () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     drawingsApi.save.mockRejectedValue(new Error("network down"));
     const view = await renderReady(page());
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    armTool("Horizontal line tool");
     act(() => lastChartProps.current?.onPriceClick?.(123.5));
     view.unmount(); // flushes once
     await act(async () => {
@@ -2629,7 +2964,7 @@ describe("ChartPage layout that comes back as it was left (Story 32.6)", () => {
     mocks.candles = bars;
     mocks.volume = bars.map((b) => ({ time: b.time, value: 10 }));
     const first = render(page());
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    armTool("Fixed range volume profile tool");
     act(() => lastChartProps.current!.onRangeSelect!({ time: 2, price: 1 }, { time: 4, price: 2 }));
     await flushSave();
 
@@ -2677,7 +3012,9 @@ describe("ChartPage layout that comes back as it was left (Story 32.6)", () => {
     });
     render(page());
 
-    expect(screen.getByRole("button", { name: "Remove visible range volume profile" })).toBeInTheDocument();
+    expect(within(openOverlays()).getByRole("button", { name: "Remove visible range volume profile" })).toBeInTheDocument();
+    expect((screen.getByLabelText("Row count") as HTMLInputElement).value).toBe("48");
+    expect((screen.getByLabelText("Value area percent") as HTMLInputElement).value).toBe("60");
   });
 
   it("restores a saved session profile and saves its period", async () => {
@@ -2709,6 +3046,7 @@ describe("ChartPage layout that comes back as it was left (Story 32.6)", () => {
       },
     });
     render(page());
+    openOverlays();
 
     expect((screen.getByLabelText("Sessions to render") as HTMLInputElement).value).toBe("1");
     expect((screen.getByLabelText("Up volume color") as HTMLInputElement).value).toBe("#112233");
@@ -2723,6 +3061,7 @@ describe("ChartPage layout that comes back as it was left (Story 32.6)", () => {
       volume_profile: { ...BUILT_IN_LAYOUT.volume_profile, kind: "visible", up_color: "#abcdef", show_value_area: false },
     });
     render(page());
+    openOverlays();
 
     expect((screen.getByLabelText("Up volume color") as HTMLInputElement).value).toBe("#abcdef");
     expect(screen.getByLabelText("Show value area")).not.toBeChecked();
@@ -2731,7 +3070,7 @@ describe("ChartPage layout that comes back as it was left (Story 32.6)", () => {
   it("saves the session count, colours and toggles of the saved kind", async () => {
     vi.useFakeTimers();
     render(page());
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
     fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "8" } });
     fireEvent.change(screen.getByLabelText("Down volume color"), { target: { value: "#010203" } });
     fireEvent.click(screen.getByLabelText("Show POC"));
@@ -2877,7 +3216,7 @@ describe("ChartPage Anchored VP and Anchored VWAP drawings (Story 32.7)", () => 
   const volumes = (list = bars) => list.map((b) => ({ time: b.time, value: b.time / 100 }));
   const avpProfiles = () => lastChartProps.current!.volumeProfiles!.filter((p) => p.id.startsWith("avp-"));
   const place = (toolName: string, time: number) => {
-    fireEvent.click(screen.getByRole("button", { name: toolName }));
+    armTool(toolName);
     act(() => lastChartProps.current!.onPointClick!({ time, price: 12 }));
   };
 
@@ -3084,7 +3423,7 @@ describe("ChartPage Anchored VP and Anchored VWAP drawings (Story 32.7)", () => 
     expect(lastChartProps.current!.drawings).toEqual([]);
     expect(avpProfiles()).toHaveLength(0);
     expect(lastChartProps.current!.legendExtras).toEqual([]);
-    expect(screen.getByRole("button", { name: "Anchored volume profile tool" })).toBeDisabled();
+    expect(toolControl("Anchored volume profile tool")).toBeDisabled();
   });
 
   it("the settings modal edits the VWAP's source and bands, and the VP's rows and value area", async () => {
@@ -3146,7 +3485,7 @@ describe("ChartPage Auto Anchored profile and TPO (Story 32.7)", () => {
   // Chart bars over two sessions; the highest high is on D1 + 120 and the lowest low on D2 + 60.
   const chartBars = [bar(D1, 10, 12), bar(D1 + 120, 20, 30), bar(D2, 15, 18), bar(D2 + 60, 5, 17)];
   const autoSpec = () => lastChartProps.current!.volumeProfiles!.find((p) => p.id === "auto-anchored");
-  const add = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
+  const add = (name: string) => overlayClick(name);
 
   beforeEach(() => {
     mocks.candles = chartBars;
@@ -3257,6 +3596,7 @@ describe("ChartPage Auto Anchored profile and TPO (Story 32.7)", () => {
     layoutApi.save.mockClear();
 
     render(page());
+    openOverlays();
     expect((screen.getByLabelText("Anchor") as HTMLSelectElement).value).toBe("week");
     expect(mocks.sessionArgs).toMatchObject({ enabled: true, sinceSeconds: Date.UTC(2024, 0, 1) / 1000, barSeconds: 300 });
     await flushSave();
@@ -3334,6 +3674,7 @@ describe("ChartPage Auto Anchored profile and TPO (Story 32.7)", () => {
 
       render(page());
       expect(sessions()[0].tpo!.letters).toBe(true);
+      openOverlays();
       expect((screen.getByLabelText("Initial balance minutes") as HTMLInputElement).value).toBe("90");
       expect(mocks.sessionArgs.barSeconds).toBe(1800);
       await flushSave();
@@ -3356,7 +3697,7 @@ describe("ChartPage Auto Anchored profile and TPO (Story 32.7)", () => {
       layoutApi.server[IID] = { ...layoutOf(), volume_profile: { ...old, kind: "session", session: "daily" } };
       render(page());
 
-      expect(screen.getByText("Session Volume Profile")).toBeInTheDocument();
+      expect(within(openOverlays()).getByRole("region", { name: "Session Volume Profile" })).toBeInTheDocument();
       expect(screen.queryByLabelText("Anchor")).toBeNull();
     });
   });

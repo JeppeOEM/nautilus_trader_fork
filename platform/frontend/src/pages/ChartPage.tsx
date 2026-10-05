@@ -16,16 +16,16 @@ import LightweightChart, {
   type PriceLineSpec,
 } from "../components/chart/LightweightChart";
 import type { TrendlineAnchor } from "../components/chart/primitives/TrendlinePrimitive";
-import SessionProfileControl from "../components/chart/SessionProfileControl";
-import VrvpControl from "../components/chart/VrvpControl";
-import VolumeProfileSettingsPanel from "../components/chart/VolumeProfileSettings";
+import ToolRail from "../components/chart/ToolRail";
+import { type ChartTool, type ChartToolDef, groupOfTool, toolDef } from "../lib/chartTools";
+import VolumeOverlaysDialog, { type SessionSlot, VolumeOverlayNotices } from "../components/chart/VolumeOverlaysDialog";
 import {
   DEFAULT_VOLUME_PROFILE_SETTINGS,
   buildRangeProfile,
   type VolumeProfile,
   type VolumeProfileSettings,
 } from "../lib/volumeProfile";
-import { type AutoAnchorPreset, DEFAULT_AUTO_ANCHOR, anchorBars, anchorTime } from "../lib/autoAnchor";
+import { DEFAULT_AUTO_ANCHOR, anchorBars, anchorTime } from "../lib/autoAnchor";
 import { anchoredVwap, breakAtGaps } from "../lib/anchoredVwap";
 import {
   DEFAULT_IB_MINUTES,
@@ -175,106 +175,6 @@ function legendTitle(entry: IndicatorConfigEntry): string {
   return parts.length ? `${entry.name} (${parts.join(", ")})` : entry.name;
 }
 
-// Story 18.1 (AC #1): the chart's drawing-tool state -- "cursor" is the inert default.
-// Stories 18.2/18.3 extend this union with their tools, never a second state variable.
-export type ChartTool =
-  | "cursor"
-  | "hline"
-  | "trendline"
-  | "fib"
-  | "long"
-  | "short"
-  | "measure"
-  | "frvp"
-  | "avp"
-  | "avwap";
-
-interface ChartToolDef {
-  id: ChartTool;
-  label: string;
-  ariaLabel: string;
-  /** Hover tooltip, where the label alone does not say what the button does. */
-  title?: string;
-  /** No meaning in Lines mode (no single main series to attach to -- spec Task 2's
-   * MVP scope decision): disables the button there and disarms an armed tool (see the
-   * mode-guard effect in ChartInner). */
-  candlesOnly: boolean;
-  /** Places a drawing that is saved with the coin: off until the coin's drawings have loaded (a
-   * placement before then would be overwritten by the load, or overwrite the server's list). */
-  placesDrawing?: boolean;
-  /** Labels its prices at the instrument's precision: off until the first candles response has
-   * carried it, never at a guessed one. */
-  needsPrecision?: boolean;
-}
-
-// The left tool rail's tools, as data -- Stories 18.2/18.3 append entries here and
-// the toolbar markup below never changes shape.
-// Story 18.10 (spec §A8.1): two clusters, top to bottom -- [cursor, crosshair toggle]
-// then the drawing tools [line, horizontal line, measurement, + the FRVP profile tool].
-// The crosshair toggle is not an exclusive tool (it is a view option), so it is rendered
-// between the clusters rather than living in this list.
-const SELECT_TOOLS: readonly ChartToolDef[] = [
-  {
-    id: "cursor",
-    label: "Cursor",
-    ariaLabel: "Cursor tool",
-    // The disarm, and the one mode in which drawings can be edited (Story 32.3).
-    title: "Select / edit drawings (Esc)",
-    candlesOnly: false,
-  },
-];
-const DRAWING_TOOLS: readonly ChartToolDef[] = [
-  { id: "trendline", label: "Trend", ariaLabel: "Trendline tool", candlesOnly: false, placesDrawing: true },
-  { id: "hline", label: "HLine", ariaLabel: "Horizontal line tool", candlesOnly: true, placesDrawing: true },
-  {
-    id: "fib",
-    label: "Fib",
-    ariaLabel: "Fibonacci retracement tool",
-    title: "Fibonacci retracement: drag from anchor A to anchor B",
-    candlesOnly: false,
-    placesDrawing: true,
-    needsPrecision: true,
-  },
-  {
-    id: "long",
-    label: "Long",
-    ariaLabel: "Long position tool",
-    title: "Long position: click the entry price",
-    candlesOnly: false,
-    placesDrawing: true,
-    needsPrecision: true,
-  },
-  {
-    id: "short",
-    label: "Short",
-    ariaLabel: "Short position tool",
-    title: "Short position: click the entry price",
-    candlesOnly: false,
-    placesDrawing: true,
-    needsPrecision: true,
-  },
-  { id: "measure", label: "Measure", ariaLabel: "Measurement tool", candlesOnly: true },
-  { id: "frvp", label: "FRVP", ariaLabel: "Fixed range volume profile tool", candlesOnly: true },
-  // Story 32.7: single-click drawings, saved with the coin's drawings; both read the candle bars.
-  {
-    id: "avp",
-    label: "AVP",
-    ariaLabel: "Anchored volume profile tool",
-    title: "Anchored volume profile: click the bar it starts at",
-    candlesOnly: true,
-    placesDrawing: true,
-  },
-  {
-    id: "avwap",
-    label: "AVWAP",
-    ariaLabel: "Anchored VWAP tool",
-    title: "Anchored VWAP: click the bar it starts at",
-    candlesOnly: true,
-    placesDrawing: true,
-    needsPrecision: true,
-  },
-];
-
 type TpoDetail = { rows: TpoRow[]; balance: InitialBalance | null; ibMinutes: number };
 type TpoDetailCache = WeakMap<VolumeProfile, TpoDetail>;
 
@@ -300,16 +200,9 @@ function trimAfter<T extends { time: Time }>(rows: T[], cutoff: number | null): 
 }
 
 // The wanted start of its history is not part of it: that follows the clock (see `sessionNowMs`).
-interface SessionConfig {
-  preset: SessionPreset;
-  period: SessionPeriod;
-  settings: SessionProfileSettings;
-  /** Story 32.7: the Auto Anchored preset, the TPO's initial balance (minutes) and letters switch;
-   * kept whichever preset is on, so switching back restores them. */
-  anchor: AutoAnchorPreset;
-  ibMinutes: number;
-  letters: boolean;
-}
+// The anchor, initial balance and letters are kept whichever preset is on, so switching back
+// restores them.
+type SessionConfig = SessionSlot;
 
 // Story 18.8: each session's longest bar spans this fraction of the session's width.
 const SESSION_WIDTH_FRACTION = 0.7;
@@ -398,6 +291,9 @@ interface ChartInnerProps {
   onLayout: (change: (prev: ChartLayout) => ChartLayout) => void;
   onSaveAsDefault: () => void;
   onResetToDefault: () => void;
+  /** The tool each rail group last armed, by group id: held above the timeframe and coin remounts. */
+  toolMemory: Partial<Record<string, ChartTool>>;
+  onToolUsed: (groupId: string, tool: ChartTool) => void;
 }
 
 function ChartInner({
@@ -413,6 +309,8 @@ function ChartInner({
   onLayout,
   onSaveAsDefault,
   onResetToDefault,
+  toolMemory,
+  onToolUsed,
 }: ChartInnerProps) {
   const [chart, setChart] = useState<IChartApi | null>(null);
   const patchLayout = useCallback(
@@ -447,6 +345,7 @@ function ChartInner({
   const [crosshairOn, setCrosshairOn] = useState(initialLayout.crosshair);
   useEffect(() => patchLayout({ crosshair: crosshairOn }), [crosshairOn, patchLayout]);
   const [indicatorDialogOpen, setIndicatorDialogOpen] = useState(false);
+  const [overlaysDialogOpen, setOverlaysDialogOpen] = useState(false);
   const [alertDialogOpen, setAlertDialogOpen] = useState(false);
   const [catalog, setCatalog] = useState<Record<string, IndicatorCatalogEntry>>({});
   // Story 18.2: the trendline's first click, held until the second click completes it
@@ -1277,6 +1176,10 @@ function ChartInner({
   const handleMeasureEnd = useCallback((): void => setActiveTool("cursor"), []);
 
   const selectTool = (tool: ChartTool): void => {
+    // The tool's rail group shows it from now on (TradingView's last-used rule); a one-tool group
+    // has nothing to remember.
+    const group = groupOfTool(tool);
+    if (group && group.tools.length > 1) onToolUsed(group.id, tool);
     setActiveTool(tool);
     setPendingAnchor(null);
     replay.cancelPick();
@@ -1350,25 +1253,12 @@ function ChartInner({
     [setAllDrawings],
   );
 
-  const renderTool = (tool: ChartToolDef) => (
-    <button
-      key={tool.id}
-      type="button"
-      className={activeTool === tool.id ? "tabbtn active" : "tabbtn"}
-      aria-pressed={activeTool === tool.id}
-      aria-label={tool.ariaLabel}
-      data-tool={tool.id}
-      title={tool.title}
-      disabled={
-        (mode === "lines" && tool.candlesOnly) ||
-        (tool.placesDrawing === true && drawingsStatus !== "ready") ||
-        (tool.needsPrecision === true && precision === null)
-      }
-      onClick={() => selectTool(tool.id)}
-    >
-      {tool.label}
-    </button>
-  );
+  const sessionRenderedCount = sessionCfg?.preset === "auto" ? autoView.specs.length : sessionSpecs.length;
+
+  const isToolDisabled = (tool: ChartToolDef): boolean =>
+    (mode === "lines" && tool.candlesOnly) ||
+    (tool.placesDrawing === true && drawingsStatus !== "ready") ||
+    (tool.needsPrecision === true && precision === null);
 
   return (
     <div>
@@ -1426,6 +1316,9 @@ function ChartInner({
         <div className="chart-cluster">
           <button type="button" onClick={() => setIndicatorDialogOpen(true)}>
             Indicators
+          </button>
+          <button type="button" aria-haspopup="dialog" onClick={() => setOverlaysDialogOpen(true)}>
+            Volume overlays
           </button>
           {/* Story 32.6: the coin's layout is saved as the default new coins start from, or reset to it. */}
           <button
@@ -1489,23 +1382,16 @@ function ChartInner({
         </div>
       )}
       <div className="chart-workspace">
-        {/* Story 18.1 (AC #1): the left tool rail, generated from CHART_TOOLS --
-            .tabbtn's shared visual pattern (theme.css) with the narrow-rail overrides
-            in index.css, same scoped-override precedent as .filter-panel .tabbtn. */}
-        <div className="chart-toolbar" role="toolbar" aria-label="Chart tools">
-          {SELECT_TOOLS.map(renderTool)}
-          <button
-            type="button"
-            className={crosshairOn ? "tabbtn active" : "tabbtn"}
-            aria-pressed={crosshairOn}
-            aria-label="Crosshair toggle"
-            onClick={() => setCrosshairOn((on) => !on)}
-          >
-            Cross
-          </button>
-          <hr className="chart-toolbar-divider" />
-          {DRAWING_TOOLS.map(renderTool)}
-        </div>
+        {/* Story 18.1 (AC #1): the left tool rail, generated from `TOOL_GROUPS` (ToolRail.tsx) --
+            .tabbtn's shared visual pattern (theme.css) with the narrow-rail overrides in index.css. */}
+        <ToolRail
+          activeTool={activeTool}
+          lastUsed={toolMemory}
+          isDisabled={isToolDisabled}
+          onPick={selectTool}
+          crosshairOn={crosshairOn}
+          onCrosshairToggle={() => setCrosshairOn((on) => !on)}
+        />
         <div className="term-box" data-label={instrumentId}>
           {loadFailed && (
             <div role="alert" className="chart-load-error">
@@ -1558,6 +1444,15 @@ function ChartInner({
           />
         </div>
       </div>
+      <VolumeOverlayNotices
+        candlesMode={mode === "candles"}
+        vrvp={{ active: vrvpActive, pastOldest: visibleRange?.pastOldest ?? false }}
+        session={{
+          active: sessionCfg,
+          renderedCount: sessionRenderedCount,
+          loading: sessionData.loading,
+        }}
+      />
       {drawingsStatus === "failed" && (
         <p role="alert" className="chart-load-error">
           Drawings could not be loaded, so the drawing tools are off (see the error bar). The load is retried every few seconds; the tools come back once it succeeds.
@@ -1609,61 +1504,41 @@ function ChartInner({
           )}
         </p>
       ))}
-      {/* DW-150: the settings are reachable as soon as the FRVP tool is armed, so the first
-          profile is placed with them already set. */}
-      {(frvps.length > 0 || activeTool === "frvp") && (
-        <div role="group" aria-label="Volume profiles">
-          {frvps.map((f) => (
-            <button
-              key={f.id}
-              type="button"
-              aria-label={`Remove volume profile ${f.id}`}
-              onClick={() => setFrvps((all) => all.filter((x) => x.id !== f.id))}
-            >
-              {f.id} x
-            </button>
-          ))}
-          <VolumeProfileSettingsPanel
-            title="Fixed range volume profile settings"
-            value={frvpSettings}
-            onChange={handleFrvpSettings}
-          />
-        </div>
+      {overlaysDialogOpen && (
+        <VolumeOverlaysDialog
+          candlesMode={mode === "candles"}
+          onClose={() => setOverlaysDialogOpen(false)}
+          vrvp={{
+            active: vrvpActive,
+            settings: vrvpSettings,
+            pastOldest: visibleRange?.pastOldest ?? false,
+            onAdd: () => setVrvpActive(true),
+            onRemove: () => setVrvpActive(false),
+            onSettingsChange: setVrvpSettings,
+          }}
+          session={{
+            active: sessionCfg,
+            renderedCount: sessionRenderedCount,
+            loading: sessionData.loading,
+            onAdd: addSessionProfile,
+            onRemove: () => setSessionCfg(null),
+            onPeriodChange: changeSessionPeriod,
+            onOptionsChange: changeSessionOptions,
+            onSettingsChange: changeSessionSettings,
+          }}
+          // DW-150: the FRVP settings show as soon as the tool is armed, so the first range is placed
+          // with them already set.
+          frvp={{
+            ranges: frvps,
+            settings: frvpSettings,
+            armed: activeTool === "frvp",
+            drawDisabled: isToolDisabled(toolDef("frvp")),
+            onDraw: () => selectTool("frvp"),
+            onRemove: (id) => setFrvps((all) => all.filter((x) => x.id !== id)),
+            onSettingsChange: handleFrvpSettings,
+          }}
+        />
       )}
-      {/* Anchor target of the top bar's "Indicators" entry point: the picker plus the chart-only
-          overlay controls. */}
-      <div id="indicators" tabIndex={-1}>
-      <VrvpControl
-        active={vrvpActive}
-        candlesMode={mode === "candles"}
-        settings={vrvpSettings}
-        pastOldest={visibleRange?.pastOldest ?? false}
-        onAdd={() => setVrvpActive(true)}
-        onRemove={() => setVrvpActive(false)}
-        onSettingsChange={setVrvpSettings}
-      />
-      <SessionProfileControl
-        active={
-          sessionCfg
-            ? {
-                preset: sessionCfg.preset,
-                period: sessionCfg.period,
-                settings: sessionCfg.settings,
-                anchor: sessionCfg.anchor,
-                ibMinutes: sessionCfg.ibMinutes,
-                letters: sessionCfg.letters,
-              }
-            : null
-        }
-        candlesMode={mode === "candles"}
-        renderedCount={sessionCfg?.preset === "auto" ? autoView.specs.length : sessionSpecs.length}
-        loading={sessionData.loading}
-        onAdd={addSessionProfile}
-        onRemove={() => setSessionCfg(null)}
-        onPeriodChange={changeSessionPeriod}
-        onOptionsChange={changeSessionOptions}
-        onSettingsChange={changeSessionSettings}
-      />
       <AlertDialog
         open={alertDialogOpen}
         onClose={() => setAlertDialogOpen(false)}
@@ -1689,18 +1564,36 @@ function ChartInner({
         onFootprintChange={changeFootprintOn}
         footprintCandlesOnly={mode !== "candles"}
       />
-      </div>
     </div>
   );
 }
 
 export default function ChartPage() {
   const { iid } = useParams<{ iid: string }>();
+  // The tool each rail group last armed (TradingView's rule: a group's button shows the tool used
+  // last). Held here, above the per-coin and per-timeframe remounts, so it follows the operator from
+  // coin to coin. Known limit: not persisted, so a page reload shows each group's first tool again.
+  // Upgrade path: a per-viewer UI preference beside the coin layout (not the layout table itself,
+  // whose shape is the server's).
+  const [toolMemory, setToolMemory] = useState<Partial<Record<string, ChartTool>>>({});
+  const rememberTool = useCallback(
+    (groupId: string, tool: ChartTool): void =>
+      setToolMemory((prev) => (prev[groupId] === tool ? prev : { ...prev, [groupId]: tool })),
+    [],
+  );
   if (!iid) return <p>No instrument specified.</p>;
-  return <ChartForCoin key={iid} instrumentId={iid} />;
+  return <ChartForCoin key={iid} instrumentId={iid} toolMemory={toolMemory} onToolUsed={rememberTool} />;
 }
 
-function ChartForCoin({ instrumentId }: { instrumentId: string }) {
+function ChartForCoin({
+  instrumentId,
+  toolMemory,
+  onToolUsed,
+}: {
+  instrumentId: string;
+  toolMemory: Partial<Record<string, ChartTool>>;
+  onToolUsed: (groupId: string, tool: ChartTool) => void;
+}) {
   // Story 32.6: the coin's saved layout (timeframe, volume, mode, crosshair, pane heights, zoom, volume
   // profile) is loaded BEFORE the chart mounts, so its first candle request already uses the saved
   // timeframe. Held here, not in ChartInner (remounted on every timeframe change).
@@ -1779,6 +1672,8 @@ function ChartForCoin({ instrumentId }: { instrumentId: string }) {
         onLayout={updateLayout}
         onSaveAsDefault={handleSaveAsDefault}
         onResetToDefault={handleResetToDefault}
+        toolMemory={toolMemory}
+        onToolUsed={onToolUsed}
       />
       {layoutStore.saveError !== null && (
         <p role="alert" className="chart-load-error">

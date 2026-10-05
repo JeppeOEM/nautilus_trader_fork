@@ -231,6 +231,56 @@ table {
   padding: 7px 10px;
 }
 
+/* A rail group (TradingView-style): the tool button, a narrow expander for a group of several
+   tools, and the group's flyout menu opening to the right of the rail, over the chart. */
+.chart-tool-group {
+  position: relative;
+  display: flex;
+}
+
+.chart-tool-group > .tabbtn {
+  flex: 1;
+}
+
+.chart-tool-expander {
+  flex: none;
+  padding: 0 3px;
+  font-size: 0.7em;
+  color: var(--color-text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.chart-tool-expander:hover,
+.chart-tool-expander:focus-visible,
+.chart-tool-expander[aria-expanded="true"] {
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+
+.chart-tool-flyout {
+  position: absolute;
+  top: 0;
+  left: calc(100% + 4px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 120px;
+  padding: 4px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-link);
+}
+
+.chart-tool-flyout button {
+  text-align: left;
+  white-space: nowrap;
+}
+
+.chart-tool-flyout button[aria-checked="true"] {
+  color: var(--color-link);
+}
+
 /* Spec §A8.1 top toolbar: three clusters (symbol+timeframe | chart type | indicators+fit+
    jump) separated by a visible divider. */
 .chart-topbar {
@@ -346,6 +396,70 @@ table {
 .indicator-dialog-tag,
 .indicator-dialog-empty {
   color: var(--color-text-dim);
+}
+
+/* The Volume overlays dialog: the add list, then each overlay on the chart with its settings.
+   Wider than a settings dialog (an entry carries the whole profile settings row), and its body
+   scrolls inside the dialog's 70vh cap once several overlays are on. */
+.volume-overlays-dialog {
+  width: min(560px, 92vw);
+}
+
+.volume-overlays-dialog .indicator-settings-body {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* DW-151/153 under the chart: which volume overlay is drawn from incomplete data. */
+.chart-overlay-notices {
+  margin: 4px 0;
+  padding: 0;
+  list-style: none;
+  color: var(--color-text-dim);
+}
+
+.volume-overlays-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.volume-overlays-dialog h2,
+.volume-overlays-dialog h3 {
+  margin: 0;
+  font-size: 1em;
+}
+
+/* The head (title + close) stays in view while the body scrolls. */
+.volume-overlays-dialog .indicator-dialog-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--color-bg);
+}
+
+.volume-overlay {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+}
+
+.volume-overlay-head,
+.volume-overlay-ranges li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.volume-overlay-ranges {
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
 
 /* Spec §A4.1 chart legend: top-left of each pane, values in their line colors. Click-through
