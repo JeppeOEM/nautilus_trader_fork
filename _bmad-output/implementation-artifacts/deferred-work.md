@@ -1372,7 +1372,9 @@ resolution: already resolved: platform/archive/prune_catalog.py:44 -- the dYdX i
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-23-1-observability-context-and-migration-guardrails.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-23-1-observability-context-and-migration-guardrails.md` summary: `observability.incidents.IncidentHandler` debounces on `(incident_type, iid)`, so every unclassified WARNING+ that has no instrument shares the key `("unclassified", None)`. Unrelated warnings within the debounce window (10 s for dYdX) after the first one get no incident report. evidence: the debounce key has been built this way since before Story 23.1, which moved the code unchanged; the handler is now the generic, reusable one. A fix would key unclassified reports on the logger name and message template, or exempt them from debounce.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-observability-ledger-fixes
+resolution-undo: f29f38bea3e637c6b62e34f9b17b6105f4546cafc7682de177659092884f975f 2026-10-05 7374617475733a206f70656e
 
 ### DW-178: `ml_signals/strategies/example_strategy.py:84` subscribes a bar type whose pandas offset alias `'d'` is deprecated (`Pandas4Warning: 'd' is deprecated ... use …
 
@@ -1438,7 +1440,9 @@ resolution: already resolved: platform/archive/application/crosscheck.py:97-103 
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-23-3-durable-error-ledger-and-day-long-data-error-crosscheck.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-23-3-durable-error-ledger-and-day-long-data-error-crosscheck.md` summary: `observability.error_ledger._FileSink._admit`'s minute-bucket read happens under the sink's lock, but the `ts_ns` two concurrent `record()` calls from different threads present to it is captured by each caller before that lock is acquired, so at an exact minute boundary two racing threads can be admitted in an order that does not match wall-clock order, narrowly misattributing which of the two gets the bucket reset. evidence: `record()` is only reached from failure paths (rare, low call frequency per process), and the window is exactly one minute boundary under real thread contention on the same site; carried over from the preserved attempt's review round as real but low-consequence, and not scoped for this story pass.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-observability-ledger-fixes
+resolution-undo: f29f38bea3e637c6b62e34f9b17b6105f4546cafc7682de177659092884f975f 2026-10-05 7374617475733a206f70656e
 
 ### DW-187: `observability.error_ledger.services()`/`ledger_files()` list every `<service>.jsonl*` file under `ERROR_LEDGER_DIR` with no concept of "this service was …
 

@@ -524,8 +524,10 @@ Parquet: plain JSON lines, one file per service (`collector`, `bybit_collector`,
 `hyperliquid_collector`, `ranking_engine`, `data_api`, `live-paper`, `bot_tui`; the compose
 service name, via `ERROR_LEDGER_SERVICE`).
 
-- **Fields per line:** `ts_ns` (int, arrival time), `service` (str), `pid` (int), `site` (str,
-  e.g. `collector.book_sequence`), `detail` (str, truncated to 2000 chars in the file only),
+- **Fields per line:** `ts_ns` (int, the time the line was admitted, read under the sink lock,
+  so a file's lines are in non-decreasing `ts_ns` order within one writer process, barring a
+  backward wall-clock step), `service` (str), `pid` (int), `site` (str, e.g.
+  `collector.book_sequence`), `detail` (str, truncated to 2000 chars in the file only),
   `exc_type` (str or `None`), `suppressed` (int, records dropped by the write cap since the
   previous line for this site — `lines + sum(suppressed)` is the true count **over a whole file
   set**; see the window-edge `Known limit` below). A `process_start`

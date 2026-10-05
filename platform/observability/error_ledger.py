@@ -73,6 +73,10 @@ sink also has its own lock around its file/rotation state), and the invariant ev
 call preserves is that it increments exactly one in-memory count and yields exactly one durable
 file line or one suppressed increment -- never both a line and a suppressed increment, and never
 neither.
+
+Ledger lines are appended in non-decreasing `ts_ns` order within a process (wall clock
+permitting): the sink reads the clock under its own lock, so a thread that waited for the lock
+stamps, buckets and appends after the one that held it.
 """
 
 import json
@@ -94,6 +98,10 @@ logger = logging.getLogger(__name__)
 PROCESS_START_SITE = "process_start"
 WRITE_FAILED_SITE = "observability.ledger_write"
 READ_FAILED_SITE = "observability.ledger_read"
+# The `record()` ERROR line's `extra` attribute naming its site: every such line shares one
+# template, so `observability.incidents` debounces it on this. Defined here, not there, because
+# incidents already imports this module.
+INCIDENT_KEY_ATTR = "incident_key"
 
 _MAX_DETAIL_CHARS = 2000
 _DEFAULT_MAX_LINES_PER_SITE_PER_MIN = 60
@@ -145,9 +153,19 @@ class _FileSink:
         # site -> (minute bucket, lines written in that bucket, suppressed since the last line)
         self._buckets: dict[str, tuple[int, int, int]] = {}
 
-    def write(self, site: str, detail: str, exc: BaseException | None, ts_ns: int) -> bool:
-        """Return False when the write failed (the caller counts it); never raises."""
+    def write(
+        self, site: str, detail: str, exc: BaseException | None, ts_ns: int | None = None
+    ) -> bool:
+        """
+        Return False when the write failed (the caller counts it); never raises.
+
+        `ts_ns` None (production) reads the clock under the lock, so the stamp, the cap bucket and
+        the append order agree; read before the lock, two racing threads at a minute boundary
+        could be admitted and appended out of `ts_ns` order. An explicit `ts_ns` is for tests.
+        """
         with self._lock:
+            if ts_ns is None:
+                ts_ns = time.time_ns()
             suppressed = self._admit(site, ts_ns)
             if suppressed is None:
                 return True
@@ -175,9 +193,14 @@ class _FileSink:
                 return False
             return True
 
-    def write_extra(self, site: str, fields: dict[str, Any], ts_ns: int) -> bool:
-        """Write a one-off line with extra fields (the `process_start` marker); uncapped."""
+    def write_extra(self, site: str, fields: dict[str, Any], ts_ns: int | None = None) -> bool:
+        """
+        Write a one-off line with extra fields (the `process_start` marker); uncapped. `ts_ns`
+        None reads the clock under the lock, as in `write`.
+        """
         with self._lock:
+            if ts_ns is None:
+                ts_ns = time.time_ns()
             line = json.dumps(
                 {
                     "ts_ns": ts_ns,
@@ -311,7 +334,7 @@ def start(service: str | None = None) -> bool:
         )
         sink = _sink
     fields: dict[str, Any] = {"revision": os.environ.get("ERROR_LEDGER_REVISION") or None}
-    if not sink.write_extra(PROCESS_START_SITE, fields, time.time_ns()):
+    if not sink.write_extra(PROCESS_START_SITE, fields):
         _count_write_failure(sink)
     logger.info("error ledger: durable sink at %s", sink.path)
     return True
@@ -368,8 +391,14 @@ def record(site: str, detail: str = "", exc: BaseException | None = None) -> Non
         _counts[site] += 1
         _last[site] = detail or (repr(exc) if exc else "")
         sink = _sink
-    logger.error("[%s] %s", site, detail, exc_info=exc if exc is not None else True)
-    if sink is not None and not sink.write(site, detail, exc, time.time_ns()):
+    logger.error(
+        "[%s] %s",
+        site,
+        detail,
+        exc_info=exc if exc is not None else True,
+        extra={INCIDENT_KEY_ATTR: site},
+    )
+    if sink is not None and not sink.write(site, detail, exc):
         _count_write_failure(sink)
 
 
@@ -478,10 +507,11 @@ def _iter_records_newest_first(directory: str | Path, service: str) -> Iterator[
     """
     Every parseable line of the service, newest first, so a reader can stop early.
 
-    Lines are appended in timestamp order and `ledger_files` is oldest-first, so reversing both
-    levels yields descending `ts_ns` -- which is what lets `service_summary` stop at the last
-    `process_start` instead of reading the whole rotation window. One file is held in memory at
-    a time (bounded by `ERROR_LEDGER_MAX_BYTES`, 20 MB by default).
+    Lines are appended in timestamp order (the sink stamps them under its lock, so this holds
+    across threads too; one writer process per file, barring a backward wall-clock step) and `ledger_files` is oldest-first, so reversing both levels yields
+    descending `ts_ns` -- which is what lets `service_summary` stop at the last `process_start`
+    instead of reading the whole rotation window. One file is held in memory at a time (bounded
+    by `ERROR_LEDGER_MAX_BYTES`, 20 MB by default).
     """
     for path in reversed(ledger_files(directory, service)):
         lines = _read_lines(path)

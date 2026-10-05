@@ -318,6 +318,168 @@ async def test_a_failed_reports_ledger_line_re_enters_once_per_debounce_window(
     error_ledger.reset()
 
 
+def _recording_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, written: list[str], **overrides: Any
+) -> incidents.IncidentHandler:
+    """Return a handler whose scheduled reports only record the message they were for."""
+
+    async def _fake_report(
+        incident_type: str, iid: str | None, level: str, logger_name: str, message: str, *_: object
+    ) -> None:
+        written.append(message)
+
+    handler = incidents.IncidentHandler(_config(tmp_path, **overrides))
+    monkeypatch.setattr(handler, "report", _fake_report)
+    return handler
+
+
+async def _drain() -> None:
+    for _ in range(5):  # every scheduled report runs
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_the_same_unclassified_text_from_two_loggers_is_two_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unclassified and without an instrument: only the logger tells the two apart (DW-177)."""
+    written: list[str] = []
+    handler = _recording_handler(tmp_path, monkeypatch, written)
+    first = _attach(handler, "test_incident_unclassified_a")
+    second = _attach(handler, "test_incident_unclassified_b")
+    try:
+        first.warning("queue backed up")
+        second.warning("queue backed up")
+        await _drain()
+    finally:
+        first.removeHandler(handler)
+        second.removeHandler(handler)
+    assert written == ["queue backed up", "queue backed up"]
+
+
+@pytest.mark.asyncio
+async def test_two_unclassified_templates_on_one_logger_are_two_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    written: list[str] = []
+    handler = _recording_handler(tmp_path, monkeypatch, written)
+    test_logger = _attach(handler, "test_incident_two_templates")
+    try:
+        test_logger.warning("queue %s backed up", "trades")
+        test_logger.warning("redis %s unreachable", "primary")
+        await _drain()
+    finally:
+        test_logger.removeHandler(handler)
+    assert written == ["queue trades backed up", "redis primary unreachable"]
+
+
+@pytest.mark.asyncio
+async def test_one_unclassified_template_with_changing_values_is_one_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The key is the template before `%`-formatting, so a per-tick warning still debounces."""
+    written: list[str] = []
+    handler = _recording_handler(tmp_path, monkeypatch, written)
+    test_logger = _attach(handler, "test_incident_one_template")
+    try:
+        test_logger.warning("x %s", 1)
+        test_logger.warning("x %s", 2)
+        await _drain()
+    finally:
+        test_logger.removeHandler(handler)
+    assert written == ["x 1"]
+
+
+@pytest.mark.asyncio
+async def test_ledger_records_debounce_per_site(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Every `error_ledger.record()` line shares the template `"[%s] %s"` on one logger; its
+    `incident_key` (the site) keeps two sites apart and one site's repeats together.
+    """
+    written: list[str] = []
+    handler = _recording_handler(tmp_path, monkeypatch, written)
+    # Not `_attach`: setting the shared ledger logger's level would outlive this test.
+    ledger_logger = logging.getLogger(error_ledger.__name__)
+    ledger_logger.addHandler(handler)
+    error_ledger.reset()
+    try:
+        error_ledger.record("site.a", "first")
+        error_ledger.record("site.b", "first")
+        error_ledger.record("site.a", "second")
+        await _drain()
+    finally:
+        ledger_logger.removeHandler(handler)
+        error_ledger.reset()
+    assert written == ["[site.a] first", "[site.b] first"]
+
+
+@pytest.mark.asyncio
+async def test_a_classified_incident_debounces_across_loggers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A classified incident is one incident per (type, instrument), whoever reports it."""
+    written: list[str] = []
+    handler = _recording_handler(tmp_path, monkeypatch, written)
+    first = _attach(handler, "test_incident_classified_a")
+    second = _attach(handler, "test_incident_classified_b")
+    try:
+        first.warning("Crossed book for %s", _IID)
+        second.warning(f"Crossed book for {_IID} (bid=1 >= ask=1)")
+        await _drain()
+    finally:
+        first.removeHandler(handler)
+        second.removeHandler(handler)
+    assert written == [f"Crossed book for {_IID}"]
+
+
+class _Clock:
+    """
+    Stands in for `incidents`' `time`: one settable value for the wall and monotonic clocks, the
+    wall clock shifted by `wall_step_ns` to model an NTP step.
+    """
+
+    def __init__(self, now_ns: int) -> None:
+        self.now_ns = now_ns
+        self.wall_step_ns = 0
+
+    def time_ns(self) -> int:
+        return self.now_ns + self.wall_step_ns
+
+    def monotonic_ns(self) -> int:
+        return self.now_ns
+
+
+@pytest.mark.asyncio
+async def test_expired_debounce_keys_are_swept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The unclassified key space is open-ended, so expired keys are dropped (at most once per
+    window); a key still inside its window is kept, so no debounce decision changes.
+    """
+    written: list[str] = []
+    handler = _recording_handler(tmp_path, monkeypatch, written)
+    window = handler._config.debounce_ns
+    clock = _Clock(_T)
+    # The module's own `time` only: a global `time.time_ns` patch would also stamp LogRecords.
+    monkeypatch.setattr(incidents, "time", clock)
+    test_logger = _attach(handler, "test_incident_sweep")
+    try:
+        test_logger.warning("old")  # first emit: sweeps the empty dict, sets the sweep mark
+        clock.now_ns = _T + window // 2
+        test_logger.warning("recent")  # inside the sweep interval: no sweep, both keys held
+        assert len(handler._last_report_ns) == 2
+        clock.now_ns = _T + window
+        test_logger.warning("new")
+        await _drain()
+    finally:
+        test_logger.removeHandler(handler)
+    assert {key[-2] for key in handler._last_report_ns} == {"recent", "new"}  # the templates
+    assert written == ["old", "recent", "new"]
+
+
 def test_a_report_cancelled_at_shutdown_is_noted_not_ledgered(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -390,3 +552,163 @@ async def test_flush_loop_calls_the_entrypoints_sync() -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     assert calls
+
+
+@pytest.mark.asyncio
+async def test_an_incident_key_extra_replaces_the_text_in_the_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The documented upgrade path for an f-string warning: name it, and its repeats debounce."""
+    written: list[str] = []
+    handler = _recording_handler(tmp_path, monkeypatch, written)
+    test_logger = _attach(handler, "test_incident_key_extra")
+    extra = {error_ledger.INCIDENT_KEY_ATTR: "queue.depth"}
+    try:
+        for depth in (1, 2):
+            test_logger.warning(f"queue depth {depth}", extra=extra)
+        await _drain()
+    finally:
+        test_logger.removeHandler(handler)
+    assert written == ["queue depth 1"]
+
+
+@pytest.mark.asyncio
+async def test_an_unhashable_incident_key_still_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    written: list[str] = []
+    handler = _recording_handler(tmp_path, monkeypatch, written)
+    test_logger = _attach(handler, "test_incident_unhashable_key")
+    try:
+        test_logger.warning("odd extra", extra={error_ledger.INCIDENT_KEY_ATTR: ["a"]})
+        await _drain()
+    finally:
+        test_logger.removeHandler(handler)
+    assert written == ["odd extra"]
+
+
+@pytest.mark.asyncio
+async def test_unclassified_reports_are_capped_per_window_and_the_rest_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    A burst of distinct f-string texts is one key each; the per-window cap bounds both the
+    reports scheduled and the keys held. The first record held back is logged at once and the
+    count at the next sweep, and a held-back text reports in the next window. Classified
+    incidents are not counted against it.
+    """
+    written: list[str] = []
+    handler = _recording_handler(
+        tmp_path, monkeypatch, written, max_unclassified_reports_per_window=2
+    )
+    clock = _Clock(_T)
+    monkeypatch.setattr(incidents, "time", clock)
+    test_logger = _attach(handler, "test_incident_cap")
+    try:
+        with caplog.at_level(logging.INFO, logger=incidents.__name__):
+            for n in range(5):
+                test_logger.warning(f"burst {n}")
+            assert "over 2 per window: the rest" in caplog.text  # the onset, before any sweep
+            test_logger.warning(f"Crossed book for {_IID}")
+            assert len(handler._last_report_ns) == 3  # two unclassified keys + the classified one
+            clock.now_ns = _T + handler._config.debounce_ns
+            test_logger.warning("burst 4")
+        await _drain()
+    finally:
+        test_logger.removeHandler(handler)
+    assert written == ["burst 0", "burst 1", f"Crossed book for {_IID}", "burst 4"]
+    assert "3 unclassified warnings got no incident report: over 2 reports per window" in (
+        caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_ledger_site_is_not_crowded_out_by_the_unclassified_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Named sites are a bounded set, so a ledgered failure always gets its report."""
+    written: list[str] = []
+    handler = _recording_handler(
+        tmp_path, monkeypatch, written, max_unclassified_reports_per_window=1
+    )
+    test_logger = _attach(handler, "test_incident_cap_ledger")
+    # Not `_attach`: setting the shared ledger logger's level would outlive this test.
+    ledger_logger = logging.getLogger(error_ledger.__name__)
+    ledger_logger.addHandler(handler)
+    error_ledger.reset()
+    try:
+        test_logger.warning("noise 1")
+        test_logger.warning("noise 2")  # over the cap
+        error_ledger.record("site.a", "failed")
+        await _drain()
+    finally:
+        test_logger.removeHandler(handler)
+        ledger_logger.removeHandler(handler)
+        error_ledger.reset()
+    assert written == ["noise 1", "[site.a] failed"]
+
+
+@pytest.mark.asyncio
+async def test_close_logs_the_open_windows_held_back_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No later record may come to trigger the sweep, so `close()` reports the count."""
+    written: list[str] = []
+    handler = _recording_handler(
+        tmp_path, monkeypatch, written, max_unclassified_reports_per_window=1
+    )
+    test_logger = _attach(handler, "test_incident_cap_close")
+    try:
+        for n in range(3):
+            test_logger.warning(f"burst {n}")
+        await _drain()
+    finally:
+        test_logger.removeHandler(handler)
+    with caplog.at_level(logging.INFO, logger=incidents.__name__):
+        handler.close()
+    assert written == ["burst 0"]
+    assert "2 unclassified warnings got no incident report" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_wall_clock_step_back_does_not_suppress_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The debounce runs on the monotonic clock; only `trigger_ns` follows the wall clock."""
+    written: list[str] = []
+    handler = _recording_handler(tmp_path, monkeypatch, written)
+    clock = _Clock(_T)
+    monkeypatch.setattr(incidents, "time", clock)
+    test_logger = _attach(handler, "test_incident_wall_step")
+    try:
+        test_logger.warning("x %s", 1)
+        clock.now_ns = _T + handler._config.debounce_ns
+        clock.wall_step_ns = -3_600_000_000_000  # an hour back
+        test_logger.warning("x %s", 2)
+        await _drain()
+    finally:
+        test_logger.removeHandler(handler)
+    assert written == ["x 1", "x 2"]
+
+
+@pytest.mark.asyncio
+async def test_an_incident_key_extra_on_a_classified_record_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    written: list[str] = []
+    handler = _recording_handler(tmp_path, monkeypatch, written)
+    test_logger = _attach(handler, "test_incident_key_classified")
+    try:
+        for site in ("a", "b"):
+            test_logger.warning(
+                f"Crossed book for {_IID}", extra={error_ledger.INCIDENT_KEY_ATTR: site}
+            )
+        await _drain()
+    finally:
+        test_logger.removeHandler(handler)
+    assert written == [f"Crossed book for {_IID}"]
+
+
+def test_a_cap_below_one_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="max_unclassified_reports_per_window"):
+        _config(tmp_path, max_unclassified_reports_per_window=0)

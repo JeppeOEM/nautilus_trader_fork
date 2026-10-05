@@ -14,6 +14,7 @@
 # -------------------------------------------------------------------------------------------------
 import json
 import logging
+import threading
 from pathlib import Path
 
 import pytest
@@ -154,6 +155,71 @@ def test_cap_per_site_per_minute_with_exact_suppressed_carry(tmp_path: Path) -> 
     assert len(site_a) + sum(line["suppressed"] for line in site_a) == 7
     assert [line["site"] for line in lines].count("b") == 1
     sink.close()
+
+
+class _Clock:
+    """Stands in for `error_ledger`'s `time`: a settable `time_ns` that counts its reads."""
+
+    def __init__(self, now_ns: int) -> None:
+        self.now_ns = now_ns
+        self.reads = 0
+
+    def time_ns(self) -> int:
+        self.reads += 1
+        return self.now_ns
+
+
+class _SpyLock:
+    """Wraps the sink's lock and signals once a thread has started waiting on it."""
+
+    def __init__(self, lock: threading.Lock) -> None:
+        self.lock = lock
+        self.waiting = threading.Event()
+
+    def __enter__(self) -> None:
+        self.waiting.set()
+        self.lock.acquire()
+
+    def __exit__(self, *_: object) -> None:
+        self.lock.release()
+
+
+def test_a_line_is_stamped_under_the_sink_lock_not_before_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    DW-186: a `record()` that waits for the sink lock across a minute boundary carries the time it
+    was admitted, so its stamp, its cap bucket and its place in the file agree.
+    """
+    error_ledger.reset()
+    monkeypatch.setenv("ERROR_LEDGER_DIR", str(tmp_path))
+    monkeypatch.setenv("ERROR_LEDGER_SERVICE", "collector")
+    t2 = 30_000_000 * _MIN  # a minute boundary
+    clock = _Clock(t2 - 1)
+    # The module's own `time` only: a global patch would also count the LogRecord's clock read.
+    monkeypatch.setattr(error_ledger, "time", clock)
+    try:
+        assert error_ledger.start() is True
+        sink = error_ledger._sink
+        assert sink is not None
+        reads_after_start = clock.reads
+        held = sink._lock
+        spy = _SpyLock(held)
+        monkeypatch.setattr(sink, "_lock", spy)
+        worker = threading.Thread(target=error_ledger.record, args=("site.race", "late"))
+        with held:
+            worker.start()
+            assert spy.waiting.wait(timeout=5)  # the worker reached the sink lock
+            assert worker.is_alive()  # and is blocked on it
+            assert clock.reads == reads_after_start  # without having read the clock
+            clock.now_ns = t2
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        lines = _lines(tmp_path / "collector.jsonl")
+        assert [line["site"] for line in lines] == ["process_start", "site.race"]
+        assert lines[1]["ts_ns"] == t2
+    finally:
+        error_ledger.reset()
 
 
 def test_rotation_by_size_keeps_bounded_backups(tmp_path: Path) -> None:

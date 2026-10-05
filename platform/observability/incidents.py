@@ -83,8 +83,17 @@ class IncidentConfig:
     # was never recorded.
     raw_log_enabled: bool = True
     # One ongoing incident logs a fresh WARNING every tick while it persists; without the
-    # debounce it would produce one report per tick.
+    # debounce it would produce one report per tick. Keyed by `IncidentHandler._debounce_key`.
     debounce_ns: int = 10_000_000_000
+    # Unclassified keys are open-ended (one per logger and template, see
+    # `IncidentHandler._debounce_key`), so a burst of distinct f-string warnings would otherwise
+    # schedule one report and hold one key each inside a single window. Past this many
+    # unclassified reports per window the rest get none: the first held back is logged at once
+    # and the window's count at the next sweep (or at `close()`); the warnings themselves still
+    # reach every other handler. A record naming its site (`error_ledger.INCIDENT_KEY_ATTR`, set
+    # by every `error_ledger.record()` line) is exempt: named sites are a bounded set fixed by
+    # the code, and a ledgered failure must never lose its report to a burst of unrelated noise.
+    max_unclassified_reports_per_window: int = 20
     lookback_ns: int = 10_000_000_000
     # Extraction waits this long after the trigger so the window also captures what resolves
     # the incident (e.g. the delete that un-crosses a book), not only its run-up.
@@ -101,6 +110,8 @@ class IncidentConfig:
             raise ValueError(f"iid_pattern must define the named groups {sorted(missing)}")
         if "{ticker}" not in self.evidence_needle:
             raise ValueError("evidence_needle must be a str.format template using {ticker}")
+        if self.max_unclassified_reports_per_window < 1:
+            raise ValueError("max_unclassified_reports_per_window must be at least 1")
 
 
 RAW_LOG_DISABLED_LINE = (
@@ -298,11 +309,12 @@ def _ledger_failed_report(
     """
     Ledger a report that could not be written (disk full, permissions): never lost (DATA-07).
 
-    The ledger's ERROR line reaches the handler again; its debounce bounds that to one retry per
-    `debounce_ns` for as long as reports keep failing. A *cancelled* report is not a failure:
-    nothing cancels these tasks but the loop's shutdown (`asyncio.run` cancels every pending
-    task), where a warning in the last `lookahead_s` loses its evidence report by design. Logged
-    at INFO, so it is visible but never re-enters this handler on a closing loop.
+    The ledger's ERROR line reaches the handler again; its debounce (keyed on the ledger site, see
+    `IncidentHandler._debounce_key`) bounds that to one retry per `debounce_ns` for as long as
+    reports keep failing. A *cancelled* report is not a failure: nothing cancels these tasks but
+    the loop's shutdown (`asyncio.run` cancels every pending task), where a warning in the last
+    `lookahead_s` loses its evidence report by design. Logged at INFO, so it is visible but never
+    re-enters this handler on a closing loop.
     """
     what = f"incident report {incident_type}/{iid or '-'}"
     if future.cancelled():
@@ -313,10 +325,29 @@ def _ledger_failed_report(
         error_ledger.record("observability.incidents.report", f"{what} not written", exc)
 
 
+def _names_a_site(record: logging.LogRecord) -> bool:
+    return getattr(record, error_ledger.INCIDENT_KEY_ATTR, None) is not None
+
+
+# (incident_type, iid) for a classified record; an unclassified one adds its logger name and
+# either its message template or its `error_ledger.INCIDENT_KEY_ATTR` (see
+# `IncidentHandler._debounce_key`).
+_DebounceKey = tuple[str, str | None] | tuple[str, str | None, str, str | None, str | None]
+
+
 class IncidentHandler(logging.Handler):
     """
     Attach to the root logger: catches every current and future WARNING+ record in the process
     (every logger propagates to root by default) without a change at any call site.
+
+    Invariant: at most one report per debounce key per `debounce_ns`, and at most
+    `max_unclassified_reports_per_window` reports per sweep interval for unclassified records
+    that name no site. `_last_report_ns` holds the keys reported in the last window, and an
+    expired key only until the next sweep (at most one window later), so with the per-window cap
+    the open-ended unclassified key space stays bounded (named sites are bounded by the code). The debounce runs on `time.monotonic_ns()`, so an NTP
+    step can neither expire every key at once nor suppress reports until the wall clock catches
+    up; only a report's `trigger_ns` is wall time. `logging.Handler`'s own lock serialises
+    `emit`, so the dict, the counters and the sweep need no lock of their own.
     """
 
     def __init__(
@@ -330,19 +361,23 @@ class IncidentHandler(logging.Handler):
         # loop, where asyncio.get_running_loop() would raise and drop the report.
         # run_coroutine_threadsafe works from the loop's own thread and from any other.
         self._loop = loop or asyncio.get_running_loop()
-        self._last_report_ns: dict[tuple[str, str | None], int] = {}
+        # Monotonic stamps (see the class docstring), never compared with `trigger_ns`.
+        self._last_report_ns: dict[_DebounceKey, int] = {}
+        self._last_sweep_ns: int | None = None
+        self._unclassified_in_window = 0
+        self._unclassified_suppressed = 0
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
             message = record.getMessage()
             incident_type, iid = classify_incident(self._config, message)
-            key = (incident_type, iid)
-            now_ns = time.time_ns()
-            if now_ns - self._last_report_ns.get(key, 0) < self._config.debounce_ns:
+            key = self._debounce_key(incident_type, iid, record)
+            capped = incident_type == "unclassified" and not _names_a_site(record)
+            if not self._admit(key, capped, time.monotonic_ns()):
                 return
-            self._last_report_ns[key] = now_ns
+            trigger_ns = time.time_ns()
             future = asyncio.run_coroutine_threadsafe(
-                self.report(incident_type, iid, record.levelname, record.name, message, now_ns),
+                self.report(incident_type, iid, record.levelname, record.name, message, trigger_ns),
                 self._loop,
             )
             future.add_done_callback(functools.partial(_ledger_failed_report, incident_type, iid))
@@ -350,6 +385,106 @@ class IncidentHandler(logging.Handler):
             # logging.Handler's documented convention: emit() never propagates -- a broken
             # report must not crash the process or its logging. handleError() reports to stderr.
             self.handleError(record)
+
+    def _admit(self, key: _DebounceKey, capped: bool, now_ns: int) -> bool:
+        """
+        Whether a record with `key` gets a report now; records it as reported when it does.
+        `capped` records count against `max_unclassified_reports_per_window`.
+        """
+        self._sweep_expired(now_ns)
+        last_ns = self._last_report_ns.get(key)
+        if last_ns is not None and now_ns - last_ns < self._config.debounce_ns:
+            return False
+        if capped:
+            cap = self._config.max_unclassified_reports_per_window
+            if self._unclassified_in_window >= cap:
+                if not self._unclassified_suppressed:
+                    # Logged when it starts, so the log dates the window even if no later record
+                    # ever triggers the sweep that reports the count. INFO: see `_log_suppressed`.
+                    logger.info(
+                        "Unclassified incident reports over %d per window: the rest of this "
+                        "window's unclassified warnings get no report",
+                        cap,
+                    )
+                self._unclassified_suppressed += 1
+                return False
+            self._unclassified_in_window += 1
+        self._last_report_ns[key] = now_ns
+        return True
+
+    @staticmethod
+    def _debounce_key(
+        incident_type: str, iid: str | None, record: logging.LogRecord
+    ) -> _DebounceKey:
+        """
+        Return the debounce key. A classified incident is one incident per (type, instrument)
+        whichever logger or wording reports it. An unclassified one is only known by where it
+        came from, so it also keys on the logger and on either the optional
+        `error_ledger.INCIDENT_KEY_ATTR` record attribute, when set, or else the message template
+        (`record.msg` before `%`-formatting, so a `%s`-style per-tick warning with changing
+        values still debounces). Every `error_ledger.record()` line shares the template
+        `"[%s] %s"` and sets the attribute to its site, so two ledger sites are two incidents.
+        Without these, every unclassified warning with no instrument shared one key and an
+        unrelated one inside the window got no report.
+
+        Known limit: an f-string message has no template, so each distinct text is its own key
+        and a per-tick f-string warning with a changing value reports once per tick. Ceiling:
+        `max_unclassified_reports_per_window` reports per window, process-wide, for
+        unclassified records naming no site, the rest counted and logged at INFO. Upgrade path: `%`-style arguments at that call
+        site, or an `extra={error_ledger.INCIDENT_KEY_ATTR: ...}` naming it, which replaces the
+        text in the key.
+        """
+        if incident_type != "unclassified":
+            return incident_type, iid
+        if _names_a_site(record):
+            # str(): an `extra` value is arbitrary, and an unhashable one would fail the lookup.
+            site = getattr(record, error_ledger.INCIDENT_KEY_ATTR)
+            return incident_type, iid, record.name, None, str(site)
+        return incident_type, iid, record.name, str(record.msg), None
+
+    def _sweep_expired(self, now_ns: int) -> None:
+        """
+        Once per `debounce_ns`: drop keys whose window has passed, report the unclassified
+        records the cap held back, and start a new cap window. An expired entry acts exactly like
+        an absent one (`now - ts >= debounce_ns` reports either way), so dropping it never
+        changes a debounce decision.
+        """
+        debounce_ns = self._config.debounce_ns
+        if self._last_sweep_ns is not None and now_ns - self._last_sweep_ns < debounce_ns:
+            return
+        self._last_sweep_ns = now_ns
+        self._last_report_ns = {
+            key: ts for key, ts in self._last_report_ns.items() if now_ns - ts < debounce_ns
+        }
+        self._log_suppressed()
+        self._unclassified_in_window = 0
+
+    def _log_suppressed(self) -> None:
+        """
+        Log, then clear, the count of records the cap held back this window. It counts warnings,
+        not distinct keys: a held-back key is not remembered, so each of its repeats is counted.
+        INFO, below this handler's level: visible, and never re-enters emit().
+        """
+        if self._unclassified_suppressed:
+            logger.info(
+                "%d unclassified warnings got no incident report: over %d reports per window",
+                self._unclassified_suppressed,
+                self._config.max_unclassified_reports_per_window,
+            )
+        self._unclassified_suppressed = 0
+
+    def close(self) -> None:
+        """
+        Report the open window's held-back count, which would otherwise be lost when no record
+        follows it (`logging.shutdown` closes handlers newest first, so the console handler
+        attached before this one is still open).
+        """
+        self.acquire()
+        try:
+            self._log_suppressed()
+        finally:
+            self.release()
+        super().close()
 
     async def report(
         self,
