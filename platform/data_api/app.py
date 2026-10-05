@@ -82,12 +82,13 @@ from data_api.ws import live as live_ws
 # the same per-request bound as `/api/snapshots` (MEM-01): the closed window `[start_ns, end_ns]`
 # must be shorter than the cap, so it holds at most `MAX_SNAPSHOTS_LIMIT` whole seconds. A wider
 # window is rejected, never clamped: a truncated answer would be passed off as the complete window.
-# Known limit: `views.catalog_reads.query_second_snapshots` widens the read's end by
+# Known limit: `views.catalog_reads.query_second_snapshots` widens the read's both ends by
 # `READ_SPAN_MARGIN_NS` (60 s) before its exact ts_event filter, so one request transiently loads
-# up to cap + 60 rows; upgrade path: a reader that filters on ts_event inside the catalog query.
+# up to cap + 120 rows; upgrade path: a reader that filters on ts_event inside the catalog query.
 _MAX_CATALOG_SPAN_NS = MAX_SNAPSHOTS_LIMIT * NS_PER_S
 # The read adds `READ_SPAN_MARGIN_NS` to `end_ns` and the catalog filters in int64, so a larger
-# bound would overflow inside the read and be misreported as a server fault, not a bad request.
+# bound would overflow inside the read and be misreported as a server fault, not a bad request
+# (the start is widened downwards, clamped at 0, so it cannot overflow).
 _MAX_TS_NS = 2**63 - 1 - READ_SPAN_MARGIN_NS
 _Timestamp = Annotated[int, Query(ge=0, le=_MAX_TS_NS)]
 

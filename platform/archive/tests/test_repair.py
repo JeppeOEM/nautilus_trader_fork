@@ -17,7 +17,9 @@
 import fcntl
 import time
 from pathlib import Path
+from typing import Any
 
+import pytest
 from candles.application import queries
 from candles.application.rebuild import rebuild_instrument
 from candles.infrastructure.sqlite_store import CandleStore
@@ -43,9 +45,15 @@ _SEC = 1_000_000_000
 
 
 def _snap(
-    second: int, high: float | None = None, low: float | None = None, t0: int = _T0
+    second: int,
+    high: float | None = None,
+    low: float | None = None,
+    t0: int = _T0,
+    init_second: float | None = None,
 ) -> DydxSecondSnapshot:
+    """Build a row at `t0 + second`; `init_second` (default `second`) sets its `ts_init` apart."""
     traded = high is not None
+    init = second if init_second is None else init_second
     return make_snapshot(
         instrument_id=InstrumentId.from_str(_IID),
         bid_prices=[100.0, 99.0],
@@ -61,7 +69,7 @@ def _snap(
         low_price=low,
         close_price=low,
         ts_event=t0 + second * _SEC,
-        ts_init=t0 + second * _SEC,
+        ts_init=t0 + int(init * _SEC),
     )
 
 
@@ -90,6 +98,111 @@ def test_spike_snapshot_is_cleared_and_its_candle_rebuilt(tmp_path: Path) -> Non
     assert all(r.high_price is None for r in rows)
     assert queries.window(store.connection, _IID, 60, 1 << 62, 10) == []  # no trade left
     store.close()
+
+
+def test_a_venue_ahead_row_at_the_read_start_is_returned(tmp_path: Path) -> None:
+    """A venue clock ahead of ours stamps `ts_init` before the window: the start is widened too."""
+    catalog_path = str(tmp_path / "cat")
+    ParquetDataCatalog(catalog_path).write_data([_snap(10, init_second=-5)])
+    rows = second_snapshots(catalog_path, _IID, _T0, _T0 + 20 * _SEC)
+    assert [r.ts_event for r in rows] == [_T0 + 10 * _SEC]
+
+
+def _second_events(catalog_path: str, n: int) -> list[int]:
+    rows = second_snapshots(catalog_path, _IID, _T0 - 10 * _SEC, _T0 + (n + 10) * _SEC)
+    return sorted(r.ts_event for r in rows)
+
+
+def test_a_row_whose_ts_init_trails_its_ts_event_is_replaced_not_duplicated(
+    tmp_path: Path,
+) -> None:
+    """The catalog deletes by `ts_init`: deleting the row's `ts_event` would hit another row."""
+    catalog_path = str(tmp_path / "cat")
+    catalog = ParquetDataCatalog(catalog_path)
+    snaps = [_snap(s, init_second=s + 3) for s in range(10)]
+    snaps[5] = _snap(5, high=150.0, low=50.0, init_second=8)
+    catalog.write_data(snaps)
+    flagged = find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 20 * _SEC)
+    assert [f.ts_init for f in flagged] == [_T0 + 8 * _SEC]
+
+    repair_instrument(catalog, catalog_path, _IID, flagged)
+
+    assert find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 20 * _SEC) == []
+    assert _second_events(catalog_path, 10) == [_T0 + s * _SEC for s in range(10)]
+
+
+def test_an_unflagged_row_sharing_the_flagged_ts_init_survives_unchanged(tmp_path: Path) -> None:
+    """Caught-up seconds share their wake-up's `ts_init`; deleting it removes all of them."""
+    catalog_path = str(tmp_path / "cat")
+    catalog = ParquetDataCatalog(catalog_path)
+    snaps = [_snap(s) for s in range(5)]
+    sibling = _snap(6, high=100.5, low=100.5, init_second=7)  # a real trade inside the book
+    snaps += [_snap(5, high=150.0, low=50.0, init_second=7), sibling]
+    catalog.write_data(snaps)
+    flagged = find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 20 * _SEC)
+    assert [f.ts_event for f in flagged] == [_T0 + 5 * _SEC]
+
+    repair_instrument(catalog, catalog_path, _IID, flagged)
+
+    rows = {r.ts_event: r for r in second_snapshots(catalog_path, _IID, _T0, _T0 + 20 * _SEC)}
+    assert _second_events(catalog_path, 7) == [_T0 + s * _SEC for s in range(7)]
+    assert rows[_T0 + 5 * _SEC].high_price is None
+    assert DydxSecondSnapshot.to_dict(rows[sibling.ts_event]) == DydxSecondSnapshot.to_dict(sibling)
+
+
+def test_a_pre_fix_repairs_leftover_copy_collapses_into_one_cleared_row(tmp_path: Path) -> None:
+    """A pre-fix repair could miss its delete and leave a cleared copy beside the original."""
+    error_ledger.reset()
+    catalog_path = str(tmp_path / "cat")
+    catalog = ParquetDataCatalog(catalog_path)
+    spike = _snap(5, high=150.0, low=50.0, init_second=8)
+    leftover = _snap(5, init_second=8)  # the old repair's cleared copy, same clocks
+    catalog.write_data([*[_snap(s) for s in range(5)], spike, leftover])
+    flagged = find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 20 * _SEC)
+
+    assert repair_instrument(catalog, catalog_path, _IID, flagged)
+
+    assert _second_events(catalog_path, 6) == [_T0 + s * _SEC for s in range(6)]
+    assert find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 20 * _SEC) == []
+    assert error_ledger.counts() == {"repair.duplicate": 1}  # collapsing it is never silent
+
+
+def test_a_flagged_row_no_longer_stored_is_ledgered_and_nothing_is_deleted(
+    tmp_path: Path,
+) -> None:
+    error_ledger.reset()
+    catalog_path = str(tmp_path / "cat")
+    catalog = ParquetDataCatalog(catalog_path)
+    catalog.write_data([_snap(s) for s in range(5)])
+    gone = _snap(30, high=150.0, low=50.0, init_second=3)  # ts_init 3 holds only second 3
+
+    assert not repair_instrument(catalog, catalog_path, _IID, [gone])
+
+    assert error_ledger.counts() == {"repair.error": 1}
+    assert _second_events(catalog_path, 5) == [_T0 + s * _SEC for s in range(5)]
+
+
+def test_a_failed_rewrite_after_the_delete_is_ledgered_with_the_lost_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Delete then write is not atomic: a crash between them must name what it lost."""
+    error_ledger.reset()
+    catalog_path = _spiked_catalog(tmp_path)
+    catalog = ParquetDataCatalog(catalog_path)
+    flagged = find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 10 * _SEC)
+
+    split = catalog.write_data  # `delete_data_range` itself writes the split remainders
+
+    def _fail(*args: Any, **kwargs: Any) -> None:
+        if "data" in kwargs:
+            return split(*args, **kwargs)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(catalog, "write_data", _fail)
+    with pytest.raises(OSError):
+        repair_instrument(catalog, catalog_path, _IID, flagged)
+    assert error_ledger.counts() == {"repair.error": 1}
+    assert f"lost ts_event [{_T0 + 2 * _SEC}]" in error_ledger.last_details()["repair.error"]
 
 
 def _spiked_catalog(tmp_path: Path) -> str:
@@ -165,6 +278,17 @@ def test_a_report_takes_no_maintenance_lock(tmp_path: Path) -> None:
         assert held is not None
         assert main(["--catalog", catalog_path]) == 0
         assert main(["--catalog", catalog_path, "--apply"]) == 1
+
+
+def test_a_flagged_row_gone_by_repair_time_exits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row skipped as no longer stored is not repaired: the run must not report success."""
+    error_ledger.reset()
+    catalog_path = _spiked_catalog(tmp_path)
+    monkeypatch.setattr("archive.application.repair._rows_at", lambda *_: [])
+    assert main(["--catalog", catalog_path, "--apply"]) == 2
+    assert error_ledger.counts() == {"repair.error": 1}
 
 
 def test_a_missing_catalog_is_ledgered(tmp_path: Path) -> None:

@@ -44,7 +44,14 @@ NS_PER_DAY = 86_400 * NS_PER_S
 # The largest `ts_init - ts_event` any writer may produce (formerly `archive_gaps.ARRIVAL_MARGIN_NS`):
 # the live age filter (`stale_trade_seconds`, 10 s) bounds it for live trades, and the reconnect
 # trade backfill refuses -- and counts -- any unseen REST trade older than this. The rebuild's
-# `ts_init` query window, the quarantine marker and the prune gate's previous-day check use it.
+# `ts_init` query window, the quarantine and `pruned` markers and the prune gate's previous- and
+# next-day checks use it, the last three on both sides of a span.
+# Known limit: the other direction, a venue clock running ahead of ours (`ts_event > ts_init`), is
+# not refused by any writer: a live trade more than hold-back + `VENUE_AHEAD_NS` ahead is counted
+# `ahead` and still archived (`capture.domain.trade_intake`), so one more than this bound ahead
+# falls outside the two-sided marker and next-day widening. The ceiling is a venue clock 5 minutes
+# off, a sixty-fold breach of the 5 s alarm. Upgrade path: refuse (and count) such a trade at
+# intake, as the backfill refuses an old one.
 MAX_TS_INIT_SKEW_NS = 300 * NS_PER_S
 
 # How far the read helpers widen a file's `ts_init` span, on both sides, when choosing which files

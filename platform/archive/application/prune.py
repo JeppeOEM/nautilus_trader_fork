@@ -18,9 +18,10 @@ Execute the retention decision: the one place a catalog file is deleted (Story 2
 Lists the leaves the policy's rules can touch, reads each old trade day's status through the
 `VerifiedDays` port (AD-D9: never a store connection of its own), asks
 `archive.domain.retention.RetentionPolicy`, then executes: a deleted `trade_tick` file is first
-recorded as a `pruned` archive gap (`GapMarkers`) -- the rebuild must keep those rows' live values
-from then on, since an older unverified file can keep `covered_from` reaching back past it -- and
-only then removed through `CatalogWriter.delete`. This module is the only caller of `delete`
+recorded as a `pruned` archive gap (`GapMarkers`, over its name span widened by the skew bound:
+`pruned_marker_span`) -- the rebuild must keep those rows' live values from then on, since an
+older unverified file can keep `covered_from` reaching back past it -- and only then removed
+through `CatalogWriter.delete`. This module is the only caller of `delete`
 (`platform/archive/tests/test_one_deleter_one_rewriter.py`).
 """
 
@@ -33,6 +34,7 @@ from pathlib import Path
 
 from candles.application.verified_days import VerifiedDays
 from kernel.archive_markers import ArchiveGap
+from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import NS_PER_DAY
 from kernel.clocks import CatalogFileSpan
 from kernel.venues import MalformedInstrumentId
@@ -79,6 +81,22 @@ def _span(path: Path) -> tuple[int, int] | None:
     except ValueError:
         return None
     return span.start_ns, span.end_ns
+
+
+def pruned_marker_span(span: tuple[int, int]) -> tuple[int, int]:
+    """
+    Return the `ts_event` span a deleted trade file's `pruned` marker covers: its `ts_init` name
+    span widened by `MAX_TS_INIT_SKEW_NS` on both sides (the start clamped at 0).
+
+    The marker is read on `ts_event` (`Coverage`), and a trade's `ts_event` can precede its
+    `ts_init` by up to the bound -- or, from a venue clock running ahead, follow it -- so the raw
+    name span would leave rows just outside it "covered" after their trades were deleted. The
+    wider span only keeps more rows' live values; it cannot explain away a missing trade (a
+    `pruned` marker's count is 0). The ahead side holds only as far as the bound does
+    (`kernel.clocks.MAX_TS_INIT_SKEW_NS`'s Known limit).
+    """
+    start, end = span
+    return max(0, start - MAX_TS_INIT_SKEW_NS), end + MAX_TS_INIT_SKEW_NS
 
 
 def _wanted(policy: RetentionPolicy, data_type: str, iid: str) -> bool:
@@ -178,7 +196,9 @@ def _delete(
     f, path = deletion.file, Path(deletion.file.path)
     # Checked before the marker, so a refused file leaves no `pruned` gap behind.
     writer.assert_span_closed(*span)
-    if f.data_type == TRADE_TICK and not markers.record(ArchiveGap(f.iid, *span, "pruned", 0)):
+    if f.data_type == TRADE_TICK and not markers.record(
+        ArchiveGap(f.iid, *pruned_marker_span(span), "pruned", 0)
+    ):
         # The marker is what keeps a later rebuild from zeroing these rows' live values: without
         # it on disk the file stays (the failure is already ledgered, `archive_gaps.write`).
         return "marker_failed"

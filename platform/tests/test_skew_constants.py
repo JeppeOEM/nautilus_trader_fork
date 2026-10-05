@@ -39,6 +39,7 @@ if importlib.util.find_spec("capture") is None or importlib.util.find_spec("arch
         allow_module_level=True,
     )
 
+from archive.application import prune
 from archive.application import rebuild_day
 from archive.domain import retention
 from capture.application import capture_service as collector
@@ -84,6 +85,11 @@ def test_the_rebuild_window_is_the_bound() -> None:
 def test_the_prune_gates_midnight_margin_uses_the_bound() -> None:
     """A trade file starting within the bound after midnight needs the previous day proven."""
     assert "MAX_TS_INIT_SKEW_NS" in _names_in(retention.file_days)
+
+
+def test_the_pruned_marker_span_uses_the_bound() -> None:
+    """A trade's `ts_event` can sit up to the bound either side of the `ts_init` name span."""
+    assert "MAX_TS_INIT_SKEW_NS" in _names_in(prune.pruned_marker_span)
 
 
 def test_the_read_margin_is_within_the_bound() -> None:

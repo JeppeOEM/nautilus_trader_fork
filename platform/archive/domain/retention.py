@@ -19,9 +19,10 @@ Four rules, each naming itself on every deletion it makes:
 
 - `trade` -- a `trade_tick/` file goes only when every UTC day its name spans is older than the
   trade retention window **and** that instrument-day is `verified` (its `verified_days` row is
-  `pass`). A file starting within `MAX_TS_INIT_SKEW_NS` after midnight also needs the previous day
-  proven: its trades' `ts_event` can belong to it. Each old day still unproven is kept and
-  reported (`unverified` or `failed`).
+  `pass`). The skew between a trade's `ts_event` and the `ts_init` the name spans runs either way,
+  so a file starting within `MAX_TS_INIT_SKEW_NS` after midnight also needs the previous day
+  proven, and one ending within it before midnight the next day: its trades' `ts_event` can
+  belong to them. Each old day still unproven is kept and reported (`unverified` or `failed`).
 - `age` -- the `--types T --days N` plain age retention: files of those types ending over N days
   ago. Never `trade_tick` (refused by the CLI).
 - `dropped_instrument` -- a dYdX leaf whose instrument the collection plan no longer collects:
@@ -121,15 +122,17 @@ def day_text(day: int) -> str:
 
 def file_days(span: tuple[int, int]) -> range:
     """
-    UTC day indices whose trades a `trade_tick` file can hold. The name spans `ts_init`; a trade's
-    `ts_event` precedes it by up to the skew bound, so a file starting within that bound after
-    midnight can hold trades of the previous day too, and that day must also be proven.
+    UTC day indices whose trades a `trade_tick` file can hold. The name spans `ts_init`, and a
+    trade's `ts_event` can differ from it by up to the skew bound in either direction: it trails
+    our clock on arrival, and leads it when the venue clock runs ahead. So a file starting within
+    that bound after midnight can hold trades of the previous day, one ending within it before
+    midnight trades of the next day, and each such day must also be proven. (The ahead side is
+    bounded by detection, not refusal: `kernel.clocks.MAX_TS_INIT_SKEW_NS`'s Known limit.)
     """
     start, end = span
-    first_day = start // NS_PER_DAY
-    if start - first_day * NS_PER_DAY < MAX_TS_INIT_SKEW_NS:
-        first_day -= 1
-    return range(first_day, end // NS_PER_DAY + 1)
+    first_day = (start - MAX_TS_INIT_SKEW_NS) // NS_PER_DAY
+    last_day = (end + MAX_TS_INIT_SKEW_NS) // NS_PER_DAY
+    return range(first_day, last_day + 1)
 
 
 @dataclass(frozen=True)

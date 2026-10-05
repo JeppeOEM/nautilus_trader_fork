@@ -30,7 +30,8 @@ untouched. Manually run, like prune_catalog; reads raw 1s in day chunks (MEM-01)
 repaired (`repair.capture_running`, exit 1); an instrument id with no venue, or with a venue
 `kernel.venues` does not know, has no lock to take and is refused (`repair.error`, exit 1). A
 missing catalog is `archive.catalog_missing`, exit 1. A row of the current UTC day, or one held by a file whose span
-reaches it, is never repaired (`repair.open_day`, exit 2).
+reaches it, is never repaired (`repair.open_day`, exit 2); nor is a flagged row no longer stored
+when its group is read back (`repair.error`, exit 2).
 
 Never run it on a day `rebuild_seconds` has rebuilt (story 22.13): a rebuilt second holds the
 trades whose *exchange* time falls in it, while its book is still sampled at mid-second on
@@ -111,10 +112,10 @@ def _instrument(
     if writer is None:  # a report writes nothing
         return True
     closed = closed_rows(writer, args.catalog, iid, flagged)
-    if closed:
-        repair_instrument(catalog, args.catalog, iid, closed, args.candles_db)
+    repaired = not closed or repair_instrument(catalog, args.catalog, iid, closed, args.candles_db)
+    if closed and repaired:
         logger.info("  repaired")
-    return len(closed) == len(flagged)
+    return repaired and len(closed) == len(flagged)
 
 
 def _all_instruments(

@@ -26,6 +26,8 @@ import pytest
 from candles.infrastructure.sqlite_store import CandleStore
 from candles.infrastructure.sqlite_store import db_path_for_venue
 from candles.infrastructure.verified_days import VerifiedDaysDir
+from kernel.clocks import MAX_TS_INIT_SKEW_NS
+from kernel.clocks import NS_PER_S
 from kernel.clocks import CatalogFileSpan
 from observability import error_ledger
 
@@ -33,6 +35,8 @@ from archive import prune_catalog
 from archive.application.prune import decide
 from archive.application.prune import execute
 from archive.application.prune import log_summary
+from archive.application.prune import pruned_marker_span
+from archive.domain.gaps import Coverage
 from archive.domain.retention import RetentionPolicy
 from archive.infrastructure.catalog_files import CatalogFiles
 from archive.infrastructure.gap_markers import GapMarkerFiles
@@ -82,8 +86,8 @@ def _trade_file(catalog: Path, days_ago: int, iid: str = _IID) -> Path:
     day = _day(days_ago)
     return _write_parquet(
         catalog / "data" / "trade_tick" / iid,
-        f"{day}T00-10-00-000000000Z",  # past the arrival margin: no previous-day trades
-        f"{day}T23-59-50-000000000Z",
+        f"{day}T00-10-00-000000000Z",  # past the skew bound of either midnight: one day's trades
+        f"{day}T23-50-00-000000000Z",
     )
 
 
@@ -188,7 +192,13 @@ def test_a_file_starting_just_after_midnight_also_needs_the_previous_day(tmp_pat
     assert _plan(catalog, candles)[0] == [early]
 
 
-def test_every_pruned_trade_file_is_recorded_as_an_archive_gap(tmp_path: Path) -> None:
+def test_every_pruned_trade_file_is_recorded_as_a_skew_widened_archive_gap(
+    tmp_path: Path,
+) -> None:
+    """
+    The marker is read on `ts_event`, the name spans `ts_init`: a trade up to the bound either
+    side of the name span was in the deleted file, so its second must keep its live values.
+    """
     catalog, candles = tmp_path / "catalog", tmp_path / "candles"
     candles.mkdir()
     passed = _trade_file(catalog, 8)
@@ -196,7 +206,19 @@ def test_every_pruned_trade_file_is_recorded_as_an_archive_gap(tmp_path: Path) -
     assert main(["--catalog", str(catalog), "--candles-dir", str(candles), "--apply"]) == 0
     span = CatalogFileSpan.from_path(passed)
     assert not passed.exists()
-    assert load_gaps(str(catalog), _IID) == [(span.start_ns, span.end_ns)]
+    gaps = load_gaps(str(catalog), _IID)
+    assert gaps == [(span.start_ns - MAX_TS_INIT_SKEW_NS, span.end_ns + MAX_TS_INIT_SKEW_NS)]
+    coverage = Coverage(0, tuple(gaps))
+    assert not coverage.covers(span.start_ns - 100 * NS_PER_S)
+    assert not coverage.covers(span.end_ns + 100 * NS_PER_S)
+
+
+def test_the_pruned_marker_span_is_widened_by_exactly_the_bound_and_clamped_at_zero() -> None:
+    assert pruned_marker_span((10**12, 2 * 10**12)) == (
+        10**12 - MAX_TS_INIT_SKEW_NS,
+        2 * 10**12 + MAX_TS_INIT_SKEW_NS,
+    )
+    assert pruned_marker_span((NS_PER_S, 2 * NS_PER_S)) == (0, 2 * NS_PER_S + MAX_TS_INIT_SKEW_NS)
 
 
 def test_a_leaf_that_is_not_an_instrument_id_is_kept_and_reported(

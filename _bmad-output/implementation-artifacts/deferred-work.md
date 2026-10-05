@@ -1450,7 +1450,9 @@ decision: 2026-10-05 Skip and ledger the vanished file — Skip with error_ledge
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-23-2-kernel-shared-kernel.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-23-2-kernel-shared-kernel.md` summary: two readers of the same snapshot rows disagree at the window's lower edge — `kernel.catalog_files.query_second_ohlc` widens the file span by `READ_SPAN_MARGIN_NS` on *both* sides, while `ml_signals.catalog_stats.query_second_snapshots` widens only the end (`start=start_ns, end=end_ns + READ_SPAN_MARGIN_NS`), so a row whose venue clock ran ahead of ours (`ts_init < ts_event`) and whose `ts_event` is within 60 s of `start_ns` is dropped by the snapshot reader and kept by the candle reader. evidence: flagged by the 23.2 fifth pass's adversarial hunter. Pre-dates 23.2 and was moved verbatim (`git show 2d7dd5ab6e:platform/ml_signals/catalog_stats.py:70-78`, same `start=start_ns`), but this story is what made its justifying comment provably wrong: `kernel/clocks.py`'s new `READ_SPAN_MARGIN_NS` docstring and `Collector._check_skew_budget` both document the second skew direction the comment denies ("ts_init >= ts_event, so the start needs no margin"). The fifth pass replaced that comment with a `Known limit:` naming the ceiling and the upgrade path rather than changing the margin, because AC2 freezes the read helpers' exact file-selection margins. The fix is `start=start_ns - READ_SPAN_MARGIN_NS`; the exact `ts_event` filter at the tail already makes it safe (widening can only add candidate rows, never admit out-of-window ones). Belongs with 24.2's views/read-model work, where the reader-side margin policy is decided once for both readers.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-archive-skew-margin-spans
+resolution-undo: 503907f1821fa3d9323ad14b8c3f6d3be2067e07f8adbfeaa0b3aad39585a6c5 2026-10-05 7374617475733a206f70656e
 
 ### DW-185: `collector_core/crosscheck_errors.py` reads the catalog through `ml_signals.catalog_stats.query_second_ohlc` and the 300 s bound …
 
@@ -1581,7 +1583,9 @@ resolution-undo: 89c508f4086e6130fe63c3b8c7df6e501f431e414611a6838c2e01ff0641c80
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: A `pruned` archive-gap marker spans the deleted file's `ts_init` name range, but the rebuild tests gaps on the row's `ts_event`, so rows in `[start - MAX_TS_INIT_SKEW_NS, start)` are treated as covered after their trades were deleted. evidence: archive/application/prune.py records `CatalogFileSpan` start/end, and archive/domain/gaps.py `Coverage.covers(ts_event)`. This predates 25.1 (old prune_catalog did the same).
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-archive-skew-margin-spans
+resolution-undo: 503907f1821fa3d9323ad14b8c3f6d3be2067e07f8adbfeaa0b3aad39585a6c5 2026-10-05 7374617475733a206f70656e
 
 ### DW-202: `rebuild_day` rewrites a day's files one at a time, so a refusal on file k leaves files 1..k-1 rebuilt while the day is reported "refused, untouched".
 
@@ -1611,7 +1615,9 @@ decision: 2026-10-05 Rewrite via CatalogFiles.rewrite (verified temp-then-rename
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: The retention `file_days` rule widens only backwards (the previous day). A file ending just before midnight can hold venue-clock-ahead trades of the next day, and that day is never required to be verified. evidence: archive/domain/retention.py `file_days`, and `kernel.clocks.CatalogFileSpan` documents `ts_init < ts_event`. This predates 25.1.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-archive-skew-margin-spans
+resolution-undo: 503907f1821fa3d9323ad14b8c3f6d3be2067e07f8adbfeaa0b3aad39585a6c5 2026-10-05 7374617475733a206f70656e
 
 ### DW-206: repair_catalog's "never run on a rebuilt day" rule is enforced only by its docstring; nothing checks the rebuild or `verified_days` state before clearing …
 
@@ -1650,7 +1656,9 @@ decision: 2026-10-05 Single O_APPEND os.write per line plus truncate-back on OSE
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: repair_catalog deletes a flagged snapshot with `delete_data_range(..., snap.ts_event, snap.ts_event)`, but the catalog range-filters on `ts_init`, which venue-time capture stamps after `ts_event`, so the delete can miss and `write_data` then adds a duplicate second. evidence: archive/application/repair.py (was collector_core/repair_catalog.py:93 at baseline 983d0c792c); test_repair.py builds every snapshot with ts_init == ts_event. This predates 25.1.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-archive-skew-margin-spans
+resolution-undo: 503907f1821fa3d9323ad14b8c3f6d3be2067e07f8adbfeaa0b3aad39585a6c5 2026-10-05 7374617475733a206f70656e
 
 ### DW-211: `record_gap` can leave a torn `_archive_gaps/*.jsonl` line on a mid-write OSError (e.g. ENOSPC), and `load_gaps` then raises ValueError every later night …
 
@@ -1679,7 +1687,9 @@ decision: 2026-10-05 Exit 2 (findings) for refused days — consolidate exits 2 
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: The prune's `pruned` marker covers the deleted trade file's raw `ts_init` span, but a trade's `ts_event` can precede its `ts_init` by up to `MAX_TS_INIT_SKEW_NS`, so a later rebuild of that day re-folds the edge seconds without the pruned trades. evidence: archive/application/prune.py `_delete` records `ArchiveGap(f.iid, *span, "pruned", 0)`, while the rebuild tests gap membership on the snapshot row's `ts_event`. This predates 25.1 (collector_core/prune_catalog.py:278 at baseline 983d0c792c).
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-archive-skew-margin-spans
+resolution-undo: 503907f1821fa3d9323ad14b8c3f6d3be2067e07f8adbfeaa0b3aad39585a6c5 2026-10-05 7374617475733a206f70656e
 
 ### DW-215: `make prune` (order_book_deltas age rule, 14 days) deletes raw deltas of a dYdX instrument whose plan entry says `retain_hours = None` (unlimited), because the …
 

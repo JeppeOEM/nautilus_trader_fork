@@ -85,6 +85,19 @@ def test_a_file_starting_inside_the_midnight_margin_also_needs_the_previous_day(
     assert [d.file for d in both.delete] == [early]
 
 
+def test_a_file_ending_inside_the_midnight_margin_also_needs_the_next_day() -> None:
+    """A venue clock ahead of ours stamps a trade's `ts_event` past its `ts_init`."""
+    midnight = (_TODAY - 9) * NS_PER_DAY
+    end = midnight - 2 * 60 * NS_PER_S  # 23:58 of the day before: within the bound of midnight
+    late = _file("trade_tick", _BYBIT, end - _HOUR, end)
+    assert list(file_days((end - _HOUR, end))) == [_TODAY - 10, _TODAY - 9]
+    policy = RetentionPolicy(_NOW, trade_retention_days=7)
+    kept = policy.decide([late], _verified(_BYBIT, _TODAY - 10))
+    assert (kept.delete, kept.kept) == ([], [(_BYBIT, day_text(_TODAY - 9), "unverified")])
+    both = policy.decide([late], _verified(_BYBIT, _TODAY - 10, _TODAY - 9))
+    assert [d.file for d in both.delete] == [late]
+
+
 def test_a_file_spanning_two_days_needs_both_verified() -> None:
     spanning = _file(
         "trade_tick", _BYBIT, (_TODAY - 10) * NS_PER_DAY - NS_PER_S, (_TODAY - 10) * NS_PER_DAY + 1

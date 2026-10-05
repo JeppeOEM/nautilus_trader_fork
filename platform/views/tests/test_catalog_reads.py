@@ -87,6 +87,29 @@ def test_query_second_ohlc_matches_this_readers_decoder() -> None:
         assert len(projected) == 2
 
 
+def test_a_venue_ahead_row_at_the_window_start_is_returned(tmp_path: Path) -> None:
+    """
+    A venue clock ahead of ours stamps `ts_init < ts_event`: the row's file span starts before the
+    window, so the `ts_init` start is widened as the end is, and the `ts_event` filter decides.
+    """
+    start = 1_800_000_000_000_000_000
+    ParquetDataCatalog(str(tmp_path)).write_data(
+        [
+            make_snapshot(
+                instrument_id=_OHLC_IID,
+                bid_prices=[99.0],
+                bid_sizes=[1.0],
+                ask_prices=[101.0],
+                ask_sizes=[1.0],
+                ts_event=start + 10_000_000_000,
+                ts_init=start - 5_000_000_000,
+            )
+        ]
+    )
+    rows = query_second_snapshots(str(tmp_path), _OHLC_IID, start, start + 20_000_000_000)
+    assert [r.ts_event for r in rows] == [start + 10_000_000_000]
+
+
 def test_fetch_page_jumps_a_gap_to_the_last_data_before_it() -> None:
     ranges = [(0, 100), (1_000, 1_100)]
     calls: list[tuple[int, int]] = []

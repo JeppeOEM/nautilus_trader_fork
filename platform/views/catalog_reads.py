@@ -64,27 +64,24 @@ def query_second_snapshots(
     end_ns: int,
 ) -> list[DydxSecondSnapshot]:
     """
-    DydxSecondSnapshot rows for `instrument_id` in [start_ns, end_ns], CustomData-unwrapped.
+    DydxSecondSnapshot rows for `instrument_id` with `ts_event` in [start_ns, end_ns],
+    CustomData-unwrapped. Files are chosen over the `ts_init` span widened by `READ_SPAN_MARGIN_NS`
+    on both sides, so a row whose venue clock ran ahead of ours or behind it is still read.
 
     Shared by dashboard.py's _historical_lines_json and custom_indicators.py's
     _second_snapshots -- both projected different fields off this same query, so only
     the catalog-query + CustomData-unwrap boilerplate lives here.
     """
     catalog = ParquetDataCatalog(catalog_path)
-    # `query` bounds on ts_init, the window is ts_event: a venue-timed row (story 22.12) is
-    # sampled up to 1 + hold_back s (a catch-up: more) after its ts_event, so the end is widened
-    # and the exact ts_event filter decides.
-    # Known limit: the start is not widened, so a row whose venue clock ran ahead of ours
-    # (`ts_init < ts_event`, the second direction `kernel.clocks.READ_SPAN_MARGIN_NS` documents)
-    # is dropped when its ts_event is within READ_SPAN_MARGIN_NS of `start_ns`. The ceiling is one
-    # margin's worth of rows at the window's lower edge; `kernel.catalog_files.query_second_ohlc`
-    # widens both sides and keeps them, so the two readers can disagree there. The upgrade path is
-    # `start=start_ns - READ_SPAN_MARGIN_NS` (the exact ts_event filter below already makes it
-    # safe); held back here because this story moves read margins without changing them.
+    # `query` bounds on ts_init, the window is ts_event, and a row's skew runs either way
+    # (`kernel.clocks.READ_SPAN_MARGIN_NS`): a venue-timed row (story 22.12) is sampled up to
+    # 1 + hold_back s (a catch-up: more) after its ts_event, so the end is widened; a venue clock
+    # running ahead of ours stamps `ts_init < ts_event`, so the start is widened too (clamped at
+    # 0). The exact ts_event filter below decides -- the same span `query_second_ohlc` reads.
     results = catalog.query(
         data_cls=DydxSecondSnapshot,
         identifiers=[instrument_id],
-        start=start_ns,
+        start=max(0, start_ns - READ_SPAN_MARGIN_NS),
         end=end_ns + READ_SPAN_MARGIN_NS,
     )
     # query() wraps custom Data subclasses in CustomData -- unwrap via .data to reach the
