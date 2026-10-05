@@ -232,6 +232,45 @@ interface EdgeGhost {
 
 const NO_BARS = (): number | null => null;
 
+/** Story 18.4's replay control bar. DW-146: a click that would do nothing is never silently
+ * ignored -- a pick on a data gap says so, Play/Step forward at the newest loaded bar are disabled
+ * with "End of loaded data" shown, Step back at the start marker is disabled with a tooltip. */
+function ReplayControls({ replay, onGoTo }: { replay: ReturnType<typeof useReplay>; onGoTo: () => void }) {
+  if (replay.mode === "picking") {
+    return (
+      <span role="status">
+        {replay.pickMissed ? "No bar at that time -- click a candle" : "Click a candle to start the replay"}
+      </span>
+    );
+  }
+  return (
+    <>
+      <button type="button" onClick={replay.togglePlay} disabled={!replay.isPlaying && replay.atEnd}>
+        {replay.isPlaying ? "Pause" : "Play"}
+      </button>
+      <button
+        type="button"
+        aria-label="Step back"
+        onClick={() => replay.step(-1)}
+        disabled={replay.atStart}
+        title={replay.atStart ? "At the replay start bar" : undefined}
+      >
+        &lt;
+      </button>
+      <button type="button" aria-label="Step forward" onClick={() => replay.step(1)} disabled={replay.atEnd}>
+        &gt;
+      </button>
+      <button type="button" aria-label="Replay speed" onClick={replay.cycleSpeed}>
+        {replay.speed}x
+      </button>
+      <button type="button" onClick={onGoTo}>
+        Go to...
+      </button>
+      {replay.atEnd && <span role="status">End of loaded data</span>}
+    </>
+  );
+}
+
 interface ChartInnerProps {
   instrumentId: string;
   /** The coin's drawings, held by the page above this component: a timeframe change remounts it. */
@@ -573,6 +612,7 @@ function ChartInner({
       // an invisible zero-length line, so it is ignored (the tool stays armed).
       // Story 18.4 (AC #2): while picking a replay start, a click selects that bar and
       // nothing else -- drawing tools are disarmed on entry, this guards the same click.
+      // A click on a gap slot stays in picking; the hook's `pickMissed` drives the hint (DW-146).
       if (replayMode === "picking") {
         pickReplayBar(point.time as number);
         return;
@@ -1069,27 +1109,7 @@ function ChartInner({
       </div>
       {replay.mode !== "off" && (
         <div role="group" aria-label="Replay controls">
-          {replay.mode === "picking" ? (
-            <span>Click a candle to start the replay</span>
-          ) : (
-            <>
-              <button type="button" onClick={replay.togglePlay}>
-                {replay.isPlaying ? "Pause" : "Play"}
-              </button>
-              <button type="button" aria-label="Step back" onClick={() => replay.step(-1)}>
-                &lt;
-              </button>
-              <button type="button" aria-label="Step forward" onClick={() => replay.step(1)}>
-                &gt;
-              </button>
-              <button type="button" aria-label="Replay speed" onClick={replay.cycleSpeed}>
-                {replay.speed}x
-              </button>
-              <button type="button" onClick={startReplayPick}>
-                Go to...
-              </button>
-            </>
-          )}
+          <ReplayControls replay={replay} onGoTo={startReplayPick} />
           <button type="button" onClick={replay.exit}>
             Exit
           </button>
@@ -1157,6 +1177,8 @@ function ChartInner({
             // Story 18.4: the real-time forming bar would reveal "future" price action.
             liveBar={replay.mode === "active" ? null : liveBar}
             markerTime={replay.markerTime}
+            // DW-145: keep the replay head in view as it advances.
+            followNewest={replay.mode === "active"}
           />
         </div>
       </div>

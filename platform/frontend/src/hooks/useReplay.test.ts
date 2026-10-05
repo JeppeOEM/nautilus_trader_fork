@@ -170,6 +170,104 @@ describe("useReplay (Story 18.4)", () => {
     expect(result.current.displayed.map((c) => c.time)).toEqual([60]);
   });
 
+  it("never steps back past the start marker, and reports atStart (DW-146)", () => {
+    const { result } = picked(120);
+    expect(result.current.atStart).toBe(true);
+
+    act(() => result.current.step(-1));
+    expect(result.current.displayed.at(-1)?.time).toBe(120);
+
+    act(() => result.current.step(1));
+    expect(result.current.atStart).toBe(false);
+    act(() => result.current.step(-1));
+    act(() => result.current.step(-1));
+    expect(result.current.displayed.at(-1)?.time).toBe(120);
+    expect(result.current.atStart).toBe(true);
+  });
+
+  it("is atStart when the previous bar is older than a start the data no longer holds", () => {
+    const { result, rerender } = picked(240);
+    act(() => result.current.step(1)); // 300
+    // the start bar 240 vanished (reload/trim); the previous real bar 120 is older than it
+    rerender({ candles: [bar(60), bar(120), bar(300)] });
+
+    expect(result.current.atStart).toBe(true);
+    act(() => result.current.step(-1));
+    expect(result.current.displayed.at(-1)?.time).toBe(300);
+  });
+
+  it("flags a missed pick until a successful pick, startPicking, cancelPick or exit (DW-146)", () => {
+    const { result } = renderHook(() => useReplay(CANDLES));
+    const miss = () =>
+      act(() => {
+        result.current.pick(180);
+      });
+    expect(result.current.pickMissed).toBe(false);
+    act(() => result.current.startPicking());
+
+    miss();
+    expect(result.current.pickMissed).toBe(true);
+    expect(result.current.mode).toBe("picking");
+    act(() => {
+      result.current.pick(120);
+    });
+    expect(result.current.pickMissed).toBe(false);
+
+    act(() => result.current.startPicking());
+    miss();
+    act(() => result.current.startPicking());
+    expect(result.current.pickMissed).toBe(false);
+
+    miss();
+    act(() => result.current.cancelPick());
+    expect(result.current.pickMissed).toBe(false);
+    expect(result.current.mode).toBe("active");
+
+    act(() => result.current.startPicking());
+    miss();
+    act(() => result.current.exit());
+    expect(result.current.pickMissed).toBe(false);
+  });
+
+  it("Play at the newest bar is a no-op that a later bar does not turn into playback (DW-146)", () => {
+    const { result, rerender } = picked(300);
+    expect(result.current.atEnd).toBe(true);
+
+    act(() => result.current.togglePlay());
+    expect(result.current.isPlaying).toBe(false);
+
+    rerender({ candles: [...CANDLES, bar(360)] });
+    expect(result.current.atEnd).toBe(false);
+    act(() => vi.advanceTimersByTime(REPLAY_BASE_MS * 3));
+    expect(result.current.isPlaying).toBe(false);
+    expect(result.current.displayed.at(-1)?.time).toBe(300);
+
+    act(() => result.current.togglePlay());
+    expect(result.current.isPlaying).toBe(true);
+  });
+
+  it("a fresh-but-equal candles array while playing never delays the next tick (DW-146)", () => {
+    const { result, rerender } = picked(60);
+    act(() => result.current.togglePlay());
+
+    act(() => vi.advanceTimersByTime(REPLAY_BASE_MS / 2));
+    rerender({ candles: [...CANDLES] });
+    act(() => vi.advanceTimersByTime(REPLAY_BASE_MS / 2));
+
+    expect(result.current.displayed.at(-1)?.time).toBe(120);
+  });
+
+  it("the play tick reads the latest candles, not those of when it was armed", () => {
+    const { result, rerender } = picked(300);
+    rerender({ candles: [...CANDLES, bar(360)] });
+    act(() => result.current.togglePlay());
+
+    rerender({ candles: [...CANDLES, bar(330), bar(360)] });
+    act(() => vi.advanceTimersByTime(REPLAY_BASE_MS));
+
+    expect(result.current.displayed.at(-1)?.time).toBe(330);
+  });
+
   it("cancelling a first pick returns to off", () => {
     const { result } = renderHook(() => useReplay(CANDLES));
     act(() => result.current.startPicking());

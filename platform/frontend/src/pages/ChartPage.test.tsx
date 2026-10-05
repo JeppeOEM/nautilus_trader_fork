@@ -176,6 +176,7 @@ interface ChartStubProps {
   data?: { time: number }[];
   liveBar?: unknown;
   markerTime?: number | null;
+  followNewest?: boolean;
   volumeProfiles?: { id: string; profile: { totalVolume: number; rows: unknown[] }; xAnchor: unknown; width: unknown; edges?: unknown; respondsToZoom?: boolean; widthFraction?: number }[];
   rangeSelectActive?: boolean;
   profileEdgesEditable?: boolean;
@@ -1027,13 +1028,66 @@ describe("ChartPage bar replay (Story 18.4)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Replay" }));
     pickBar(120);
 
+    expect(screen.getByRole("button", { name: "Step back" })).toBeDisabled(); // at the marker
     fireEvent.click(screen.getByRole("button", { name: "Step forward" }));
     expect(lastChartProps.current!.data).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "Step back" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "Step back" }));
+    expect(lastChartProps.current!.data).toHaveLength(2);
+    // DW-146: clamped at the start marker, never walking past it.
+    expect(screen.getByRole("button", { name: "Step back" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Step back" }));
-    expect(lastChartProps.current!.data).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "Step back" }));
-    expect(lastChartProps.current!.data).toHaveLength(1);
+    expect(lastChartProps.current!.data).toHaveLength(2);
+    expect(lastChartProps.current!.markerTime).toBe(120);
+  });
+
+  it("a pick on a data gap stays picking and says so; the next real pick clears it (DW-146)", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    expect(screen.getByRole("status")).toHaveTextContent("Click a candle to start the replay");
+
+    pickBar(150); // no bar at this time
+
+    expect(screen.getByRole("status")).toHaveTextContent("No bar at that time -- click a candle");
+    expect(lastChartProps.current!.data).toHaveLength(5);
+    expect(lastChartProps.current!.markerTime).toBeNull();
+    pickBar(120);
+    expect(lastChartProps.current!.markerTime).toBe(120);
+    fireEvent.click(screen.getByRole("button", { name: "Go to..." }));
+    expect(screen.getByRole("status")).toHaveTextContent("Click a candle to start the replay");
+  });
+
+  it("disables Play and Step forward at the newest loaded bar, until a later bar arrives (DW-146)", () => {
+    const { rerender } = render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    pickBar(240);
+    expect(screen.getByRole("button", { name: "Play" })).toBeEnabled();
+    expect(screen.queryByText("End of loaded data")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Step forward" }));
+
+    expect(lastChartProps.current!.data).toHaveLength(5);
+    expect(screen.getByRole("button", { name: "Play" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Step forward" })).toBeDisabled();
+    expect(screen.getByText("End of loaded data")).toBeInTheDocument();
+
+    mocks.candles = [...bars, { time: 360, open: 1, high: 2, low: 1, close: 1 }];
+    rerender(<ChartPage />);
+    expect(screen.getByRole("button", { name: "Play" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Step forward" })).toBeEnabled();
+    expect(screen.queryByText("End of loaded data")).toBeNull();
+    expect(lastChartProps.current!.data).toHaveLength(5); // nothing revealed by itself
+  });
+
+  it("asks the chart to follow the replay head only while a replay is active (DW-145)", () => {
+    render(<ChartPage />);
+    expect(lastChartProps.current!.followNewest).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    expect(lastChartProps.current!.followNewest).toBe(false);
+    pickBar(120);
+    expect(lastChartProps.current!.followNewest).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Exit" }));
+    expect(lastChartProps.current!.followNewest).toBe(false);
   });
 
   it("restores the full dataset and removes the controls and marker on Exit (AC #6)", () => {

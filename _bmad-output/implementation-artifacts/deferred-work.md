@@ -1110,14 +1110,18 @@ resolution-undo: 988e15f4b5ef3bc15b0c3918fdddb8822929edd35fe148958cc5976427cb70d
 origin: migrated from legacy ledger ("Deferred from: code review of story-18.4 (2026-09-19)"), 2026-10-05
 location: setData
 reason: Replay: no follow-scroll -- revealed bars may end up off-screen right after `setData`; verify in a real browser and add `scrollToPosition`/`scrollToRealTime` if so.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-chart-replay-polish
+resolution-undo: d46e45e5a8206fc33cb2bd6cecda4ae20ede7cce2c87830feddf1aecf8a9bcff 2026-10-05 7374617475733a206f70656e
 
 ### DW-146: Replay polish: silent no-op when picking a gap; Play at newest bar does nothing visibly; Step back can pass the start marker; play interval restarts on any …
 
 origin: migrated from legacy ledger ("Deferred from: code review of story-18.4 (2026-09-19)"), 2026-10-05
 location: candles
 reason: Replay polish: silent no-op when picking a gap; Play at newest bar does nothing visibly; Step back can pass the start marker; play interval restarts on any `candles` identity change; marker color resolved at construction.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-chart-replay-polish
+resolution-undo: d46e45e5a8206fc33cb2bd6cecda4ae20ede7cce2c87830feddf1aecf8a9bcff 2026-10-05 7374617475733a206f70656e
 
 ### DW-147: `GET /api/candles` `has_more` probes only one query window back, so a collector outage longer than that window (limit*bar_seconds*3, capped at 7 days -- ~25h …
 

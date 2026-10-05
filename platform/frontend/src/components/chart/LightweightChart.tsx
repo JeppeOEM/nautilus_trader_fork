@@ -239,11 +239,17 @@ interface LightweightChartProps {
   /** Story 18.4: when set, a vertical marker line is drawn at this time (the replay start
    * bar); `null`/omitted removes it. Attached to the main candlestick series. */
   markerTime?: Time | null;
+  /** DW-145: while true (a replay is active), a candles `setData` whose newest bar time changed
+   * scrolls that bar into view when it is off-screen -- the visible width kept, the bar at the
+   * right edge. A refill that only prepends older bars (newest time unchanged) never follows,
+   * and flipping this prop alone moves nothing. Default false: the data effects leave the view. */
+  followNewest?: boolean;
   /** Story 18.10: crosshair on/off (the left toolbar's toggle); default on. */
   crosshairVisible?: boolean;
   /** Story 18.10: applied once per new command object -- `fit` snaps the visible range to
-   * all loaded data, `latest` scrolls to the newest bar. The only place this component
-   * deliberately moves the view; the data/pane effects still never do. */
+   * all loaded data, `latest` scrolls to the newest bar. The only user-commanded view move;
+   * otherwise the view changes only through the candles data effect's own keeping (scroll-back
+   * prepend compensation, the Story 32.6 initial zoom and the opt-in `followNewest`). */
   viewCommand?: ViewCommand | null;
   /** Story 18.5: declarative Volume Profiles (one `VolumeProfilePrimitive` each), diffed by
    * id like `drawings`. Nothing in the app places one yet -- Stories 18.6-18.9 do. */
@@ -288,6 +294,23 @@ interface LightweightChartProps {
   /** Story 32.6: the visible bar count after a zoom, debounced; silent until `initialVisibleBars`
    * was applied (the library's own first fit must not overwrite the saved zoom) and in Lines mode. */
   onVisibleBars?: (bars: number) => void;
+}
+
+/** DW-145: after a replay `setData`, bring the newest bar back into view when its time changed
+ * and it lies outside the visible logical range: the range keeps its width and ends half a bar
+ * past it. lightweight-charts keeps the right offset relative to the last bar, so at the
+ * realtime edge the head is already visible and this is a no-op; it acts when the view was
+ * scrolled back before picking, or panned away while paused. */
+function followNewestBar(chart: IChartApi, data: readonly ChartDatum[], prevNewest: number | null): void {
+  if (data.length === 0) return;
+  const last = data.length - 1;
+  if ((data[last].time as unknown as number) === prevNewest) return;
+  const range = chart.timeScale().getVisibleLogicalRange();
+  // The whole bar (its index +/- half a slot) must be inside the range: a head half clipped at
+  // either edge is followed too.
+  if (!range || (last - 0.5 >= range.from && last + 0.5 <= range.to)) return;
+  const width = range.to - range.from;
+  chart.timeScale().setVisibleLogicalRange({ from: last + 0.5 - width, to: last + 0.5 });
 }
 
 /** Quiet period after the last visible-range event before the zoom is reported. */
@@ -547,6 +570,7 @@ export default function LightweightChart({
   volume = [],
   onMeasureEnd,
   markerTime = null,
+  followNewest = false,
   crosshairVisible = true,
   viewCommand = null,
   volumeProfiles = [],
@@ -584,6 +608,9 @@ export default function LightweightChart({
   const visibleBarsReadyRef = useRef(false);
   const lastVisibleBarsRef = useRef<number | null>(null);
   const initialVisibleBarsRef = useRef(initialVisibleBars);
+  // Read by the candles data effect, never one of its deps: a prop flip must not re-run setData.
+  const followNewestRef = useRef(followNewest);
+  followNewestRef.current = followNewest;
   const legendActionRef = useRef(onLegendAction);
   legendActionRef.current = onLegendAction;
   const handleLegendAction = useCallback(
@@ -936,6 +963,7 @@ export default function LightweightChart({
     const prevFirst = prevFirstTimeRef.current;
     const addedAtFront = prevFirst === null ? 0 : Math.max(0, data.findIndex((d) => d.time === prevFirst));
     const rangeBeforeUpdate = addedAtFront > 0 ? chart?.timeScale().getVisibleLogicalRange() : null;
+    const prevNewest = lastPaintedTimeRef.current;
 
     series.setData(data);
     prevFirstTimeRef.current = data.length > 0 ? data[0].time : null;
@@ -959,6 +987,8 @@ export default function LightweightChart({
         lastVisibleBarsRef.current = bars;
       }
     }
+
+    if (followNewestRef.current && chart) followNewestBar(chart, data, prevNewest);
   }, [data, mode]);
 
   useEffect(() => {
@@ -1285,7 +1315,7 @@ export default function LightweightChart({
       markerRef.current.setTime(markerTime);
       return;
     }
-    markerRef.current = new VerticalMarkerPrimitive(markerTime, chartVar("--chart-marker"));
+    markerRef.current = new VerticalMarkerPrimitive(markerTime);
     host.attachPrimitive(markerRef.current);
   }, [markerTime, mode]);
 

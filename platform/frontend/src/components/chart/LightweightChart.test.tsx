@@ -199,6 +199,7 @@ type ChartTestProps = {
   onMeasureEnd?: () => void;
   data?: { time: Time; open: number; high: number; low: number; close: number }[];
   markerTime?: Time | null;
+  followNewest?: boolean;
   volumeProfiles?: VolumeProfileSpec[];
   crosshairVisible?: boolean;
   viewCommand?: { kind: "fit" | "latest"; seq: number } | null;
@@ -1161,6 +1162,83 @@ describe("replay support (Story 18.4)", () => {
     rerender(chartElement({ data: [b(0), b(30), b(60), b(120)] }));
 
     expect(setVisibleLogicalRangeMock).toHaveBeenCalledWith({ from: 12, to: 52 });
+  });
+
+  describe("followNewest (DW-145)", () => {
+    const bars = (n: number) => Array.from({ length: n }, (_, i) => b(60 * (i + 1)));
+
+    it("scrolls a newest bar right of the view back in, keeping the width, the bar at the right edge", () => {
+      getVisibleLogicalRangeMock.mockReturnValue({ from: 0, to: 4 });
+      const { rerender } = render(chartElement({ data: bars(3), followNewest: true }));
+      expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled(); // index 2 is visible
+
+      rerender(chartElement({ data: bars(6), followNewest: true }));
+
+      expect(setVisibleLogicalRangeMock).toHaveBeenCalledExactlyOnceWith({ from: 1.5, to: 5.5 });
+    });
+
+    it("scrolls a newest bar left of the view in (a start picked while scrolled back)", () => {
+      getVisibleLogicalRangeMock.mockReturnValue({ from: 0, to: 100 });
+      const { rerender } = render(chartElement({ data: bars(60), followNewest: false }));
+      getVisibleLogicalRangeMock.mockReturnValue({ from: 40, to: 80 });
+
+      rerender(chartElement({ data: bars(30), followNewest: true }));
+
+      expect(setVisibleLogicalRangeMock).toHaveBeenCalledExactlyOnceWith({ from: -10.5, to: 29.5 });
+    });
+
+    it("follows a newest bar half clipped at the right edge", () => {
+      getVisibleLogicalRangeMock.mockReturnValue({ from: 0, to: 2 });
+      const { rerender } = render(chartElement({ data: bars(2), followNewest: true }));
+      expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled(); // index 1 spans 0.5..1.5
+
+      rerender(chartElement({ data: bars(3), followNewest: true })); // index 2 spans 1.5..2.5
+
+      expect(setVisibleLogicalRangeMock).toHaveBeenCalledExactlyOnceWith({ from: 0.5, to: 2.5 });
+    });
+
+    it("leaves the view alone while the newest bar is already visible", () => {
+      getVisibleLogicalRangeMock.mockReturnValue({ from: 0, to: 100 });
+      const { rerender } = render(chartElement({ data: bars(3), followNewest: true }));
+
+      rerender(chartElement({ data: bars(4), followNewest: true }));
+      rerender(chartElement({ data: bars(5), followNewest: true }));
+
+      expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled();
+    });
+
+    it("a prepend during replay only compensates; the unchanged newest bar is not followed", () => {
+      const { rerender } = render(chartElement({ data: [b(60), b(120)], followNewest: true }));
+      setVisibleLogicalRangeMock.mockClear();
+
+      // the range stays {10, 50}, so index 3 reads as off-screen: only the newest-time check
+      // keeps the follow from firing
+      rerender(chartElement({ data: [b(0), b(30), b(60), b(120)], followNewest: true }));
+
+      expect(setVisibleLogicalRangeMock).toHaveBeenCalledExactlyOnceWith({ from: 12, to: 52 });
+    });
+
+    it("never follows while not replaying", () => {
+      getVisibleLogicalRangeMock.mockReturnValue({ from: 0, to: 4 });
+      const { rerender } = render(chartElement({ data: bars(3) }));
+
+      rerender(chartElement({ data: bars(6) }));
+      rerender(chartElement({ data: bars(9), followNewest: false }));
+
+      expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled();
+    });
+
+    it("flipping the prop alone neither repaints the data nor moves the view", () => {
+      getVisibleLogicalRangeMock.mockReturnValue({ from: 0, to: 4 });
+      const data = bars(9);
+      const { rerender } = render(chartElement({ data, followNewest: false }));
+      const paints = setDataMock.mock.calls.length;
+
+      rerender(chartElement({ data, followNewest: true }));
+
+      expect(setDataMock).toHaveBeenCalledTimes(paints);
+      expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled();
+    });
   });
 
   it("attaches, moves and detaches the start marker", () => {
