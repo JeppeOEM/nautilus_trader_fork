@@ -82,6 +82,19 @@ describe("TPO rows (Story 32.7)", () => {
   });
 });
 
+describe("TPO letters by clock (Story 32.7)", () => {
+  it("name each candle's 30-minute period from the session start, so a missing bar shifts nothing", () => {
+    const at = (period: number) => ({ ...c(1, 2, 1, 2), time: 1000 + period * TPO_BAR_SECONDS });
+    const candles = [at(0), at(2), at(3)]; // period 1 (B) is missing
+    const rows = tpoRows(buildVolumeProfile(candles, 1, 0.7, "time"), candles, TPO_MAX_BLOCKS_PER_ROW, {
+      sessionStart: 1000,
+      barSeconds: TPO_BAR_SECONDS,
+    });
+
+    expect(rows[0].touches.map((t) => t.letter)).toEqual(["A", "C", "D"]);
+  });
+});
+
 describe("tpoLetter", () => {
   it("runs A..Z, a..z and then around again", () => {
     expect([0, 1, 25, 26, 51, 52, 53].map(tpoLetter)).toEqual(["A", "B", "Z", "a", "z", "A", "B"]);
@@ -89,28 +102,39 @@ describe("tpoLetter", () => {
 });
 
 describe("initialBalance (Story 32.7)", () => {
-  const five = (n: number) =>
-    Array.from({ length: n }, (_, i) => ({ time: 1000 + i * 300, high: 100 + i, low: 90 - i }));
+  const bars = (n: number, step: number) =>
+    Array.from({ length: n }, (_, i) => ({ time: 1000 + i * step, high: 100 + i, low: 90 - i }));
 
   it("at 5m bars the default 60 minutes is the first 12 bars: their high and low", () => {
-    const ib = initialBalance(five(30), 300, DEFAULT_IB_MINUTES);
+    const ib = initialBalance(bars(30, 300), 1000, DEFAULT_IB_MINUTES);
 
     expect(ib).toEqual({ startTime: 1000, endTime: 1000 + 11 * 300, high: 111, low: 79 });
   });
 
   it("is 2 bars of the 30-minute TPO candle by default", () => {
-    const ib = initialBalance(five(10), TPO_BAR_SECONDS, DEFAULT_IB_MINUTES);
+    const ib = initialBalance(bars(10, TPO_BAR_SECONDS), 1000, DEFAULT_IB_MINUTES);
 
-    expect(ib).toMatchObject({ startTime: 1000, endTime: 1300, high: 101, low: 89 });
+    expect(ib).toMatchObject({ startTime: 1000, endTime: 1000 + TPO_BAR_SECONDS, high: 101, low: 89 });
   });
 
-  it("takes at least one bar, and only the bars the session has", () => {
-    expect(initialBalance(five(3), 86_400, 60)).toMatchObject({ endTime: 1000 });
-    expect(initialBalance(five(3), 300, 600)).toMatchObject({ endTime: 1600 });
+  it("is counted by time from the session start: a missing bar pulls no later bar in", () => {
+    const withHole = bars(6, TPO_BAR_SECONDS).filter((_, i) => i !== 1); // the 2nd period is missing
+    const ib = initialBalance(withHole, 1000, DEFAULT_IB_MINUTES);
+
+    expect(ib).toEqual({ startTime: 1000, endTime: 1000, high: 100, low: 90 });
   });
 
-  it("is null for no bars or a non-positive length", () => {
-    expect(initialBalance([], 300, 60)).toBeNull();
-    expect(initialBalance(five(3), 300, 0)).toBeNull();
+  it("resolves to whole bars: 45 minutes at 30-minute bars takes the first two", () => {
+    expect(initialBalance(bars(4, TPO_BAR_SECONDS), 1000, 45)).toMatchObject({ endTime: 1000 + TPO_BAR_SECONDS });
+  });
+
+  it("only the bars the session has", () => {
+    expect(initialBalance(bars(3, 300), 1000, 600)).toMatchObject({ endTime: 1600 });
+  });
+
+  it("is null for no bars, none inside the window, or a non-positive length", () => {
+    expect(initialBalance([], 1000, 60)).toBeNull();
+    expect(initialBalance(bars(3, 300), 1000 - 7200, 60)).toBeNull(); // the session's first hour has no bar
+    expect(initialBalance(bars(3, 300), 1000, 0)).toBeNull();
   });
 });

@@ -2605,6 +2605,66 @@ describe("ChartPage Anchored VP and Anchored VWAP drawings (Story 32.7)", () => 
     expect(avpProfiles()[0].profile.totalVolume).toBeCloseTo(14);
   });
 
+  it("a click on the forming bar draws at once: both include the live bar, and it closes into history unchanged", async () => {
+    mocks.liveBar = { time: 500, open: 14, high: 16, low: 14, close: 16, volume: 5 };
+    const { rerender } = await renderReady(page());
+    place("Anchored volume profile tool", 500);
+    place("Anchored VWAP tool", 400);
+
+    expect(avpProfiles()).toHaveLength(1);
+    expect(avpProfiles()[0]).toMatchObject({ xAnchor: { time: 500 }, width: { toTime: 500 } });
+    expect(avpProfiles()[0].profile.totalVolume).toBeCloseTo(5);
+    const vwap = () =>
+      lastChartProps.current!.drawings!.find((d) => d.kind === "anchored_vwap")! as unknown as { points: { time: number }[] };
+    expect(vwap().points.map((p) => p.time)).toEqual([400, 500]);
+
+    // The live bar closes: history holds it now, and the drawings read the same bars.
+    const closed = [...bars, bar(500, 14, 16)];
+    mocks.candles = closed;
+    mocks.volume = [...volumes(bars), { time: 500, value: 5 }];
+    mocks.liveBar = null;
+    rerender(page());
+    expect(avpProfiles()[0]).toMatchObject({ xAnchor: { time: 500 }, width: { toTime: 500 } });
+    expect(avpProfiles()[0].profile.totalVolume).toBeCloseTo(5);
+    expect(vwap().points.map((p) => p.time)).toEqual([400, 500]);
+  });
+
+  it("an anchor in a gap slot is drawn on the real bar the profile starts at, not on the slot", async () => {
+    mocks.candles = [bar(100, 10, 12), bar(200, 11, 13), { time: 250 }, bar(300, 12, 14), bar(400, 13, 15)];
+    drawingsApi.server = [
+      { kind: "anchored_vp", id: "anchored_vp-1", time: 250, rows: 24, value_area_pct: 70, up_color: "#25a399", down_color: "#ef5350" },
+    ];
+    await renderReady(page());
+
+    expect(lastChartProps.current!.drawings!.find((d) => d.kind === "anchored_vp")).toMatchObject({ time: 200 });
+    expect(avpProfiles()[0].xAnchor).toEqual({ time: 200 });
+  });
+
+  it("opens the Anchored VP's settings before the instrument's precision is known (its dialog prints no price)", async () => {
+    drawingsApi.server = [
+      { kind: "anchored_vp", id: "anchored_vp-1", time: 200, rows: 24, value_area_pct: 70, up_color: "#25a399", down_color: "#ef5350" },
+      { kind: "anchored_vwap", id: "anchored_vwap-1", time: 100, source: "hlc3", bands: false, band_color: "#b26a00" },
+    ];
+    mocks.precision = null;
+    await renderReady(page());
+
+    act(() => lastChartProps.current!.onDrawingSettings!("anchored_vwap-1"));
+    expect(screen.queryByRole("dialog", { name: "Anchored VWAP settings" })).toBeNull();
+    act(() => lastChartProps.current!.onDrawingSettings!("anchored_vp-1"));
+    expect(screen.getByRole("dialog", { name: "Anchored volume profile settings" })).toBeInTheDocument();
+  });
+
+  it("the VWAP's line colour picker shows the colour the line is drawn in when none is stored", async () => {
+    drawingsApi.server = [{ kind: "anchored_vwap", id: "anchored_vwap-1", time: 100, source: "hlc3", bands: false, band_color: "#b26a00" }];
+    await renderReady(page());
+
+    act(() => lastChartProps.current!.onDrawingSettings!("anchored_vwap-1"));
+    const dialog = screen.getByRole("dialog", { name: "Anchored VWAP settings" });
+    expect(within(dialog).getByLabelText("Line colour")).toHaveValue(CHART_TOKENS["--chart-drawing"].toLowerCase());
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    expect(lastChartProps.current!.drawings!.find((d) => d.id === "anchored_vwap-1")).not.toHaveProperty("color");
+  });
+
   it("saves only what the wire holds (no computed rows) and restores both kinds after a reload", async () => {
     vi.useFakeTimers();
     try {

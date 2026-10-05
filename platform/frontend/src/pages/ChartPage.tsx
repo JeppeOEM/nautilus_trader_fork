@@ -26,7 +26,15 @@ import {
 } from "../lib/volumeProfile";
 import { type AutoAnchorPreset, DEFAULT_AUTO_ANCHOR, anchorBars, anchorTime } from "../lib/autoAnchor";
 import { anchoredVwap } from "../lib/anchoredVwap";
-import { DEFAULT_IB_MINUTES, TPO_BAR_SECONDS, initialBalance, tpoRows } from "../lib/tpo";
+import {
+  DEFAULT_IB_MINUTES,
+  type InitialBalance,
+  TPO_BAR_SECONDS,
+  TPO_MAX_BLOCKS_PER_ROW,
+  type TpoRow,
+  initialBalance,
+  tpoRows,
+} from "../lib/tpo";
 import {
   DEFAULT_SESSION_COUNT,
   SESSION_PRESETS,
@@ -35,9 +43,11 @@ import {
   periodStartBack,
   sessionBarSeconds,
   timedBars,
+  withFormingBar,
   type SessionPeriod,
   type SessionPreset,
   type SessionProfileCache,
+  type SessionProfileEntry,
   type SessionProfileSettings,
 } from "../lib/sessionProfile";
 import { chartVar, fibLevelColor } from "../components/chart/chartTheme";
@@ -248,6 +258,24 @@ const DRAWING_TOOLS: readonly ChartToolDef[] = [
   },
 ];
 
+type TpoDetail = { rows: TpoRow[]; balance: InitialBalance | null; ibMinutes: number };
+type TpoDetailCache = WeakMap<VolumeProfile, TpoDetail>;
+
+// A TPO session's blocks, letters and initial balance, kept per profile object: `buildSessionProfiles`
+// hands back the same profile for a session that did not change, so only the forming one is recounted.
+function tpoDetail(cache: TpoDetailCache, entry: SessionProfileEntry, ibMinutes: number): TpoDetail {
+  const hit = cache.get(entry.profile);
+  if (hit && hit.ibMinutes === ibMinutes) return hit;
+  const clock = { sessionStart: entry.periodStart, barSeconds: TPO_BAR_SECONDS };
+  const detail: TpoDetail = {
+    rows: hit?.rows ?? tpoRows(entry.profile, entry.bars, TPO_MAX_BLOCKS_PER_ROW, clock),
+    balance: initialBalance(entry.bars, entry.periodStart, ibMinutes),
+    ibMinutes,
+  };
+  cache.set(entry.profile, detail);
+  return detail;
+}
+
 // Identity-preserving when no replay is active (`cutoff === null`), so an ordinary
 // re-render never hands the chart's pane registry a "changed" data reference.
 function trimAfter<T extends { time: Time }>(rows: T[], cutoff: number | null): T[] {
@@ -384,6 +412,7 @@ function ChartInner({
   // fixed when the config is set (an event handler), so render stays pure.
   const [sessionCfg, setSessionCfg] = useState<SessionConfig | null>(() => initialSessionConfig(savedProfile));
   const [sessionCache] = useState<SessionProfileCache>(() => new Map());
+  const [tpoCache] = useState<TpoDetailCache>(() => new WeakMap());
   const [vrvpSettings, setVrvpSettings] = useState(() =>
     savedProfile.kind === "visible" ? profileSettings(savedProfile) : DEFAULT_VOLUME_PROFILE_SETTINGS,
   );
@@ -415,8 +444,28 @@ function ChartInner({
   // they would show the "future" the replay hides.
   const volume = useMemo(() => trimAfter(fullVolume, cutoffTime), [fullVolume, cutoffTime]);
 
-  // Known limit: this memo recomputes every anchored profile and VWAP on each bar update (O(bars) per
-  // drawing). Upgrade path: cache per drawing like `buildSessionProfiles`, and extend the VWAP
+  const snapshotLines = useSnapshotSeries(instrumentId, chart, mode === "lines");
+  // Story 15.5: the forming right-edge bar, over its own dedicated /ws/live socket
+  // (AD-F7) -- same BAR_SECONDS constant useCandles uses, so the two paths can't drift.
+  // Lines mode has no live-edge concept of its own (Task 3's Dev Note) -- LightweightChart
+  // itself ignores `liveBar` while `mode === "lines"` (its own seriesRef is null there).
+  // A bar the live socket closes is promoted into history state, so a later setData() (a
+  // scroll-back prepend, replay, a mode flip) can never wipe bars the chart already showed;
+  // bars closed while the socket was down exist only on the server, so a reconnect refetches
+  // the newest page and merges it in.
+  const liveBar = useLiveCandle(instrumentId, barSeconds, { onReconnect: refreshNewest, onBarClosed: appendBar });
+  // Story 32.1: a forming bar that starts more than one bar after history's newest point
+  // (the collector came back after a hole) opens the gap run at once, not when it closes.
+  // `historyLoaded` re-runs it once the first page lands: the socket may seed the forming bar
+  // before REST returns, and openGapTo is a no-op (and idempotent) until history exists.
+  const liveTime = liveBar?.time;
+  const historyLoaded = candles.length > 0;
+  useEffect(() => {
+    if (liveTime !== undefined && historyLoaded) openGapTo(liveTime);
+  }, [liveTime, historyLoaded, openGapTo]);
+
+  // Known limit: this memo recomputes every anchored profile and VWAP on each bar update and each
+  // forming-bar tick (the live socket's ~1/s, O(bars) per drawing). Upgrade path: cache per drawing like `buildSessionProfiles`, and extend the VWAP
   // incrementally from its last point.
   // Story 32.7: every drawing as the chart takes it. The Anchored VP and VWAP are computed here from
   // the candles the chart holds (what a replay has revealed): the profile by the one engine, the
@@ -425,14 +474,19 @@ function ChartInner({
   // because a VWAP started mid-history would misstate it. Upgrade path: fetch the bars from the
   // anchor like the session profiles do (`useSessionCandles`). Both read candle bars, so Lines mode
   // (snapshot seconds on the time axis) shows neither.
+  // The forming bar is part of "the latest bar" here (not under a replay, which hides it): a drawing
+  // placed on it draws at once, and the line and profile include it, like the candle beside them.
+  const anchoredLive = replay.mode === "active" ? null : liveBar;
   const anchored = useMemo(() => {
     const specs: DrawingSpec[] = [];
     const profiles: VolumeProfileSpec[] = [];
     const legend: LegendExtra[] = [];
-    const bars = timedBars(replay.displayed, volume);
-    // Anchors snap on the chart's OWN bars (what the primitive draws the anchor on), volume or not.
+    const { candles: chartBars, volume: chartVolume } = withFormingBar(replay.displayed, volume, anchoredLive);
+    const bars = timedBars(chartBars, chartVolume);
+    // Anchors snap on the chart's real bars (gap slots excluded), volume or not; the primitive is
+    // handed the snapped bar, so its anchor line and the profile start on the same bar.
     const times: number[] = [];
-    for (const c of replay.displayed) if ("open" in c) times.push(c.time as number);
+    for (const c of chartBars) if ("open" in c) times.push(c.time as number);
     const lastTime = times.at(-1);
     const forLines = mode !== "candles";
     for (const d of allDrawings) {
@@ -446,11 +500,11 @@ function ChartInner({
         const profile =
           anchorBar === null || lastTime === undefined
             ? EMPTY_PROFILE
-            : buildRangeProfile(replay.displayed, volume, anchorBar, lastTime, {
+            : buildRangeProfile(chartBars, chartVolume, anchorBar, lastTime, {
                 rowCount: d.rows,
                 valueAreaPercent: d.value_area_pct,
               });
-        specs.push({ ...d, anchorPrice: profile.rows.at(-1)?.priceHigh ?? null });
+        specs.push({ ...d, time: anchorBar ?? d.time, anchorPrice: profile.rows.at(-1)?.priceHigh ?? null });
         if (profile.rows.length > 0 && anchorBar !== null && lastTime !== undefined) {
           profiles.push({
             id: `avp-${d.id}`,
@@ -480,7 +534,7 @@ function ChartInner({
     // Shared empty arrays: a coin with none (nearly every one) must not hand the chart a fresh
     // array, hence a "changed" prop, on every bar.
     return { specs: specs.length > 0 ? specs : NONE, profiles: profiles.length > 0 ? profiles : NONE, legend: legend.length > 0 ? legend : NONE };
-  }, [allDrawings, mode, replay.displayed, volume, precision]);
+  }, [allDrawings, mode, replay.displayed, volume, anchoredLive, precision]);
   const plainDrawings = useMemo<DrawingSpec[]>(
     () =>
       allDrawings.flatMap((d): DrawingSpec[] => {
@@ -493,25 +547,6 @@ function ChartInner({
     () => (anchored.specs.length === 0 ? plainDrawings : [...plainDrawings, ...anchored.specs]),
     [plainDrawings, anchored.specs],
   );
-  const snapshotLines = useSnapshotSeries(instrumentId, chart, mode === "lines");
-  // Story 15.5: the forming right-edge bar, over its own dedicated /ws/live socket
-  // (AD-F7) -- same BAR_SECONDS constant useCandles uses, so the two paths can't drift.
-  // Lines mode has no live-edge concept of its own (Task 3's Dev Note) -- LightweightChart
-  // itself ignores `liveBar` while `mode === "lines"` (its own seriesRef is null there).
-  // A bar the live socket closes is promoted into history state, so a later setData() (a
-  // scroll-back prepend, replay, a mode flip) can never wipe bars the chart already showed;
-  // bars closed while the socket was down exist only on the server, so a reconnect refetches
-  // the newest page and merges it in.
-  const liveBar = useLiveCandle(instrumentId, barSeconds, { onReconnect: refreshNewest, onBarClosed: appendBar });
-  // Story 32.1: a forming bar that starts more than one bar after history's newest point
-  // (the collector came back after a hole) opens the gap run at once, not when it closes.
-  // `historyLoaded` re-runs it once the first page lands: the socket may seed the forming bar
-  // before REST returns, and openGapTo is a no-op (and idempotent) until history exists.
-  const liveTime = liveBar?.time;
-  const historyLoaded = candles.length > 0;
-  useEffect(() => {
-    if (liveTime !== undefined && historyLoaded) openGapTo(liveTime);
-  }, [liveTime, historyLoaded, openGapTo]);
 
   // Story 15.6: the picker's persisted selection for this coin -- IndicatorPicker owns
   // the GET (initial load)/PUT (every add/remove/param-apply) round trip and reports the
@@ -916,7 +951,8 @@ function ChartInner({
     return entries.flatMap((entry) => {
       const span = drawableSpan(replay.displayed, entry.startTime, entry.endTime);
       if (!span) return [];
-      const balance = tpo ? initialBalance(entry.bars, TPO_BAR_SECONDS, sessionCfg.ibMinutes) : null;
+      const detail = tpo ? tpoDetail(tpoCache, entry, sessionCfg.ibMinutes) : null;
+      const balance = detail?.balance ?? null;
       return [
         {
           id: `session-${entry.periodStart}`,
@@ -929,12 +965,12 @@ function ChartInner({
           downColor: sessionCfg.settings.downColor,
           showPoc: sessionCfg.settings.showPoc,
           showValueArea: sessionCfg.settings.showValueArea,
-          ...(tpo ? { tpo: { rows: tpoRows(entry.profile, entry.bars), letters: sessionCfg.letters } } : {}),
+          ...(detail ? { tpo: { rows: detail.rows, letters: sessionCfg.letters } } : {}),
           ...(balance ? { initialBalance: { high: balance.high, low: balance.low } } : {}),
         },
       ];
     });
-  }, [sessionCfg, sessionActive, sessionData, cutoffTime, sessionCache, replay.displayed]);
+  }, [sessionCfg, sessionActive, sessionData, cutoffTime, sessionCache, tpoCache, replay.displayed]);
 
   const autoView = useMemo<{ specs: VolumeProfileSpec[]; markerTime: Time | null }>(() => {
     if (!sessionCfg || sessionCfg.preset !== "auto" || !autoAnchor) return { specs: [], markerTime: null };
@@ -1175,10 +1211,16 @@ function ChartInner({
   );
 
   const settingsDrawing = allDrawings.find((d) => d.id === settingsId);
+  const allDrawingsRef = useRef(allDrawings);
+  useEffect(() => {
+    allDrawingsRef.current = allDrawings;
+  }, [allDrawings]);
   const requestSettings = useCallback((id: string): void => {
     // No dialog without the instrument's precision (its fields are labelled and rounded by it):
-    // the request is dropped, not parked to pop open when the precision arrives.
-    if (precisionRef.current === null) return;
+    // the request is dropped, not parked to pop open when the precision arrives. The Anchored VP's
+    // dialog prints no price, so it opens without one.
+    const kind = allDrawingsRef.current.find((d) => d.id === id)?.kind;
+    if (precisionRef.current === null && kind !== "anchored_vp") return;
     setSettingsId(id);
   }, []);
   const applyDrawing = useCallback(
@@ -1420,7 +1462,7 @@ function ChartInner({
           {drawingsSaveError}
         </p>
       )}
-      {settingsDrawing && settingsDrawing.kind !== "hline" && settingsDrawing.kind !== "trendline" && precision && (
+      {settingsDrawing && settingsDrawing.kind !== "hline" && settingsDrawing.kind !== "trendline" && (precision || settingsDrawing.kind === "anchored_vp") && (
         <DrawingSettingsDialog
           key={settingsDrawing.id}
           drawing={settingsDrawing}

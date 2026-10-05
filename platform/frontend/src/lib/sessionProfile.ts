@@ -1,4 +1,5 @@
 import type { ChartDatum, VolumeDatum } from "../hooks/useCandles";
+import type { LiveBar } from "../hooks/useLiveCandle";
 import {
   buildVolumeProfile,
   type ProfileCandle,
@@ -76,6 +77,23 @@ export type SessionProfileCache = Map<string, CacheEntry>;
 
 export interface TimedBar extends ProfileCandle {
   time: number;
+}
+
+/**
+ * `candles` / `volume` with the live forming bar appended (Story 32.7: an anchored drawing runs to
+ * the latest bar, the forming one included, so one placed on the forming bar draws at once). The
+ * inputs come back unchanged with no forming bar or one not newer than the newest point.
+ */
+export function withFormingBar(
+  candles: readonly ChartDatum[],
+  volume: readonly VolumeDatum[],
+  bar: LiveBar | null,
+): { candles: readonly ChartDatum[]; volume: readonly VolumeDatum[] } {
+  if (bar === null) return { candles, volume };
+  const newest = candles.at(-1)?.time as number | undefined;
+  if (newest !== undefined && (bar.time as number) <= newest) return { candles, volume };
+  const { time, open, high, low, close } = bar;
+  return { candles: [...candles, { time, open, high, low, close }], volume: [...volume, { time, value: bar.volume }] };
 }
 
 /**

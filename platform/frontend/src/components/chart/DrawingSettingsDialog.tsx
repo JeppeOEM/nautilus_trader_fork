@@ -18,11 +18,13 @@ import {
   parsePositionForm,
   positionToForm,
 } from "../../lib/drawings";
+import { chartVar } from "./chartTheme";
 import SettingsDialogShell from "./SettingsDialogShell";
 
 interface Props {
   drawing: FibDrawing | PositionDrawing | AnchoredVpDrawing | AnchoredVwapDrawing;
-  precision: InstrumentPrecision;
+  /** Null only for an Anchored VP, whose dialog prints no price (the page opens no other without it). */
+  precision: InstrumentPrecision | null;
   /** Receives the drawing as edited; the page persists it through the one drawings resource. */
   onApply: (next: Drawing) => void;
   onRemove: () => void;
@@ -124,7 +126,7 @@ function PositionSettings({
   onApply,
   onRemove,
   onClose,
-}: Omit<Props, "drawing"> & { drawing: PositionDrawing }) {
+}: Omit<Props, "drawing" | "precision"> & { drawing: PositionDrawing; precision: InstrumentPrecision }) {
   const [form, setForm] = useState<PositionForm>(() => positionToForm(drawing, precision.price));
   const [refusal, setRefusal] = useState<string | null>(null);
   const field = (key: keyof PositionForm, label: string) => (
@@ -278,6 +280,7 @@ function AnchoredVpSettings({ drawing, onApply, onRemove, onClose }: Omit<Props,
 function AnchoredVwapSettings({ drawing, onApply, onRemove, onClose }: Omit<Props, "drawing" | "precision"> & { drawing: AnchoredVwapDrawing }) {
   const [source, setSource] = useState<VwapSource>(drawing.source);
   const [bands, setBands] = useState(drawing.bands);
+  // No stored colour means the drawing token (what the line is drawn in): the picker shows that.
   const [color, setColor] = useState(drawing.color ?? "");
   const [bandColor, setBandColor] = useState(drawing.band_color);
   return (
@@ -304,7 +307,7 @@ function AnchoredVwapSettings({ drawing, onApply, onRemove, onClose }: Omit<Prop
         <h3>Style</h3>
         <label>
           Line:
-          <input type="color" aria-label="Line colour" value={asHex(color)} onChange={(e) => setColor(e.target.value)} />
+          <input type="color" aria-label="Line colour" value={asHex(color === "" ? chartVar("--chart-drawing") : color)} onChange={(e) => setColor(e.target.value)} />
         </label>
         <label>
           Bands:
@@ -341,7 +344,7 @@ export default function DrawingSettingsDialog({ drawing, precision, onApply, onR
   return (
     <SettingsDialogShell title={DIALOG_TITLES[drawing.kind]} onClose={onClose}>
       {drawing.kind === "fib" && <FibForm drawing={drawing} onApply={onApply} onRemove={onRemove} onClose={onClose} />}
-      {drawing.kind === "position" && (
+      {drawing.kind === "position" && precision && (
         <PositionSettings drawing={drawing} precision={precision} onApply={onApply} onRemove={onRemove} onClose={onClose} />
       )}
       {drawing.kind === "anchored_vp" && (

@@ -51,15 +51,27 @@ export interface TpoRow {
   touches: TpoTouch[];
 }
 
+/** A TPO candle: the engine's candle, with its open time when the letters are clocked by it. */
+export type TpoCandle = ProfileCandle & { time?: number };
+
+/** Where a session's letters are counted from: letter A is the period starting at `sessionStart`. */
+export interface TpoClock {
+  sessionStart: number;
+  barSeconds: number;
+}
+
 /**
  * The rows of `profile` (built with the time weight from the same `candles`, ascending) with each
  * row's touches: the candle that touched it, in time order. The row mapping is the engine's own
- * (`touchedRows`), so a row's `count` always equals the profile's total for it.
+ * (`touchedRows`), so a row's `count` always equals the profile's total for it. With a `clock` a
+ * candle's letter names its period by time (a missing bar leaves its letter out, it does not shift
+ * the later ones); without one, its place in `candles`.
  */
 export function tpoRows(
   profile: VolumeProfile,
-  candles: readonly ProfileCandle[],
+  candles: readonly TpoCandle[],
   maxBlocks: number = TPO_MAX_BLOCKS_PER_ROW,
+  clock: TpoClock | null = null,
 ): TpoRow[] {
   const count = profile.rows.length;
   if (count === 0) return [];
@@ -79,7 +91,9 @@ export function tpoRows(
     const [usable] = usableCandles([candle], "time");
     if (!usable) return;
     const [first, last] = touchedRows(usable.low, usable.high, min, size, count);
-    const touch: TpoTouch = { letter: tpoLetter(index), up: candle.close >= candle.open };
+    const period =
+      clock !== null && candle.time !== undefined ? Math.floor((candle.time - clock.sessionStart) / clock.barSeconds) : index;
+    const touch: TpoTouch = { letter: tpoLetter(period), up: candle.close >= candle.open };
     for (let i = first; i <= last; i++) {
       rows[i].count += 1;
       if (rows[i].touches.length < maxBlocks) rows[i].touches.push(touch);
@@ -101,17 +115,23 @@ export interface InitialBalance {
 }
 
 /**
- * The initial balance of a session: the high..low of its first `ceil(ibMinutes * 60 / barSeconds)`
- * bars (at least one). Null for a session with no bars or a non-positive length.
+ * The initial balance of a session: the high..low of the bars that open within its first
+ * `ibMinutes` from `sessionStart`, by time, so a bar missing from the session (a collector gap) never
+ * pulls a later bar into it. Null for no such bar or a non-positive length.
+ *
+ * Known limit: a bar counts whole, so the band resolves to whole TPO periods (`TPO_BAR_SECONDS`):
+ * 45 minutes at 30-minute bars spans the first two bars, 60 minutes. Upgrade path: profile the
+ * initial balance from finer bars than the TPO's own when a non-multiple length is set.
  */
 export function initialBalance(
   bars: readonly { time: number; high: number; low: number }[],
-  barSeconds: number,
+  sessionStart: number,
   ibMinutes: number,
 ): InitialBalance | null {
-  if (bars.length === 0 || !(barSeconds > 0) || !(ibMinutes > 0)) return null;
-  const take = Math.max(1, Math.ceil((ibMinutes * 60) / barSeconds));
-  const first = bars.slice(0, take);
+  if (!(ibMinutes > 0)) return null;
+  const end = sessionStart + ibMinutes * 60;
+  const first = bars.filter((b) => b.time >= sessionStart && b.time < end);
+  if (first.length === 0) return null;
   let high = -Infinity;
   let low = Infinity;
   for (const b of first) {

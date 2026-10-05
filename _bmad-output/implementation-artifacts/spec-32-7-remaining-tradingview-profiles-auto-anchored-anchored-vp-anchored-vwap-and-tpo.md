@@ -123,10 +123,26 @@ Live anchors (verified at plan time on branch `epic-32`, after 32.6):
   - `[low]` `[patch]` `anchorBars` skips non-finite high/low.
   - `[low]` `[patch]` `Known limit:` comments for TPO's fixed 30m fetch cost and the per-bar anchored recompute.
 
+
+### 2026-10-05 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 7: (high 0, medium 3, low 4)
+- defer: 0
+- reject: 11
+- addressed_findings:
+  - `[medium]` `[patch]` An Anchored VP/VWAP placed (or dragged) onto the live forming bar was skipped as "after the newest bar": invisible, unselectable until the bar closed; both also lagged the forming bar. The anchored memo now appends the forming bar (`withFormingBar`, not under a replay) + tests.
+  - `[medium]` `[patch]` An AVP anchored in a gap slot drew its anchor line on the slot while the profile started at the earlier real bar; the primitive is now handed the snapped bar + test.
+  - `[medium]` `[patch]` TPO letters and the initial balance were keyed on bar order, so a missing 30m bar shifted every later letter and pulled later bars into the IB; both are now by time from the session start (`TpoClock`, `initialBalance(bars, sessionStart, ibMinutes)`) + tests.
+  - `[low]` `[patch]` The initial balance's whole-30m-bar granularity was silent; `Known limit:` in `lib/tpo.ts` and the Docs page say so.
+  - `[low]` `[patch]` TPO blocks/letters/IB were recounted for every session on every bar; kept per profile object (`tpoDetail`, WeakMap), so only the forming session recounts.
+  - `[low]` `[patch]` The Anchored VP's settings could not open before the instrument precision loaded though its dialog prints no price; now it opens (other kinds still dropped) + test.
+  - `[low]` `[patch]` The AVWAP line-colour picker showed black when no colour was stored; it now shows the drawing token the line is drawn in + test.
+
 ## Auto Run Result
 
-- **Summary:** Added Auto Anchored VP, TPO (session presets in the one session slot), Anchored VP and Anchored VWAP (one-click drawings) on the one `buildVolumeProfile` engine (`weight: "volume" | "time"`), persisted through the layout (`volume_profile.kind` auto/tpo + `anchor`, `ib_minutes`, `letters`) and drawings (`anchored_vp`, `anchored_vwap`) resources, with Python wire validation mirrored.
-- **Files:** new `lib/{autoAnchor,anchoredVwap,tpo}.ts`, `primitives/Anchored{Vp,Vwap}Primitive.ts` (+ tests); changed `volumeProfile.ts`, `sessionProfile.ts`, `drawings.ts`, `chartLayout.ts`, `VolumeProfilePrimitive.ts`, `LightweightChart.tsx`, `SessionProfileControl.tsx`, `DrawingSettingsDialog.tsx`, `legend.ts`, `ChartPage.tsx`, `kbData.ts`, `views/preferences.py` (+ tests), planning spec §A7, `platform/CLAUDE.md` SSOT-06.
-- **Review:** 6 patches applied, 2 deferred (colours not persisted for Auto/TPO; weak-test/doc wording nits), rest rejected.
-- **Verification:** `npm test` 801 passed; `npm run build` clean; `python3 -m pytest views/tests` 362 passed; `npm run lint` 3 pre-existing warnings (`TrustedHtml.tsx`, `useCandles.ts`), none in touched files.
-- **Residual risks / deviations:** profile colours for Auto Anchored/TPO are session-only (spec text says layout; the wire design has no colour keys, same as existing profiles). Anchored drawings older than loaded bars are not drawn until scrolled in (Known limit). New drawings/profiles are Candles mode only.
+- **Summary:** Follow-up review of Story 32.7 (Auto Anchored VP, Anchored VP, Anchored VWAP, TPO on the one `buildVolumeProfile` engine). Seven patches applied; no spec or intent changes.
+- **Files changed in this pass:** `lib/sessionProfile.ts` (+test: `withFormingBar`), `pages/ChartPage.tsx` (+test: anchored memo includes the forming bar and hands the AVP its snapped bar; per-profile TPO detail cache; AVP settings without precision), `lib/tpo.ts` (+test: clocked letters, time-based initial balance, `Known limit:`), `components/chart/DrawingSettingsDialog.tsx` (nullable precision for the AVP; AVWAP colour default), `pages/docs/kbData.ts` (TPO letters/IB wording, forming-bar note).
+- **Review:** 7 patches, 0 deferred, 11 rejected (AVWAP legend not following the crosshair: spec says current value; highest/lowest-high over the loaded set: as specified; IB intermediate keystrokes: save is debounced; AVP full-height hit line; letter wrap past 52 periods; overflow-bar colour; Python default duplication and colour-format checks: existing patterns; a zero-volume-since-anchor AVWAP having no hit area: spec'd "line undefined until first volume"; 1W bars with month/session anchors; Auto Anchored rollover waiting for the first new bar to close: the session family's closed-bar convention).
+- **Verification:** `npm test` 43 files / 810 passed; `npm run build` clean; `npm run lint` 3 warnings, all pre-existing (`useCandles.ts`, `TrustedHtml.tsx`); `python3 -m pytest views/tests -q` 362 passed.
+- **Residual risks:** the anchored memo and legend now recompute on each forming-bar tick (~1/s, documented in the memo's `Known limit:`); Auto Anchored re-anchors at a session rollover once the new session's first bar closes, not on its first tick (session profiles share this closed-bar convention); a TPO session with no bar in its first `ib_minutes` draws no initial balance.
