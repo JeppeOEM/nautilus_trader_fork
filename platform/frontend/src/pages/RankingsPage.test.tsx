@@ -400,6 +400,13 @@ describe("RankingsPage", () => {
       useLiveChannelMock.mockReturnValue({ latest: liveMessage({ ranks }), connected: true });
     });
 
+    // The Technicals pending/errored tests leave a never-settling / rejecting values mock behind
+    // otherwise.
+    afterEach(() => {
+      vi.mocked(fetchTechnicalsColumns).mockResolvedValue([]);
+      vi.mocked(fetchTechnicalsValues).mockReset().mockResolvedValue({});
+    });
+
     it("narrows rows, combines conditions with AND, and restores rows when a condition is removed", () => {
       renderPage();
 
@@ -548,6 +555,82 @@ describe("RankingsPage", () => {
 
       expect(shownInstruments()).toEqual(["AAA-USD-PERP.DYDX", "CCC-USD-PERP.DYDX"]);
     });
+
+    it("matches `=` against what a ranking cell shows (DW-135)", () => {
+      useLiveChannelMock.mockReturnValue({
+        latest: liveMessage({ ranks: [{ ...ranks[0], obi_5: 0.49996 }, ranks[1], ranks[2]] }),
+        connected: true,
+      });
+      renderPage();
+      const row = screen.getByText("AAA-USD-PERP.DYDX").closest("tr")!;
+      expect(within(row).getByText("0.500")).toBeInTheDocument();
+
+      addFilter("OBI5", "=", "0.5");
+
+      expect(shownInstruments()).toEqual(["AAA-USD-PERP.DYDX"]);
+    });
+
+    it("matches `=` against what a Technicals cell shows (DW-135)", async () => {
+      vi.mocked(fetchTechnicalsColumns).mockResolvedValue([
+        { name: "RelativeStrengthIndex", params: {}, category: "native" },
+      ]);
+      vi.mocked(fetchTechnicalsValues).mockResolvedValue({
+        "AAA-USD-PERP.DYDX": { "0.value": 29.99996 }, // shows 30.0000
+        "BBB-USD-PERP.DYDX": { "0.value": 30.0001 },
+        "CCC-USD-PERP.DYDX": { "0.value": 29.9999 },
+      });
+      renderPage();
+      fireEvent.click(screen.getByRole("button", { name: "Add filter" }));
+      await waitFor(() => {
+        const options = Array.from(screen.getByLabelText<HTMLSelectElement>("Filter field").options).map((o) => o.text);
+        expect(options).toContain("RelativeStrengthIndex.value");
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Add filter" })); // close, then reuse helper
+      addFilter("RelativeStrengthIndex.value", "=", "30");
+
+      expect(shownInstruments()).toEqual(["AAA-USD-PERP.DYDX"]);
+      fireEvent.click(screen.getByText("Technicals"));
+      expect(await screen.findByText("30.0000")).toBeInTheDocument();
+    });
+
+    // A Technicals filter set, then its values query replaced by one that has not resolved or
+    // has failed (removing another column changes the query key): rows stay, with the note.
+    async function technicalsFilterThenRefetch(values: () => Promise<never>) {
+      const rsi = { name: "RelativeStrengthIndex", params: {}, category: "native" };
+      const macd = { name: "MovingAverageConvergenceDivergence", params: {}, category: "native" };
+      vi.mocked(fetchTechnicalsColumns).mockResolvedValue([rsi, macd]);
+      vi.mocked(fetchTechnicalsValues).mockResolvedValue({ "AAA-USD-PERP.DYDX": { "0.value": 25 } });
+      renderPage();
+      fireEvent.click(screen.getByRole("button", { name: "Add filter" }));
+      await waitFor(() => {
+        const options = Array.from(screen.getByLabelText<HTMLSelectElement>("Filter field").options).map((o) => o.text);
+        expect(options).toContain("RelativeStrengthIndex.value");
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Add filter" }));
+      addFilter("RelativeStrengthIndex.value", "<", "30");
+      expect(shownInstruments()).toEqual(["AAA-USD-PERP.DYDX"]);
+
+      vi.mocked(fetchTechnicalsValues).mockImplementation(values);
+      vi.mocked(fetchTechnicalsColumns).mockResolvedValue([rsi]);
+      fireEvent.click(screen.getByText("Technicals"));
+      fireEvent.click(await screen.findByRole("button", { name: "Remove MovingAverageConvergenceDivergence column" }));
+    }
+
+    it("keeps every row and notes a Technicals filter while its values are loading (DW-135)", async () => {
+      await technicalsFilterThenRefetch(() => new Promise<never>(() => {}));
+
+      await waitFor(() => expect(shownInstruments()).toHaveLength(3));
+      expect(screen.getByText(/1 Technicals filter\(s\) not applied yet — waiting for indicator values$/)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Remove filter .*RelativeStrengthIndex\.value/ })).toBeInTheDocument();
+    });
+
+    it("keeps every row and notes a Technicals filter with the error when its values failed (DW-135)", async () => {
+      await technicalsFilterThenRefetch(() => Promise.reject(new Error("values down")));
+
+      expect(await screen.findByText(/Technicals filter\(s\) not applied yet .*\(values down\)/)).toBeInTheDocument();
+      expect(shownInstruments()).toHaveLength(3);
+    });
+
     describe("venue chips", () => {
       const multiVenueRanks = [
         { instrument_id: "BTCUSDT-LINEAR.BYBIT", venue: "BYBIT", price: 1 },

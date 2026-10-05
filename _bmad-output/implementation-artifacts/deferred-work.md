@@ -1032,7 +1032,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of epic 17 (2026-09-19)"), 2026-10-05
 location: =
 reason: `=` filter operator on float values is strict equality; tech filters hide all rows while values are loading/errored on the Performance tab.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-screener-filter-equality
+resolution-undo: 90ba95829001d719ed6b8bfa449998ead31f76789d534b0bd14e5f0058919a08 2026-10-05 7374617475733a206f70656e
 
 ### DW-136: 16.x minute_rollup partial_start does not cover gap-created partial minutes (outside epic 17).
 
