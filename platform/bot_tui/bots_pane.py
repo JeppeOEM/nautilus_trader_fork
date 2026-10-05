@@ -312,26 +312,48 @@ def format_win_rate_detail(win_rate: float | None, closed_trades: int) -> str:
     return f"{win_rate:.0%} ({closed_trades} trades)"
 
 
-def bot_detail_lines(row: dict, now: float) -> list[str]:
+def bot_detail_segments(row: dict, now: float) -> list[list[Segment]]:
     """
-    Bot-detail's live-snapshot-header region, as plain-text lines matching the
-    UX mockup's two-column field pairing (mockups/key-bot-detail.html):
+    Bot-detail's live-snapshot-header region, one list of (attr, text) segments per line,
+    matching the UX mockup's two-column field pairing (mockups/key-bot-detail.html):
     line 1 = strategy/symbol + mode, line 2 = PnL + position, line 3 = uptime +
     win-rate (Story 4.5, AC1); line 4 = quantity, entry, mark and open orders, line 5 =
     stop-loss and take-profit with their order counts and the time since the last fill
-    (Story 29.6). app.py lays these out and colors the PnL segment -- this function only
-    produces the text.
+    (Story 29.6). Only line 2's PnL segment carries an attr, by sign (DW-85: built tagged,
+    never found again by searching the rendered text) -- "fixed position + color, never
+    color alone", like `bot_line_segments`. `now` is wall clock: `started_at` and
+    `last_fill_at` are the wire's timestamps.
     """
-    pnl_text = format_pnl(row["realized_pnl"] + row["unrealized_pnl"])
+    pnl = row["realized_pnl"] + row["unrealized_pnl"]
     uptime_text = format_uptime(row["started_at"], now)
     win_rate_text = format_win_rate_detail(row["win_rate"], row["closed_trades"])
-    return [
-        f"strategy   {row['strategy']} / {row['symbol']}        mode      {row['mode']}",
-        f"pnl        {pnl_text}                              "
-        f"position  {row['position_side']} {format_exposure(row['net_exposure']).strip()}",
-        f"uptime     {uptime_text}                                win rate  {win_rate_text}",
-        *_position_detail_lines(row, now),
+    exposure_text = format_exposure(row["net_exposure"]).strip()
+    strategy_line = f"strategy   {row['strategy']} / {row['symbol']}        mode      {row['mode']}"
+    position_text = f"position  {row['position_side']} {exposure_text}"
+    uptime_line = (
+        f"uptime     {uptime_text}                                win rate  {win_rate_text}"
+    )
+    position_lines: list[list[Segment]] = [
+        [(None, line)] for line in _position_detail_lines(row, now)
     ]
+    return [
+        [(None, strategy_line)],
+        [
+            (None, "pnl        "),
+            ("pnl-pos" if pnl >= 0 else "pnl-neg", format_pnl(pnl)),
+            (None, f"                              {position_text}"),
+        ],
+        [(None, uptime_line)],
+        *position_lines,
+    ]
+
+
+def bot_detail_lines(row: dict, now: float) -> list[str]:
+    """
+    Bot-detail's live-snapshot-header region as plain-text lines: the text of
+    `bot_detail_segments`, which app.py colors, so the two can never disagree.
+    """
+    return ["".join(text for _attr, text in line) for line in bot_detail_segments(row, now)]
 
 
 def _detail_price(text: str | None) -> str:

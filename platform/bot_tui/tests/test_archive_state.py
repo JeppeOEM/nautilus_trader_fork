@@ -53,6 +53,17 @@ def test_stale_before_any_message_and_after_missed_heartbeats() -> None:
     assert archive_state.is_stale()
     archive_state._handle_status_message(_status())
     received = archive_state._LATEST_RECEIVED_AT
+    assert received is not None
 
     assert not archive_state.is_stale(now=received + archive_state._STATUS_STALE_SECONDS)
     assert archive_state.is_stale(now=received + archive_state._STATUS_STALE_SECONDS + 1)
+
+
+@pytest.mark.parametrize("step", [-3600.0, 3600.0])
+def test_a_wall_clock_step_does_not_change_the_archive_lines_staleness(
+    monkeypatch: pytest.MonkeyPatch, step: float
+) -> None:
+    archive_state._handle_status_message(_status())
+    wall = archive_state.time.time()
+    monkeypatch.setattr(archive_state.time, "time", lambda: wall + step)
+    assert archive_state.is_stale() is False

@@ -52,7 +52,9 @@ PING_ANSWER_SECONDS: float = 10.0
 MARKETS_EXPIRE_SECONDS: float = 900.0
 
 # Per venue, the latest valid message's markets as (instrument_id, symbol), and its local receive
-# time (this TUI's clock: the staleness is about arrival, never the publisher's `ts` -- DATA-01).
+# time (this TUI's `time.monotonic()`: the staleness is about arrival, never the publisher's `ts`
+# -- DATA-01 -- and a wall-clock step must never age or refresh a list, DW-60). Every `now` taken
+# below is a monotonic reading too.
 _LATEST_MARKETS: dict[str, list[tuple[str, str]]] = {}
 _RECEIVED_AT: dict[str, float] = {}
 
@@ -88,14 +90,14 @@ def _handle_markets_message(message: object, now: float | None = None) -> None:
         return
     venue, markets = validated
     _LATEST_MARKETS[venue] = markets
-    _RECEIVED_AT[venue] = time.time() if now is None else now
+    _RECEIVED_AT[venue] = time.monotonic() if now is None else now
 
 
 def _age(venue: str, now: float | None) -> float | None:
     received_at = _RECEIVED_AT.get(venue)
     if received_at is None:
         return None
-    return (time.time() if now is None else now) - received_at
+    return (time.monotonic() if now is None else now) - received_at
 
 
 def venue_markets_stale(venue: str, now: float | None = None) -> bool:
@@ -119,7 +121,7 @@ def live_markets(now: float | None = None) -> dict[str, list[tuple[str, str]]]:
 
 
 def received_at(venue: str) -> float | None:
-    """Return when this TUI received `venue`'s current list (the browser's rebuild key)."""
+    """Return when (monotonic clock) this TUI received `venue`'s current list (the rebuild key)."""
     return _RECEIVED_AT.get(venue)
 
 

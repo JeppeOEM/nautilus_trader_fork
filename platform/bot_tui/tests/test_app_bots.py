@@ -154,7 +154,9 @@ def test_highlighted_bot_id_none_when_no_bots() -> None:
 def test_stale_row_has_marker_fresh_row_does_not() -> None:
     _reset()
     bots_state._handle_status_message(_status("bot-fresh"))
-    bots_state._LATEST_RECEIVED_AT["bot-stale"] = 0.0
+    bots_state._LATEST_RECEIVED_AT["bot-stale"] = (
+        time.monotonic() - bots_state._BOT_STALE_SECONDS - 1
+    )
     bots_state._LATEST_STATUSES["bot-stale"] = _status("bot-stale")
     app = BotTuiApp()
     app._refresh_bots_body()
@@ -196,7 +198,7 @@ def test_s_on_running_bot_opens_stop_confirm_without_publishing() -> None:
     # see the module docstring).
     app = _bots_app_with_one_row(running=True)
     published: list[tuple[str, str]] = []
-    app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))  # type: ignore[method-assign]
+    app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))
 
     app._toggle_bot()
 
@@ -208,7 +210,7 @@ def test_s_on_running_bot_opens_stop_confirm_without_publishing() -> None:
 def test_s_on_stopped_bot_starts_immediately_without_confirm() -> None:
     app = _bots_app_with_one_row(running=False)
     published: list[tuple[str, str]] = []
-    app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))  # type: ignore[method-assign]
+    app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))
 
     app._toggle_bot()
 
@@ -219,7 +221,7 @@ def test_s_on_stopped_bot_starts_immediately_without_confirm() -> None:
 def test_typing_stop_and_enter_confirms_and_publishes() -> None:
     app = _bots_app_with_one_row(running=True)
     published: list[tuple[str, str]] = []
-    app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))  # type: ignore[method-assign]
+    app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))
     app._toggle_bot()
 
     app._stop_confirm_edit.set_edit_text("stop")
@@ -232,7 +234,7 @@ def test_typing_stop_and_enter_confirms_and_publishes() -> None:
 def test_wrong_text_keeps_confirm_open_without_publishing() -> None:
     app = _bots_app_with_one_row(running=True)
     published: list[tuple[str, str]] = []
-    app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))  # type: ignore[method-assign]
+    app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))
     app._toggle_bot()
 
     app._stop_confirm_edit.set_edit_text("nope")
@@ -246,7 +248,7 @@ def test_wrong_text_keeps_confirm_open_without_publishing() -> None:
 def test_esc_cancels_stop_confirm_without_publishing() -> None:
     app = _bots_app_with_one_row(running=True)
     published: list[tuple[str, str]] = []
-    app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))  # type: ignore[method-assign]
+    app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))
     app._toggle_bot()
 
     app._close_stop_confirm()
@@ -261,7 +263,7 @@ def test_stop_confirm_intercepts_keys_via_unhandled_input() -> None:
     # confirms _unhandled_input actually routes to the guard while it's active.
     app = _bots_app_with_one_row(running=True)
     published: list[tuple[str, str]] = []
-    app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))  # type: ignore[method-assign]
+    app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))
 
     app._unhandled_input("s")
     assert app._stop_confirm_active is True
@@ -349,3 +351,83 @@ def test_a_row_renders_on_one_line_at_the_minimum_width() -> None:
     assert header.rows((width,)) == 1
     # The minimum is tight: one column fewer and the row wraps.
     assert row.rows((width - 1,)) == 2
+
+
+# --- DW-74: `s` refused on a stale row (no live supervisor consumes bots:control) ---
+
+
+def _go_stale(bot_id: str = "bot-01") -> None:
+    bots_state._LATEST_RECEIVED_AT[bot_id] = time.monotonic() - bots_state._BOT_STALE_SECONDS - 1
+
+
+def _recording(app: BotTuiApp) -> list[tuple[str, str]]:
+    published: list[tuple[str, str]] = []
+    app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))
+    return published
+
+
+def test_s_on_a_stale_running_bot_is_refused_without_a_prompt() -> None:
+    app = _bots_app_with_one_row(running=True)
+    _go_stale()
+    published = _recording(app)
+
+    app._unhandled_input("s")
+
+    assert app._stop_confirm_active is False
+    assert app._footer_hint.text == "cannot stop bot-01: no bots:status for over 15s (bot down?)"
+    assert published == []
+
+
+def test_s_on_a_stale_stopped_bot_is_refused_too() -> None:
+    app = _bots_app_with_one_row(running=False)
+    _go_stale()
+    published = _recording(app)
+
+    app._unhandled_input("s")
+
+    assert app._footer_hint.text == "cannot start bot-01: no bots:status for over 15s (bot down?)"
+    assert published == []
+
+
+def test_a_bot_going_stale_while_the_stop_prompt_is_open_is_refused_at_submit() -> None:
+    app = _bots_app_with_one_row(running=True)
+    published = _recording(app)
+    app._unhandled_input("s")
+    assert app._stop_confirm_active is True
+    _go_stale()
+
+    app._stop_confirm_edit.set_edit_text("stop")
+    app._unhandled_input("enter")
+
+    assert app._stop_confirm_active is False
+    assert app._footer_hint.text == "cannot stop bot-01: no bots:status for over 15s (bot down?)"
+    assert published == []
+
+
+# --- DW-258: j/k move the selection like down/up ---
+
+
+def test_j_and_k_move_the_bots_selection_like_the_arrows() -> None:
+    _reset()
+    bots_state._handle_status_message(_status("bot-01"))
+    bots_state._handle_status_message(_status("bot-02"))
+    app = BotTuiApp()
+    app._refresh_bots_body()
+    listbox = _listbox(app)
+
+    assert listbox.keypress((80, 20), "j") is None
+    assert listbox.focus.original_widget.bot_id == "bot-02"
+    assert listbox.keypress((80, 20), "k") is None
+    assert listbox.focus.original_widget.bot_id == "bot-01"
+
+
+def test_j_reaches_the_bots_rows_through_the_frame() -> None:
+    _reset()
+    bots_state._handle_status_message(_status("bot-01"))
+    bots_state._handle_status_message(_status("bot-02"))
+    app = BotTuiApp()
+    app._refresh_bots_body()
+    app._body.original_widget = app._bots_body
+
+    assert app._frame.keypress((80, 20), "j") is None
+    assert app._highlighted_bot_id() == "bot-02"

@@ -37,7 +37,9 @@ logger = logging.getLogger(__name__)
 ARCHIVE_STATUS_CHANNEL = "archive:status"
 
 _LATEST_ARCHIVE_STATUS: dict | None = None
-_LATEST_RECEIVED_AT: float = 0.0
+# This TUI's `time.monotonic()` when the kept status arrived, None before the first (DW-60: a
+# wall-clock step must never flip the line stale or fresh).
+_LATEST_RECEIVED_AT: float | None = None
 
 # The scheduler republishes at least every 30 s (its heartbeat), so four missed heartbeats means
 # the service or the Redis path is down and the shown line is no longer current.
@@ -56,14 +58,15 @@ def _handle_status_message(message: object) -> None:
         logger.warning("archive:status message malformed, ignoring: %r", message)
         return
     _LATEST_ARCHIVE_STATUS = message
-    _LATEST_RECEIVED_AT = time.time()
+    _LATEST_RECEIVED_AT = time.monotonic()
 
 
 def is_stale(now: float | None = None) -> bool:
-    if _LATEST_RECEIVED_AT == 0.0:
+    """Whether the kept status is missing or older than `_STATUS_STALE_SECONDS` (monotonic)."""
+    if _LATEST_RECEIVED_AT is None:
         return True
     if now is None:
-        now = time.time()
+        now = time.monotonic()
     return (now - _LATEST_RECEIVED_AT) > _STATUS_STALE_SECONDS
 
 

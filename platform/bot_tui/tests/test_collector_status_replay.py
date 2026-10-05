@@ -186,7 +186,7 @@ def test_the_29_5_aggregate_keeps_its_refusal_stamped_once_on_arrival(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = itertools.count(100.0)
-    monkeypatch.setattr(collector_state.time, "time", lambda: next(clock))
+    monkeypatch.setattr(collector_state.time, "monotonic", lambda: next(clock))
     _replay(*_RECORDED[:3], _AGGREGATE_29_5)
     first = collector_state.latest_refusal("DYDX")
     _replay(*_RECORDED[:3], _AGGREGATE_29_5)  # every publish repeats it: not a new refusal
@@ -252,3 +252,18 @@ def test_a_re_sent_add_drops_the_earlier_answer() -> None:
     _replay(_aggregate_refusing("start", "NEW-USD-PERP.DYDX", "Cannot start: at cap"))
     collector_state.record_sent_add("NEW-USD-PERP.DYDX", 2.0)
     assert collector_state.add_refused_reason("NEW-USD-PERP.DYDX") is None
+
+
+# --- DW-60: every local stamp is monotonic, a wall-clock step changes nothing ---
+
+
+@pytest.mark.parametrize("step", [-3600.0, 7200.0])
+def test_a_wall_clock_step_does_not_change_row_or_plan_staleness(
+    monkeypatch: pytest.MonkeyPatch, step: float
+) -> None:
+    _replay(*_RECORDED)
+    wall = collector_state.time.time()
+    monkeypatch.setattr(collector_state.time, "time", lambda: wall + step)
+    row_id = next(iter(collector_state._LATEST_COLLECTOR_STATUS))
+    assert collector_state.is_stale(row_id) is False
+    assert collector_state.plan_is_stale("DYDX") is False

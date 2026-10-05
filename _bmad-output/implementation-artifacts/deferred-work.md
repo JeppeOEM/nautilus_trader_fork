@@ -426,7 +426,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of 4-1-scaffold-the-tui-shell-and-live-coins-pane (2026-07-28)"), 2026-10-05
 location: troll/bot_tui/app.py:run
 reason: **`BotTuiApp.run()`'s `finally` block cancels the listener/redraw asyncio tasks but never awaits their cancellation** (no `loop.run_until_complete(...)` after `MainLoop.run()` returns), so the aioredis connection isn't given a chance to close cleanly on `:q`. Likely to emit a harmless "Task was destroyed but it is pending!" warning at shutdown. Cosmetic only — the process exits immediately afterward. `troll/bot_tui/app.py:run`.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-bot-tui-robustness
+resolution-undo: ddee5d273c5815dadfe57f0176738c0b9a9a64ff679763c9b494d5992cf1f027 2026-10-05 7374617475733a206f70656e
 
 ### DW-59: The working tree already contained substantial uncommitted deployment wiring for Story 1.8
 
@@ -440,7 +442,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of 4-2-coins-pane-interaction-and-attention-only-visual-polish (2026-07-28)"), 2026-10-05
 location: ml_signals/dashboard.py
 reason: **Staleness detection (`is_stale`, `_LATEST_RANKING_RECEIVED_AT`) is built on wall-clock `time.time()`, not `time.monotonic()`** -- vulnerable to NTP adjustments/manual clock changes causing false stale/fresh flips, and if the clock ever moves backward, `is_stale` can under-report staleness entirely (negative `now - received_at` never exceeds the threshold). Mirrors `ml_signals/dashboard.py`'s own already-shipped, already-accepted identical pattern this story was explicitly instructed to reuse verbatim -- not a new risk, and a near-identical clock-skew item is already deferred against `dashboard.py`'s own `_is_fresh` (Story 1.3's review). `troll/bot_tui/ranking_state.py`.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-bot-tui-robustness
+resolution-undo: ddee5d273c5815dadfe57f0176738c0b9a9a64ff679763c9b494d5992cf1f027 2026-10-05 7374617475733a206f70656e
 
 ### DW-61: Nothing in the Coins pane displays which Ranking Mode is currently active.
 
@@ -482,14 +486,18 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of 4-3-coin-detail-drill-down-with-collapsible-order-book-depth.md (2026-07-29)"), 2026-10-05
 location: try/except Exception
 reason: **`_open_dashboard_chart`'s `webbrowser.open()` call isn't guarded against stdout/stderr bleed-through from a failed headless launch corrupting the urwid full-screen display.** This product's own `main()` already redirects Python logging to a file specifically to avoid stray output corrupting the screen (`logging.basicConfig(..., filename=_LOG_PATH)`), but a subprocess-based browser backend (e.g. `xdg-open` under the documented headless Docker/SSH deployment shape) can still write directly to the terminal on failure -- the `try/except Exception` around the call only catches Python-level exceptions, not subprocess fd bleed-through. Self-healing within one redraw tick (~0.5s) since the periodic redraw loop repaints the full screen; not a crash. `troll/bot_tui/app.py:448-461`.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-bot-tui-robustness
+resolution-undo: ddee5d273c5815dadfe57f0176738c0b9a9a64ff679763c9b494d5992cf1f027 2026-10-05 7374617475733a206f70656e
 
 ### DW-67: `webbrowser.open()` runs synchronously on the single asyncio event-loop thread
 
 origin: migrated from legacy ledger ("Deferred from: code review of 4-3-coin-detail-drill-down-with-collapsible-order-book-depth.md (2026-07-29)"), 2026-10-05
 location: troll/bot_tui/app.py:458
 reason: **`webbrowser.open()` runs synchronously on the single asyncio event-loop thread**, with no offload to an executor -- could briefly block Redis ingestion and the redraw loop for the duration of the subprocess launch. Low risk: this is a rare, human-triggered action (pressing `o` once per Coin-detail visit), not a hot path. `troll/bot_tui/app.py:458`.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-bot-tui-robustness
+resolution-undo: ddee5d273c5815dadfe57f0176738c0b9a9a64ff679763c9b494d5992cf1f027 2026-10-05 7374617475733a206f70656e
 
 ### DW-68: The `d` keypress handler (and `_open_coin_detail`) call `_build_coin_detail_body()` with no try/except, unlike the redraw loop's identical call, which is …
 
@@ -540,7 +548,9 @@ resolution: already resolved: platform/bot_tui/app.py:480-492,1556 persistent _b
 origin: migrated from legacy ledger ("Deferred from: code review of 4-4-bots-pane-with-start-stop-control.md (2026-09-01)"), 2026-10-05
 location: troll/bot_tui/app.py:_toggle_bot
 reason: **`_toggle_bot`'s start/stop direction is decided from `bots_state`'s last-known `running` field, which can be stale** (up to `_BOT_STALE_SECONDS` = 15s old, or older if the bot has crashed and stopped heartbeating entirely -- `_LATEST_STATUSES` never expires an entry, it just ages toward the stale badge). Pressing `s` against a crashed bot's lingering "running: true" sends a "stop" into the void; harmless (published to a channel no live process is consuming) but not actually correct feedback. No optimistic local-state fix is possible without violating AC3's "no optimistic local state change" -- the honest fix would be disabling/relabeling `s` once a row's stale badge is active, not attempted here. `troll/bot_tui/app.py:_toggle_bot`.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-bot-tui-robustness
+resolution-undo: ddee5d273c5815dadfe57f0176738c0b9a9a64ff679763c9b494d5992cf1f027 2026-10-05 7374617475733a206f70656e
 
 ### DW-75: `bot_status.run()`'s reconnect loop can leak an orphaned `_control_loop` task on a partial failure.
 
@@ -622,7 +632,9 @@ resolution: already resolved: platform/views/chart_series.py:937 candle_page der
 origin: migrated from legacy ledger ("Deferred from: code review of 4-5-bot-detail-live-snapshot-view.md (2026-09-01)"), 2026-10-05
 location: bots_pane.py
 reason: **`_build_bot_detail_body()`'s PnL coloring locates the PnL segment via `str.index()` substring search rather than a structured return from `bots_pane.bot_detail_lines()`.** Works correctly today because `format_pnl`'s output is deterministically embedded as the first thing after `"pnl "` in line 2 and can't coincidentally appear earlier in that same string, but it's a more fragile coupling between `bots_pane.py`'s text layout and `app.py`'s coloring logic than the ladder's own bid/ask `urwid.Columns` pairing (Story 4.3) or the Bots-pane row's own `_build_bot_row_widget` (Story 4.4, which builds its markup list directly rather than searching rendered text for a segment). A cleaner fix would have `bot_detail_lines` return the PnL line as `(prefix, pnl_text, suffix)` or similar instead of one fused string -- not attempted here since it would touch `bot_detail_lines`'s already-tested return shape for a purely cosmetic-robustness win. `troll/bot_tui/app.py:_build_bot_detail_body`.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-bot-tui-robustness
+resolution-undo: ddee5d273c5815dadfe57f0176738c0b9a9a64ff679763c9b494d5992cf1f027 2026-10-05 7374617475733a206f70656e
 
 ### DW-86: Bot-detail's own `s`-triggered `_toggle_bot()` call is not exercised by an automated test that reaches `asyncio.ensure_future(...)`
 
@@ -671,7 +683,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of spec-4-7-bot-detail-trades-blotter-and-pnl-over-time-chart.md (2026-09-02)"), 2026-10-05
 location: http://.../bot/None
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-4-7-bot-detail-trades-blotter-and-pnl-over-time-chart.md` summary: `_open_dashboard_bot`'s `assert self._bot_detail_bot_id is not None` is unreachable by construction today but would build a silently-wrong `http://.../bot/None` URL instead of failing loudly if that invariant were ever violated, since asserts are stripped under `python -O`; this mirrors the pre-existing, already-shipped `_open_dashboard_chart`'s identical pattern rather than introducing a new one, per this story's own spec instruction to mirror it exactly. evidence: `troll/bot_tui/app.py` -- both `_open_dashboard_chart` (Story 4.2/4.3) and the new `_open_dashboard_bot` (Story 4.7) use the same `assert ... is not None` shape ahead of URL construction; neither is guarded by an explicit `if`/`raise`. A single shared fix (or at least a joint decision to accept the risk) would be cleaner than fixing one call site and not the other.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-bot-tui-robustness
+resolution-undo: ddee5d273c5815dadfe57f0176738c0b9a9a64ff679763c9b494d5992cf1f027 2026-10-05 7374617475733a206f70656e
 
 ### DW-93: Pressing `o` in Bot-detail opens a `/bot/{bot_id}` dashboard URL that 404s today -- the web dashboard has no per-bot route, and the TUI gives no in-app signal …
 
@@ -1895,7 +1909,9 @@ resolution: already resolved: platform/bot_tui/collector_state.py:302-325 publis
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: j/k, up/down move selection
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-29-5-market-browser-search-by-name-and-add-in-collector-pane.md` summary: `bot_tui`'s Collector-pane and Bots-pane help both advertise `j/k, up/down move selection`, but only up/down work there: no urwid `command_map` entry or pane handler maps `j`/`k`, and the rows' `keypress` passes keys through unchanged. evidence: `bot_tui/app.py`'s HELP text (Bots `j/k` line ~149, Collector ~174); `_handle_bots_pane_key`/`_handle_collector_pane_key` handle only `enter`/`s` and `p`/`x`/`/`; Story 29.5's follow-up review added `_VimListBox` for the market browser only. Fix: use `_VimListBox` for those panes' ListBoxes too (or map `j`/`k` in urwid's `command_map`), with a test per pane.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-bot-tui-robustness
+resolution-undo: ddee5d273c5815dadfe57f0176738c0b9a9a64ff679763c9b494d5992cf1f027 2026-10-05 7374617475733a206f70656e
 
 ### DW-259: On the live dYdX feed, the `live-paper` node's Cache L2 order book for `BTC-USD-PERP.DYDX` reported a best bid about 2% below the real market while quotes and …
 

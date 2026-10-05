@@ -21,6 +21,9 @@ module accumulates the latest message and its own per-bot received-at timestamp 
 dicts keyed by bot_id, so a crashed bot's row can go stale independently of every other
 bot's (AC2: "a healthy bot next to a crashed one shows exactly one stale row, never a
 pane-wide flag").
+
+The received-at stamps are `time.monotonic()` (DW-60): staleness is about how long ago this TUI
+heard a bot, so a wall-clock step (an NTP correction) must never flip a row stale or fresh.
 """
 
 import asyncio
@@ -37,6 +40,7 @@ logger = logging.getLogger(__name__)
 REDIS_URL: str = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
 
 _LATEST_STATUSES: dict[str, dict] = {}
+# bot_id -> this TUI's `time.monotonic()` at receipt; absent until the bot's first message.
 _LATEST_RECEIVED_AT: dict[str, float] = {}
 
 # 3x the heartbeat producer's cadence (bots/application/supervise.py, a 5s heartbeat --
@@ -56,7 +60,7 @@ def _handle_status_message(message: dict) -> None:
         logger.warning("bots:status message missing string 'bot_id', ignoring: %r", message)
         return
     _LATEST_STATUSES[bot_id] = message
-    _LATEST_RECEIVED_AT[bot_id] = time.time()
+    _LATEST_RECEIVED_AT[bot_id] = time.monotonic()
 
 
 def latest_status(bot_id: str) -> dict | None:
@@ -65,13 +69,32 @@ def latest_status(bot_id: str) -> dict | None:
 
 
 def is_stale(bot_id: str, now: float | None = None) -> bool:
-    """Whether bot_id's last-received status should count as stale (Story 4.4, AC2)."""
-    received_at = _LATEST_RECEIVED_AT.get(bot_id, 0.0)
-    if received_at == 0.0:
+    """
+    Whether bot_id's last-received status should count as stale (Story 4.4, AC2). `now` is a
+    `time.monotonic()` reading, the clock the receipt was stamped with.
+    """
+    received_at = _LATEST_RECEIVED_AT.get(bot_id)
+    if received_at is None:
         return True
     if now is None:
-        now = time.time()
+        now = time.monotonic()
     return (now - received_at) > _BOT_STALE_SECONDS
+
+
+def control_refusal(bot_id: str, now: float | None = None) -> str | None:
+    """
+    Return why `s` must not send a start/stop for bot_id now, or None to send it (DW-74).
+
+    The supervisor (bots/application/supervise.py) heartbeats bots:status every 5 s whether or not
+    its bot runs, on the same connection that consumes bots:control -- so a stale row means no
+    live consumer of the command at all, in both directions: a `start` goes into the void exactly
+    like a `stop`, and the row's last-known `running` (the verb named here) may no longer hold.
+    """
+    if not is_stale(bot_id, now):
+        return None
+    status = latest_status(bot_id)
+    verb = "stop" if status is not None and status.get("running") else "start"
+    return f"cannot {verb} {bot_id}: no bots:status for over {_BOT_STALE_SECONDS:.0f}s (bot down?)"
 
 
 async def publish_control(redis_url: str, bot_id: str, action: str) -> None:

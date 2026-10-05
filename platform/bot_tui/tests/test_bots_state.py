@@ -88,7 +88,7 @@ def test_malformed_message_empty_bot_id_is_ignored() -> None:
 
 def test_valid_message_updates_received_at_to_current_time(monkeypatch: pytest.MonkeyPatch) -> None:
     _reset()
-    monkeypatch.setattr(bots_state.time, "time", lambda: 12_345.0)
+    monkeypatch.setattr(bots_state.time, "monotonic", lambda: 12_345.0)
     bots_state._handle_status_message(_status("bot-01"))
     assert bots_state._LATEST_RECEIVED_AT["bot-01"] == 12_345.0
 
@@ -123,3 +123,18 @@ def test_is_stale_for_one_bot_does_not_affect_another() -> None:
     # bot-crashed has never received a message at all.
     assert bots_state.is_stale("bot-healthy", now=1_000.5) is False
     assert bots_state.is_stale("bot-crashed", now=1_000.5) is True
+
+
+# --- DW-60: staleness is monotonic, a wall-clock step changes nothing ---
+
+
+@pytest.mark.parametrize("step", [-3600.0, 3600.0])
+def test_a_wall_clock_step_does_not_change_a_bots_staleness(
+    monkeypatch: pytest.MonkeyPatch, step: float
+) -> None:
+    _reset()
+    bots_state._handle_status_message(_status("bot-01"))
+    wall = bots_state.time.time()
+    monkeypatch.setattr(bots_state.time, "time", lambda: wall + step)
+    assert bots_state.is_stale("bot-01") is False
+    assert bots_state.control_refusal("bot-01") is None

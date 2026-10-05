@@ -20,13 +20,21 @@ test_app_bots.py. `_toggle_bot`'s actual asyncio-scheduled publish call is not
 independently re-tested here beyond confirming `_active_bot_id()` returns the right
 target -- same established precedent as test_app_bots.py's own docstring: the first
 side-effecting statement needs a running event loop, left to the manual smoke check.
-`webbrowser.open()`'s actual behavior is a manual-smoke-check exception too -- only the
-`o` key's footer echo and the local-listener hand-off (a real loopback socket) are
-asserted here.
+Whether a real browser opens is a manual-smoke-check exception too: the `o` key's footer
+echo, its background launch (run inside `asyncio.run`, the launcher recorded), the
+launcher's child-process arguments (`asyncio.create_subprocess_exec` faked) and the
+local-listener hand-off (a real loopback socket) are asserted here.
 """
 
+import asyncio
+import logging
 import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
 
+import pytest
 import urwid
 
 from bot_tui import app as app_module
@@ -271,18 +279,204 @@ def test_right_key_full_cycle_returns_to_day() -> None:
 
 def test_o_key_sets_footer_to_bot_dashboard_url(monkeypatch) -> None:
     monkeypatch.delenv("BOT_TUI_OPEN_URL_PORT", raising=False)
+    launched: list[str] = []
+
+    async def _record(url: str) -> None:
+        launched.append(url)
+
+    monkeypatch.setattr(app_module, "_launch_browser", _record)
     _reset()
     bots_state._handle_status_message(_status("bot-07"))
     app = BotTuiApp()
     app._open_bot_detail("bot-07")
-    app._handle_bot_detail_key("o")
-    assert (
-        app._footer_hint.text == "dashboard (copied to clipboard): http://127.0.0.1:9100/bot/bot-07"
+
+    async def _press() -> None:
+        app._handle_bot_detail_key("o")
+        await asyncio.gather(*app._browser_tasks)
+
+    asyncio.run(_press())
+    url = "http://127.0.0.1:9100/bot/bot-07"
+    assert app._footer_hint.text == f"dashboard (copied to clipboard): {url}"
+    assert launched == [url]
+
+
+# --- DW-66/67: the browser is a child process off the loop, every stdio on /dev/null ---
+
+
+class _FakeProcess:
+    def __init__(self, returncode: int) -> None:
+        self.returncode = returncode
+
+    async def wait(self) -> int:
+        return self.returncode
+
+
+class _BlockingProcess:
+    """A launcher that only returns once killed (a `BROWSER` waiting on its browser)."""
+
+    def __init__(self) -> None:
+        self.killed = asyncio.Event()
+        self.reaped = False
+
+    def kill(self) -> None:
+        self.killed.set()
+
+    async def wait(self) -> int:
+        await self.killed.wait()
+        self.reaped = True
+        return -9
+
+
+def _fake_spawn(
+    monkeypatch: pytest.MonkeyPatch, returncode: int = 0, error: OSError | None = None
+) -> list[tuple[tuple, dict]]:
+    calls: list[tuple[tuple, dict]] = []
+
+    async def _spawn(*args: object, **kwargs: object) -> _FakeProcess:
+        calls.append((args, kwargs))
+        if error is not None:
+            raise error
+        return _FakeProcess(returncode)
+
+    monkeypatch.setattr(app_module.asyncio, "create_subprocess_exec", _spawn)
+    return calls
+
+
+def test_the_browser_child_gets_no_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _fake_spawn(monkeypatch)
+    asyncio.run(app_module._launch_browser("http://x/bot/b"))
+    (args, kwargs) = calls[0]
+    assert args == (
+        app_module.sys.executable,
+        "-c",
+        app_module._BROWSER_CHILD_SOURCE,
+        "http://x/bot/b",
     )
+    devnull = asyncio.subprocess.DEVNULL
+    assert kwargs == {
+        "stdin": devnull,
+        "stdout": devnull,
+        "stderr": devnull,
+        "start_new_session": True,
+    }
+
+
+@pytest.mark.parametrize(("launcher_exit", "returncode"), [(0, 0), (1, 1)])
+def test_the_browser_child_exits_nonzero_only_when_no_browser_took_the_url(
+    tmp_path: Path, launcher_exit: int, returncode: int
+) -> None:
+    # The real child program, `BROWSER` naming a launcher that succeeds or fails. Hermetic: no
+    # display and a PATH holding only that launcher, so the stdlib cannot fall through to a real
+    # browser on the test host. `python -m webbrowser` would exit 0 either way.
+    launcher = tmp_path / "launcher"
+    launcher.write_text(f"#!/bin/sh\nexit {launcher_exit}\n")
+    launcher.chmod(0o755)
+    result = subprocess.run(  # noqa: S603 -- fixed argv, no untrusted input
+        [sys.executable, "-c", app_module._BROWSER_CHILD_SOURCE, "http://x/bot/b"],
+        env={"PATH": str(tmp_path), "BROWSER": str(launcher)},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == returncode
+
+
+def test_a_failing_browser_launcher_is_a_warning_not_an_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _fake_spawn(monkeypatch, returncode=1)
+    with caplog.at_level(logging.WARNING, logger=app_module.__name__):
+        asyncio.run(app_module._launch_browser("http://x/bot/b"))
+    assert "exited 1" in caplog.text
+
+
+def test_a_browser_that_cannot_be_spawned_is_a_warning_not_an_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _fake_spawn(monkeypatch, error=FileNotFoundError("no python"))
+    with caplog.at_level(logging.WARNING, logger=app_module.__name__):
+        asyncio.run(app_module._launch_browser("http://x/bot/b"))
+    assert "could not start a browser" in caplog.text
+
+
+def test_a_quit_during_a_browser_launch_kills_and_reaps_the_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _BlockingProcess()
+
+    async def _spawn(*args: object, **kwargs: object) -> _BlockingProcess:
+        return process
+
+    monkeypatch.setattr(app_module.asyncio, "create_subprocess_exec", _spawn)
+
+    async def _quit_mid_launch() -> None:
+        launch = asyncio.create_task(app_module._launch_browser("http://x/bot/b"))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        launch.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await launch
+
+    asyncio.run(_quit_mid_launch())
+    assert process.killed.is_set()
+    assert process.reaped
+
+
+# --- DW-92: invariants raise, never vanish under `python -O` ---
+
+
+def test_the_dashboard_link_with_no_open_bot_raises_and_opens_nothing() -> None:
+    _reset()
+    app = BotTuiApp()
+    opened: list[str] = []
+    app._open_url = lambda url: opened.append(url)
+    app._bot_detail_bot_id = None
+    with pytest.raises(RuntimeError, match="no bot open"):
+        app._open_dashboard_bot()
+    assert opened == []
+
+
+def test_expect_raises_type_error_naming_both_types() -> None:
+    with pytest.raises(TypeError, match="expected ListBox, got Text"):
+        app_module._expect(urwid.Text(""), urwid.ListBox)
+
+
+def test_expect_returns_a_widget_of_the_expected_type() -> None:
+    text = urwid.Text("")
+    assert app_module._expect(text, urwid.Text) is text
+
+
+# --- DW-74: `s` from Bot-detail refused while the bot is stale ---
+
+
+def test_s_in_bot_detail_on_a_stale_bot_is_refused() -> None:
+    _reset()
+    bots_state._handle_status_message(_status("bot-07", running=True))
+    bots_state._LATEST_RECEIVED_AT["bot-07"] = time.monotonic() - 16.0
+    app = BotTuiApp()
+    app._open_bot_detail("bot-07")
+    published: list[tuple[str, str]] = []
+    app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))
+
+    app._handle_bot_detail_key("s")
+
+    assert app._stop_confirm_active is False
+    assert app._footer_hint.text == "cannot stop bot-07: no bots:status for over 15s (bot down?)"
+    assert published == []
+
+
+def test_s_in_bot_detail_on_a_fresh_running_bot_still_opens_the_prompt() -> None:
+    _reset()
+    bots_state._handle_status_message(_status("bot-07", running=True))
+    app = BotTuiApp()
+    app._open_bot_detail("bot-07")
+    app._handle_bot_detail_key("s")
+    assert app._stop_confirm_active is True
 
 
 # --- BOT_TUI_OPEN_URL_PORT: hand off to a local open_listener.go instead of
-# webbrowser.open()/OSC52, when troll-tui's reverse SSH tunnel is up ---
+# the browser launch/OSC52, when troll-tui's reverse SSH tunnel is up ---
 
 
 def _listening_socket() -> tuple[socket.socket, int]:
@@ -531,3 +725,34 @@ def test_bot_detail_snapshot_of_a_pre_story_message_says_n_a() -> None:
     assert len(texts) == 5
     assert texts[3].startswith("quantity   n/a")
     assert texts[4].startswith("stop loss  n/a")
+
+
+# --- DW-85: the PnL color comes from bots_pane's segments ---
+
+
+def _pnl_line_attrs(app: BotTuiApp) -> list[tuple[str | None, int]]:
+    body = app._build_bot_detail_body()
+    assert isinstance(body, urwid.ListBox)
+    snapshot_box = body.body[0]
+    assert isinstance(snapshot_box, urwid.LineBox)
+    pile = snapshot_box.original_widget
+    assert isinstance(pile, urwid.Pile)
+    _text, attrs = pile.contents[1][0].get_text()
+    return attrs
+
+
+def test_a_negative_pnl_renders_in_the_negative_color() -> None:
+    _reset()
+    status = _status("bot-01", realized_pnl=-3.0, unrealized_pnl=1.0)
+    bots_state._handle_status_message(status)
+    app = BotTuiApp()
+    app._open_bot_detail("bot-01")
+    assert ("pnl-neg", len(bots_pane.format_pnl(-2.0))) in _pnl_line_attrs(app)
+
+
+def test_a_positive_pnl_renders_in_the_positive_color() -> None:
+    _reset()
+    bots_state._handle_status_message(_status("bot-01", realized_pnl=2.0))
+    app = BotTuiApp()
+    app._open_bot_detail("bot-01")
+    assert ("pnl-pos", len(bots_pane.format_pnl(2.0))) in _pnl_line_attrs(app)
