@@ -54,6 +54,8 @@ VERIFIED = "verified"
 FINDINGS = "findings"
 
 # The venues with a liquidation feed, whose day `verify_day` also reports (never judges).
+# Hyperliquid is absent: it has no feed, Story 33.2 having refuted both public-data hypotheses
+# (`docs/DATA_DICTIONARY.md` §1.26).
 LIQUIDATION_VENUES = ("BYBIT",)
 # The summary's `report` when the tool printed a report it could read.
 REPORTED = "reported"

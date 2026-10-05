@@ -2278,8 +2278,10 @@ ingest-queue backlog (D-07) can be told apart from host contention (D-146)
 ### 1.26 `Liquidation` (custom `Data` type, `kernel/liquidation.py`, Story 33.1)
 
 One forced liquidation, one type for every venue that publishes them; Bybit linear since Story
-33.1 (Hyperliquid has no market-wide feed: Story 33.2) `[amended 2026-10-05: Story 33.1 -- new
-type, channel and coverage kind]`.
+33.1 `[amended 2026-10-05: Story 33.1 -- new type, channel and coverage kind]`. Hyperliquid is not
+captured: it has no market-wide feed, and Story 33.2 refuted both public-data hypotheses on a
+captured hour (findings below), so it writes no rows `[amended 2026-10-05: Story 33.2 -- outcome
+neither, no feed ships]`.
 
 - **Catalog directory:** `data/custom_liquidation/<iid>/` (the class name, registered for Arrow once,
   `tests/test_namespace.py`), written by capture's flush through `ParquetDataCatalog.write_data`.
@@ -2423,6 +2425,65 @@ Read: the wire matches the epic's facts (every entry has `T/s/S/v/p`; one push p
 every entry exactly, there is no subscribe-time replay to filter, and about 30 % of liquidations
 have no single trade of their full size -- why the nightly match reports a share and never asserts
 one.
+
+**Hyperliquid investigation (Story 33.2)** (the same step 1). Hyperliquid has no market-wide
+liquidation feed; a fill of a liquidated position carries a `liquidation` marker
+(`liquidatedUser`, `markPx`, `method`) in that address's own fills, which the public `/info`
+`userFills`/`userFillsByTime` serve for any address. The epic's two hypotheses:
+**(a)** a market-liquidation fill is system-generated, so its public `trades` entry carries a
+non-transaction (all-zero) `hash` and the liquidated address is one of its `users`;
+**(b)** the liquidator (HLP child) vaults' fills give the backstop subset (`method: backstop`).
+Adoption rule: >= 99 % of the candidates confirmed by the fill marker on the capture **and** a
+measured false-negative rate; otherwise refuted with the numbers. Method:
+`PYTHONPATH=. python3 scripts/capture_hl_ws.py --coin <list> --topic trades --seconds <n> --out
+<f>` against `wss://api.hyperliquid.xyz/ws` from the dev box (`--summarize` gives the per-coin
+counts), then `PYTHONPATH=. python3 scripts/hl_liquidation_probe.py <f> --coins BTC,ETH` (control
+200, census 150, seed 332, 10-min `userFillsByTime` buckets, 20 backstop confirmations in total,
+taken vault by vault in `childAddresses` order); the probe's report applies the rule in `verdicts`.
+The two sample rows below (TWAP slice, fill hash = trade hash; seed 7, 40 trades of each kind) came
+from a separate script run on the same capture, folded into the probe as its `samples` phase in
+review and re-run there. The report was produced by the commit-1 version of the probe; the review then hardened its paging
+(a full page restarts at its newest millisecond), retries (transient errors only) and per-trade
+classification, and re-derived the trade counts unchanged. The census reads each address's
+*latest* fills as of the run (finished 19:42 UTC), so a re-run reads a later window; the raw
+capture (16 MB) and the report are not committed. Date 2026-10-05; the hour was not picked for
+volatility (the census reaches back days to weeks instead). Known limits: `userFillsByTime` serves
+only an address's 10,000 most recent fills (Hyperliquid's API docs), so a very busy address's fill
+from the capture can be out of reach by query time and read as absent (one possible cause of the 13
+`no_fill_found`); the census population is the addresses that traded BTC or ETH in the hour, each
+read as its latest <= 2000 fills (minutes for a market maker, weeks for an idle address), so it
+excludes liquidated addresses that did not trade then.
+
+| Figure | Value |
+|---|---|
+| Capture window (UTC) | 17:31:57-18:46:56 (75 min), `trades` for BTC, ETH, SOL, HYPE, XRP, DOGE, SUI, FARTCOIN, PUMP, ENA |
+| Live trades / with the all-zero `hash` | BTC 13,837 / 2,318; ETH 5,614 / 1,786; SOL 2,146 / 288; HYPE 15,310 / 3,188; XRP 927 / 10; DOGE 791 / 13; SUI 665 / 22; FARTCOIN 377 / 1; PUMP 5,015 / 1,480; ENA 5,380 / 1,815 |
+| (a) candidates (BTC + ETH all-zero-hash trades) | 4,104: 4,091 `one_fill_ordinary` (the maker's fill of the `tid` found, the taker's absent from `userFills`), 13 `no_fill_found` (neither address listed a fill of the `tid`: not resolved further) |
+| All-zero hash = TWAP slice (seeded sample of 40 BTC/ETH candidates, `userTwapSliceFills` of the address whose fill was absent) | 40 / 40 found there, each with a `twapId` (run 19:51 UTC); the committed `samples` re-run at 20:27 UTC: 40 of 41 absent sides found there, the 41st the maker side of a trade whose maker fill the first run found and `userFillsByTime` no longer served (39 instead of 40 zero-hash fills: the 10,000-fill limit below), not a TWAP miss |
+| A fill's `hash` = its public trade's `hash` (seeded sample: 40 ordinary + 40 all-zero trades, both addresses) | 120 / 120 fills (run 19:51 UTC; so the census's fill hashes test the rule's trade hash); re-run 20:27 UTC: 115 / 115, 0 disagreeing (5 fills had left `userFillsByTime`'s reach); `userFills` returned newest first |
+| (a) confirmed liquidations among the candidates | 0 of 4,104 (0 %) |
+| (a) control (seeded random ordinary-hash trades) | 200: 200 `both_fills_ordinary`, 0 liquidations |
+| (a) census (latest <= 2000 fills of 150 sampled capture addresses) | 1,205 liquidation-marked fills = 1,204 distinct trades: 1,203 `market` + 1 `backstop`, **all 1,204 with a transaction hash**, 0 all-zero; 0 inside the capture window |
+| (a) false-negative rate (census liquidations without the rule's hash) | 1,204 / 1,204 = 100 %, read from the liquidation fills' own hashes; that a fill's hash is its public trade's was measured on 120 non-liquidation fills (row above), and no census liquidation fell inside the capture to compare directly |
+| (b) backstop fills in the capture window (7 HLP child vaults) | 0 (the one liquidation-marked vault fill in the window is `method: market`, a vault as counterparty, on JUP, not a captured coin, absent from the captured trades) |
+| (b) vault history (latest <= 2000 fills each) | 4 of 7 vaults hold backstop fills: 2 (newest 44.56 d before the capture end, span 95.67 d), 16 (31.26 d, 228.51 d), 46 (12.19 d, 32.37 d), 223 (46.91 d, all within 0.2 d); the other 3 none |
+| (b) confirmed / checked (the liquidated user's own fill of the same `tid`) | 20 / 20: 2/2, 16/16 and 2/2 of the 2-, 16- and 46-fill vaults (the budget ran out before the 223-fill vault) |
+| `/info` cost | 1,654 calls, weight 47,232 over 0.90 h (paced at 900/min; documented limit 1,200 per minute per IP, `userFills`/`userFillsByTime` 20 + 1 per 20 items) |
+
+Planning pre-probe (a 150-address `userFills` scan of the capture's takers, stopped at 17:47 UTC
+before it finished): 202 `market` liquidation fills from 22 addresses, 0 with the all-zero `hash`;
+182 the liquidated user's own taker fill (`crossed: true`), 20 a maker's (`crossed: false`) whose
+fill carries the marker (with the other address as `liquidatedUser`) too.
+
+Verdicts: **(a) refuted** -- 0 % of the candidates confirmed, which alone fails the rule, and no
+census liquidation's fill carried the all-zero hash (false-negative rate 100 % on 1,204, resting on
+the measured fill-hash = trade-hash identity); the all-zero
+hash marks TWAP slices (40/40 sampled, audit D-152). **(b) refuted** -- 0 backstop fills in the capture window,
+so nothing could be confirmed on the capture; the history shows the subset is real (20/20
+confirmed) but rare and bursty, days to weeks apart (audit D-153). Outcome **neither**: no
+Hyperliquid socket, poll or row; a cross-venue reader treats Hyperliquid's liquidation values as
+null, never 0 (audit D-151). Upgrade path: a non-validator node's fill stream, which carries every
+fill with its marker (DDD spine, Deferred; declined by the operator on cost, 2026-10-05).
 
 ---
 

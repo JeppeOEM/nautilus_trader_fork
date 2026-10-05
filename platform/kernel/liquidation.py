@@ -14,7 +14,8 @@
 # -------------------------------------------------------------------------------------------------
 """
 One forced liquidation, shared by every venue that publishes them (kernel, DDD spine AD-D3; Story
-33.1, `docs/DATA_DICTIONARY.md` §1.26).
+33.1, `docs/DATA_DICTIONARY.md` §1.26). Hyperliquid writes no rows: it has no market-wide feed and
+Story 33.2 refuted both public-data hypotheses (§1.26).
 
 Invariant: `Liquidation` is registered for Arrow exactly once, under this class name (the catalog
 directory `custom_liquidation` derives from `__name__`) and this schema; its price and size are

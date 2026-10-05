@@ -40,7 +40,8 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
   liquidated side, size and **bankruptcy** price in exact integer units at the definition's
   precisions), published on `liquidations:raw`. Spot has no liquidation stream. A window the socket
   missed is recorded as coverage `liquidations_unrecoverable`, never filled (Bybit has no
-  liquidation history). Hyperliquid has no market-wide liquidation feed (Story 33.2).
+  liquidation history). Hyperliquid liquidations are **not** collected: no market-wide feed, and
+  Story 33.2 refuted both public-data hypotheses (`platform/docs/DATA_DICTIONARY.md` §1.26).
 
 ### Constraints
 
@@ -84,6 +85,21 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
   - Hyperliquid: forwarded over the WebSocket (`subscribe_open_interest`), so no poll.
   - All land in the one shared `kernel.open_interest.OpenInterest` custom `Data`
     type (story 22.3), registered for Arrow/Parquet serialization.
+- **Liquidations** arrive differently per venue and are likewise a per-venue investigation:
+  - Bybit: `allLiquidation.{symbol}` on the linear stream over a second, generic
+    `nautilus_pyo3.WebSocketClient` (the Rust handler drops the topic), Story 33.1.
+  - Hyperliquid: none (Story 33.2, `platform/docs/DATA_DICTIONARY.md` §1.26). There is no
+    market-wide feed, and both public hypotheses failed on a captured hour. The upgrade path, a
+    non-validator node's fill stream, is in the DDD spine's Deferred, declined by the operator on
+    cost (2026-10-05): liquidations come from Bybit only.
+    - (a) the all-zero trade `hash` marks TWAP slices, not liquidations: 0 of 4,104 candidates
+      confirmed, and 0 of 1,204 census liquidations carry it.
+    - (b) the liquidator vaults' backstop fills are real but rare and bursty, 0 in the window.
+  - dYdX: trades carry `type: LIQUIDATED` on REST (`crates/adapters/dydx/src/http/models.rs:184`)
+    and on the `v4_trades` WS payload (`websocket/messages.rs:480`), but the adapter's
+    `parse_trade_ticks` (`websocket/parse.rs:754`) drops it from `TradeTick`; not deployed since
+    29.3, out of scope.
+  - Only Bybit's land in the shared `kernel.liquidation.Liquidation` custom `Data` type.
 - **Rate limits:** dYdX relies on the Rust WebSocket client's built-in subscribe throttle
   (2/sec) and reconnect handling; no custom throttling. Bybit and Hyperliquid needed no cap
   for the instrument counts collected (stories 19.3/19.4). A new venue's limits are part of

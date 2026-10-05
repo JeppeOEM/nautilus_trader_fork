@@ -21,6 +21,8 @@ Story 33.1 added `--topic` (repeatable; Bybit topic prefixes such as `allLiquida
 `publicTrade`, Hyperliquid subscription types such as `trades`; default: the trade and book topics
 above) and comma-separated `--coin`, for the liquidation wire investigation
 (`docs/DATA_DICTIONARY.md` §1.26); `--summarize` then reports the `allLiquidation` frames too.
+Story 33.2: for Hyperliquid `trades`, `--summarize` also counts each coin's live trades carrying
+the all-zero, non-transaction `hash` (`scripts/hl_liquidation_probe.py` settles what they are).
 The Rust clients cannot supply this: Cargo.toml's `release_max_level_debug` compiles the
 Bybit handler's `log::trace!` raw-frame line out of release builds, and Hyperliquid has none.
 
@@ -222,6 +224,27 @@ def _match_trades(rows: list, entries: list) -> None:
     print(f"same-size forced-side trade within 2 s: {matched}/{len(entries)}")
 
 
+def summarize_hashes(frames: list) -> None:
+    """
+    Story 33.2: live trades per coin and how many carry the all-zero, non-transaction `hash`
+    (deduplicated by `(coin, tid)`; a coin's live trades start at its own first `trades` frame,
+    the subscribe reply that replays older trades, DATA-06). `scripts/hl_liquidation_probe.py`
+    cross-queries those against the fills.
+    """
+    first_ns: dict[str, int] = {}
+    live: dict[tuple, dict] = {}
+    for frame in frames:
+        for trade in frame["raw"]["data"]:
+            start_ns = first_ns.setdefault(trade["coin"], frame["recv_ns"])
+            if trade["time"] * 1_000_000 >= start_ns:
+                live.setdefault((trade["coin"], trade["tid"]), trade)
+    no_tx = "0x" + "0" * 64
+    per_coin = Counter(coin for coin, _ in live)
+    zero = Counter(t["coin"] for t in live.values() if t["hash"] == no_tx)
+    for coin in sorted(per_coin):
+        print(f"{coin}: {per_coin[coin]} live trades, {zero[coin]} with a non-transaction hash")
+
+
 def summarize(path: str) -> None:
     rows = [json.loads(line) for line in open(path)]
     if any(str(r["raw"].get("topic", "")).startswith("allLiquidation") for r in rows):
@@ -237,6 +260,7 @@ def summarize(path: str) -> None:
         ages = sorted((head["recv_ns"] / 1e6 - t["time"]) / 1000 for t in head["raw"]["data"])
         print(f"first trades frame: {len(ages)} trades, age {ages[0]:.1f}s..{ages[-1]:.1f}s")
         print(f"trades frames: {len(trades)}; first at +{(head['recv_ns'] - first) / 1e9:.2f}s")
+        summarize_hashes(trades)
     gaps = [(b["recv_ns"] - a["recv_ns"]) / 1e9 for a, b in zip(books, books[1:], strict=False)]
     if gaps:
         changed = sum(
