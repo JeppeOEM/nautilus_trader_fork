@@ -375,7 +375,7 @@ development_status:
   32-4-classic-light-chart-tradingview-palette-inside-the-dark-terminal-app: done
   32-5-fibonacci-retracement-and-long-short-position-tools-every-drawing-stays-on-the-chart: done  # operator decision 2026-10-01 (evening): unblocked; runs before 32-6 and 32-7, which need its preferences directory
   32-6-chart-layout-restored-on-return-and-default-setup-for-a-new-coin: done
-  32-7-remaining-tradingview-profiles-auto-anchored-anchored-vp-anchored-vwap-and-tpo: ready-for-dev
+  32-7-remaining-tradingview-profiles-auto-anchored-anchored-vp-anchored-vwap-and-tpo: done
   32-8-volume-footprint-bars-from-the-raw-trade-archive-toggled-from-the-indicators-menu: deferred  # operator decision 2026-10-01: not run by the loop; set to ready-for-dev to schedule
   epic-32-retrospective: optional
 
