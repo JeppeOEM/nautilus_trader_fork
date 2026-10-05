@@ -502,4 +502,4 @@ def test_an_order_fills_at_the_top_of_book_after_its_latency(
     _FILLS.clear()
     NodeRunner().run(spec)
     expected_ask = _stepped_snapshot(filled_second).ask_prices[0]
-    assert _FILLS == [(_LATENCY_START + filled_second * NS_PER_S, expected_ask)]
+    assert [(_LATENCY_START + filled_second * NS_PER_S, expected_ask)] == _FILLS

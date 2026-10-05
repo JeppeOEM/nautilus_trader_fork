@@ -174,7 +174,11 @@ def test_a_trades_socket_that_cannot_connect_is_dropped_and_ledgered() -> None:
 
     setattr(trades, "connect", refuse)  # noqa: B010 (stub method)
     client._ws, client._ws_trades = main, trades
-    asyncio.run(client.connect(asyncio.new_event_loop(), [object()]))
+    loop = asyncio.new_event_loop()  # only handed through to the stubs, never run
+    try:
+        asyncio.run(client.connect(loop, [object()]))
+    finally:
+        loop.close()
     assert set(client.feed_states()) == {MAIN_FEED}
     assert main.calls[:2] == [("connect", "1"), ("wait_until_active", "30.0")]
     assert error_ledger.counts() == {"collector.trade_feed": 1}

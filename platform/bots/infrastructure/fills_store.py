@@ -190,13 +190,13 @@ class SqliteFillsStore:
     def pnl_by_day(self, bot_id: str, cutoff_ns: int | None) -> list[dict]:
         """Net realized PnL per UTC day (only reducing fills carry a non-NULL `realized_pnl`)."""
         rows = self._query(
-            f"""
-            SELECT (ts / {_NS_PER_DAY}) AS day_bucket, SUM(realized_pnl) AS pnl
+            """
+            SELECT (ts / ?) AS day_bucket, SUM(realized_pnl) AS pnl
             FROM fills
             WHERE bot_id = ? AND realized_pnl IS NOT NULL AND (? IS NULL OR ts >= ?)
             GROUP BY day_bucket
             ORDER BY day_bucket
             """,
-            (bot_id, cutoff_ns, cutoff_ns),
+            (_NS_PER_DAY, bot_id, cutoff_ns, cutoff_ns),
         )
         return [{"period_start": day_bucket * _NS_PER_DAY, "pnl": pnl} for day_bucket, pnl in rows]

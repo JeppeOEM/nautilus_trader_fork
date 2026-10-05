@@ -21,6 +21,7 @@ never as an error.
 """
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from candles.application.queries import open_store
@@ -59,7 +60,9 @@ def test_the_named_store_holds_no_connection_open_between_calls(tmp_path: Path) 
 
 def test_a_store_that_predates_the_table_reads_as_unverified(tmp_path: Path) -> None:
     path = tmp_path / "candles_bybit.db"
-    sqlite3.connect(path).execute("CREATE TABLE candles (t INTEGER)").connection.commit()
+    with closing(sqlite3.connect(path)) as old:
+        old.execute("CREATE TABLE candles (t INTEGER)")
+        old.commit()
     assert VerifiedDaysStore(str(path)).verified_status(_IID, _DAY) is None
 
 

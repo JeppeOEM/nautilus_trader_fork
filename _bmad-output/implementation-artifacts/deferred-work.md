@@ -1407,14 +1407,18 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: data_api/alerts.py
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-23-1-observability-context-and-migration-guardrails.md` summary: 17 pre-existing `ruff` findings (pinned v0.15.16, repo config) survive in files Story 23.1 edited on lines it did not touch: `data_api/alerts.py` (UP035, D401), `data_api/app.py` (UP035, SIM105), `data_api/live_candles.py` (UP035), `dydx_collector/collector.py:609` (ASYNC240), `ranking_engine/engine.py` (C901, D401), `ranking_engine/tests/test_engine.py` (S306 x2), `ml_signals/catalog_stats.py:198` (DTZ007), plus D401/C408/PT018 in five more. evidence: the same files carried 22 findings at the story's baseline `0cb42a5838` and 17 at its end; `platform/observability` and `platform/tests` are clean, as the spec's verification promises. The pre-commit hook would block a commit touching those lines, so they should go in one lint-only change, not be folded into a feature story.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-lint-and-test-hygiene
+resolution-undo: 36635e4be7c38ae86fb67ecab9a11a98778641ab03dc21803191ad05a7466469 2026-10-05 7374617475733a206f70656e
 
 ### DW-180: the full `make test` list run with `-W default` prints ~140 `ResourceWarning: unclosed database in <sqlite3.Connection>` from `collector_core/collector.py` and …
 
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: collector_core/collector.py
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-23-1-observability-context-and-migration-guardrails.md` summary: the full `make test` list run with `-W default` prints ~140 `ResourceWarning: unclosed database in <sqlite3.Connection>` from `collector_core/collector.py` and `second_snapshot.py` (the candle store connection a test-built `Collector` opens and never closes; loudest in `collector_core/tests/test_collector.py`, `dydx_collector/tests/test_build_candles.py`, `test_collector_resilience.py`), plus one unclosed event loop; the default filter hides all of them (TEST-04). evidence: third review pass of 23.1, collector image `story-23-1/collector:latest`: 163 warnings under `-W default` versus 15 under the default filter; none from `platform/observability` or `platform/tests`. Pre-dates 23.1, which touched neither the candle store nor those tests.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-lint-and-test-hygiene
+resolution-undo: 36635e4be7c38ae86fb67ecab9a11a98778641ab03dc21803191ad05a7466469 2026-10-05 7374617475733a206f70656e
 
 ### DW-181: one file-name parser (`kernel.clocks.CatalogFileSpan.from_path`), two policies for a `*.parquet` whose stem the catalog did not write inside an instrument …
 
@@ -1506,7 +1510,9 @@ resolution: already resolved: platform/capture/application/capture_service.py:12
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-24-1-candles-context-behind-the-secondsink-port.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-24-1-candles-context-behind-the-secondsink-port.md` summary: the epic's "exactly two folds exist in `platform/`" invariant (this story's AC #4) has no automated guard — it is asserted only by a one-shot `grep` in the spec's Verification block, so the next hand-rolled aggregation reintroduces a third fold with nothing failing. evidence: `grep -rn "fold_arrays" platform/tests platform/candles/tests` finds no structural assertion, only docstrings. The repo already has the machinery for this class of invariant (`tests/test_boundaries.py`, `test_images.py`, `test_namespace.py`, `test_hotpath.py` are all static source guards), so this is a gap in coverage rather than a missing capability. Checked and *not* a violation today: `data_api/routes/indicator_series.py`'s `snapshot.ts_event // bar_ns` bucketing samples indicator values per bucket and produces no OHLCV, so it is not a seconds->bars fold; a guard would have to be written to admit it deliberately.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-lint-and-test-hygiene
+resolution-undo: 36635e4be7c38ae86fb67ecab9a11a98778641ab03dc21803191ad05a7466469 2026-10-05 7374617475733a206f70656e
 
 ### DW-193: this story moved candle-store ownership to the three venue entrypoints without giving them a teardown — `CandleStore.close()` is called only by …
 
@@ -1906,7 +1912,9 @@ decision: 2026-10-05 Prove 3.x — Run catalog read/backtest suite on pandas 3.x
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: platform/views/tests/test_live_candles.py::test_seed_wide_bar_reads_raw_seconds_plus_unflushed_tail
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-27-1-research-domain-analysis-values-and-application-ports.md` summary: `platform/views/tests/test_live_candles.py::test_seed_wide_bar_reads_raw_seconds_plus_unflushed_tail` is wall-clock flaky -- it floors `time.time_ns()` to a bucket and then feeds a snapshot at `now - 1s`, which falls in the previous bucket whenever the test runs within the first second of a bucket. evidence: failed once in the 27.1 follow-up review's full-suite run (2026-09-28), then passed 3/3 in isolation; the test reads `time.time_ns()` at line 233 and builds `_snapshot(now_ns - 1_000_000_000, ...)` at line 248; `views` imports nothing 27.1 changed.
-status: open
+status: done 2026-10-05
+resolution: resolved by sweep bundle dw-lint-and-test-hygiene
+resolution-undo: 36635e4be7c38ae86fb67ecab9a11a98778641ab03dc21803191ad05a7466469 2026-10-05 7374617475733a206f70656e
 
 ### DW-246: `research/application/quotes.py`'s `derived_quotes` (moved unchanged out of `snapshot_backtest.py`) builds each `QuoteTick` from level 0 without checking `bid …
 

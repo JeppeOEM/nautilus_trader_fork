@@ -84,6 +84,9 @@ def test_deliver_sends_telegram_message_to_bot_api(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("TELEGRAM_API_BASE", f"http://127.0.0.1:{server.server_port}")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
-    NotifyDeliverer().deliver(_alert(webhook_url=""), "BTC crossed 65000")
-    server.shutdown()
+    try:
+        NotifyDeliverer().deliver(_alert(webhook_url=""), "BTC crossed 65000")
+    finally:
+        server.shutdown()
+        server.server_close()  # shutdown() only stops the loop; this closes the listening socket
     assert received == [("/bot123:abc/sendMessage", {"chat_id": "42", "text": "BTC crossed 65000"})]

@@ -271,7 +271,8 @@ def test_a_composite_source_on_a_candle_with_a_none_component_is_a_gap_not_a_typ
     for source in ("hl2", "hlc3", "ohlc4"):
         out = replay_indicator(candles, "SimpleMovingAverage", {"period": 1}, source)["value"]
         assert out[1] is None, source
-        assert out[0] is not None and out[2] is not None, source
+        assert out[0] is not None, source
+        assert out[2] is not None, source
     # a source that does not need the missing field is unaffected
     assert replay_indicator(candles, "SimpleMovingAverage", {"period": 1}, "low")["value"][1] == 9.0
 

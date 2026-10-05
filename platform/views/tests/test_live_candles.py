@@ -22,7 +22,6 @@ how `test_rankings.py` unit-tests `RankingsBus.handle_message` in isolation).
 import asyncio
 import inspect
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -47,6 +46,14 @@ _BAR_SECONDS = 60
 # _BASE_NS convention).
 _BASE_NS = 1_800_000_000_000_000_000
 assert _BASE_NS % (_BAR_SECONDS * 1_000_000_000) == 0
+# The seed tests' pinned wall clock: mid-bucket for both 60 s and 4 h bars (_BASE_NS is a multiple
+# of 14,400 s too), so a seed never straddles a bucket edge whatever the real time is.
+_NOW_NS = _BASE_NS + 30 * 1_000_000_000
+assert _BASE_NS % (14_400 * 1_000_000_000) == 0
+
+
+def _clock() -> int:
+    return _NOW_NS
 
 
 def _snapshot(ts_event: int, price: float, iid: str = _IID) -> DydxSecondSnapshot:
@@ -199,12 +206,12 @@ async def test_seed_fills_bucket_start_so_forming_bar_covers_whole_bucket(
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
     bucket_ns = _BAR_SECONDS * 1_000_000_000
-    now_ns = time.time_ns()
+    now_ns = _NOW_NS
     start_ns = now_ns // bucket_ns * bucket_ns
     # Two snapshots already in the catalog for this bucket, before we "subscribe".
     early = [_snapshot(start_ns, 100.0), _snapshot(start_ns + 1, 90.0)]
     ParquetDataCatalog(str(tmp_path)).write_data(early)
-    bus = LiveCandleBus(str(tmp_path))
+    bus = LiveCandleBus(str(tmp_path), clock=_clock)
     queue = bus.subscribe(_IID, _BAR_SECONDS)
     await bus.seed(_IID, _BAR_SECONDS)
     bar = queue.get_nowait()["bar"]
@@ -231,11 +238,11 @@ async def test_seed_wide_bar_reads_raw_seconds_plus_unflushed_tail(
 
     bar_seconds = 14_400
     bucket_ns = bar_seconds * 1_000_000_000
-    now_ns = time.time_ns()
+    now_ns = _NOW_NS
     start_ns = now_ns // bucket_ns * bucket_ns
 
     def seconds(_path: str, _iid: str, a: int, b: int) -> list[SecondOHLC]:
-        assert (a, b) == (start_ns, pytest.approx(now_ns, abs=5_000_000_000))
+        assert (a, b) == (start_ns, now_ns)
         return [
             SecondOHLC(start_ns, 100.0, 105.0, 99.0, 104.0, 1.0, 0.5),
             SecondOHLC(start_ns + 1_000_000_000, None, None, None, None, 0.0, 0.0),
@@ -243,7 +250,7 @@ async def test_seed_wide_bar_reads_raw_seconds_plus_unflushed_tail(
         ]
 
     monkeypatch.setattr(lc, "query_second_ohlc", seconds)
-    bus = LiveCandleBus(_NO_CATALOG)
+    bus = LiveCandleBus(_NO_CATALOG, clock=_clock)
     queue = bus.subscribe(_IID, bar_seconds)
     # A live second the collector has not flushed yet, newer than every archived second.
     bus.handle_batch([DydxSecondSnapshot.to_dict(_snapshot(now_ns - 1_000_000_000, 120.0))])
@@ -259,8 +266,8 @@ async def test_seed_wide_bar_reads_raw_seconds_plus_unflushed_tail(
 @pytest.mark.asyncio
 async def test_seed_includes_unflushed_recent_seconds(tmp_path: Path) -> None:
     bucket_ns = _BAR_SECONDS * 1_000_000_000
-    start_ns = time.time_ns() // bucket_ns * bucket_ns
-    bus = LiveCandleBus(str(tmp_path))  # empty catalog: nothing flushed yet
+    start_ns = _NOW_NS // bucket_ns * bucket_ns
+    bus = LiveCandleBus(str(tmp_path), clock=_clock)  # empty catalog: nothing flushed yet
     # Seen live before this subscriber arrived (another pair was watching the coin).
     bus.handle_batch([DydxSecondSnapshot.to_dict(_snapshot(start_ns, 100.0))])
     queue = bus.subscribe(_IID, _BAR_SECONDS)
@@ -275,9 +282,9 @@ async def test_seed_never_prepends_previous_bucket_after_rollover(
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
     bucket_ns = _BAR_SECONDS * 1_000_000_000
-    start_ns = time.time_ns() // bucket_ns * bucket_ns
+    start_ns = _NOW_NS // bucket_ns * bucket_ns
     ParquetDataCatalog(str(tmp_path)).write_data([_snapshot(start_ns, 100.0)])
-    bus = LiveCandleBus(str(tmp_path))
+    bus = LiveCandleBus(str(tmp_path), clock=_clock)
     queue = bus.subscribe(_IID, _BAR_SECONDS)
     # A tick from the NEXT bucket lands before the seed read finishes.
     bus._buffers[(_IID, _BAR_SECONDS)] = [_snapshot(start_ns + bucket_ns, 500.0)]
@@ -657,9 +664,8 @@ def test_observed_one_day_width_is_folded() -> None:
 def test_seed_publish_is_not_handed_to_observers(monkeypatch: pytest.MonkeyPatch) -> None:
     import views.live_candles as lc
 
-    bus = LiveCandleBus(_NO_CATALOG)
-    now_ns = time.time_ns()
-    seeded = _snapshot(now_ns // 60_000_000_000 * 60_000_000_000, 100.0)
+    bus = LiveCandleBus(_NO_CATALOG, clock=_clock)
+    seeded = _snapshot(_NOW_NS // 60_000_000_000 * 60_000_000_000, 100.0)
     monkeypatch.setattr(lc, "query_second_ohlc", lambda *_a: [lc._second_row(seeded)])
     queue = bus.subscribe(_IID, _BAR_SECONDS)
     observer = _RecordingObserver(frozenset({(_IID, _BAR_SECONDS)}))

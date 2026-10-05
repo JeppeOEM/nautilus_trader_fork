@@ -119,9 +119,12 @@ class _RecordingSink:
         self,
         failing: set[str] | None = None,
         failing_with: dict[str, type[Exception]] | None = None,
+        failing_close: bool = False,
     ) -> None:
         self.applied: dict[str, list[SecondRow]] = {}
         self.calls: list[str] = []
+        self.closes = 0
+        self._failing_close = failing_close
         self._failing: dict[str, type[Exception]] = dict.fromkeys(failing or (), RuntimeError)
         self._failing.update(failing_with or {})
         self._through: dict[str, int] = {}
@@ -140,6 +143,11 @@ class _RecordingSink:
 
     def watermarks(self) -> Mapping[str, int]:
         return dict(self._through)
+
+    def close(self) -> None:
+        self.closes += 1
+        if self._failing_close:
+            raise OSError("candle store close failed")
 
     def seconds(self, instrument_id: str) -> list[int]:
         return [r.ts_event for r in self.applied.get(instrument_id, [])]
@@ -691,6 +699,102 @@ def test_the_catch_up_runs_before_the_first_subscribe(
     asyncio.run(c.run())
 
     assert events == ["connect", "catch_up", f"subscribe {_BYBIT}", "disconnect"]
+
+
+class _ClosingSink(_RecordingSink):
+    """Puts its `close` into the client's event list, so its place in `run()`'s unwind shows."""
+
+    def __init__(self, events: list[str], failing_close: bool = False) -> None:
+        super().__init__(failing_close=failing_close)
+        self._events = events
+
+    def close(self) -> None:
+        self._events.append("close")
+        super().close()
+
+
+class _UnlistableClient(_LifecycleClient):
+    """A venue whose instrument listing fails: `run()` raises before it connects or loops."""
+
+    async def fetch_instruments(self) -> list[_ListedInstrument]:
+        raise ConnectionError("venue REST unreachable")
+
+
+def _stopped_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sink: _RecordingSink, client: object
+) -> CaptureService:
+    """Build a collector, stop it before it starts, and `run()` it to the end of its unwind."""
+    monkeypatch.setattr(collector_mod, "instruments_from_pyo3", lambda pyo3: [])
+    c = _collector(tmp_path, client=client, second_sink=sink)
+    c._applied.clear()  # `run()` applies the plan itself
+    c.stop()
+    asyncio.run(c.run())
+    return c
+
+
+def test_run_closes_the_sink_once_last_after_a_clean_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The service owns the sink it was handed: a `run_forever` restart builds a fresh store per
+    attempt, so a sink left open is one leaked SQLite connection per restart.
+    """
+    events: list[str] = []
+    sink = _ClosingSink(events)
+    _stopped_run(tmp_path, monkeypatch, sink, _LifecycleClient(events))
+    assert sink.closes == 1
+    assert events[-2:] == ["disconnect", "close"]  # after the unwind, so after the final flush
+
+
+def test_run_closes_the_sink_when_it_fails_before_its_loops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    sink = _ClosingSink(events)
+    with pytest.raises(ConnectionError, match="venue REST unreachable"):
+        _stopped_run(tmp_path, monkeypatch, sink, _UnlistableClient(events))
+    assert sink.closes == 1
+    assert events == ["close"]
+
+
+def test_a_failing_sink_close_is_ledgered_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    sink = _ClosingSink(events, failing_close=True)
+    error_ledger.reset()
+    _stopped_run(tmp_path, monkeypatch, sink, _LifecycleClient(events))
+    counts = error_ledger.counts()
+    error_ledger.reset()
+    assert sink.closes == 1
+    assert counts == {sites.SECOND_SINK_CLOSE: 1}
+
+
+def test_a_failing_sink_close_keeps_the_original_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    sink = _ClosingSink(events, failing_close=True)
+    error_ledger.reset()
+    with pytest.raises(ConnectionError, match="venue REST unreachable"):
+        _stopped_run(tmp_path, monkeypatch, sink, _UnlistableClient(events))
+    counts = error_ledger.counts()
+    error_ledger.reset()
+    assert counts == {sites.SECOND_SINK_CLOSE: 1}
+
+
+def test_run_without_a_sink_has_nothing_to_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(collector_mod, "instruments_from_pyo3", lambda pyo3: [])
+    c = _collector(tmp_path, client=_LifecycleClient([]), second_sink=_NO_SINK)
+    c._applied.clear()
+    c.stop()
+    error_ledger.reset()
+    asyncio.run(c.run())
+    counts = error_ledger.counts()
+    error_ledger.reset()
+    assert sites.SECOND_SINK_CLOSE not in counts
 
 
 def test_a_collector_without_a_sink_still_flushes(

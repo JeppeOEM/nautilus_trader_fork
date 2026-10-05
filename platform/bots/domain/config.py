@@ -105,6 +105,8 @@ def plain_params(value: Any) -> Any:
     if isinstance(value, tuple):
         return [plain_params(item) for item in value]
     return value
+
+
 # An exit 10_000 basis points (100%) or more below the entry -- a long's stop-loss, a short's
 # take-profit -- sits at or below zero, so neither key may reach it.
 MAX_EXIT_BPS = 9_999

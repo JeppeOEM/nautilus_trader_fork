@@ -214,7 +214,7 @@ def test_build_node_passes_redis_credentials_and_ssl_from_url() -> None:
         assert db.host == "myhost"
         assert db.port == 6380
         assert db.username == "user"
-        assert db.password == "secret"
+        assert db.password == "secret"  # noqa: S105  test fixture credential, not a secret
         assert db.ssl is True
     finally:
         _dispose(node)

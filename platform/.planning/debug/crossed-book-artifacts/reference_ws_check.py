@@ -21,9 +21,10 @@ stale price at the same moment, the loss is upstream of both of us.
 """
 
 import asyncio
+import contextlib
 import json
 import re
-import subprocess
+import shutil
 import time
 from collections import deque
 from decimal import Decimal
@@ -78,38 +79,40 @@ def apply_side(ticker: str, side: str, levels: list) -> None:
 
 
 async def ws_reader() -> None:
-    async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(WS_URL, heartbeat=30) as ws:
-            for ticker in INSTRUMENTS:
-                await ws.send_json({"type": "subscribe", "channel": "v4_orderbook", "id": ticker})
-            print(
-                f"[{time.strftime('%H:%M:%S')}] reference client subscribed: {INSTRUMENTS}",
-                flush=True,
-            )
+    async with (
+        aiohttp.ClientSession() as session,
+        session.ws_connect(WS_URL, heartbeat=30) as ws,
+    ):
+        for ticker in INSTRUMENTS:
+            await ws.send_json({"type": "subscribe", "channel": "v4_orderbook", "id": ticker})
+        print(
+            f"[{time.strftime('%H:%M:%S')}] reference client subscribed: {INSTRUMENTS}",
+            flush=True,
+        )
 
-            async for msg in ws:
-                if msg.type != aiohttp.WSMsgType.TEXT:
-                    continue
-                data = json.loads(msg.data)
-                ticker = data.get("id")
-                if ticker not in INSTRUMENTS:
-                    continue
+        async for msg in ws:
+            if msg.type != aiohttp.WSMsgType.TEXT:
+                continue
+            data = json.loads(msg.data)
+            ticker = data.get("id")
+            if ticker not in INSTRUMENTS:
+                continue
 
-                now_ns = time.time_ns()
-                raw_history[ticker].append((now_ns, data))
+            now_ns = time.time_ns()
+            raw_history[ticker].append((now_ns, data))
 
-                try:
-                    msg_type = data.get("type")
-                    contents = data.get("contents", {})
-                    if msg_type == "subscribed":
-                        books[ticker] = {"bids": {}, "asks": {}}
-                        apply_side(ticker, "bids", contents.get("bids", []))
-                        apply_side(ticker, "asks", contents.get("asks", []))
-                    elif msg_type == "channel_data":
-                        apply_side(ticker, "bids", contents.get("bids", []))
-                        apply_side(ticker, "asks", contents.get("asks", []))
-                except Exception as e:
-                    print(f"Failed to apply message for {ticker}: {e}", flush=True)
+            try:
+                msg_type = data.get("type")
+                contents = data.get("contents", {})
+                if msg_type == "subscribed":
+                    books[ticker] = {"bids": {}, "asks": {}}
+                    apply_side(ticker, "bids", contents.get("bids", []))
+                    apply_side(ticker, "asks", contents.get("asks", []))
+                elif msg_type == "channel_data":
+                    apply_side(ticker, "bids", contents.get("bids", []))
+                    apply_side(ticker, "asks", contents.get("asks", []))
+            except Exception as e:
+                print(f"Failed to apply message for {ticker}: {e}", flush=True)
 
 
 async def periodic_snapshot_log() -> None:
@@ -165,22 +168,38 @@ def dump_episode(iid: str, our_bid: str, our_ask: str) -> None:
 
 
 async def docker_log_watcher() -> None:
-    proc = subprocess.Popen(
-        ["docker", "logs", "-f", "--since", "0s", "dydx-collector"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
+    docker = shutil.which("docker")
+    if docker is None:
+        raise RuntimeError("docker CLI not found on PATH")
+    proc = await asyncio.create_subprocess_exec(
+        docker,
+        "logs",
+        "-f",
+        "--since",
+        "0s",
+        "dydx-collector",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        # Known limit: asyncio's StreamReader caps a line (default 64 KiB) where the blocking
+        # Popen readline this replaced had no cap; a line over 16 MiB still raises out of
+        # `readline()` and ends the watcher. Upgrade path: chunked `read()` with own splitting.
+        limit=1 << 24,
     )
     assert proc.stdout is not None
-    loop = asyncio.get_running_loop()
-    while True:
-        line = await loop.run_in_executor(None, proc.stdout.readline)
-        if not line:
-            break
-        m = _crossed_re.search(line)
-        if m and m.group("iid") in IID_TO_TICKER:
-            dump_episode(m.group("iid"), m.group("bid"), m.group("ask"))
+    try:
+        while True:
+            raw = await proc.stdout.readline()
+            if not raw:
+                break
+            line = raw.decode(errors="replace")
+            m = _crossed_re.search(line)
+            if m and m.group("iid") in IID_TO_TICKER:
+                dump_episode(m.group("iid"), m.group("bid"), m.group("ask"))
+    finally:
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):  # exited since the check
+                proc.terminate()
+        await proc.wait()
 
 
 async def main() -> None:

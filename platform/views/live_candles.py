@@ -41,6 +41,7 @@ import logging
 import time
 from collections import defaultdict
 from collections import deque
+from collections.abc import Callable
 from typing import Protocol
 
 import redis.asyncio as aioredis
@@ -188,7 +189,9 @@ class LiveCandleBus:
     running app uses is `data_api.buses.live_candle_bus`, but tests construct their own
     isolated `LiveCandleBus(catalog_path)` so a buffer-lifecycle/convergence unit test
     never shares state with another test or a live subscriber task. `catalog_path` is the
-    archive the seed reads the current bucket's earlier seconds from.
+    archive the seed reads the current bucket's earlier seconds from. `clock` (wall time, ns) is
+    the one "now" the bus reads, to place the seed's bucket; a test pins it so a seed never
+    straddles a bucket edge.
 
     Known limit: a pair only an observer watches is never seeded (the seed reads the catalog for a
     listener's first paint), so its first bar after the pair becomes watched -- at attach, on
@@ -202,8 +205,9 @@ class LiveCandleBus:
     kept equal to `fold_arrays` by the candles equivalence test.
     """
 
-    def __init__(self, catalog_path: str) -> None:
+    def __init__(self, catalog_path: str, *, clock: Callable[[], int] = time.time_ns) -> None:
         self._catalog_path = catalog_path
+        self._clock = clock
         # `SecondOHLC` rows, not snapshots: an always-on 1D alert keeps up to 86,400 seconds
         # buffered, ~10-15 MB as the fold's 7-field projection versus hundreds as 20-level books.
         self._buffers: dict[_BufferKey, list[SecondOHLC]] = {}
@@ -323,7 +327,7 @@ class LiveCandleBus:
         if key in self._seeded or key not in self._listeners:
             return
         self._seeded.add(key)
-        now_ns = time.time_ns()
+        now_ns = self._clock()
         start_ns = _bucket_of(now_ns, bar_seconds) * 1_000_000
         try:
             rows = await asyncio.to_thread(

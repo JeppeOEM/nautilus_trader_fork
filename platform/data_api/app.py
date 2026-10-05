@@ -36,6 +36,7 @@ service (`network_mode: host` + `uvicorn --host 127.0.0.1`), no `ports:` entry.
 """
 
 import asyncio
+import contextlib
 import os
 from collections.abc import AsyncIterator
 from collections.abc import Callable
@@ -129,10 +130,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         live_candles_task.cancel()
         archive_status_task.cancel()
         for task in (rankings_task, live_candles_task, archive_status_task):
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
 
 
 app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)

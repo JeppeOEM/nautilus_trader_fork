@@ -15,6 +15,9 @@
 """The sink adapter, the store factory and the retention loop -- the wiring a venue entrypoint does."""
 
 import asyncio
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -30,47 +33,63 @@ from candles.tests.test_candle_store import _IID
 from candles.tests.test_candle_store import _second
 
 
-def _sink(tmp_path: Path) -> tuple[CandleSink, CandleStore]:
+@contextmanager
+def _sink(tmp_path: Path) -> Iterator[tuple[CandleSink, CandleStore]]:
+    """Yield a sink over a fresh store, closed through the sink afterwards (as capture does)."""
     store = CandleStore(str(tmp_path / "candles_dydx.db"))
-    return CandleSink(store), store
+    sink = CandleSink(store)
+    try:
+        yield sink, store
+    finally:
+        sink.close()
 
 
-def test_the_sink_offers_exactly_the_ports_two_methods(tmp_path: Path) -> None:
+def test_the_sink_offers_exactly_the_ports_three_methods(tmp_path: Path) -> None:
     """
     `CandleSink` never imports `capture.application.ports.SecondSink` -- candles imports no context but
     kernel and observability, so the port is satisfied structurally (spine AD-D2). The typed
     conformance is asserted from the composition root's side, in
     `capture/venues/dydx/tests/test_candle_feed.py`; here only the shape and the return values.
     """
-    sink, _ = _sink(tmp_path)
-    assert sink.apply(_IID, [_second(0, 100.0)]) == 1
-    assert dict(sink.watermarks()) == {_IID: _second(0, 100.0).ts_event}
+    with _sink(tmp_path) as (sink, _):
+        public = {n for n in dir(sink) if not n.startswith("_") and callable(getattr(sink, n))}
+        assert public == {"apply", "watermarks", "close"}
+        assert sink.apply(_IID, [_second(0, 100.0)]) == 1
+        assert dict(sink.watermarks()) == {_IID: _second(0, 100.0).ts_event}
+
+
+def test_closing_the_sink_closes_its_store(tmp_path: Path) -> None:
+    """`close` is the port's third method: capture's `run()` calls it once, when it ends."""
+    store = CandleStore(str(tmp_path / "candles_dydx.db"))
+    CandleSink(store).close()
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        store.connection.execute("SELECT 1")
 
 
 def test_applied_seconds_become_bars_and_a_watermark(tmp_path: Path) -> None:
-    sink, store = _sink(tmp_path)
-    rows = [_second(s, 100.0 + s) for s in range(120)]
-    assert sink.apply(_IID, rows) == 120
-    assert sink.watermarks() == {_IID: rows[-1].ts_event}
-    assert len(queries.window(store.connection, _IID, 60, 1 << 62, 10)) == 2
+    with _sink(tmp_path) as (sink, store):
+        rows = [_second(s, 100.0 + s) for s in range(120)]
+        assert sink.apply(_IID, rows) == 120
+        assert sink.watermarks() == {_IID: rows[-1].ts_event}
+        assert len(queries.window(store.connection, _IID, 60, 1 << 62, 10)) == 2
 
 
 def test_a_replayed_batch_applies_nothing_and_changes_no_volume(tmp_path: Path) -> None:
     """The `_UPSERT` accumulates `v`, so only the watermark keeps a second from counting twice."""
-    sink, store = _sink(tmp_path)
-    rows = [_second(s, 100.0 + s) for s in range(60)]
-    sink.apply(_IID, rows)
-    before = queries.window(store.connection, _IID, 60, 1 << 62, 5)
-    assert sink.apply(_IID, rows) == 0
-    assert queries.window(store.connection, _IID, 60, 1 << 62, 5) == before
+    with _sink(tmp_path) as (sink, store):
+        rows = [_second(s, 100.0 + s) for s in range(60)]
+        sink.apply(_IID, rows)
+        before = queries.window(store.connection, _IID, 60, 1 << 62, 5)
+        assert sink.apply(_IID, rows) == 0
+        assert queries.window(store.connection, _IID, 60, 1 << 62, 5) == before
 
 
 def test_one_instruments_rows_never_reach_another(tmp_path: Path) -> None:
-    sink, store = _sink(tmp_path)
-    other = "ETH-USD-PERP.DYDX"
-    sink.apply(_IID, [_second(0, 100.0)])
-    assert queries.window(store.connection, other, 60, 1 << 62, 5) == []
-    assert list(sink.watermarks()) == [_IID]
+    with _sink(tmp_path) as (sink, store):
+        other = "ETH-USD-PERP.DYDX"
+        sink.apply(_IID, [_second(0, 100.0)])
+        assert queries.window(store.connection, other, 60, 1 << 62, 5) == []
+        assert list(sink.watermarks()) == [_IID]
 
 
 def test_db_path_for_venue_is_the_frozen_filename_formula(tmp_path: Path) -> None:

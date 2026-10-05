@@ -64,7 +64,7 @@ def test_parse_candle_channel(channel: str, expected: tuple[str, int] | None) ->
 @pytest.fixture
 def isolated_bus(monkeypatch: pytest.MonkeyPatch) -> LiveCandleBus:
     """
-    A fresh `LiveCandleBus`, isolated from the module-level `live_candle_bus` the
+    Provide a fresh `LiveCandleBus`, isolated from the module-level `live_candle_bus` the
     running app uses -- `_CandleSubscriptions` (ws/live.py) calls through
     `buses.live_candle_bus` dynamically, so patching the module attribute is
     enough to redirect it without editing ws/live.py's own code.

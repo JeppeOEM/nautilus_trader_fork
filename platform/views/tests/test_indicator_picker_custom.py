@@ -57,7 +57,7 @@ def _window() -> ReplayWindow:
 def _echo_replay(
     candles: list[dict], params: dict, window: ReplayWindow
 ) -> dict[str, list[float | None]]:
-    """A placeholder replay: one output ("value") per candle, scaled by params["scale"]."""
+    """Echo each candle's close scaled by params["scale"], as one "value" output (a placeholder)."""
     return {"value": [c["c"] * params["scale"] for c in candles]}
 
 

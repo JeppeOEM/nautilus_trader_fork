@@ -1,4 +1,14 @@
 "ETHUSDT-LINEAR.BYBIT" = []
+"BTCUSDT-LINEAR.BYBIT" = []
+
+[["BTCUSDT-SPOT.BYBIT"]]
+name = "VariableIndexDynamicAverage"
+category = "native"
+
+["BTCUSDT-SPOT.BYBIT".params]
+period = 20
+price_type = "LAST"
+cmo_ma_type = "SIMPLE"
 
 [["SOL-USD-PERP.HYPERLIQUID"]]
 name = "HullMovingAverage"

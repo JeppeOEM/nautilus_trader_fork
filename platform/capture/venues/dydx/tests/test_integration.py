@@ -73,17 +73,26 @@ async def main() -> None:
         stopper = asyncio.create_task(_stopper())
         await collector.run()
         stopper.cancel()
+        _audit_catalog(Path(tmpdir))
 
-        files = sorted(Path(tmpdir).rglob("*.parquet"))
-        print(f"\n--- catalog audit: {len(files)} parquet file(s) ---")
-        for f in files:
-            size = f.stat().st_size
-            print(f"  {f.relative_to(tmpdir)}  ({size:,} bytes)")
 
-        if not files:
-            print("\nFAIL: no parquet files written")
-            sys.exit(1)
-        print("\nOK")
+def _audit_catalog(root: Path) -> None:
+    """
+    Print every Parquet file the run wrote; exit 1 when there are none.
+
+    Synchronous, and called from `main()` on the running loop: it blocks that loop, which is
+    harmless only because the collector has already stopped and nothing else is scheduled.
+    """
+    files = sorted(root.rglob("*.parquet"))
+    print(f"\n--- catalog audit: {len(files)} parquet file(s) ---")
+    for f in files:
+        size = f.stat().st_size
+        print(f"  {f.relative_to(root)}  ({size:,} bytes)")
+
+    if not files:
+        print("\nFAIL: no parquet files written")
+        sys.exit(1)
+    print("\nOK")
 
 
 if __name__ == "__main__":

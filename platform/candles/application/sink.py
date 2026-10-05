@@ -51,3 +51,7 @@ class CandleSink:
     def watermarks(self) -> Mapping[str, int]:
         """instrument_id -> `ts_event` (ns) of the last second applied."""
         return self._store.watermarks()
+
+    def close(self) -> None:
+        """Close the store's connection; capture calls this once, when its `run()` ends."""
+        self._store.close()

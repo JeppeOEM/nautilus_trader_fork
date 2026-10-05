@@ -351,8 +351,11 @@ def test_a_store_write_failure_is_ledgered_instead_of_crashing(
     error_ledger.reset()
     unwritable = SqliteFillsStore(str(tmp_path))  # a directory, not a file
     history = HistoryPublisher("bot-01", _UNUSED_RUNTIME, unwritable, unused_connect, None)
-    with caplog.at_level("ERROR"):
-        history.record_fill(fill, strategy.cache.position(fill.position_id))  # must not raise
+    try:
+        with caplog.at_level("ERROR"):
+            history.record_fill(fill, strategy.cache.position(fill.position_id))  # must not raise
+    finally:
+        unwritable.close()
 
     assert error_ledger.counts() == {"bots.fill_lost": 1}
     assert len(caplog.records) == 1

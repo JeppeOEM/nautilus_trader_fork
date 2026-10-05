@@ -169,6 +169,9 @@ COMPOSITION_ROOTS: dict[str, frozenset[str]] = {
     "capture.venues.dydx.tests.test_candle_feed": frozenset({CANDLES}),
     "capture.venues.bybit.tests.test_candle_wiring": frozenset({CANDLES}),
     "capture.venues.hyperliquid.tests.test_candle_wiring": frozenset({CANDLES}),
+    # ...and the venue tests' conftest, which closes every `CandleStore` those roots open
+    # (`ResourceWarning: unclosed database`, TEST-04): it names the class to wrap, nothing more.
+    "capture.venues.conftest": frozenset({CANDLES}),
     # ...and their collection-control wiring, asserted per venue for the same reason (Story 29.2's
     # status wiring tests, extended to the whole control plane in Story 29.4).
     "capture.venues.bybit.tests.test_control_wiring": frozenset({COLLECTION_CONTROL}),

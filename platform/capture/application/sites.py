@@ -53,6 +53,7 @@ FLUSH_WRITE = "collector.flush_write"
 CANDLE_STORE = "collector.candle_store"
 CANDLE_STORE_CATCH_UP = "collector.candle_store_catch_up"
 NO_SECOND_SINK = "collector.no_second_sink"
+SECOND_SINK_CLOSE = "collector.second_sink_close"
 CANDLE_STORE_BEHIND = "collector.candle_store_behind"
 SNAPSHOT_PUBLISH = "collector.snapshot_publish"
 # the per-flush hot-path record on `capture:hotpath` (Story 28.1)

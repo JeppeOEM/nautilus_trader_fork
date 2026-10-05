@@ -396,7 +396,7 @@ def _check_position(item: dict[str, Any]) -> None:
 
 
 def _check_anchored_vp(item: dict[str, Any]) -> None:
-    """An Anchored VP: the anchor bar, the engine's row count and value area, the two colours."""
+    """Check an Anchored VP: the anchor bar, the engine's row count, value area and two colours."""
     _check_time(item.get("time"), "time")
     _require_int(item, "rows", MIN_PROFILE_ROWS, MAX_PROFILE_ROWS)
     _require_number(item, "value_area_pct")
@@ -408,7 +408,7 @@ def _check_anchored_vp(item: dict[str, Any]) -> None:
 
 
 def _check_anchored_vwap(item: dict[str, Any]) -> None:
-    """An Anchored VWAP: the anchor bar, the source, the bands switch and the band colour."""
+    """Check an Anchored VWAP: the anchor bar, the source, the bands switch and the band colour."""
     _check_time(item.get("time"), "time")
     if item.get("source") not in VWAP_SOURCES:
         raise DrawingError("source", f"must be one of {list(VWAP_SOURCES)}")
@@ -449,6 +449,12 @@ def validate_drawing(item: Any) -> dict[str, Any]:
     unknown = set(item) - {"kind", "id", "color"} - _DRAWING_KEYS[kind]
     if unknown:
         raise DrawingError(sorted(unknown)[0], f"is not a field of a {kind}")
+    _check_kind_fields(kind, item)
+    return item
+
+
+def _check_kind_fields(kind: str, item: dict[str, Any]) -> None:
+    """Check the fields specific to `kind` (already known to be one of `DRAWING_KINDS`)."""
     if kind == "hline":
         _require_number(item, "price", positive=True)
     elif kind == "trendline":
@@ -462,7 +468,6 @@ def validate_drawing(item: Any) -> dict[str, Any]:
         _check_anchored_vp(item)
     else:
         _check_anchored_vwap(item)
-    return item
 
 
 def validate_drawings(items: Any) -> list[dict[str, Any]]:

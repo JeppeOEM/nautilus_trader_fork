@@ -947,6 +947,22 @@ def test_a_crash_is_ledgered_with_its_traceback_and_the_service_restarts(
     assert "restarting in 1s" in error_ledger.last_details()["collector.crash"]
 
 
+def test_run_forever_closes_the_sink_when_the_pre_run_quarantine_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A service built and never run is closed by `run_forever` itself: `run()` never sees it."""
+    c = _collector(tmp_path)
+    sink = c._second_sink
+
+    def quarantine(ids: list[str], ledger: object) -> None:
+        raise OSError("catalog unreadable")
+
+    monkeypatch.setattr(c._archive, "quarantine_corrupt", quarantine)
+    with pytest.raises(OSError, match="catalog unreadable"):
+        asyncio.run(run_forever(lambda: c, init_rust_logging=False))
+    assert sink.closes == 1  # type: ignore[union-attr]
+
+
 def test_a_candle_store_a_day_behind_is_ledgered(tmp_path: Path) -> None:
     error_ledger.reset()
     c = _collector(tmp_path)

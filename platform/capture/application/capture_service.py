@@ -2396,6 +2396,33 @@ class CaptureService:
     # -- lifecycle ---------------------------------------------------------------------------
 
     async def run(self) -> None:
+        """
+        Run until `stop()` or a loop dies, then close the second sink this service was handed.
+
+        The sink is closed in this outer `finally`, after `_run`'s own unwind (every loop
+        cancelled and gathered -- including a venue's `candle_prune_loop`, which shares the
+        sink's store -- then the final flush, the disconnect, the live-stream close), so nothing
+        touches the store after it, and also when `_run` fails before its loops start
+        (`fetch_instruments`, `_connect`). Each `run_forever` attempt builds a fresh sink, so this
+        is what keeps a crash-restart from leaking one SQLite connection per attempt;
+        `run_forever` closes the sink itself on the paths that build a service and never run it
+        (shut down while waiting for the capture lock, or the lock or quarantine step raising).
+        """
+        try:
+            await self._run()
+        finally:
+            self._close_second_sink()
+
+    def _close_second_sink(self) -> None:
+        """Close the sink; a failure is ledgered, never raised over `run`'s own outcome."""
+        if self._second_sink is None:
+            return
+        try:
+            self._second_sink.close()
+        except Exception as e:
+            self._ledger(sites.SECOND_SINK_CLOSE, "second sink close failed", e)
+
+    async def _run(self) -> None:
         self._started = True
         instruments = await self._client.fetch_instruments()
         by_id = {i.id.value: i for i in instruments}
@@ -2563,15 +2590,21 @@ async def run_forever(
                 # Held (shared) for the process lifetime: `repair_catalog` refuses to write under
                 # a running collector, and an archive tool holding it exclusively makes capture
                 # wait. Released by the `finally` below however this loop ends.
-                capture_lock = await collector._archive.acquire_lock(
-                    collector.venue, shutting_down, collector._ledger
-                )
+                try:
+                    capture_lock = await collector._archive.acquire_lock(
+                        collector.venue, shutting_down, collector._ledger
+                    )
+                    if capture_lock is not None and not shutting_down.is_set():
+                        # The plan, not `_instrument_ids()`: nothing is applied before `run()`.
+                        collector._archive.quarantine_corrupt(
+                            sorted(collector._plan_ids), collector._ledger
+                        )
+                except BaseException:
+                    collector._close_second_sink()  # built, never run: `run()` cannot close it
+                    raise
                 if capture_lock is None or shutting_down.is_set():  # shut down while waiting
+                    collector._close_second_sink()  # built, never run: `run()` cannot close it
                     break
-                # The plan, not `_instrument_ids()`: nothing is applied before `run()`.
-                collector._archive.quarantine_corrupt(
-                    sorted(collector._plan_ids), collector._ledger
-                )
                 first = False
             watcher = asyncio.create_task(_stop_on_shutdown(shutting_down, collector))
             try:

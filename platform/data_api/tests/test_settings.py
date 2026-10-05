@@ -13,4 +13,5 @@ assert app.METRICS_DB_PATH == metrics.METRICS_DB_PATH == s.METRICS_DB_PATH
 
 def test_data_api_imports_cleanly_and_shares_one_catalog_path() -> None:
     # Fresh interpreter: a circular import only shows up on a cold import, never in a warm pytest process.
-    subprocess.run([sys.executable, "-c", _CHECK], check=True)
+    # S603: our own interpreter running a fixed source string, no untrusted input.
+    subprocess.run([sys.executable, "-c", _CHECK], check=True)  # noqa: S603

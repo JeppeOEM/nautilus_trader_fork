@@ -21,6 +21,8 @@ live bus hands it its in-progress buffer. Every `o/h/l/c/v` and every `partial` 
 at 1 m, 5 m and 1 h -- if they ever could not, the chart's last candle would jump at bar close.
 """
 
+from collections.abc import Iterator
+
 import pytest
 
 from candles.application import queries
@@ -66,11 +68,14 @@ def _flushed(store: CandleStore, rows: list) -> None:
 @pytest.fixture(scope="module", params=[_rebuilt, _flushed], ids=["rebuilt", "flushed"])
 def stored(
     request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
-) -> tuple[CandleStore, list]:
+) -> Iterator[tuple[CandleStore, list]]:
     rows = _fixture()
     store = CandleStore(str(tmp_path_factory.mktemp("candles") / "c.db"))
-    request.param(store, rows)
-    return store, rows
+    try:
+        request.param(store, rows)
+        yield store, rows
+    finally:
+        store.close()
 
 
 @pytest.mark.parametrize("bar_seconds", _BARS)

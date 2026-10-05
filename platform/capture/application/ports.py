@@ -253,11 +253,19 @@ class SecondSink(Protocol):
 
     `apply` returns the number of seconds it actually took (rows at or before its own watermark are
     a replay and count 0). It may raise: capture ledgers the failure per instrument and carries on.
+
+    `close` releases what the sink holds (the candle store's SQLite connection). The service owns
+    the sink it was handed: `CaptureService.run()` calls `close` exactly once, last, however `run`
+    ends -- after the final flush, so nothing is applied after it, and also when `run` fails before
+    its loops start. `run_forever` builds a fresh sink per attempt, so no restart leaks one. It may
+    raise: capture ledgers the failure and keeps `run`'s own outcome.
     """
 
     def apply(self, instrument_id: str, rows: Sequence[SecondRow]) -> int: ...
 
     def watermarks(self) -> Mapping[str, int]: ...
+
+    def close(self) -> None: ...
 
 
 class PlanDiff(Protocol):

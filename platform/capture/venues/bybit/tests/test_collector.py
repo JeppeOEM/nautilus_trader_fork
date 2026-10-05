@@ -98,9 +98,11 @@ def test_client_routes_by_product_type() -> None:
 
     client = BybitClient(on_data=lambda _: None, ledger=error_ledger.record)
     ws, pt = client._ws_for("BTCUSDT-SPOT.BYBIT")
-    assert ws is client._ws_spot and pt == BybitProductType.SPOT
+    assert ws is client._ws_spot
+    assert pt == BybitProductType.SPOT
     ws, pt = client._ws_for("BTCUSDT-LINEAR.BYBIT")
-    assert ws is client._ws_linear and pt == BybitProductType.LINEAR
+    assert ws is client._ws_linear
+    assert pt == BybitProductType.LINEAR
     with pytest.raises(ValueError, match="unsupported"):
         client._ws_for("BTCUSD-INVERSE.BYBIT")
 

@@ -93,10 +93,11 @@ async def _forward(source: "asyncio.Queue[dict]", outbox: "asyncio.Queue[dict]")
 
 def _log_forward_error(task: "asyncio.Task[None]") -> None:
     """
-    A per-channel `_forward` task isn't in `ws_live`'s monitored `asyncio.wait()` set
-    (there can be any number of them, created/cancelled dynamically) -- without this, an
-    unexpected failure would silently stop that channel's stream and only surface as an
-    "exception was never retrieved" warning from asyncio's default handler.
+    Log a failed per-channel `_forward` task, which isn't in `ws_live`'s monitored
+    `asyncio.wait()` set (there can be any number of them, created/cancelled
+    dynamically) -- without this, an unexpected failure would silently stop that channel's
+    stream and only surface as an "exception was never retrieved" warning from asyncio's
+    default handler.
     """
     if task.cancelled():
         return
@@ -161,7 +162,7 @@ async def _sender(websocket: WebSocket, outbox: "asyncio.Queue[dict]") -> None:
 
 async def _reader(websocket: WebSocket, subs: _CandleSubscriptions) -> None:
     """
-    Reads inbound control frames forever. A malformed (non-JSON or non-dict) frame is
+    Read inbound control frames forever. A malformed (non-JSON or non-dict) frame is
     logged and skipped, never fatal -- only `WebSocketDisconnect` (raised by
     `receive_text()` once the client closes) ends this loop.
     """
