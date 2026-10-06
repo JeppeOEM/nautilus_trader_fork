@@ -53,6 +53,7 @@ from archive.application.ports import CatalogWriter
 from archive.application.ports import GapMarkers
 from archive.application.ports import OpenDayWriteError
 from archive.domain.archive_day import ArchiveDay
+from archive.domain.retention import DEFINITION_HELD
 from archive.domain.retention import TRADE_TICK
 from archive.domain.retention import CatalogFile
 from archive.domain.retention import Deletion
@@ -234,7 +235,11 @@ def decide(
     decision = policy.decide(files, days)
     for skipped in decision.unparsable:
         logger.warning("  skipped %s: not a catalog file name, never pruned", skipped.path)
-    kept = [(iid, day, reasons.get((iid, day), reason)) for iid, day, reason in decision.kept]
+    # A trade day's fault reason never relabels a held definition of the same instrument-day.
+    kept = [
+        (iid, day, reason if reason == DEFINITION_HELD else reasons.get((iid, day), reason))
+        for iid, day, reason in decision.kept
+    ]
     return RetentionDecision(decision.delete, kept, decision.unparsable)
 
 
@@ -308,6 +313,7 @@ def execute(
 def log_summary(report: PruneReport, policy: RetentionPolicy, apply: bool) -> None:
     """One summary line per active rule, in the shape the operator's logs have always had."""
     done = "deleted" if apply else "deletable (report only)"
+    held = sum(1 for _iid, _day, reason in report.kept if reason == DEFINITION_HELD)
     if policy.age_types:
         verb = "freed" if apply else "would free"
         logger.info("%s %.1f MB", verb, report.freed["age"] / _MB)
@@ -318,12 +324,13 @@ def log_summary(report: PruneReport, policy: RetentionPolicy, apply: bool) -> No
             report.files["trade"],
             done,
             report.freed["trade"] / _MB,
-            len(report.kept),
+            len(report.kept) - held,
         )
     if policy.plan is not None:
         logger.info(
             "dropped-instrument retention %.1f h: %d file(s) %s (%.1f MB); per-coin raw-delta "
-            "retention: %d file(s) %s (%.1f MB)",
+            "retention: %d file(s) %s (%.1f MB); %d dropped-coin definition day(s) held for "
+            "their trades",
             policy.plan.non_config_retain_hours,
             report.files["dropped_instrument"],
             done,
@@ -331,6 +338,7 @@ def log_summary(report: PruneReport, policy: RetentionPolicy, apply: bool) -> No
             report.files["delta_retention"],
             done,
             report.freed["delta_retention"] / _MB,
+            held,
         )
     logger.info(
         "prune: %d file(s) skipped for the open UTC day, %d per-file error(s), %d kept for a "

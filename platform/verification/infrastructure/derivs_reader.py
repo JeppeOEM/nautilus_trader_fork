@@ -76,6 +76,9 @@ TYPE_DIRS = MappingProxyType(
 )
 # Every definition type a Bybit or Hyperliquid id can be written as: perps, spot pairs, and Bybit's
 # dated linear futures (`BTCUSDT-25SEP26-LINEAR.BYBIT`), which the adapter writes as `CryptoFuture`.
+# A literal on purpose: the reference side may not import `kernel.catalog_files` (DATA-02,
+# `tests/test_boundaries.py`'s `VERIFICATION_DENIED_MODULES`), so `verification/tests/
+# test_derivs.py` holds it equal to that module's `DEFINITION_DIRNAMES` instead (no drift).
 DEFINITION_DIRS = ("crypto_perpetual", "currency_pair", "crypto_future")
 SPOT_SUFFIX = "-SPOT.BYBIT"
 _TS_EVENT = "ts_event"

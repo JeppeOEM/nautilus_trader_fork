@@ -38,6 +38,8 @@ from archive.application.prune import execute
 from archive.application.prune import log_summary
 from archive.application.prune import pruned_marker_span
 from archive.domain.gaps import Coverage
+from archive.domain.retention import DEFINITION_HELD
+from archive.domain.retention import PlanRetention
 from archive.domain.retention import RetentionPolicy
 from archive.infrastructure.catalog_files import CatalogFiles
 from archive.infrastructure.gap_markers import GapMarkerFiles
@@ -302,6 +304,19 @@ def test_the_plan_prunes_a_dropped_instrument_and_finite_delta_retention(tmp_pat
     assert other_venue.exists()  # plan rules are dYdX's alone
 
 
+def test_the_age_rule_cedes_plan_governed_dydx_deltas(tmp_path: Path) -> None:
+    """`make prune` (DW-215): with the plan, an unlimited entry's old deltas survive `--days 14`."""
+    catalog = tmp_path / "catalog"
+    data = catalog / "data" / "order_book_deltas"
+    unlimited = _write_parquet(data / "BTC-USD-PERP.DYDX", *_OLD)
+    not_in_plan = _write_parquet(data / "SOL-USD-PERP.DYDX", *_OLD)
+    plan = _dydx_plan(tmp_path, _PLAN)
+    args = ["--types", "order_book_deltas", "--days", "14", "--dydx-plan", str(plan)]
+    assert main(["--catalog", str(catalog), *args, "--apply"]) == 0
+    assert unlimited.exists()  # retain_hours None: the plan wins over the age rule
+    assert not not_in_plan.exists()
+
+
 def test_the_plan_is_ignored_for_another_venue(tmp_path: Path) -> None:
     catalog = tmp_path / "catalog"
     dropped = _write_parquet(
@@ -490,6 +505,59 @@ def test_an_unreadable_store_keeps_that_venues_days_and_decides_the_others(
     report = execute(decision, None, GapMarkerFiles(catalog))
     assert report.has_findings()
     assert all(f.exists() for f in bybit_files)
+
+
+class _UnreadableStore(_UnreadableBybit):
+    """A `VerifiedDays` whose every store raises like a corrupt file."""
+
+    def verified_status(self, instrument_id: str, day: str) -> str | None:
+        raise sqlite3.DatabaseError("file is not a database")
+
+
+def test_a_held_definition_keeps_its_reason_beside_an_unreadable_trade_day(tmp_path: Path) -> None:
+    """DW-208: the trade day's fault reason never relabels the held definition of the same day."""
+    error_ledger.reset()
+    catalog, gone = tmp_path / "catalog", "GONE-USD-PERP.DYDX"
+    _trade_file(catalog, 8, gone)
+    day = _day(8)
+    definition = _write_parquet(
+        catalog / "data" / "crypto_perpetual" / gone,
+        f"{day}T00-10-00-000000000Z",
+        f"{day}T23-50-00-000000000Z",
+    )
+    plan = PlanRetention(frozenset({"BTC-USD-PERP.DYDX"}), 4.0)
+    policy = RetentionPolicy(time.time_ns(), trade_retention_days=7, plan=plan)
+    decision = decide(str(catalog), policy, _UnreadableStore())
+    assert decision.delete == []
+    assert sorted(decision.kept) == [
+        (gone, day, DEFINITION_HELD),
+        (gone, day, "status_unreadable"),
+    ]
+    assert definition.exists()
+
+
+def test_the_summary_counts_held_definitions_on_the_plan_line_not_the_trade_line(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """DW-208: a held definition is a plan outcome, never an old instrument-day the trades kept."""
+    error_ledger.reset()
+    catalog, gone = tmp_path / "catalog", "GONE-USD-PERP.DYDX"
+    _trade_file(catalog, 8, gone)
+    day = _day(8)
+    definition = _write_parquet(
+        catalog / "data" / "crypto_perpetual" / gone,
+        f"{day}T00-10-00-000000000Z",
+        f"{day}T23-50-00-000000000Z",
+    )
+    plan = PlanRetention(frozenset({"BTC-USD-PERP.DYDX"}), 4.0)
+    policy = RetentionPolicy(time.time_ns(), trade_retention_days=7, plan=plan)
+    decision = decide(str(catalog), policy, _UnreadableStore())
+    with caplog.at_level(logging.INFO):
+        report = execute(decision, CatalogFiles(), GapMarkerFiles(catalog))
+        log_summary(report, policy, apply=True)
+    assert definition.exists()
+    assert "1 old instrument-day(s) kept" in caplog.text  # the unreadable trade day alone
+    assert "1 dropped-coin definition day(s) held for their trades" in caplog.text
 
 
 def test_a_corrupt_store_file_is_ledgered_and_the_run_exits_with_findings(tmp_path: Path) -> None:

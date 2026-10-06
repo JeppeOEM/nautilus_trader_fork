@@ -82,6 +82,9 @@ from kernel.second_snapshot import trade_float_columns
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
+from nautilus_trader.model.instruments import CryptoFuture
+from nautilus_trader.model.instruments import CryptoPerpetual
+from nautilus_trader.model.instruments import CurrencyPair
 from nautilus_trader.model.objects import FIXED_PRECISION
 from nautilus_trader.model.objects import FIXED_PRECISION_BYTES
 from nautilus_trader.model.objects import Price
@@ -92,6 +95,14 @@ from nautilus_trader.persistence.funcs import class_to_filename
 SNAPSHOT_DIRNAME = class_to_filename(DydxSecondSnapshot)  # "custom_dydx_second_snapshot"
 _TRADE_READ_COLUMNS = ("ts_event", *PRECISION_COLUMNS, *OHLC_UNIT_COLUMNS, *VOLUME_UNIT_COLUMNS)
 INDEX_PRICE_DIRNAME = class_to_filename(IndexPriceUpdate)  # "index_price_update"
+# Every instrument-definition leaf a collected id is written as: perps, spot pairs, and Bybit's dated
+# linear futures (`BTCUSDT-25SEP26-LINEAR.BYBIT`, written as `CryptoFuture`). Archive retention keeps
+# a dropped coin's definitions while its trades stay (DW-208).
+DEFINITION_DIRNAMES = (
+    class_to_filename(CryptoPerpetual),  # "crypto_perpetual"
+    class_to_filename(CurrencyPair),  # "currency_pair"
+    class_to_filename(CryptoFuture),  # "crypto_future"
+)
 # The error-ledger site a production caller's `on_foreign` hook records a foreign file name at
 # (published language: `GET /api/errors`, the durable ledger files).
 FOREIGN_FILE_SITE = "catalog.foreign_file"

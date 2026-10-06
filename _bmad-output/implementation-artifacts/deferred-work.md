@@ -1663,7 +1663,9 @@ resolution: already resolved: platform/archive/application/reconcile_day.py:228-
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: The dropped-instrument rule deletes a dropped dYdX coin's instrument-definition leaves while its unverified `trade_tick` days are kept, so those days can never be reconciled and are kept forever. evidence: archive/domain/retention.py rule (c) covers every type except trade_tick, the same set as the old `prune_instrument`. Semantics predate 25.1.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw-archive-retention-rule-ordering
+resolution-undo: a743b1aba6f42e24f54f556698a89012d8221c6df629ae682bdbd109fed850ab 2026-10-06 7374617475733a206f70656e
 decision: 2026-10-05 Keep definition leaves until the coin's trade days are verified or released — Gate rule (c) definition deletion on trade days.
 
 ### DW-209: Capture appends `_archive_gaps/*.jsonl` without a lock, so a nightly `load_gaps` can read a torn last line, raise ValueError and refuse the instrument-day.
@@ -1724,7 +1726,9 @@ resolution-undo: 503907f1821fa3d9323ad14b8c3f6d3be2067e07f8adbfeaa0b3aad39585a6c
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: `make prune` (order_book_deltas age rule, 14 days) deletes raw deltas of a dYdX instrument whose plan entry says `retain_hours = None` (unlimited), because the age rule is decided independently of the plan's per-instrument delta retention. evidence: platform/Makefile `prune` target and archive/domain/retention.py, where rule (b) runs regardless of rule (d)'s None. This predates 25.1 (baseline Makefile prune target, plus the old `_prune_loop`).
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw-archive-retention-rule-ordering
+resolution-undo: a743b1aba6f42e24f54f556698a89012d8221c6df629ae682bdbd109fed850ab 2026-10-06 7374617475733a206f70656e
 decision: 2026-10-05 Plan wins: skip age rule for unlimited-plan instruments — Age rule excludes dYdX instruments whose plan retain_hours is None
 
 ### DW-216: bot_tui Bot-detail's `o` deep-link opens `<DASHBOARD_BASE_URL>/bot/{bot_id}`, which the web app has no route for, so the only remaining TUI deep-link (and the …
@@ -2346,3 +2350,7 @@ location: platform/data/alerts/alerts.toml
 source_spec: `_bmad-output/implementation-artifacts/spec-dw-197-199-alert-store-durability.md`
 reason: Runtime-rewritten data files are git-tracked (`platform/data/alerts/alerts.toml`, as `platform/data/preferences/*.toml` already are), so any upstream change to a tracked copy makes the VPS `git pull` refuse the locally rewritten file. Evidence: The 32-5 and DW-197 DEPLOY_CHECKLIST entries both need `git checkout --` surgery for exactly this; upgrade path is gitignoring the files (keeping a `.gitkeep`), since `AlertStore._load` and the preference readers already start empty on a missing file.
 status: open
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-dw-208-215-archive-retention-rule-ordering.md`
+  summary: `mypy platform/kernel/catalog_files.py` fails with one pre-existing error at line 382: `SecondOHLC(...)` gets a `*Generator[float | None, ...]` star-arg where it expects `float`, so a None open/high/low/close is not excluded by the types.
+  evidence: The error is reproduced on HEAD 6ca8d50d6a with this review's patches stashed (`../.venv/bin/mypy archive/domain/retention.py archive/application/prune.py kernel/catalog_files.py` from `platform/`: 1 error, `[arg-type]`). Line 382 is outside the DW-208/215 diff, which only adds `DEFINITION_DIRNAMES` near line 98. It surfaced because this pass ran mypy over the whole module.

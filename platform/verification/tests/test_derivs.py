@@ -36,6 +36,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from kernel.catalog_files import DEFINITION_DIRNAMES
 from kernel.open_interest import OpenInterest
 from observability import error_ledger
 
@@ -109,6 +110,7 @@ from verification.domain.instrument_check import bybit_linear_definition
 from verification.domain.instrument_check import bybit_spot_definition
 from verification.domain.instrument_check import hyperliquid_definition
 from verification.domain.instrument_check import judge_polls
+from verification.infrastructure.derivs_reader import DEFINITION_DIRS
 from verification.infrastructure.derivs_reader import DerivsCatalog
 from verification.infrastructure.derivs_reader import funding_row
 from verification.tests.test_trades import _write_raw
@@ -1356,3 +1358,8 @@ def test_hyperliquid_updates_are_sorted_by_receipt_when_the_clock_steps_back() -
     frames = [hyperliquid_ctx(_context(c), "test")[1] for c in (_CTXS[3], _CTXS[0])]
     updates = hyperliquid_references(frames, _NO_GAPS)["mark"].updates
     assert [u.key for u in updates] == sorted(u.key for u in updates)
+
+
+def test_the_definition_dirs_are_the_kernel_definition_dirnames() -> None:
+    """The reference's literal cannot import the kernel's (DATA-02): held equal here instead."""
+    assert DEFINITION_DIRS == DEFINITION_DIRNAMES

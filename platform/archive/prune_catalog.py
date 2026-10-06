@@ -25,7 +25,10 @@ Usage (report only unless --apply; --dry-run is the explicit spelling of the def
 
 The rules are `archive.domain.retention`'s docstring. `--types T --days N` deletes files of those
 data types whose end timestamp is older than N days. `trade_tick` is refused there: raw trades
-exist to correct and prove the aggregates, so they are released only by the trade policy.
+exist to correct and prove the aggregates, so they are released only by the trade policy. With
+`--dydx-plan` the age rule cedes plan-governed dYdX deltas (DW-215): the `order_book_deltas` of a
+dYdX instrument the plan gives a delta entry are decided by its `retain_hours` alone (`None`:
+never deleted), however old; `make prune` passes the plan for that reason.
 
 Trade policy (with `--candles-dir`): a `data/trade_tick/<iid>/` file is deleted only when every
 UTC day its name spans is older than `--trade-retention-days` (default 7) **and** that
@@ -41,9 +44,12 @@ recorded as a `pruned` archive gap so a later rebuild keeps those rows' live val
 Plan retention (with `--dydx-plan`, the dYdX collection plan's `config.toml`, read through
 collection control's `TomlPlanStore`, over capture's one venue loader): dYdX leaves whose instrument
 the plan no longer collects lose every type except `trade_tick` once older than
-`non_config_retain_hours`; a collected instrument with `store_order_book_deltas` and a finite
-`retain_hours` loses its older `order_book_deltas`. Applied to DYDX leaves only, for `--venue DYDX`
-or no `--venue`. This replaced the dYdX collector's in-process `_prune_loop` (Story 25.1).
+`non_config_retain_hours` -- except its instrument-definition files, kept while any `trade_tick`
+file of the instrument is left (DW-208: a stored trade day may still need reconciling against
+it; they go on the first run after every trade day is released); a collected instrument with
+`store_order_book_deltas` and a finite `retain_hours` loses its older `order_book_deltas`.
+Applied to DYDX leaves only, for `--venue DYDX` or no `--venue`. This replaced the dYdX
+collector's in-process `_prune_loop` (Story 25.1).
 
 A file whose name does not parse is skipped and reported, never deleted; a file whose span reaches
 the current UTC day is never deleted (the next nightly takes it). `--venue V` limits every policy

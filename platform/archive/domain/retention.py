@@ -24,10 +24,21 @@ Four rules, each naming itself on every deletion it makes:
   proven, and one ending within it before midnight the next day: its trades' `ts_event` can
   belong to them. Each old day still unproven is kept and reported (`unverified` or `failed`).
 - `age` -- the `--types T --days N` plain age retention: files of those types ending over N days
-  ago. Never `trade_tick` (refused by the CLI).
+  ago. Never `trade_tick` (refused by the CLI). It cedes to the plan (DW-215): an
+  `order_book_deltas` file of a dYdX instrument the plan gives a delta retention entry (finite or
+  `None`) is never chosen by it -- `delta_retention` alone decides those, so an unlimited entry's
+  deltas are never cut at N days, nor a finite entry longer than N days.
 - `dropped_instrument` -- a dYdX leaf whose instrument the collection plan no longer collects:
   every type except `trade_tick` (the set `prune_instrument` covered), ending more than
-  `non_config_retain_hours` ago (MEM-02: an uncollected coin's data ages out).
+  `non_config_retain_hours` ago (MEM-02: an uncollected coin's data ages out). Its
+  instrument-definition files (`kernel.catalog_files.DEFINITION_DIRNAMES`) wait for its trades
+  (DW-208): kept while any `trade_tick` file of the instrument is in the listing -- parsable or
+  not, and including one the `trade` rule deletes in the same run -- because a trade day still
+  stored may yet need reconciling (a rebuild or repair can clear its verdict), and that needs
+  the definition. They go on the first run after every trade day is released. A trade file the
+  trade rule never releases (a `failed` day, a name that does not parse, or a run without the
+  trade rule, e.g. `make prune`) holds them as long as it stays: the fail-safe direction, a few
+  small files per coin, reported `definition_held_by_trades` on every run.
 - `delta_retention` -- a collected dYdX instrument with `store_order_book_deltas` and a finite
   `retain_hours`: its `order_book_deltas` files ending more than that many hours ago. `None`
   means unlimited, never pruned.
@@ -50,6 +61,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field
 
+from kernel.catalog_files import DEFINITION_DIRNAMES
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import NS_PER_DAY
 from kernel.clocks import NS_PER_S
@@ -62,6 +74,8 @@ from archive.domain.archive_day import DayStatus
 TRADE_TICK = "trade_tick"
 ORDER_BOOK_DELTAS = "order_book_deltas"
 _HOUR_NS = 3_600 * NS_PER_S
+# The kept reason of a dropped coin's old definition file held back by its trade files (DW-208).
+DEFINITION_HELD = "definition_held_by_trades"
 
 
 @dataclass(frozen=True)
@@ -146,7 +160,10 @@ class RetentionPolicy:
     executor of its result is `archive.application.prune`.
 
     `trade_retention_days` None disables the trade rule, `age_types` empty the age rule, `plan`
-    None the two plan rules.
+    None the two plan rules. Two orderings between rules: the age rule never takes a plan-governed
+    dYdX delta file (DW-215: the plan wins), and the dropped-instrument rule never takes a
+    definition file of an instrument with a `trade_tick` file in the listing (DW-208: definitions
+    outlive the trade days that need them).
     """
 
     now_ns: int
@@ -173,6 +190,9 @@ class RetentionPolicy:
         """
         listed = list(files)
         live = self._captured_now(listed)
+        # Every listed trade file counts, unparsable or deleted by this very run: the definition
+        # then goes next run, after the deletion executed (fail-safe if it did not).
+        traded = {f.iid for f in listed if f.data_type == TRADE_TICK}
         delete: list[Deletion] = []
         kept: set[tuple[str, str, str]] = set()
         unparsable: list[CatalogFile] = []
@@ -188,7 +208,7 @@ class RetentionPolicy:
                 if f.data_type == TRADE_TICK
                 else self._other(f, span[1], f.iid in live)
             )
-            if chosen is not None:
+            if chosen is not None and not _held(chosen, traded, kept):
                 delete.append(chosen)
         return RetentionDecision(delete, sorted(kept), unparsable)
 
@@ -237,13 +257,27 @@ class RetentionPolicy:
         return Deletion(f, "trade", reason)
 
     def _other(self, f: CatalogFile, end: int, captured_now: bool) -> Deletion | None:
-        if f.data_type in self.age_types and end < self.now_ns - self.age_days * NS_PER_DAY:
+        if self._aged(f, end):
             return Deletion(f, "age", f"{f.data_type} older than {self.age_days} days")
         if self.plan is None or not has_venue(f.iid, "DYDX"):
             return None
         if f.iid not in self.plan.collected:
             return None if captured_now else self._dropped(f, end, self.plan)
         return self._delta(f, end, self.plan)
+
+    def _aged(self, f: CatalogFile, end: int) -> bool:
+        if f.data_type not in self.age_types or end >= self.now_ns - self.age_days * NS_PER_DAY:
+            return False
+        return not self._plan_governs_deltas(f)
+
+    def _plan_governs_deltas(self, f: CatalogFile) -> bool:
+        """Tell a dYdX delta file whose instrument has a plan delta entry (`delta_retention` only)."""
+        return (
+            self.plan is not None
+            and f.data_type == ORDER_BOOK_DELTAS
+            and has_venue(f.iid, "DYDX")
+            and f.iid in self.plan.delta_retain_hours
+        )
 
     def _dropped(self, f: CatalogFile, end: int, plan: PlanRetention) -> Deletion | None:
         hours = plan.non_config_retain_hours
@@ -258,3 +292,19 @@ class RetentionPolicy:
         if end < self.now_ns - int(hours * _HOUR_NS):
             return Deletion(f, "delta_retention", f"deltas older than {hours} h")
         return None
+
+
+def _held(chosen: Deletion, traded: set[str], kept: set[tuple[str, str, str]]) -> bool:
+    """
+    Whether a dropped coin's definition file the window releases is held back by the coin's trade
+    files (DW-208: a stored trade day may still need reconciling against it); a held file is
+    reported in `kept`, so an operator sees why it stays. Keyed by the file's first day, as
+    `archive.application.prune` keys a file it keeps at execution.
+    """
+    f = chosen.file
+    if chosen.rule != "dropped_instrument" or f.data_type not in DEFINITION_DIRNAMES:
+        return False
+    if f.iid not in traded or f.span is None:
+        return False
+    kept.add((f.iid, day_text(f.span[0] // NS_PER_DAY), DEFINITION_HELD))
+    return True

@@ -27,6 +27,7 @@ from kernel.clocks import NS_PER_S
 
 from archive.domain.archive_day import ArchiveDay
 from archive.domain.archive_day import DayStatus
+from archive.domain.retention import DEFINITION_HELD
 from archive.domain.retention import CatalogFile
 from archive.domain.retention import PlanRetention
 from archive.domain.retention import RetentionPolicy
@@ -167,6 +168,101 @@ def test_delta_retention_prunes_a_finite_window_and_never_an_unlimited_one() -> 
     snapshots = _day_file("custom_dydx_second_snapshot", "ETH-USD-PERP.DYDX", _TODAY - 30)
     decision = policy.decide([unlimited, finite_old, finite_young, snapshots], {})
     assert [(d.file, d.rule) for d in decision.delete] == [(finite_old, "delta_retention")]
+
+
+# -- rule ordering: definitions wait for trades (DW-208), the plan beats the age rule (DW-215) ----
+
+_GONE = "GONE-USD-PERP.DYDX"
+
+
+def test_a_dropped_coins_definition_is_kept_while_its_unverified_trades_stay() -> None:
+    policy = RetentionPolicy(_NOW, trade_retention_days=7, plan=_PLAN)
+    definition = _day_file("crypto_perpetual", _GONE, _TODAY - 20)
+    trades = _day_file("trade_tick", _GONE, _TODAY - 20)
+    snapshots = _day_file("custom_dydx_second_snapshot", _GONE, _TODAY - 20)
+    decision = policy.decide([definition, trades, snapshots], {})
+    assert [(d.file, d.rule) for d in decision.delete] == [(snapshots, "dropped_instrument")]
+    assert decision.kept == [
+        (_GONE, day_text(_TODAY - 20), DEFINITION_HELD),  # reported, never silently kept
+        (_GONE, day_text(_TODAY - 20), "unverified"),
+    ]
+
+
+def test_a_definition_outlives_the_run_that_releases_the_last_trade_day() -> None:
+    """A trade file deleted this run still holds the definition: it goes on the next run."""
+    policy = RetentionPolicy(_NOW, trade_retention_days=7, plan=_PLAN)
+    definition = _day_file("crypto_perpetual", _GONE, _TODAY - 20)
+    trades = _day_file("trade_tick", _GONE, _TODAY - 20)
+    decision = policy.decide([definition, trades], _verified(_GONE, _TODAY - 20))
+    assert [(d.file, d.rule) for d in decision.delete] == [(trades, "trade")]
+    assert decision.kept == [(_GONE, day_text(_TODAY - 20), DEFINITION_HELD)]
+    next_run = policy.decide([definition], {})
+    assert [(d.file, d.rule) for d in next_run.delete] == [(definition, "dropped_instrument")]
+
+
+@pytest.mark.parametrize("data_type", ["crypto_perpetual", "currency_pair", "crypto_future"])
+def test_a_dropped_coins_definition_goes_once_no_trade_file_is_left(data_type: str) -> None:
+    definition = _day_file(data_type, _GONE, _TODAY - 20)
+    decision = RetentionPolicy(_NOW, plan=_PLAN).decide([definition], {})
+    assert [(d.file, d.rule) for d in decision.delete] == [(definition, "dropped_instrument")]
+    assert decision.kept == []
+
+
+def test_a_young_definition_of_a_traded_dropped_coin_is_not_reported_held() -> None:
+    """Only a definition the window would release is held (and reported): a young one just waits."""
+    definition = _day_file("crypto_perpetual", _GONE, _TODAY - 1)
+    trades = _day_file("trade_tick", _GONE, _TODAY - 1)
+    policy = RetentionPolicy(_TODAY * NS_PER_DAY + 2 * _HOUR, plan=_PLAN)  # 02:00: 3 h old
+    decision = policy.decide([definition, trades], {})
+    assert (decision.delete, decision.kept) == ([], [])
+
+
+def test_an_unparsable_trade_name_still_holds_the_definition() -> None:
+    definition = _day_file("crypto_perpetual", _GONE, _TODAY - 20)
+    odd = CatalogFile("trade_tick", _GONE, "trade_tick/x/not-a-span.parquet", None)
+    policy = RetentionPolicy(_NOW, trade_retention_days=7, plan=_PLAN)
+    decision = policy.decide([definition, odd], {})
+    assert (decision.delete, decision.unparsable) == ([], [odd])
+
+
+def test_the_age_rule_never_takes_unlimited_plan_deltas() -> None:
+    policy = RetentionPolicy(_NOW, age_types=frozenset({"order_book_deltas"}), plan=_PLAN)
+    unlimited = _day_file("order_book_deltas", "BTC-USD-PERP.DYDX", _TODAY - 30)
+    assert policy.decide([unlimited], {}).delete == []
+
+
+def test_a_finite_plan_window_longer_than_the_age_rule_wins() -> None:
+    plan = PlanRetention(_PLAN.collected, 4.0, {"ETH-USD-PERP.DYDX": 720.0})
+    policy = RetentionPolicy(_NOW, age_types=frozenset({"order_book_deltas"}), plan=plan)
+    deltas = _day_file("order_book_deltas", "ETH-USD-PERP.DYDX", _TODAY - 20)
+    assert policy.decide([deltas], {}).delete == []
+
+
+def test_a_finite_plan_window_shorter_than_the_age_rule_names_delta_retention() -> None:
+    """Both rules would take it: the plan's names it, the age rule never sees it."""
+    ages = frozenset({"order_book_deltas"})
+    policy = RetentionPolicy(_NOW, age_types=ages, age_days=2, plan=_PLAN)
+    deltas = _day_file("order_book_deltas", "ETH-USD-PERP.DYDX", _TODAY - 3)  # plan: 48 h
+    decision = policy.decide([deltas], {})
+    assert [(d.file, d.rule) for d in decision.delete] == [(deltas, "delta_retention")]
+
+
+@pytest.mark.parametrize(
+    ("plan", "dydx"), [(None, "BTC-USD-PERP.DYDX"), (_PLAN, "SOL-USD-PERP.DYDX")]
+)
+def test_the_age_rule_is_unchanged_without_a_plan_delta_entry(
+    plan: PlanRetention | None, dydx: str
+) -> None:
+    policy = RetentionPolicy(_NOW, age_types=frozenset({"order_book_deltas"}), plan=plan)
+    files = [_day_file("order_book_deltas", iid, _TODAY - 15) for iid in (_BYBIT, dydx)]
+    decision = policy.decide(files, {})
+    assert [(d.file, d.rule) for d in decision.delete] == [(f, "age") for f in files]
+
+
+def test_the_age_rule_still_takes_other_types_of_a_plan_delta_instrument() -> None:
+    policy = RetentionPolicy(_NOW, age_types=frozenset({"custom_dydx_second_snapshot"}), plan=_PLAN)
+    snapshots = _day_file("custom_dydx_second_snapshot", "BTC-USD-PERP.DYDX", _TODAY - 15)
+    assert [d.rule for d in policy.decide([snapshots], {}).delete] == ["age"]
 
 
 def test_nothing_reaching_the_current_utc_day_is_ever_chosen() -> None:

@@ -458,18 +458,23 @@ harden-ssh:
 		/etc/ssh/sshd_config
 	sudo systemctl reload ssh
 
-## Prune order_book_deltas older than 14 days (run daily to bound storage). Trades are pruned
-## by `make nightly` only (verification-gated, see archive/prune_catalog.py).
+## Prune order_book_deltas older than 14 days (run daily to bound storage) -- except a dYdX
+## instrument with a plan delta entry, whose deltas follow its own `retain_hours` (None: kept
+## forever, so the plan, not this target, bounds those; DW-215) -- plus the dYdX plan's retention
+## (as `nightly` does): a dropped dYdX coin ages out (its definitions only once its trades are
+## gone, DW-208). Trades are pruned by `make
+## nightly` only (verification-gated, see archive/prune_catalog.py).
 prune:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
 		python3 -m archive.prune_catalog --catalog /app/catalog \
-		--types order_book_deltas --days 14 --apply
+		--types order_book_deltas --days 14 --dydx-plan /app/dydx_collector/config.toml --apply
 
-## Preview what prune would delete without removing anything (the tool's default: report only)
+## Preview what prune would delete without removing anything (the tool's default: report only),
+## with the same dYdX plan as `prune`
 prune-dry:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
 		python3 -m archive.prune_catalog --catalog /app/catalog \
-		--types order_book_deltas --days 14
+		--types order_book_deltas --days 14 --dydx-plan /app/dydx_collector/config.toml
 
 ## Local frontend dev, fully self-contained: brings up the Bybit and Hyperliquid collectors +
 ## ranking_engine + data_api + redis, all locally (network_mode: host, so data_api lands on
