@@ -20,4 +20,3 @@ CREATE TABLE IF NOT EXISTS verified_days (
     mismatches    INTEGER NOT NULL,
     PRIMARY KEY (instrument_id, day)
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS candles_by_bar_seconds_t ON candles(bar_seconds, t);

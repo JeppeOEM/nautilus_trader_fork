@@ -20,6 +20,7 @@ a real SQLite file (platform/CLAUDE.md TEST-03).
 """
 
 import random
+import re
 import sqlite3
 import time
 from contextlib import closing
@@ -30,6 +31,8 @@ from candles.application import queries
 from candles.application.forming import bars_from_rows
 from candles.domain.candle import PARTIAL_OBSERVED_FRACTION
 from candles.domain.fold import BAR_SECONDS
+from candles.domain.fold import DAY_MS
+from candles.domain.fold import RETAIN_DAYS
 from candles.infrastructure import sqlite_store
 from candles.infrastructure.sqlite_store import CandleStore
 
@@ -163,6 +166,183 @@ def test_prune_drops_old_short_bars_but_keeps_wide_ones(tmp_path: Path) -> None:
         assert queries.oldest_t(db, _IID, 14400) is not None
         assert queries.newest_t(db, _IID, 60) is None
         assert queries.newest_t(db, _IID, 14400) is not None
+
+
+def _plan(db: sqlite3.Connection, sql: str, params: tuple) -> str:
+    return " ".join(row[3] for row in db.execute("EXPLAIN QUERY PLAN " + sql, params).fetchall())
+
+
+def test_prune_plan_is_an_index_search_not_a_table_scan(tmp_path: Path) -> None:
+    with closing(sqlite_store.connect_rw(str(tmp_path / "c.db"))) as db:
+        plan = _plan(db, sqlite_store._PRUNE, (60, 0))
+    # SQLite before 3.36 words it "SEARCH TABLE candles"
+    assert re.search(r"SEARCH (TABLE )?candles", plan)
+    assert "INDEX candles_by_bar_seconds_t (bar_seconds=? AND t<?)" in plan
+    assert "SCAN" not in plan
+
+
+def test_per_instrument_reads_and_rebuild_deletes_keep_the_primary_key(tmp_path: Path) -> None:
+    """The added index must not steal the plans that lead with `instrument_id`."""
+    window = (
+        "SELECT t FROM candles WHERE instrument_id = ? AND bar_seconds = ? "
+        "AND o IS NOT NULL AND t < ? ORDER BY t DESC LIMIT ?"
+    )
+    rebuild_delete = "DELETE FROM candles WHERE instrument_id = ? AND t >= ? AND t < ?"
+    with closing(sqlite_store.connect_rw(str(tmp_path / "c.db"))) as db:
+        window_plan = _plan(db, window, (_IID, 60, 0, 10))
+        rebuild_plan = _plan(db, rebuild_delete, (_IID, 0, 1))
+    assert "PRIMARY KEY (instrument_id=? AND bar_seconds=? AND t<?)" in window_plan
+    assert "PRIMARY KEY (instrument_id=?)" in rebuild_plan
+
+
+def test_the_other_per_instrument_reads_keep_the_primary_key(tmp_path: Path) -> None:
+    """
+    `queries.oldest_t`/`newest_t`/`bucket_starts` and the verifier's day read
+    (`verification.infrastructure.catalog_scan`), whose `ORDER BY bar_seconds, t` matches the new
+    index's key order.
+    """
+    reads = {
+        "SELECT MIN(t) FROM candles WHERE instrument_id = ? AND bar_seconds = ? "
+        "AND o IS NOT NULL": ((_IID, 60), "PRIMARY KEY (instrument_id=? AND bar_seconds=?)"),
+        "SELECT MAX(t) FROM candles WHERE instrument_id = ? AND bar_seconds = ?": (
+            (_IID, 60),
+            "PRIMARY KEY (instrument_id=? AND bar_seconds=?)",
+        ),
+        "SELECT t FROM candles WHERE instrument_id = ? AND bar_seconds = ? AND t >= ? AND t < ? "
+        "ORDER BY t": (
+            (_IID, 60, 0, 1),
+            "PRIMARY KEY (instrument_id=? AND bar_seconds=? AND t>? AND t<?)",
+        ),
+        "SELECT bar_seconds, t, o, h, l, c, v, seconds_observed FROM candles "
+        "WHERE instrument_id = ? AND t >= ? AND t < ? ORDER BY bar_seconds, t": (
+            (_IID, 0, 1),
+            "PRIMARY KEY (instrument_id=?)",
+        ),
+    }
+    with closing(sqlite_store.connect_rw(str(tmp_path / "c.db"))) as db:
+        for sql, (params, expected) in reads.items():
+            plan = _plan(db, sql, params)
+            assert expected in plan, (sql, plan)
+            assert "candles_by_bar_seconds_t" not in plan, (sql, plan)
+
+
+_PRE_INDEX_SCHEMA = Path(__file__).parent / "fixtures" / "candle_store_schema_pre_index.sql"
+_NOW_MS = _DAY0_MS + 100 * DAY_MS
+
+
+def _cutoff(bar: int) -> int:
+    return _NOW_MS - RETAIN_DAYS[bar] * DAY_MS
+
+
+# Per pruned width: rows just past retention (deleted) and rows at or inside it (kept).
+_EXPIRED = {bar: (_cutoff(bar) - DAY_MS, _cutoff(bar) - bar * 1000) for bar in RETAIN_DAYS}
+_LIVE = {bar: (_cutoff(bar), _NOW_MS - bar * 1000) for bar in RETAIN_DAYS}
+_WIDE_BAR = 14_400  # never pruned, however old
+_WIDE_TS = (_NOW_MS - 1_000 * DAY_MS,)
+
+
+def _seeded() -> dict[int, tuple[int, ...]]:
+    seeded = {bar: (*_EXPIRED[bar], *_LIVE[bar]) for bar in RETAIN_DAYS}
+    seeded[_WIDE_BAR] = _WIDE_TS
+    return seeded
+
+
+def _pre_index_store(path: Path) -> None:
+    """Create a real store with the pre-DW-195 DDL, holding expired, live and wide rows."""
+    with closing(sqlite3.connect(path)) as old:
+        old.executescript(_PRE_INDEX_SCHEMA.read_text())
+        for bar, stamps in _seeded().items():
+            for t in stamps:
+                old.execute(
+                    "INSERT INTO candles VALUES(?, ?, ?, 1.0, 2.0, 0.5, 1.5, 3.0, 60)",
+                    (_IID, bar, t),
+                )
+        old.commit()
+
+
+def _candle_indexes(db: sqlite3.Connection) -> list[str]:
+    return [
+        row[0]
+        for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'candles' "
+            "AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    ]
+
+
+def _stamps_by_bar(db: sqlite3.Connection) -> dict[int, tuple[int, ...]]:
+    stamps: dict[int, tuple[int, ...]] = {}
+    for bar, t in db.execute("SELECT bar_seconds, t FROM candles ORDER BY bar_seconds, t"):
+        stamps[bar] = (*stamps.get(bar, ()), t)
+    return stamps
+
+
+def test_pre_index_store_has_no_index(tmp_path: Path) -> None:
+    path = tmp_path / "old.db"
+    _pre_index_store(path)
+    with closing(sqlite3.connect(path)) as db:
+        assert _candle_indexes(db) == []
+
+
+def test_pre_index_fixture_is_the_recorded_schema_without_the_index_line() -> None:
+    """The two fixtures cannot drift apart: the old shape is the new one minus DW-195's index."""
+    index_line = "CREATE INDEX IF NOT EXISTS candles_by_bar_seconds_t ON candles(bar_seconds, t);\n"
+    recorded = (_PRE_INDEX_SCHEMA.parent / "candle_store_schema.sql").read_text()
+    assert index_line in recorded
+    assert _PRE_INDEX_SCHEMA.read_text() == recorded.replace(index_line, "")
+
+
+def test_pre_index_store_gains_the_index_on_writer_open_with_rows_intact(tmp_path: Path) -> None:
+    path = tmp_path / "old.db"
+    _pre_index_store(path)
+    store = CandleStore(str(path))
+    try:
+        assert _candle_indexes(store.connection) == ["candles_by_bar_seconds_t"]
+        assert store.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'candles_by_bar_seconds_t'"
+        ).fetchone() == ("CREATE INDEX candles_by_bar_seconds_t ON candles(bar_seconds, t)",)
+        assert _stamps_by_bar(store.connection) == _seeded()
+    finally:
+        store.close()
+
+
+def test_migrated_and_analyzed_store_still_prunes_through_the_index(tmp_path: Path) -> None:
+    """The plan on a populated, migrated store with planner statistics, not only an empty one."""
+    path = tmp_path / "old.db"
+    _pre_index_store(path)
+    with closing(sqlite3.connect(path)) as old:
+        rows = [
+            (f"X{i}-PERP.BYBIT", bar, _NOW_MS - k * bar * 1000)
+            for i in range(50)
+            for bar in (*RETAIN_DAYS, _WIDE_BAR)
+            for k in range(1, 40)
+        ]
+        old.executemany("INSERT INTO candles VALUES(?, ?, ?, 1.0, 2.0, 0.5, 1.5, 3.0, 60)", rows)
+        old.commit()
+    with closing(sqlite_store.connect_rw(str(path))) as db:
+        db.execute("ANALYZE")
+        for bar in RETAIN_DAYS:
+            plan = _plan(db, sqlite_store._PRUNE, (bar, _cutoff(bar)))
+            assert "INDEX candles_by_bar_seconds_t (bar_seconds=? AND t<?)" in plan, plan
+            assert "SCAN" not in plan, plan
+
+
+def test_pre_index_store_prunes_exactly_the_expired_rows_after_migration(tmp_path: Path) -> None:
+    path = tmp_path / "old.db"
+    _pre_index_store(path)
+    store = CandleStore(str(path))
+    try:
+        store.prune(now_ms=_NOW_MS)
+        assert _stamps_by_bar(store.connection) == {**_LIVE, _WIDE_BAR: _WIDE_TS}
+    finally:
+        store.close()
+
+
+def test_writer_open_twice_is_idempotent_with_exactly_one_index(tmp_path: Path) -> None:
+    path = str(tmp_path / "c.db")
+    sqlite_store.connect_rw(path).close()
+    with closing(sqlite_store.connect_rw(path)) as db:
+        assert _candle_indexes(db) == ["candles_by_bar_seconds_t"]
 
 
 def test_bucket_starts_lists_every_observed_bucket_and_skips_the_outage(tmp_path: Path) -> None:

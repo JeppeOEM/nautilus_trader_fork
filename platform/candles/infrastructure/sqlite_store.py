@@ -26,9 +26,12 @@ Every second a snapshot exists counts toward `seconds_observed` (the `partial` f
 or not; a bucket row exists for every bucket a snapshot touched. Reads only return buckets with a
 trade (`o IS NOT NULL`).
 
-`_SCHEMA` and `_UPSERT` are frozen text (spine AD-D12): they are the on-disk contract of a file the
+`_SCHEMA` and `_UPSERT` are recorded text (spine AD-D12): they are the on-disk contract of a file the
 collectors keep across deploys, and `candles/tests/test_schema_is_frozen.py` asserts them against a
-recorded copy.
+recorded copy. They change only deliberately, with the fixture re-recorded in the same change
+(nothing is frozen until prod). `connect_rw` runs `_SCHEMA` on every writer open, so an added
+`CREATE INDEX IF NOT EXISTS` is its own migration: an existing store gains the index the next time
+its writer opens it (DW-195 added `candles_by_bar_seconds_t` that way).
 """
 
 import contextlib
@@ -72,7 +75,12 @@ CREATE TABLE IF NOT EXISTS verified_days (
     mismatches    INTEGER NOT NULL,
     PRIMARY KEY (instrument_id, day)
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS candles_by_bar_seconds_t ON candles(bar_seconds, t);
 """
+
+# The retention prune: the `(bar_seconds, t)` index makes it a range SEARCH rather than a full SCAN of
+# the `(instrument_id, bar_seconds, t)` primary key (DW-195).
+_PRUNE = "DELETE FROM candles WHERE bar_seconds = ? AND t < ?"
 
 # NULL-safe merge: a bucket with no trade carries NULL o/h/l/c and must not erase or poison them.
 _UPSERT = """
@@ -89,7 +97,12 @@ ON CONFLICT(instrument_id, bar_seconds, t) DO UPDATE SET
 
 
 def connect_rw(path: str) -> sqlite3.Connection:
-    """Open the writer's connection (collector, rebuild CLI), creating the file and schema."""
+    """
+    Open the writer's connection (collector, rebuild CLI), creating the file and schema.
+
+    On a store that predates an index in `_SCHEMA`, this open builds it synchronously while holding
+    the write lock (one-time; see the `Known limit:` on `prune`).
+    """
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(
         path, check_same_thread=False, timeout=60.0
@@ -301,13 +314,30 @@ def clear_verified(db: sqlite3.Connection, iid: str, day: str) -> None:
 
 
 def prune(db: sqlite3.Connection, now_ms: int | None = None) -> None:
+    """
+    Delete 1m/5m buckets past their retention (`RETAIN_DAYS`) in one transaction.
+
+    Runs synchronously on the writer's event loop (single writer, `application.prune.loop`); the
+    `candles_by_bar_seconds_t` index makes each DELETE a range search instead of a full scan.
+
+    Known limit: the residual on-loop cost is proportional to the rows removed plus their index
+    upkeep -- in steady state one prune interval's worth of 1m and 5m buckets per instrument
+    (`application.prune.PRUNE_INTERVAL_SECONDS`, an hour). The index itself costs every writer one
+    extra B-tree insert per new bucket (live `apply` and the rebuild alike; the `_UPSERT` conflict
+    branch never moves `bar_seconds`/`t`) and covers every bar width, including the wide ones
+    retention never deletes. The first writer open of a store that predates
+    the index builds it synchronously inside `connect_rw` (one-time, at startup) while holding the
+    write lock, so a second writer opening the file meanwhile (`candles.rebuild`, the verifier)
+    waits on `connect_rw`'s 60 s busy timeout. A prune after a long outage deletes the whole backlog
+    in one transaction. Upgrade path: delete in bounded chunks (`DELETE ... WHERE (instrument_id,
+    bar_seconds, t) IN (SELECT ... LIMIT n)`) with an `await asyncio.sleep(0)` between chunks in
+    `prune_loop` -- giving up the one-transaction prune, harmless because each chunk is itself a
+    valid retention state -- or move the single writer connection onto one dedicated writer thread.
+    """
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     with db:
         for bar, days in RETAIN_DAYS.items():
-            db.execute(
-                "DELETE FROM candles WHERE bar_seconds = ? AND t < ?",
-                (bar, now_ms - days * DAY_MS),
-            )
+            db.execute(_PRUNE, (bar, now_ms - days * DAY_MS))
 
 
 class CandleStore:

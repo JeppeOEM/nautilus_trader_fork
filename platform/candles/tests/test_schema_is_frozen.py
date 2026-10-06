@@ -13,14 +13,21 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-The store's DDL and merge statement are frozen text (spine AD-D12).
+The store's DDL and merge statement are recorded text (spine AD-D12), changed only deliberately.
 
 `candles_<venue>.db` outlives every deploy -- the collectors keep writing the same file across image
 rebuilds, and `data_api` reads it live. A reformatted `CREATE TABLE` would not migrate anything (the
 `IF NOT EXISTS` means an existing file keeps its old shape while new files get the new one, silently
 diverging), and a reworded `_UPSERT` could change which of `o`/`c` wins a conflict or whether `v`
-accumulates. The fixtures below are the exact pre-move text of the candle store module, copied
-out of the tree at the Story 24.1 baseline revision.
+accumulates. An added index needs no separate migration: `connect_rw` runs `_SCHEMA` on every writer
+open, so the `CREATE INDEX IF NOT EXISTS` statement itself migrates an existing file -- at the cost
+of a one-time build on that open, holding the write lock (the `Known limit:` on
+`sqlite_store.prune`).
+
+The fixtures below are the exact text of the candle store module, first copied out of the tree at
+the Story 24.1 baseline revision. Nothing is frozen until prod: a change re-records the fixture in
+the same change, as DW-195 did when it added `candles_by_bar_seconds_t` (the pre-index DDL stays in
+`candle_store_schema_pre_index.sql` for the migration test).
 """
 
 from pathlib import Path
@@ -51,6 +58,25 @@ def test_a_fresh_store_has_exactly_the_three_recorded_tables(tmp_path: Path) -> 
     ]
     db.close()
     assert names == ["built_through", "candles", "verified_days"]
+
+
+def test_a_fresh_store_has_exactly_the_one_recorded_index_on_candles(tmp_path: Path) -> None:
+    """
+    Name and definition: `IF NOT EXISTS` skips an index of the same name whatever its columns, so a
+    redefined index must take a new name or existing stores keep the old one.
+    """
+    db = connect_rw(str(tmp_path / "c.db"))
+    indexes = db.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'candles' "
+        "AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    db.close()
+    assert indexes == [
+        (
+            "candles_by_bar_seconds_t",
+            "CREATE INDEX candles_by_bar_seconds_t ON candles(bar_seconds, t)",
+        )
+    ]
 
 
 def test_the_candles_table_columns_are_the_recorded_ones(tmp_path: Path) -> None:

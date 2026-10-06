@@ -46,6 +46,11 @@ def loop(store: RetentionStore) -> Callable[[], Awaitable[None]]:
     loop task, and the `await` is the cancellation point. A failed prune is loud and never stops the
     loop (DATA-07) -- the store simply keeps bars past their retention until the next attempt.
 
+    The prune stays synchronous on the loop by design: the collector's one connection is the
+    store's single writer. The `candles_by_bar_seconds_t` index turns its full-table scan into a
+    range search over the rows it removes (DW-195); see the `Known limit:` on `sqlite_store.prune`
+    for what remains, including the one-transaction backlog after a long outage.
+
     The inner function's name (`prune_loop`) and its one free variable (`store`) are a contract:
     the three venue wiring tests identify the retention loop in `extra_loops` by that name and
     read the store out of the closure cell to prove each venue prunes the file it writes.

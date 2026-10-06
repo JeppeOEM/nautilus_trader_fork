@@ -523,7 +523,7 @@ scale burst gives per-instrument figures.
   (`nproc`) over the hour.
 - Dozzle, each collector over the same hour: zero `_second_loop tick arrived ... late` lines.
 - OOM: `docker inspect -f '{{.Name}} OOMKilled={{.State.OOMKilled}} restarts={{.RestartCount}}'
-  bybit-collector hyperliquid-collector` (and `dydx-collector` where it runs) prints
+  bybit-collector hyperliquid-collector` (and `dydx-collector` where it runs) lists
   `OOMKilled=false` for each. A `true` means that collector outgrew its `mem_limit`: raise it from
   a fresh measurement (the Known limit in `docker-compose.yml`), never live with the restarts
   (DATA-07).
@@ -1527,3 +1527,33 @@ The file's text and key set are unchanged.
       `git checkout -- data/alerts/alerts.toml` (the checkout of the reverted commit refuses a
       modified tracked file), check out or pull the revert, then
       `cp ~/alerts.toml.post-dw197 data_api/alerts.toml` and `make up`.
+
+### DW-195 candle store gains the `candles_by_bar_seconds_t` index (commit: 1814a83a0d)
+
+The first writer open of each existing `candles_<venue>.db` builds the new `(bar_seconds, t)` index
+inside `connect_rw` (`CREATE INDEX IF NOT EXISTS` in `_SCHEMA`): a one-time, synchronous build that
+holds the store's write lock, so any other writer of the same file waits up to 60 s. Whichever
+writer opens the file first builds it: normally that venue's collector at its first start after
+the deploy (delaying its startup), but for a store whose collector does not run (`candles_dydx.db`
+without the `dydx` profile) it is the `archive` service's nightly saga (`build_candles`, or
+`mark_verified` through `connect_rw`) at `archive/config.toml`'s `nightly_at` (03:07 UTC).
+
+- [ ] Before the deploy, check free disk: `df -h data/candles /var/lib/docker` and
+      `ls -lh data/candles/`. The index holds every row's `(bar_seconds, t, instrument_id)` key,
+      measured at about a third of the `candles` table's size, and is written through the WAL;
+      `CREATE INDEX` also sorts its keys in SQLite temp files inside the writing container's own
+      filesystem (`/var/tmp`, not `data/candles`). Leave at least the largest store's size free on
+      both.
+- [ ] Do not run `make build-candles` / `make nightly` against a venue while its collector's first
+      start after this deploy is still building the index, and deploy outside the nightly window
+      (03:07 UTC).
+- [ ] If `candles_dydx.db` exists but the `dydx` profile does not run, build its index once by hand
+      right after `make up` instead of inside the next nightly:
+      `docker compose exec archive python3 -c "from candles.infrastructure.sqlite_store import CandleStore; CandleStore('/app/candles_dir/candles_dydx.db').close()"`.
+- [ ] After `make up`, confirm each store has the index. Run the check inside a container that
+      mounts the stores read-write (opening a WAL file `mode=ro` needs its `-shm`, which the host
+      user may be unable to create or write):
+      `docker compose exec archive python3 -c "import sqlite3,sys; print(sqlite3.connect('file:'+sys.argv[1]+'?mode=ro', uri=True).execute(\"SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='candles'\").fetchall())" /app/candles_dir/candles_bybit.db`
+      must print `[('candles_by_bar_seconds_t',)]`; repeat for `candles_hyperliquid.db` and, if it
+      exists, `candles_dydx.db`. `GET /api/errors` shows no new `collector.candle_store_prune` or
+      `collector.candle_store` entries.

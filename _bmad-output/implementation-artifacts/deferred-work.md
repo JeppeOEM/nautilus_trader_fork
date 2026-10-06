@@ -1547,7 +1547,9 @@ resolution-undo: 1a6b7740085079c55586e14fa69e2d038c3f8ef250f63ca0a0f98c58703adbc
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-24-1-candles-context-behind-the-secondsink-port.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-24-1-candles-context-behind-the-secondsink-port.md` summary: the hourly retention prune runs `store.prune()` synchronously on the collector's event loop, and the `candles` table's primary key leads with `instrument_id`, so the `DELETE ... WHERE bar_seconds = ? AND t < ?` cannot use it — on a large store the scan blocks ingestion and per-second sampling for its whole duration. evidence: `candles/application/prune.py`'s `prune_loop` awaits only `asyncio.sleep`, never `asyncio.to_thread`; `_SCHEMA` (frozen under AD-D12) declares `PRIMARY KEY (instrument_id, bar_seconds, t) WITHOUT ROWID` and no secondary index. Pre-existing: the baseline's `Collector._candle_prune_loop` called `candle_store.prune(self._candle_db)` the same way on the same loop, so this story moved the shape rather than introducing it. The two fixes pull in opposite directions — `asyncio.to_thread` hands a second thread a connection the store's single-writer invariant says it owns alone, and an index on `(bar_seconds, t)` touches the frozen schema — so it needs a decision, not a patch.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw-candle-prune-secondary-index
+resolution-undo: dcec435856f63a0a78f742e8ca01075037bf4d1a50125f8b003fefd5e7288433 2026-10-06 7374617475733a206f70656e
 decision: 2026-10-05 Add a secondary index (bar_seconds, t) (schema change; nothing frozen until prod) — Add index in _SCHEMA with migration for existing stores.
 
 ### DW-196: the web frontend still hand-mirrors the ranking-table columns (`frontend/src/pages/RankingsPage.tsx`'s TS copy of `RANKING_COLS`) and its own coin-detail …
