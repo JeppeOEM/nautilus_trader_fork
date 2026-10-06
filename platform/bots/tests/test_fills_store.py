@@ -15,6 +15,7 @@
 """Tests for bots.infrastructure.fills_store -- Story 4.6 (financial calculations, TEST-01)."""
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -154,3 +155,52 @@ def test_a_closed_store_refuses_every_call_instead_of_reopening(tmp_path) -> Non
         write_fill(store, "bot-01", 2, "SELL", 101.0, 1.0, 1.0)
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         store.recent_trades("bot-01", None, 10)
+
+
+def test_a_re_delivered_trade_id_is_stored_once(store: SqliteFillsStore) -> None:
+    # DW-224: a fill re-delivered into a later process life must not inflate the stats.
+    first = write_fill(store, "bot-01", 1, "SELL", 100.0, 1.0, 5.0, 5.0, trade_id="T-1")
+    second = write_fill(store, "bot-01", 1, "SELL", 100.0, 1.0, 5.0, 5.0, trade_id="T-1")
+
+    assert (first, second) == (True, False)
+    assert len(store.recent_trades("bot-01", None, 10)) == 1
+    assert store.win_rate_stats("bot-01") == (1, 1)
+
+
+def test_the_same_trade_id_is_stored_for_each_bot(store: SqliteFillsStore) -> None:
+    write_fill(store, "bot-01", 1, "BUY", 100.0, 1.0, None, trade_id="T-1")
+    write_fill(store, "bot-02", 1, "BUY", 100.0, 1.0, None, trade_id="T-1")
+
+    assert len(store.recent_trades("bot-01", None, 10)) == 1
+    assert len(store.recent_trades("bot-02", None, 10)) == 1
+
+
+def _legacy_db(path: str) -> None:
+    # The `fills` table as it stood before the trade_id column (DW-224), with one row.
+    db = sqlite3.connect(path)
+    db.executescript(
+        """
+        CREATE TABLE fills (
+            ts INTEGER NOT NULL, bot_id TEXT NOT NULL, side TEXT NOT NULL,
+            price REAL NOT NULL, qty REAL NOT NULL, realized_pnl REAL,
+            position_realized_pnl REAL
+        );
+        CREATE INDEX idx_bot_ts ON fills(bot_id, ts);
+        INSERT INTO fills VALUES (1, 'bot-01', 'SELL', 100.0, 1.0, 5.0, 5.0);
+        """
+    )
+    db.commit()
+    db.close()
+
+
+def test_a_legacy_fills_db_migrates_in_place(tmp_path: Path) -> None:
+    path = str(tmp_path / "fills.db")
+    _legacy_db(path)
+    store = SqliteFillsStore(path)
+    try:
+        assert store.win_rate_stats("bot-01") == (1, 1)  # the old row, NULL trade id, still read
+        assert write_fill(store, "bot-01", 2, "BUY", 101.0, 1.0, None, trade_id="T-2")
+        assert not write_fill(store, "bot-01", 2, "BUY", 101.0, 1.0, None, trade_id="T-2")
+        assert [t["ts"] for t in store.recent_trades("bot-01", None, 10)] == [1, 2]
+    finally:
+        store.close()

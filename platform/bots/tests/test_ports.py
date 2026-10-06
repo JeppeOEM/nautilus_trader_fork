@@ -31,9 +31,9 @@ _DAY = 24 * 3600 * 1_000_000_000
 
 
 def _fills_store_contract(store: FillsStore) -> None:
-    store.write_fill(FillRecord("b1", 3 * _DAY, "SELL", 105.0, 1.0, 5.0, 5.0))
-    store.write_fill(FillRecord("b1", 1 * _DAY, "BUY", 100.0, 1.0, None, None))
-    store.write_fill(FillRecord("b2", 2 * _DAY, "SELL", 1.0, 1.0, -1.0, -1.0))
+    store.write_fill(FillRecord("b1", 3 * _DAY, "SELL", 105.0, 1.0, 5.0, 5.0, "T-3"))
+    store.write_fill(FillRecord("b1", 1 * _DAY, "BUY", 100.0, 1.0, None, None, "T-1"))
+    store.write_fill(FillRecord("b2", 2 * _DAY, "SELL", 1.0, 1.0, -1.0, -1.0, "T-2"))
 
     # scoped to one bot, ascending by ts, every row kept
     assert [t["ts"] for t in store.recent_trades("b1", None, 10)] == [1 * _DAY, 3 * _DAY]
@@ -56,7 +56,7 @@ def test_sqlite_fills_store_satisfies_the_fills_store_contract(store: SqliteFill
 def test_a_reopened_store_still_holds_every_row(tmp_path: Path) -> None:
     path = str(tmp_path / "fills.db")
     first = SqliteFillsStore(path)
-    first.write_fill(FillRecord("b1", 1, "BUY", 1.0, 1.0, None, None))
+    first.write_fill(FillRecord("b1", 1, "BUY", 1.0, 1.0, None, None, "T-1"))
     first.close()
     second = SqliteFillsStore(path)
     try:

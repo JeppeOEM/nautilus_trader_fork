@@ -42,10 +42,13 @@ from observability import error_ledger
 
 from bots.application.history import HistoryPublisher
 from bots.application.ports import BotRuntime
+from bots.application.ports import history_key
 from bots.domain.fill_ledger import FillRecord
 from bots.infrastructure.fills_store import SqliteFillsStore
 from bots.strategies.dummy import DummyStrategy
 from bots.strategies.dummy import DummyStrategyConfig
+from bots.tests.support import FakeBus
+from bots.tests.support import ThreadRecordingStore
 from bots.tests.support import record_fills
 from bots.tests.support import unused_connect
 from nautilus_trader.backtest.engine import BacktestEngine
@@ -455,9 +458,10 @@ class _GatedStore:
         self.gate = gate
         self.written: list[FillRecord] = []
 
-    def write_fill(self, record: FillRecord) -> None:
+    def write_fill(self, record: FillRecord) -> bool:
         self.gate.wait(timeout=5.0)
         self.written.append(record)
+        return True
 
 
 class _FixedLedger:
@@ -470,6 +474,9 @@ class _FixedLedger:
         return self.record
 
 
+_A_FILL = FillRecord("bot-01", 1, "BUY", 1.0, 1.0, None, None, "T-1")
+
+
 def test_drain_waits_out_queued_writes_before_the_executor_shuts_down() -> None:
     """
     Regression: `TradingNode.dispose` shuts the loop's executor down with `cancel_futures=True`,
@@ -480,7 +487,7 @@ def test_drain_waits_out_queued_writes_before_the_executor_shuts_down() -> None:
     gate = threading.Event()
     store = _GatedStore(gate)
     history = HistoryPublisher("bot-01", _UNUSED_RUNTIME, store, unused_connect, None)  # type: ignore[arg-type]
-    history.ledger = _FixedLedger(FillRecord("bot-01", 1, "BUY", 1.0, 1.0, None, None))  # type: ignore[assignment]
+    history.ledger = _FixedLedger(_A_FILL)  # type: ignore[assignment]
 
     async def _shutdown() -> None:
         executor = ThreadPoolExecutor(max_workers=1)
@@ -494,3 +501,61 @@ def test_drain_waits_out_queued_writes_before_the_executor_shuts_down() -> None:
     asyncio.run(_shutdown())
 
     assert len(store.written) == 2
+
+
+class _FailingLedger:
+    """A `FillLedger` whose attribution raises, as a bug in it would."""
+
+    def attribute(self, fill: object, position: object) -> FillRecord:
+        raise ValueError("attribution failed")
+
+
+def test_a_failed_attribution_is_ledgered_and_writes_nothing(store: SqliteFillsStore) -> None:
+    # DW-230: the exception must not escape into the message bus's dispatch, and no row with a
+    # fabricated PnL may be written in its place.
+    error_ledger.reset()
+    history = _history(store)
+    history.ledger = _FailingLedger()  # type: ignore[assignment]
+
+    history.record_fill("<the OrderFilled>", None)
+
+    assert store.recent_trades("bot-01", None, 10) == []
+    assert error_ledger.counts() == {"bots.fill_lost": 1}
+    assert "<the OrderFilled>" in error_ledger.last_details()["bots.fill_lost"]
+
+
+def test_a_re_delivered_fill_is_logged_and_stored_once(
+    store: SqliteFillsStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    error_ledger.reset()
+    history = _history(store)
+    history.ledger = _FixedLedger(_A_FILL)  # type: ignore[assignment]
+
+    with caplog.at_level("WARNING"):
+        history.record_fill(None, None)
+        history.record_fill(None, None)
+
+    assert len(store.recent_trades("bot-01", None, 10)) == 1
+    assert [record.levelname for record in caplog.records] == ["WARNING"]
+    assert "T-1" in caplog.records[0].message
+    assert error_ledger.counts() == {}
+
+
+def test_refresh_reads_fills_off_the_event_loop_and_sets_every_range_in_order(
+    store: SqliteFillsStore,
+) -> None:
+    # DW-222: the full-history scans on the loop would freeze every bot on the node.
+    recording = ThreadRecordingStore(store)
+    history = HistoryPublisher("bot-01", _UNUSED_RUNTIME, recording, unused_connect, None)
+    bus = FakeBus()
+    loop_threads: list[int] = []
+
+    async def _refresh() -> None:
+        loop_threads.append(threading.get_ident())
+        await history.refresh(bus)
+
+    asyncio.run(_refresh())
+
+    assert recording.read_threads
+    assert loop_threads[0] not in recording.read_threads
+    assert list(bus.keys) == [history_key("bot-01", r) for r in ("day", "week", "month", "all")]

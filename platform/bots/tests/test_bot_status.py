@@ -27,6 +27,7 @@ import asyncio
 import contextlib
 import json
 import math
+import threading
 import time
 from collections.abc import AsyncIterator
 from collections.abc import Callable
@@ -36,6 +37,7 @@ import pytest
 from observability import error_ledger
 
 from bots.application.ports import BusConnection
+from bots.application.ports import FillsStore
 from bots.application.ports import PositionSnapshot
 from bots.application.supervise import Supervisor
 from bots.application.supervise import parse_control_message
@@ -49,6 +51,7 @@ from bots.infrastructure.fills_store import SqliteFillsStore
 from bots.strategies.dummy import DummyStrategy
 from bots.strategies.dummy import DummyStrategyConfig
 from bots.tests.support import FakeBus
+from bots.tests.support import ThreadRecordingStore
 from bots.tests.support import connect_to
 from bots.tests.support import record_fills
 from bots.tests.support import status_of
@@ -490,9 +493,7 @@ class _Clock:
         return int(self.now * 1e9)
 
 
-def _supervisor(
-    runtime: _Runtime, store: SqliteFillsStore, bus: FakeBus, clock: _Clock
-) -> Supervisor:
+def _supervisor(runtime: _Runtime, store: FillsStore, bus: FakeBus, clock: _Clock) -> Supervisor:
     return Supervisor(
         "bot-01",
         "paper",
@@ -623,7 +624,9 @@ def test_an_unreadable_prior_log_starts_an_empty_one_that_still_marks_the_start(
     assert supervisor.bot.incidents == [
         {"type": "process_start", "started_at": 100.0, "ended_at": 100.0}
     ]
+    assert json.loads(bus.keys["bots:incidents:bot-01"]) == supervisor.bot.incidents
     assert error_ledger.counts() == {"bots.incidents_write": 1}
+    assert "'{not json'" in error_ledger.last_details()["bots.incidents_write"]
 
 
 @pytest.mark.parametrize("prior", ['{"not": "a list"}', "[1, 2]", '[{"type": "data_stale"}]'])
@@ -638,7 +641,51 @@ def test_a_malformed_prior_log_still_marks_the_start(store: SqliteFillsStore, pr
     assert supervisor.bot.incidents == [
         {"type": "process_start", "started_at": 100.0, "ended_at": 100.0}
     ]
+    assert json.loads(bus.keys["bots:incidents:bot-01"]) == supervisor.bot.incidents
     assert error_ledger.counts() == {"bots.incidents_write": 1}
+
+
+def test_seed_retries_an_unreachable_prior_log_instead_of_overwriting_it(
+    store: SqliteFillsStore,
+) -> None:
+    # DW-228: starting from an empty log while Redis was merely down would overwrite the prior
+    # life's log on the first write. The start is still this process's, not the retry's, time.
+    runtime, clock = _Runtime(), _Clock(100.0)
+    bus = FakeBus()
+    bus.keys["bots:incidents:bot-01"] = json.dumps(
+        [{"type": "data_stale", "started_at": 90.0, "ended_at": None}]
+    )
+    bus.fail_get = 2
+    supervisor = _supervisor(runtime, store, bus, clock)
+    clock.now = 150.0
+
+    asyncio.run(supervisor.seed())
+
+    assert json.loads(bus.keys["bots:incidents:bot-01"]) == [
+        {"type": "data_stale", "started_at": 90.0, "ended_at": 100.0, "note": "closed by restart"},
+        {"type": "process_start", "started_at": 100.0, "ended_at": 100.0},
+    ]
+    assert error_ledger.counts() == {"bots.redis": 2}
+
+
+def test_heartbeat_reads_fill_stats_off_the_event_loop_thread(store: SqliteFillsStore) -> None:
+    # DW-222: a sqlite read on the loop would freeze every bot on the node for its duration.
+    recording = ThreadRecordingStore(store)
+    write_fill(store, "bot-01", 1, "SELL", 1.0, 1.0, 2.0, position_realized_pnl=2.0)
+    runtime, bus, clock = _Runtime(), FakeBus(), _Clock(100.0)
+    supervisor = _supervisor(runtime, recording, bus, clock)
+    loop_threads: list[int] = []
+
+    async def _tick() -> None:
+        loop_threads.append(threading.get_ident())
+        await supervisor.heartbeat_tick(bus)
+
+    asyncio.run(_tick())
+
+    assert recording.read_threads
+    assert loop_threads[0] not in recording.read_threads
+    status = json.loads(bus.published[0][1])
+    assert (status["closed_trades"], status["win_rate"], status["last_fill_at"]) == (1, 1.0, 1)
 
 
 def test_a_refused_control_action_is_ledgered_not_raised(store: SqliteFillsStore) -> None:
@@ -706,7 +753,8 @@ def test_run_keeps_the_incident_log_across_a_reconnect(store: SqliteFillsStore) 
 
     def flaky_connect():
         opened["n"] += 1
-        if opened["n"] == 2:
+        # The seed's read and write are the first two connections; the run loop's first fails.
+        if opened["n"] == 3:
             raise ConnectionError("redis down")
         return real_connect()
 

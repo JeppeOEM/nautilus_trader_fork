@@ -16,8 +16,8 @@
 `fills.db`: the shared, append-only SQLite fill log of every bot (Story 4.6).
 
 One row per fill across every bot (a `bot_id` column, not a file per bot: write volume is human
-timescale, so one shared file adds no real contention). A row is written once, as its
-`OrderFilled` is observed, and never rewritten -- unlike Nautilus's Cache, which overwrites a
+timescale, so one shared file adds no real contention). A row is appended once per trade id, as
+its `OrderFilled` is observed, and never rewritten -- unlike Nautilus's Cache, which overwrites a
 NETTING position's closed history the instant it reopens (`bots.domain.fill_ledger`). Plain
 `sqlite3`, no ORM, like `ranking/infrastructure/metrics_store.py`.
 """
@@ -49,14 +49,34 @@ CREATE INDEX IF NOT EXISTS idx_bot_ts ON fills(bot_id, ts);
 # `position_realized_pnl` is non-NULL on exactly the closing fill of each round trip. ALTER TABLE
 # (not only CREATE ... IF NOT EXISTS) because an existing fills.db predates the column; the
 # "duplicate column" error on an already-migrated db is the expected steady state.
-_MIGRATIONS = ("ALTER TABLE fills ADD COLUMN position_realized_pnl REAL",)
+# `trade_id` (DW-224) is the venue's trade id: with `bot_id`, the idempotency key.
+_MIGRATIONS = (
+    "ALTER TABLE fills ADD COLUMN position_realized_pnl REAL",
+    "ALTER TABLE fills ADD COLUMN trade_id TEXT",
+)
+
+# Created after the migrations, outside their suppression: a failure here is real, never the
+# expected "duplicate column". Legacy rows keep a NULL `trade_id`, and a SQLite unique index admits
+# any number of NULLs, so they never collide. The key drops no legitimate fill: a venue's trade ids
+# are unique per venue (Sandbox's `_generate_trade_id_str`, nautilus_trader/backtest/engine.pyx,
+# hashes the venue, the instrument's raw id and ts_init, so it does not repeat across restarts),
+# and within one process the ExecutionEngine already refuses a duplicate trade id
+# (`is_duplicate_fill_c`) -- so this guards only a re-delivery into a later process life.
+# Known limit: a fill that startup reconciliation *infers* (no venue fill report, order status
+# ahead of the Cache: `nautilus_trader/live/reconciliation.py` `create_inferred_order_filled_event`)
+# carries a synthesised trade id, never the venue's, so it is not deduplicated against a row this
+# store already holds -- reachable only by an exec bot whose fill reached `fills.db` but not the
+# Redis-persisted Cache before the process died. Upgrade path: key inferred fills (detectable by
+# their reconciliation trade id) on `(bot_id, client_order_id, cumulative filled qty)` instead.
+_UNIQUE_TRADE_INDEX = "CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_trade ON fills(bot_id, trade_id)"
 
 
 class SqliteFillsStore:
     """
     The `FillsStore` port over one `fills.db` file.
 
-    Invariant: rows are only ever appended (`write_fill`); one connection, opened on first use and
+    Invariant: rows are only ever appended (`write_fill`), at most one per `(bot_id, trade_id)`;
+    one connection, opened on first use and
     shared by the event loop and the executor thread that writes fills, serialised by one lock;
     after `close()` every call raises, so a late write is a loud `bots.fill_lost`, never a second,
     leaked connection.
@@ -82,6 +102,7 @@ class SqliteFillsStore:
                     # "duplicate column": already present from a prior run.
                     with contextlib.suppress(sqlite3.OperationalError):
                         db.execute(migration)
+                db.execute(_UNIQUE_TRADE_INDEX)
                 db.commit()
             except Exception:
                 db.close()
@@ -100,13 +121,19 @@ class SqliteFillsStore:
         with self._lock:
             return self._conn().execute(sql, params).fetchall()
 
-    def write_fill(self, record: FillRecord) -> None:
+    def write_fill(self, record: FillRecord) -> bool:
+        """
+        Append one fill; False (nothing written) when this bot already stored its trade id.
+        `ON CONFLICT ... DO NOTHING`, never `INSERT OR IGNORE`, which would also swallow a NOT NULL
+        violation -- a real fault that must raise.
+        """
         with self._lock:
             db = self._conn()
             try:
-                db.execute(
+                cursor = db.execute(
                     "INSERT INTO fills(ts, bot_id, side, price, qty, realized_pnl, "
-                    "position_realized_pnl) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "position_realized_pnl, trade_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(bot_id, trade_id) DO NOTHING",
                     (
                         record.ts,
                         record.bot_id,
@@ -115,12 +142,14 @@ class SqliteFillsStore:
                         record.qty,
                         record.realized_pnl,
                         record.position_realized_pnl,
+                        record.trade_id,
                     ),
                 )
                 db.commit()
             except Exception:
                 db.rollback()
                 raise
+            return cursor.rowcount == 1
 
     def recent_trades(self, bot_id: str, cutoff_ns: int | None, limit: int) -> list[dict]:
         """Return the latest `limit` fills at/after `cutoff_ns` (all time if None), ascending."""

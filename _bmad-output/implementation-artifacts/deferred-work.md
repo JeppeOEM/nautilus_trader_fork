@@ -1771,7 +1771,9 @@ resolution-undo: 9077e58b03eea8f8c9d2570018bc9c06100b365969d0b85199174491807bf96
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-3-bots-context-paper-and-exec-types-nautilus-acl.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-3-bots-context-paper-and-exec-types-nautilus-acl.md` summary: The bots' `fills.db` reads run synchronously on the TradingNode's one event loop -- every 30 s each bot's history refresh runs 4 ranges x 4 queries (two full-history `pnl_by_day` scans per range) and every 5 s `win_rate_stats` -- under the lock the executor's fill writes hold, a cost that grows without bound with the file. evidence: platform/bots/application/history.py `refresh` and application/supervise.py `build_status` call the `SqliteFillsStore` directly; only `record_fill` is offloaded (`run_in_executor`). The same inline reads existed in live_paper/trade_history.py and bot_status.py at baseline 88abf70269.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw2-bots-persistence-and-host
+resolution-undo: b98e299a1973c6cd760dd890fe03e85313515bcb9f8a9937413ae821024a54e1 2026-10-06 7374617475733a206f70656e
 
 ### DW-223: Per-fill realized PnL attribution loses its invariant across a restart or a flip -- the pending partial-close estimates live only in memory, so a close after a …
 
@@ -1786,7 +1788,9 @@ decision: 2026-10-05 Derive realized PnL from Nautilus position events only — 
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-3-bots-context-paper-and-exec-types-nautilus-acl.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-3-bots-context-paper-and-exec-types-nautilus-acl.md` summary: `fills.db` has no idempotency key (no `trade_id`, no unique constraint), so a re-delivered `OrderFilled` (e.g. exec-path reconciliation after a restart) appends a duplicate row that permanently inflates closed_trades, win rate and PnL in the append-only store. evidence: platform/bots/infrastructure/fills_store.py `_SCHEMA`/`write_fill` and domain/fill_ledger.py `FillRecord` (no trade id); identical schema in live_paper/fills_store.py at baseline 88abf70269.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw2-bots-persistence-and-host
+resolution-undo: b98e299a1973c6cd760dd890fe03e85313515bcb9f8a9937413ae821024a54e1 2026-10-06 7374617475733a206f70656e
 
 ### DW-225: `bots:status.realized_pnl` sums `cache.positions_closed(strategy_id=...)`, which keeps only a NETTING position's latest round trip, so after any reopen the …
 
@@ -1801,7 +1805,9 @@ decision: 2026-10-05 Source from fills.db — realized_pnl from fills.db total, 
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: portfolio.is_flat/is_net_long/is_net_short(instrument_id)
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-3-bots-context-paper-and-exec-types-nautilus-acl.md` summary: `DummyStrategy._maybe_trade` decides from `portfolio.is_flat/is_net_long/is_net_short(instrument_id)`, which are account-and-instrument wide, so two paper bots on one instrument (allowed by the config) read each other's positions -- an AD-11 violation the status path already avoids by strategy-scoped reads. evidence: platform/bots/strategies/dummy.py `_maybe_trade`, unchanged from live_paper/strategy.py at baseline 88abf70269; contrast bots/infrastructure/cache_reader.py (`positions_open(strategy_id=...)`).
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw2-bots-persistence-and-host
+resolution-undo: b98e299a1973c6cd760dd890fe03e85313515bcb9f8a9937413ae821024a54e1 2026-10-06 7374617475733a206f70656e
 
 ### DW-227: bot_tui docstrings still cite the deleted `live_paper/bot_status.py`/`trade_history.py` and say "one live_paper process = one bot", and its …
 
@@ -1816,21 +1822,27 @@ resolution: already resolved: grep of platform/bot_tui finds no live_paper/bot_s
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-3-bots-context-paper-and-exec-types-nautilus-acl.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-3-bots-context-paper-and-exec-types-nautilus-acl.md` summary: When Redis is unreachable at the one-shot incident-log seed, the bot starts from `[process_start]` alone and its first staleness transition `SET`s that short list over the previous life's `bots:incidents:{bot_id}`, which was never read -- the prior incident history is lost whenever Redis and `live-paper` restart together. evidence: platform/bots/application/supervise.py `Supervisor.seed` (no retry; the fallback `self.bot.start([], ...)`) and `heartbeat_tick`'s whole-list `connection.set`; the same seed-once-then-overwrite flow in live_paper/bot_status.py `run` at baseline 88abf70269.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw2-bots-persistence-and-host
+resolution-undo: b98e299a1973c6cd760dd890fe03e85313515bcb9f8a9937413ae821024a54e1 2026-10-06 7374617475733a206f70656e
 
 ### DW-229: `_cache_config` passes `urlparse(REDIS_URL).username/password` to the Nautilus Cache still percent-encoded, while redis-py's `from_url` (the `bots:*` bus) …
 
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: urlparse(REDIS_URL).username/password
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-3-bots-context-paper-and-exec-types-nautilus-acl.md` summary: `_cache_config` passes `urlparse(REDIS_URL).username/password` to the Nautilus Cache still percent-encoded, while redis-py's `from_url` (the `bots:*` bus) decodes them, so a password containing an encoded character authenticates the bus but not the Cache. evidence: platform/bots/infrastructure/nautilus_host.py `_cache_config` (no `urllib.parse.unquote`); redis-py `parse_url` unquotes username/password. Same code in live_paper/node.py at baseline 88abf70269.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw2-bots-persistence-and-host
+resolution-undo: b98e299a1973c6cd760dd890fe03e85313515bcb9f8a9937413ae821024a54e1 2026-10-06 7374617475733a206f70656e
 
 ### DW-230: `HistoryPublisher.record_fill` calls `FillLedger.attribute` outside any guard, so an exception there (e.g. `Position.calculate_pnl` on an unexpected fill) …
 
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-3-bots-context-paper-and-exec-types-nautilus-acl.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-3-bots-context-paper-and-exec-types-nautilus-acl.md` summary: `HistoryPublisher.record_fill` calls `FillLedger.attribute` outside any guard, so an exception there (e.g. `Position.calculate_pnl` on an unexpected fill) propagates into the strategy's message-bus dispatch and the fill is neither written nor ledgered as `bots.fill_lost`. evidence: platform/bots/application/history.py `record_fill` (only `_write` catches); the unguarded `_fill_pnl` call in live_paper/trade_history.py `_on_order_event` at baseline 88abf70269.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw2-bots-persistence-and-host
+resolution-undo: b98e299a1973c6cd760dd890fe03e85313515bcb9f8a9937413ae821024a54e1 2026-10-06 7374617475733a206f70656e
 
 ### DW-231: A `collector:control` command arriving within `config_reload_seconds` (30 s) of a hand edit of the dYdX plan file overwrites that edit silently …
 

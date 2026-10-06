@@ -231,6 +231,13 @@ def test_cache_config_carries_the_redis_url_credentials_and_tls() -> None:
     assert (plain.host, plain.port, plain.username, plain.ssl) == ("127.0.0.1", 6379, None, False)
 
 
+def test_cache_config_decodes_percent_encoded_credentials_and_host() -> None:
+    # DW-229: redis-py's parse_url decodes all three, so the Cache must authenticate the same way.
+    db = _cache_config("redis://us%40r:p%40ss%3A1@h%2Dx:6379").database
+    assert db is not None
+    assert (db.username, db.password, db.host) == ("us@r", "p@ss:1", "h-x")
+
+
 def test_cache_config_refuses_a_redis_database_number() -> None:
     # DatabaseConfig has no database field: the Cache would silently use 0 while the bus used 2.
     with pytest.raises(ValueError, match="database '2'"):

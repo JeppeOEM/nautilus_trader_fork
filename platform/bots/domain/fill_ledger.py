@@ -62,6 +62,8 @@ class FillRecord:
     One `fills.db` row. `realized_pnl` is this fill's own share of closing its position (None for
     an opening/adding fill); `position_realized_pnl` is the round trip's true total, set only on
     the fill that closes it -- one value per completed trade, for the per-trade statistics.
+    `trade_id` is the venue's trade id, with `bot_id` the store's idempotency key: a fill
+    re-delivered in a later process life is never stored twice.
     """
 
     bot_id: str
@@ -71,6 +73,7 @@ class FillRecord:
     qty: float
     realized_pnl: float | None
     position_realized_pnl: float | None
+    trade_id: str
 
 
 class FillLedger:
@@ -107,6 +110,7 @@ class FillLedger:
             qty=fill.last_qty.as_double(),
             realized_pnl=realized_pnl,
             position_realized_pnl=position_realized_pnl,
+            trade_id=fill.trade_id.value,
         )
 
     def _pnl(

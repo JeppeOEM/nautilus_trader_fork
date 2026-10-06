@@ -15,6 +15,8 @@
 """Shared helpers for the bots tests: store seeding, the application's wiring, a fake bus."""
 
 import asyncio
+import itertools
+import threading
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
 from contextlib import asynccontextmanager
@@ -23,11 +25,16 @@ from bots.application.history import HistoryPublisher
 from bots.application.ports import BusConnection
 from bots.application.ports import Connect
 from bots.application.supervise import build_status
+from bots.application.supervise import read_fill_stats
 from bots.domain.bot import Bot
 from bots.domain.fill_ledger import FillRecord
 from bots.infrastructure.cache_reader import StrategyCacheReader
 from bots.infrastructure.fills_store import SqliteFillsStore
 from nautilus_trader.trading.strategy import Strategy
+
+
+# A fresh trade id per seeded fill unless a test names one: the store keys on (bot_id, trade_id).
+_trade_ids = itertools.count()
 
 
 def write_fill(
@@ -39,8 +46,53 @@ def write_fill(
     qty: float,
     realized_pnl: float | None,
     position_realized_pnl: float | None = None,
-) -> None:
-    store.write_fill(FillRecord(bot_id, ts, side, price, qty, realized_pnl, position_realized_pnl))
+    trade_id: str | None = None,
+) -> bool:
+    if trade_id is None:
+        trade_id = f"T-{next(_trade_ids)}"
+    record = FillRecord(bot_id, ts, side, price, qty, realized_pnl, position_realized_pnl, trade_id)
+    return store.write_fill(record)
+
+
+class ThreadRecordingStore:
+    """
+    A `FillsStore` over a real one that records which thread ran each read, for the tests that
+    prove no sqlite read runs on the node's event-loop thread (DW-222).
+    """
+
+    def __init__(self, store: SqliteFillsStore) -> None:
+        self._store = store
+        self.read_threads: set[int] = set()
+
+    def _reading(self) -> None:
+        self.read_threads.add(threading.get_ident())
+
+    def write_fill(self, record: FillRecord) -> bool:
+        return self._store.write_fill(record)
+
+    def recent_trades(self, bot_id: str, cutoff_ns: int | None, limit: int) -> list[dict]:
+        self._reading()
+        return self._store.recent_trades(bot_id, cutoff_ns, limit)
+
+    def realized_pnls(self, bot_id: str, cutoff_ns: int | None) -> list[float]:
+        self._reading()
+        return self._store.realized_pnls(bot_id, cutoff_ns)
+
+    def position_realized_pnls(self, bot_id: str, cutoff_ns: int | None) -> list[float]:
+        self._reading()
+        return self._store.position_realized_pnls(bot_id, cutoff_ns)
+
+    def win_rate_stats(self, bot_id: str) -> tuple[int, int]:
+        self._reading()
+        return self._store.win_rate_stats(bot_id)
+
+    def last_fill_ns(self, bot_id: str) -> int | None:
+        self._reading()
+        return self._store.last_fill_ns(bot_id)
+
+    def pnl_by_day(self, bot_id: str, cutoff_ns: int | None) -> list[dict]:
+        self._reading()
+        return self._store.pnl_by_day(bot_id, cutoff_ns)
 
 
 class FakeBus:
@@ -51,11 +103,16 @@ class FakeBus:
         self.keys: dict[str, str] = {}
         self.control = list(control or [])
         self.fail_set = False
+        # How many more `get` calls raise, as an unreachable Redis does.
+        self.fail_get = 0
 
     async def publish(self, channel: str, message: str) -> None:
         self.published.append((channel, message))
 
     async def get(self, key: str) -> str | None:
+        if self.fail_get > 0:
+            self.fail_get -= 1
+            raise ConnectionError("get failed")
         return self.keys.get(key)
 
     async def set(self, key: str, value: str) -> None:
@@ -105,4 +162,5 @@ def status_of(
     started_at: float = 0.0,
     now: float = 1.0,
 ) -> dict:
-    return build_status(Bot(bot_id, mode, started_at), StrategyCacheReader(strategy), store, now)
+    stats = read_fill_stats(store, bot_id)
+    return build_status(Bot(bot_id, mode, started_at), StrategyCacheReader(strategy), stats, now)

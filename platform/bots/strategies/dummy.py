@@ -127,6 +127,7 @@ from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.orders import MarketOrder
+from nautilus_trader.model.position import Position
 from nautilus_trader.trading.strategy import Strategy
 
 
@@ -450,39 +451,51 @@ class DummyStrategy(Strategy):
         if not (self.trend.initialized and self.mlofi.initialized):
             return
 
-        # An order already in flight hasn't updated portfolio state yet -- without this
+        # An order already in flight hasn't updated position state yet -- without this
         # guard, a signal that stays true across successive 1s timer ticks would submit a
         # duplicate order every tick until the first one fills (established idiom, see
         # nautilus_trader/examples/strategies/orderbook_imbalance.py's check_trigger()).
         if self.cache.orders_inflight(strategy_id=self.id):
             return
 
-        is_flat = self.portfolio.is_flat(self.config.instrument_id)
+        position = self._own_position()
         if self._uses_exits:
-            self._trade_with_exits(is_flat)
+            self._trade_with_exits(position)
             return
-        side = self._wanted_side(is_flat)
+        side = self._wanted_side(position)
         if side is not None:
             self._submit(side)
 
-    def _trade_with_exits(self, is_flat: bool) -> None:
+    def _own_position(self) -> Position | None:
+        """
+        Return the strategy's own open position on its instrument, None when flat (NETTING holds
+        at most one). Never `portfolio.is_flat`/`net_position` and kin: those are
+        account+instrument wide and blend every bot trading the instrument on the node (AD-11) --
+        the same scoping `bots/infrastructure/cache_reader.py` reads with.
+        """
+        positions = self.cache.positions_open(
+            instrument_id=self.config.instrument_id, strategy_id=self.id
+        )
+        return positions[0] if positions else None
+
+    def _trade_with_exits(self, position: Position | None) -> None:
         """
         One bracket-mode cycle: resting exits are cancelled before a reversal and whenever flat,
         and the trade waits for the next cycle (see module docstring).
         """
-        if is_flat:
+        if position is None:
             self._reversal_side = None
             if self._entry_working():
                 return
             if self._has_resting_orders():
                 self.cancel_all_orders(self.config.instrument_id)
                 return
-            side = self._wanted_side(is_flat)
+            side = self._wanted_side(position)
             if side is not None:
                 self._enter(side)
             return
         side = (
-            self._reversal_side if self._reversal_side is not None else self._wanted_side(is_flat)
+            self._reversal_side if self._reversal_side is not None else self._wanted_side(position)
         )
         if side is None:
             return
@@ -490,20 +503,20 @@ class DummyStrategy(Strategy):
         if self._has_resting_orders():
             self.cancel_all_orders(self.config.instrument_id)
             return
-        self._flatten(side)
+        self._flatten(side, position)
 
-    def _wanted_side(self, is_flat: bool) -> OrderSide | None:
+    def _wanted_side(self, position: Position | None) -> OrderSide | None:
         """Return the side of the one order this cycle's signals call for, None to hold."""
         signal = self._signal(self.trend.value, self.mlofi.value)
         long_signal = signal == SIGNAL_LONG
         short_signal = signal == SIGNAL_SHORT
-        if is_flat:
+        if position is None:
             if long_signal:
                 return OrderSide.BUY
             return OrderSide.SELL if short_signal else None
-        if self.portfolio.is_net_long(self.config.instrument_id) and short_signal:
+        if position.is_long and short_signal:
             return OrderSide.SELL
-        if self.portfolio.is_net_short(self.config.instrument_id) and long_signal:
+        if position.is_short and long_signal:
             return OrderSide.BUY
         return None
 
@@ -570,19 +583,18 @@ class DummyStrategy(Strategy):
         self.submit_order_list(order_list)
         self._cycle_action = side
 
-    def _flatten(self, side: OrderSide) -> None:
+    def _flatten(self, side: OrderSide, position: Position) -> None:
         """
         Close the whole open position with one reduce-only market order. Sized to the position,
         not `trade_size`: a partly filled flatten's remainder is cancelled on the next cycle
         (`_reversal_side` holds until flat) and re-sent for what is left, so it can never
-        overshoot into an opposite position that has no exits.
+        overshoot into an opposite position that has no exits. `position.quantity` is already a
+        `Quantity` at the instrument's precision: exact, never through `float`.
         """
-        assert self.instrument is not None
-        quantity = abs(self.portfolio.net_position(self.config.instrument_id))
         order: MarketOrder = self.order_factory.market(
             instrument_id=self.config.instrument_id,
             order_side=side,
-            quantity=self.instrument.make_qty(quantity),
+            quantity=position.quantity,
             reduce_only=True,
         )
         self.submit_order(order)

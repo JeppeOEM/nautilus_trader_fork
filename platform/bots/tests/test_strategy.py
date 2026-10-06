@@ -35,6 +35,7 @@ import pytest
 from bots.infrastructure.cache_reader import own_open_orders
 from bots.strategies.dummy import DummyStrategy
 from bots.strategies.dummy import DummyStrategyConfig
+from bots.strategies.signal_log import SIGNAL_LONG
 from bots.tests.test_replay import _INPUTS as _REVERSING_INPUTS
 from bots.tests.test_replay import _data as _reversing_data
 from nautilus_trader.backtest.engine import BacktestEngine
@@ -195,6 +196,40 @@ def test_dummy_strategy_no_trade_when_thresholds_unreachable() -> None:
 
     engine.reset()
     engine.dispose()
+
+
+def test_a_bot_reads_only_its_own_position_never_the_instruments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # DW-226 (AD-11): two bots on one instrument share the account-wide portfolio figures, so a
+    # flat bot that read them would believe itself long on the other bot's position.
+    engine = _engine()
+    engine.add_data(_quotes_and_deltas(n_seconds=15, levels_per_side=2))
+    trading = DummyStrategy(
+        _config(
+            order_id_tag="A",
+            trend_buy_threshold=0.49,
+            trend_sell_threshold=0.1,
+            ofi_confirm_threshold=-999_999.0,
+        ),
+    )
+    idle = DummyStrategy(
+        _config(order_id_tag="B", trend_buy_threshold=0.999_999, trend_sell_threshold=0.000_001)
+    )
+    engine.add_strategy(trading)
+    engine.add_strategy(idle)
+    engine.run(streaming=True)
+
+    own = trading._own_position()
+    assert own is not None
+    assert own.is_long
+    assert idle.portfolio.is_net_long(_IID), "the account-wide figure blends in bot A"
+    assert idle._own_position() is None
+    # B's decision on a long signal is a flat entry; the blended read would have held instead.
+    monkeypatch.setattr(idle, "_signal", lambda trend, mlofi: SIGNAL_LONG)
+    assert idle._wanted_side(idle._own_position()) == OrderSide.BUY
+
+    _close(engine)
 
 
 def test_dummy_strategy_stops_on_invalid_thresholds() -> None:
@@ -374,10 +409,10 @@ def test_a_reversal_whose_signal_fades_still_flattens() -> None:
     try:
         assert strategy.portfolio.is_net_long(_IID)
         signals = iter([OrderSide.SELL, None])
-        strategy._wanted_side = lambda is_flat: next(signals)
-        strategy._trade_with_exits(is_flat=False)
+        strategy._wanted_side = lambda position: next(signals)
+        strategy._trade_with_exits(strategy._own_position())
         assert own_open_orders(strategy) == [], "the reversal cancels the resting exits first"
-        strategy._trade_with_exits(is_flat=False)
+        strategy._trade_with_exits(strategy._own_position())
         flattens = [
             order
             for order in engine.cache.orders(strategy_id=strategy.id)
@@ -421,9 +456,9 @@ def test_a_reversal_flattens_the_whole_position_not_trade_size() -> None:
         engine.run(streaming=True)
         assert strategy.portfolio.net_position(_IID) == Decimal("0.002")
         signals = iter([OrderSide.SELL])
-        strategy._wanted_side = lambda is_flat: next(signals, None)
-        strategy._trade_with_exits(is_flat=False)  # cancels the exits
-        strategy._trade_with_exits(is_flat=False)  # sends the flatten
+        strategy._wanted_side = lambda position: next(signals, None)
+        strategy._trade_with_exits(strategy._own_position())  # cancels the exits
+        strategy._trade_with_exits(strategy._own_position())  # sends the flatten
         engine.add_data(_more_quotes(17, 3))
         engine.run(streaming=True)
         flattens = [
@@ -454,7 +489,7 @@ def test_a_flat_bot_keeps_the_legs_of_an_entry_still_working() -> None:
         assert len(legs) == 2, "the entry list's legs rest before its fill is applied"
         cancels: list[object] = []
         strategy.cancel_all_orders = lambda *args, **kwargs: cancels.append(args)
-        strategy._trade_with_exits(is_flat=True)
+        strategy._trade_with_exits(None)
         assert cancels == []
     finally:
         _close(engine)

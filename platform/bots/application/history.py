@@ -23,6 +23,11 @@ Known limit: the keys refresh on the 30 s timer only, not also on each fill as A
 deliberate scope cut since Story 4.6: no reader needs sub-30 s latency). The fill *write*, which
 durability depends on, is on-fill. Upgrade path: call `refresh` from `record_fill` through the
 event loop once a reader needs it.
+
+Known limit: every refresh still scans the bot's whole `fills.db` history (the all-time daily
+PnL and the `all` window), so its cost grows with the file. It runs on the loop's default executor,
+never on the node's event loop, but stays serialised with fill writes by the store's one lock.
+Upgrade path: a per-UTC-day rollup table maintained by `write_fill`, read in place of the scans.
 """
 
 import asyncio
@@ -60,7 +65,8 @@ class HistoryPublisher:
     Records one bot's fills and publishes its history windows.
 
     Invariants: every fill the strategy reports is attributed by the bot's one `FillLedger` and
-    written once (a write that fails is ledgered with every field, never dropped silently); a
+    written once (an attribution or a write that fails is ledgered with every field, a re-delivered
+    trade id is logged, neither is dropped silently); a
     refresh cycle that fails leaves the previously published keys untouched, so their aging
     `updated_at` signals staleness rather than an empty fallback overwriting good data.
     """
@@ -102,7 +108,16 @@ class HistoryPublisher:
         the write goes to a worker thread. BacktestEngine has no running loop (a purely
         synchronous replay), so there it is written inline.
         """
-        record = self.ledger.attribute(fill, position)
+        try:
+            record = self.ledger.attribute(fill, position)
+        except Exception as exc:
+            # Never into the message bus's dispatch; and never a row with fabricated PnL.
+            error_ledger.record(
+                "bots.fill_lost",
+                f"fill permanently lost, not attributed or persisted to fills.db: {fill}",
+                exc,
+            )
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -128,15 +143,32 @@ class HistoryPublisher:
         # unwritable mount) a retry cannot fix. Every field is ledgered, so the lost fill is
         # visible and recoverable by hand, never a silent undercount.
         try:
-            self._fills.write_fill(record)
+            inserted = self._fills.write_fill(record)
         except Exception as exc:
             error_ledger.record(
                 "bots.fill_lost", f"fill permanently lost, not persisted to fills.db: {record}", exc
             )
+            return
+        if not inserted:
+            # A fill re-delivered into a later process life (e.g. after the Cache lost its
+            # state): the venue's, not a fault of ours, and the stored row already counts it.
+            logger.warning(
+                "duplicate fill not stored again, trade id already in fills.db: %s", record
+            )
 
-    def compute(self, range_name: str, now_ns: int) -> dict:
-        """One `bots:history:{bot_id}:{range_name}` payload from `fills.db`."""
+    def compute(
+        self,
+        range_name: str,
+        now_ns: int,
+        all_time_pnl_by_day: list[dict] | None = None,
+    ) -> dict:
+        """
+        One `bots:history:{bot_id}:{range_name}` payload from `fills.db`. `all_time_pnl_by_day`
+        is read here when not given (`compute_all` reads it once for all four ranges).
+        """
         cutoff = cutoff_ns(range_name, now_ns)
+        if all_time_pnl_by_day is None:
+            all_time_pnl_by_day = self._fills.pnl_by_day(self.bot_id, None)
         return history_payload(
             bot_id=self.bot_id,
             range_name=range_name,
@@ -144,15 +176,27 @@ class HistoryPublisher:
             trades=self._fills.recent_trades(self.bot_id, cutoff, MAX_TRADES),
             pnl_series=self._fills.pnl_by_day(self.bot_id, cutoff),
             position_realized_pnls=self._fills.position_realized_pnls(self.bot_id, cutoff),
-            all_time_pnl_by_day=self._fills.pnl_by_day(self.bot_id, None),
+            all_time_pnl_by_day=all_time_pnl_by_day,
             starting_balance=self._starting_balance,
         )
 
+    def compute_all(self, now_ns: int) -> dict[str, dict]:
+        """Every range's payload, in `RANGE_WINDOW_NS` order, sharing one all-time daily PnL."""
+        all_time_pnl_by_day = self._fills.pnl_by_day(self.bot_id, None)
+        return {
+            range_name: self.compute(range_name, now_ns, all_time_pnl_by_day)
+            for range_name in RANGE_WINDOW_NS
+        }
+
     async def refresh(self, connection: BusConnection) -> None:
         now_ns = self._clock_ns()
+        # The full-history sqlite scans run on the executor: on the loop they would freeze every
+        # bot on the node for their duration (DW-222).
+        blobs = await asyncio.get_running_loop().run_in_executor(None, self.compute_all, now_ns)
         for range_name in RANGE_WINDOW_NS:
-            blob = self.compute(range_name, now_ns)
-            await connection.set(history_key(self.bot_id, range_name), json.dumps(blob))
+            await connection.set(
+                history_key(self.bot_id, range_name), json.dumps(blobs[range_name])
+            )
 
     async def run(self) -> None:
         logger.info("bots:history loop starting for bot_id=%s", self.bot_id)

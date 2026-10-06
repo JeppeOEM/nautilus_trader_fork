@@ -108,11 +108,15 @@ class FillsStore(Protocol):
     """
     `fills.db`, the append-only fill log (one row per fill, every bot, a `bot_id` column).
 
-    Invariant: a written row is never rewritten or dropped; every query is scoped to one bot and
-    returns rows at/after `cutoff_ns` (all time when None) in ascending `ts` order.
+    Invariant: a written row is never rewritten or dropped, and one bot stores a venue trade id
+    at most once (`(bot_id, trade_id)` is the idempotency key, so a re-delivered fill is a no-op);
+    every query is scoped to one bot and returns rows at/after `cutoff_ns` (all time when None) in
+    ascending `ts` order.
     """
 
-    def write_fill(self, record: FillRecord) -> None: ...
+    def write_fill(self, record: FillRecord) -> bool:
+        """Append one fill: True when inserted, False when this bot already stored its trade id."""
+        ...
 
     def recent_trades(self, bot_id: str, cutoff_ns: int | None, limit: int) -> list[dict]: ...
 

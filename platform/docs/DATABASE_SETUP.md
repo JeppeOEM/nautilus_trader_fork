@@ -119,7 +119,15 @@ single-file mount can't expose.
   container (`FILLS_DB_PATH` env; `/app/live_paper/data/fills.db` until Story 26.3 mirrored the
   host path).
 - **Table:** `fills(ts, bot_id, side, price, qty, realized_pnl,
-  position_realized_pnl)`.
+  position_realized_pnl, trade_id)`, indexed on `(bot_id, ts)`.
+- **Idempotency key:** unique index `idx_bot_trade` on `(bot_id, trade_id)`, `trade_id`
+  being the venue's trade id (DW-224). A fill re-delivered into a later process life is a
+  no-op (`INSERT ... ON CONFLICT(bot_id, trade_id) DO NOTHING`, never `INSERT OR IGNORE`,
+  which would also swallow a NOT NULL violation) that `history.py` logs at WARNING, so it
+  never inflates the stats. Two bots may each store the same trade id. An existing
+  `fills.db` is migrated in place on open (`ALTER TABLE ... ADD COLUMN trade_id`, then the
+  index); legacy rows keep a NULL `trade_id`, which never collide because a SQLite unique
+  index admits any number of NULLs.
 - **Purpose:** append-only, event-sourced fill log — one row per `OrderFilled` event,
   written directly off the strategy's message bus. This exists specifically because
   Nautilus's `Cache.positions_closed()` silently discards prior closed positions on a
@@ -127,7 +135,9 @@ single-file mount can't expose.
   history is rebuilt from, not the Nautilus cache.
 - **Writer:** `bots/application/history.py` (through `bots.domain.fill_ledger.FillLedger`).
   **Readers:** `bots/application/supervise.py` (win-rate stats) and `history.py` itself, to
-  build the `bots:history:*` Redis blobs above. Nothing outside `bots/` reads this file
+  build the `bots:history:*` Redis blobs above. Both readers run their queries on the
+  event loop's default executor, never on the node's event loop itself, which every bot on
+  the node shares (DW-222). Nothing outside `bots/` reads this file
   directly — `bot_tui`/
   `data_api` only ever sees it via Redis.
 

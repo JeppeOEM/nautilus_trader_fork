@@ -32,6 +32,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from observability import error_ledger
 
@@ -59,7 +60,29 @@ MIN_PUBLISH_SPACING_SECONDS = 0.1
 RECONNECT_SECONDS = 2.0
 
 
-def build_status(bot: Bot, runtime: BotRuntime, fills: FillsStore, now: float) -> dict:
+@dataclass(frozen=True)
+class FillStats:
+    """A bot's all-time `fills.db` figures for one `bots:status` payload."""
+
+    closed_trades: int
+    wins: int
+    last_fill_ns: int | None
+
+
+def read_fill_stats(fills: FillsStore, bot_id: str) -> FillStats:
+    """
+    Blocking sqlite reads: run on an executor, never on the node's event loop (DW-222).
+
+    Known limit: `win_rate_stats` scans every closing row of the bot on each heartbeat (and each
+    order-event wake), so its cost grows with `fills.db`, off the loop but serialised with fill
+    writes by the store's one lock. Upgrade path: the per-UTC-day rollup table `history.py`'s
+    Known limit names, carrying closed/win counts, read in place of the scan.
+    """
+    closed_trades, wins = fills.win_rate_stats(bot_id)
+    return FillStats(closed_trades, wins, fills.last_fill_ns(bot_id))
+
+
+def build_status(bot: Bot, runtime: BotRuntime, stats: FillStats, now: float) -> dict:
     """
     One `bots:status` payload, field order frozen (AD-10): the published language only ever gains
     fields appended after `updated_at` (Story 29.6's nine, in this order); an existing field is
@@ -71,7 +94,7 @@ def build_status(bot: Bot, runtime: BotRuntime, fills: FillsStore, now: float) -
     `bots.domain.fill_ledger`).
     """
     positions = runtime.positions()
-    closed_trades, wins = fills.win_rate_stats(bot.id)
+    closed_trades = stats.closed_trades
     return {
         "bot_id": bot.id,
         "strategy": runtime.strategy_name,
@@ -82,7 +105,7 @@ def build_status(bot: Bot, runtime: BotRuntime, fills: FillsStore, now: float) -
         "net_exposure": positions.net_exposure,
         "realized_pnl": positions.realized_pnl,
         "unrealized_pnl": positions.unrealized_pnl,
-        "win_rate": wins / closed_trades if closed_trades else None,
+        "win_rate": stats.wins / closed_trades if closed_trades else None,
         "closed_trades": closed_trades,
         "started_at": bot.started_at,
         "updated_at": now,
@@ -94,7 +117,7 @@ def build_status(bot: Bot, runtime: BotRuntime, fills: FillsStore, now: float) -
         "stop_loss_orders": positions.stop_loss_orders,
         "take_profit_orders": positions.take_profit_orders,
         "open_orders": positions.open_orders,
-        "last_fill_at": fills.last_fill_ns(bot.id),
+        "last_fill_at": stats.last_fill_ns,
     }
 
 
@@ -118,8 +141,10 @@ class Supervisor:
 
     Invariants: the incident log is seeded and `process_start` recorded once per process life,
     never per Redis reconnect (the in-memory log survives every reconnect, so a Redis blip never
-    looks like a data gap or a restart); `bots:status` is published on every heartbeat tick while
-    connected; only a well-formed `bots:control` message addressed to this bot starts or stops it.
+    looks like a data gap or a restart), and only after the prior life's log was read -- an unread
+    prior log is never overwritten by a short new one (DW-228); `bots:status` is published on
+    every heartbeat tick while connected; only a well-formed `bots:control` message addressed to
+    this bot starts or stops it.
     """
 
     def __init__(
@@ -175,24 +200,53 @@ class Supervisor:
 
     async def seed(self) -> None:
         """
-        Adopt the previous life's incident log and record this start, once per process. When the
-        prior log cannot be read, this life starts from an empty log that still marks the start;
-        when only the write fails, the adopted log stays in memory and is written on its next
-        transition -- never replaced by an empty one.
+        Adopt the previous life's incident log and record this start (at `bot.started_at`), once
+        per process. The read is retried until Redis answers: starting from an empty log while the
+        prior one was merely unreachable would overwrite it on the first write (DW-228). Only
+        content that cannot be used (malformed JSON or entries) starts an empty log that still
+        marks the start, the replaced value kept in the error ledger; when only the write fails,
+        the adopted log stays in memory and is written on its next transition -- never replaced by
+        an empty one.
         """
         key = incidents_key(self.bot.id)
+        raw = await self._read_prior_log(key)
+        try:
+            prior = json.loads(raw) if raw is not None else []
+            incidents = self.bot.start(prior, self.bot.started_at)
+        except Exception as exc:
+            incidents = self.bot.start([], self.bot.started_at)
+            # The write below replaces the stored value, so the ledger keeps it for recovery.
+            error_ledger.record(
+                "bots.incidents_write",
+                f"bots:incidents prior log for {self.bot.id} unusable, starting a new one; "
+                f"replaced value: {raw!r}",
+                exc,
+            )
         try:
             async with self._connect() as connection:
-                raw = await connection.get(key)
-                prior = json.loads(raw) if raw is not None else []
-                incidents = self.bot.start(prior, self._clock())
                 await connection.set(key, json.dumps(incidents))
         except Exception as exc:
-            if not self.bot.started:
-                self.bot.start([], self._clock())
             error_ledger.record(
-                "bots.incidents_write", f"bots:incidents seed failed for {self.bot.id}", exc
+                "bots.incidents_write", f"bots:incidents seed write failed for {self.bot.id}", exc
             )
+
+    async def _read_prior_log(self, key: str) -> str | None:
+        # Only the GET retries: a retry after `Bot.start` would raise "already started". Nothing
+        # can be published without Redis anyway, and the strategy runs independently meanwhile.
+        while True:
+            try:
+                async with self._connect() as connection:
+                    return await connection.get(key)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                error_ledger.record(
+                    "bots.redis",
+                    f"bots:incidents seed read for {self.bot.id} failed, "
+                    f"retrying in {self._reconnect_seconds}s",
+                    exc,
+                )
+                await asyncio.sleep(self._reconnect_seconds)
 
     async def heartbeat_tick(self, connection: BusConnection) -> None:
         now_ns = self._clock_ns()
@@ -209,7 +263,12 @@ class Supervisor:
         # A failed build skips this tick's publish (it can race the first quote at startup)
         # rather than tearing down the connection the control loop shares.
         try:
-            status = build_status(self.bot, self._runtime, self._fills, now=self._clock())
+            stats = await asyncio.get_running_loop().run_in_executor(
+                None, read_fill_stats, self._fills, self.bot.id
+            )
+            # The Nautilus Cache is not thread-safe, so `runtime.positions()` stays on the loop;
+            # only the sqlite reads go to the executor.
+            status = build_status(self.bot, self._runtime, stats, now=self._clock())
         except Exception as exc:
             error_ledger.record(
                 "bots.status_build", f"bots:status not built this tick for {self.bot.id}", exc

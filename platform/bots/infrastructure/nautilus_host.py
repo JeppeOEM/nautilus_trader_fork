@@ -56,6 +56,7 @@ from dataclasses import dataclass
 from functools import partial
 from types import MappingProxyType
 from urllib.parse import parse_qs
+from urllib.parse import unquote
 from urllib.parse import urlparse
 
 from kernel.venues import market_suffix
@@ -247,6 +248,10 @@ def _exec_venue_clients(
     return data_clients, exec_clients, {venue: spec.data_factory}
 
 
+def _decoded(part: str | None) -> str | None:
+    return unquote(part) if part is not None else None
+
+
 def _cache_config(redis_url: str) -> CacheConfig:
     """
     Build the Redis-backed Cache config (Story 4.6, AD-10): orders/positions persist beyond the
@@ -254,7 +259,9 @@ def _cache_config(redis_url: str) -> CacheConfig:
     and the `bots:*` channels onto different Redis instances -- which is also why a database
     number is refused: `DatabaseConfig` has no field for it, so the Cache would use database 0
     while the bus used the one named. redis-py reads the number from the path or a `?db=` query
-    (the query wins), so both are checked.
+    (the query wins), so both are checked. Host, username and password are percent-decoded, as
+    redis-py's `parse_url` decodes all three, so the Cache and the bus authenticate with the same
+    credentials (an encoded `@` or `:` in a password otherwise reached the Cache still encoded).
     """
     url = urlparse(redis_url)
     databases = [url.path.lstrip("/")] if url.path not in ("", "/") else []
@@ -268,10 +275,10 @@ def _cache_config(redis_url: str) -> CacheConfig:
     return CacheConfig(
         database=DatabaseConfig(
             type="redis",
-            host=url.hostname,
+            host=_decoded(url.hostname),
             port=url.port,
-            username=url.username,
-            password=url.password,
+            username=_decoded(url.username),
+            password=_decoded(url.password),
             ssl=url.scheme == "rediss",
         ),
     )
