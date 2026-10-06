@@ -42,6 +42,15 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
   missed is recorded as coverage `liquidations_unrecoverable`, never filled (Bybit has no
   liquidation history). Hyperliquid liquidations are **not** collected: no market-wide feed, and
   Story 33.2 refuted both public-data hypotheses (`platform/docs/DATA_DICTIONARY.md` §1.26).
+- Where each derivative is shown (Story 33.5; read through `views/derivatives.py`'s routes and
+  `/ws/live`'s `derivs:`/`liquidations:` channels, Story 33.4):
+  - the chart's pinned **Derivatives** group: Open Interest, Funding (held per bar between
+    change-deduped events), Basis (mark−index, mark−last) panes and the Mark / Index overlay;
+    Liquidations as mirrored bars plus **markers** on the price pane at the bankruptcy price,
+    and a live **Liquidation tape** panel (newest 50). Spot shows the group disabled;
+  - the History page's OI, Funding and Liquidations 1h tiles (`metrics.db`);
+  - the ranking fields `ranking` publishes on `rankings:live` (funding, OI and its change,
+    basis, liquidation sums and notional, Story 33.4), shown as screener columns from 33.7.
 
 ### Constraints
 

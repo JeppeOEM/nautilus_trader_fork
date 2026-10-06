@@ -16,6 +16,7 @@ Story 32.6: `GET`/`PUT /api/coin/{instrument_id}/layout` and the default-templat
 real `views.preferences` writers against temp files, no mocking.
 """
 
+import copy
 import tomllib
 from pathlib import Path
 
@@ -45,6 +46,7 @@ _LAYOUT_KEYS = {
     "visible_bars",
     "volume_profile",
     "footprint",  # optional on the wire, always served (Story 32.8)
+    "derivatives",  # likewise (Story 33.5)
 }
 
 
@@ -296,6 +298,37 @@ def test_put_without_a_footprint_serves_footprint_off(client: TestClient) -> Non
     response = client.put(f"/api/coin/{_IID}/layout", json={"layout": layout})
     assert response.status_code == 200
     assert response.json()["layout"]["footprint"]["on"] is False
+
+
+def test_put_with_a_bad_derivatives_flag_is_a_422_naming_it(client: TestClient) -> None:
+    derivatives = copy.deepcopy(preferences.DERIVATIVES_DEFAULTS)
+    derivatives["oi"]["on"] = "yes"
+    response = client.put(
+        f"/api/coin/{_IID}/layout", json={"layout": _layout(derivatives=derivatives)}
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"].startswith("derivatives.oi.on:")
+
+
+def test_put_roundtrips_derivatives_settings_and_their_pane_heights(client: TestClient) -> None:
+    derivatives = copy.deepcopy(preferences.DERIVATIVES_DEFAULTS)
+    derivatives["oi"] = {"on": True, "style": {"oi": {"color": "#26a69a", "line_width": 2}}}
+    derivatives["liquidations"] = {"on": True, "measure": "notional", "markers": False}
+    layout = _layout(derivatives=derivatives, pane_heights={"price": 400, "deriv_oi": 140})
+    client.put(f"/api/coin/{_IID}/layout", json={"layout": layout})
+    served = client.get(f"/api/coin/{_IID}/layout").json()["layout"]
+    assert (served["derivatives"], served["pane_heights"]) == (
+        derivatives,
+        {"price": 400, "deriv_oi": 140},
+    )
+
+
+def test_put_without_derivatives_serves_every_entry_off(client: TestClient) -> None:
+    layout = _layout()
+    del layout["derivatives"]
+    client.put(f"/api/coin/{_IID}/layout", json={"layout": layout})
+    served = client.get(f"/api/coin/{_IID}/layout").json()["layout"]
+    assert served["derivatives"] == preferences.DERIVATIVES_DEFAULTS
 
 
 def test_put_roundtrips_footprint_settings(client: TestClient) -> None:

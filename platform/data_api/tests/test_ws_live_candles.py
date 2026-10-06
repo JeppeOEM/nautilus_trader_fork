@@ -269,6 +269,7 @@ async def test_a_derivs_subscription_receives_only_its_instruments_rows(
         "value": "0.0001",
         "interval": 28_800,
         "next_funding_ns": 3,
+        "annualised": 0.1095,  # 0.0001 x 31 536 000 / 28 800, the server's (Story 33.5)
     }
     await asyncio.sleep(0)
     assert outbox.empty()
@@ -289,7 +290,12 @@ async def test_a_liquidations_subscription_receives_the_forwarded_rows(
     )
     derivs_bus.publish_liquidations([row])
     message = await asyncio.wait_for(outbox.get(), timeout=1.0)
-    assert message == {"channel": f"liquidations:{_BYBIT}", "liq": Liquidation.to_dict(row)}
+    assert message == {
+        "channel": f"liquidations:{_BYBIT}",
+        "liq": Liquidation.to_dict(row),
+        "notional_units": 41 * 8_513_850,  # size x bankruptcy price at 10^-(2 + 3) (Story 33.5)
+        "notional_precision": 5,
+    }
     _handle_control_message({"unsubscribe": f"liquidations:{_BYBIT}"}, subs)
     assert derivs_bus._listeners == {}
 

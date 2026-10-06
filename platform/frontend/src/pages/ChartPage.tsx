@@ -5,7 +5,9 @@ import { Link, useParams } from "react-router";
 import { fetchCoinIndicatorConfig, fetchIndicatorCatalog, saveCoinIndicatorConfig } from "../api/client";
 import AlertDialog from "../components/chart/AlertDialog";
 import IndicatorPicker, { type IndicatorPickerHandle } from "../components/chart/IndicatorPicker";
-import type { SettingsOutput } from "../components/chart/IndicatorSettingsDialog";
+import IndicatorSettingsDialog, { type SettingsOutput, type SettingsPatch } from "../components/chart/IndicatorSettingsDialog";
+import LiquidationTape from "../components/chart/LiquidationTape";
+import { DERIVATIVE_OUTPUT_TOKENS, DERIVATIVE_PANE_IDS, MARK_INDEX_GROUP } from "../components/chart/derivativePanes";
 import type { LegendAction } from "../components/chart/legend";
 import LightweightChart, {
   type ChartMode,
@@ -79,7 +81,18 @@ import { assignPaneColor } from "../components/chart/paneColors";
 import type { IndicatorCatalogEntry, IndicatorConfigEntry } from "../api/schema";
 import { useCandles } from "../hooks/useCandles";
 import { TIMEFRAMES } from "../timeframes";
-import { type ChartLayout, type FootprintSettings, type VolumeProfileLayout } from "../lib/chartLayout";
+import {
+  type ChartLayout,
+  DERIVATIVE_KEYS,
+  DERIVATIVE_LABELS,
+  DERIVATIVE_OUTPUTS,
+  type DerivativeKey,
+  type DerivativesLayout,
+  type FootprintSettings,
+  type LiquidationMeasure,
+  type VolumeProfileLayout,
+} from "../lib/chartLayout";
+import { useChartDerivatives } from "../hooks/useChartDerivatives";
 import { useFootprint } from "../hooks/useFootprint";
 import { useChartLayout } from "../hooks/useChartLayout";
 import { useReplay } from "../hooks/useReplay";
@@ -233,6 +246,106 @@ interface EdgeGhost {
 }
 
 const NO_BARS = (): number | null => null;
+
+// Story 33.5: the Derivatives group's legend groups -> the layout entry each belongs to.
+const DERIVATIVE_OF_GROUP: Record<string, DerivativeKey> = {
+  deriv_oi: "oi",
+  deriv_funding: "funding",
+  deriv_basis: "basis",
+  [MARK_INDEX_GROUP]: "mark_index",
+  deriv_liquidations: "liquidations",
+};
+
+function derivativeOfGroup(group: string): DerivativeKey | null {
+  return Object.hasOwn(DERIVATIVE_OF_GROUP, group) ? DERIVATIVE_OF_GROUP[group] : null;
+}
+
+/** Why the Liquidation tape button is disabled (its tooltip), or undefined while it is not. */
+function tapeUnavailableReason(spot: boolean, candles: boolean, marketKnown: boolean): string | undefined {
+  if (spot) return "spot: no derivatives";
+  if (!candles) return "Candles mode only";
+  if (!marketKnown) return "waiting for the instrument's market";
+  return undefined;
+}
+
+function derivativeOnStates(layout: DerivativesLayout): Record<DerivativeKey, boolean> {
+  return Object.fromEntries(DERIVATIVE_KEYS.map((key) => [key, layout[key].on])) as Record<DerivativeKey, boolean>;
+}
+
+// The Style rows of each entry's settings: a histogram output edits its up/down colours, a line its
+// colour, width and style. The seeds are the chart tokens the panes draw with while nothing is stored.
+const DERIVATIVE_OUTPUT_KINDS: Record<string, "Line" | "Histogram"> = { rate: "Histogram", liquidations: "Histogram" };
+
+function derivativeOutputs(key: DerivativeKey): SettingsOutput[] {
+  return DERIVATIVE_OUTPUTS[key].map((label) => {
+    const tokens = DERIVATIVE_OUTPUT_TOKENS[label];
+    return {
+      label,
+      kind: DERIVATIVE_OUTPUT_KINDS[label] ?? "Line",
+      defaultColor: chartVar(tokens.color),
+      defaultUpColor: chartVar(tokens.up),
+      defaultDownColor: chartVar(tokens.down),
+    };
+  });
+}
+
+/** An applied settings patch on one entry: its style, and Liquidations' `measure` and `markers`. */
+function applyDerivativePatch(prev: DerivativesLayout, key: DerivativeKey, patch: SettingsPatch): DerivativesLayout {
+  const style = Object.fromEntries(Object.entries(patch.style).filter(([, s]) => Object.keys(s).length > 0));
+  const entry = { ...prev[key], style };
+  if (key !== "liquidations") return { ...prev, [key]: entry };
+  const measure = patch.params.measure === "notional" ? "notional" : ("size" as LiquidationMeasure);
+  const markers = patch.params.markers !== false;
+  return { ...prev, liquidations: { ...prev.liquidations, ...entry, measure, markers } };
+}
+
+/** The legend gear's modal for one Derivatives entry: the one settings dialog (`IndicatorSettingsDialog`),
+ * with Liquidations' `measure` (size / notional) and `markers` (true / false) as its inputs. */
+function DerivativeSettingsDialog({
+  entryKey,
+  settings,
+  onApply,
+  onRemove,
+  onClose,
+}: {
+  entryKey: DerivativeKey;
+  settings: DerivativesLayout;
+  onApply: (patch: SettingsPatch) => void;
+  onRemove: () => void;
+  onClose: () => void;
+}) {
+  const liquidations = settings.liquidations;
+  const params: Record<string, unknown> =
+    entryKey === "liquidations" ? { measure: liquidations.measure, markers: liquidations.markers } : {};
+  const entry: IndicatorConfigEntry = {
+    name: DERIVATIVE_LABELS[entryKey],
+    category: "derivatives",
+    params,
+    style: settings[entryKey].style as IndicatorConfigEntry["style"],
+  };
+  const catalogEntry: IndicatorCatalogEntry = {
+    params,
+    panel: "",
+    category: "derivatives",
+    choices: entryKey === "liquidations" ? { measure: ["size", "notional"], markers: ["true", "false"] } : {},
+  };
+  return (
+    <IndicatorSettingsDialog
+      title={DERIVATIVE_LABELS[entryKey]}
+      entry={entry}
+      catalogEntry={catalogEntry}
+      outputs={derivativeOutputs(entryKey)}
+      disabled={false}
+      onApply={(patch) => {
+        onApply(patch);
+        // The layout saves itself (useChartLayout); a failed save is reported under the chart.
+        return Promise.resolve(null);
+      }}
+      onRemove={onRemove}
+      onClose={onClose}
+    />
+  );
+}
 const NONE: never[] = [];
 
 /** Story 18.4's replay control bar. DW-146: a click that would do nothing is never silently
@@ -414,7 +527,20 @@ function ChartInner({
   // scroll-back prepend, replay, a mode flip) can never wipe bars the chart already showed;
   // bars closed while the socket was down exist only on the server, so a reconnect refetches
   // the newest page and merges it in.
-  const liveBar = useLiveCandle(instrumentId, barSeconds, { onReconnect: refreshNewest, onBarClosed: appendBar });
+  // Story 33.5: a closed bar and a reconnect also re-read the derivatives routes' newest pages (the
+  // route wins for closed slots); the ref is set once `useChartDerivatives` below has run.
+  const derivativesRefreshRef = useRef<() => void>(() => {});
+  const derivativesAfterCloseRef = useRef<() => void>(() => {});
+  const liveBar = useLiveCandle(instrumentId, barSeconds, {
+    onReconnect: () => {
+      void refreshNewest();
+      derivativesRefreshRef.current();
+    },
+    onBarClosed: (bar) => {
+      appendBar(bar);
+      derivativesAfterCloseRef.current();
+    },
+  });
   // Story 32.1: a forming bar that starts more than one bar after history's newest point
   // (the collector came back after a hole) opens the gap run at once, not when it closes.
   // `historyLoaded` re-runs it once the first page lands: the socket may seed the forming bar
@@ -632,12 +758,54 @@ function ChartInner({
     [footprintActive, footprintData.items, footprintData.precision, footprint, cutoffTime],
   );
 
+  // Story 33.5: the Derivatives group (Open Interest, Funding, Basis, Mark / Index, Liquidations), a
+  // field of the coin's layout; the Liquidation tape is view state. Spot (the candles' `market`)
+  // disables the group and fetches nothing, its saved on-states kept.
+  const [derivatives, setDerivatives] = useState<DerivativesLayout>(initialLayout.derivatives);
+  useEffect(() => patchLayout({ derivatives }), [derivatives, patchLayout]);
+  const [tapeOn, setTapeOn] = useState(false);
+  const [barSpacing, setBarSpacing] = useState(Number.POSITIVE_INFINITY);
+  const [derivativeSettings, setDerivativeSettings] = useState<DerivativeKey | null>(null);
+  const changeDerivativeOn = useCallback(
+    (key: DerivativeKey, on: boolean): void => setDerivatives((prev) => ({ ...prev, [key]: { ...prev[key], on } })),
+    [],
+  );
+  const derivativesData = useChartDerivatives({
+    instrumentId,
+    barSeconds,
+    chart,
+    settings: derivatives,
+    market: venueMarket?.market ?? null,
+    candlesMode: mode === "candles",
+    bars: replay.displayed,
+    liveTime: replay.mode === "active" || !liveBar ? null : (liveBar.time as number),
+    cutoff: cutoffTime,
+    barSpacing,
+    tapeOn,
+  });
+  useEffect(() => {
+    derivativesRefreshRef.current = derivativesData.refreshNewest;
+    derivativesAfterCloseRef.current = derivativesData.refreshAfterClose;
+  }, [derivativesData.refreshNewest, derivativesData.refreshAfterClose]);
+  const chartPanes = useMemo(
+    () => (derivativesData.panes.length === 0 ? panes : [...panes, ...derivativesData.panes]),
+    [panes, derivativesData.panes],
+  );
+
   // The legend's eye / gear / x. Picker indicators go through the picker's own persist path (the
   // same one an add uses); Volume is page state (eye) and the Indicators dialog's toggle (x); the
   // Footprint row has the gear (its settings modal) and the x (off).
   const pickerRef = useRef<IndicatorPickerHandle>(null);
   const handleLegendAction = useCallback(
     (action: LegendAction, group: string): void => {
+      const derivative = derivativeOfGroup(group);
+      if (derivative !== null) {
+        // The eye and the x both turn the entry off in the layout (its pane goes; the Indicators
+        // dialog brings it back); the gear opens its settings.
+        if (action === "settings") setDerivativeSettings(derivative);
+        else changeDerivativeOn(derivative, false);
+        return;
+      }
       if (group === "footprint") {
         if (action === "settings") setFootprintDialogOpen(true);
         else if (action === "remove") changeFootprintOn(false);
@@ -655,7 +823,7 @@ function ChartInner({
       else if (action === "settings") picker?.openSettings(group);
       else picker?.remove(group);
     },
-    [changeVolumeOn, changeFootprintOn],
+    [changeVolumeOn, changeFootprintOn, changeDerivativeOn],
   );
   // Seeded with what the chart draws while the entry stores nothing: the palette colour, which a
   // histogram also paints both signs with (and the side whose colour is not set keeps).
@@ -1136,7 +1304,8 @@ function ChartInner({
     (heights: Record<string, number>): void =>
       onLayout((prev) => {
         const kept = Object.entries(prev.pane_heights).filter(
-          ([id]) => id === "price" || id === "volume" || paneIdsRef.current.has(id),
+          ([id]) =>
+            id === "price" || id === "volume" || paneIdsRef.current.has(id) || (DERIVATIVE_PANE_IDS as readonly string[]).includes(id),
         );
         return { ...prev, pane_heights: { ...Object.fromEntries(kept), ...heights } };
       }),
@@ -1320,6 +1489,16 @@ function ChartInner({
           <button type="button" aria-haspopup="dialog" onClick={() => setOverlaysDialogOpen(true)}>
             Volume overlays
           </button>
+          <button
+            type="button"
+            className={tapeOn ? "tabbtn active" : "tabbtn"}
+            aria-pressed={tapeOn}
+            disabled={!derivativesData.available}
+            title={tapeUnavailableReason(derivativesData.spot, mode === "candles", venueMarket !== null)}
+            onClick={() => setTapeOn((on) => !on)}
+          >
+            Liquidation tape
+          </button>
           {/* Story 32.6: the coin's layout is saved as the default new coins start from, or reset to it. */}
           <button
             type="button"
@@ -1403,7 +1582,7 @@ function ChartInner({
             data={replay.displayed}
             linesData={snapshotLines}
             onChartApi={setChart}
-            panes={panes}
+            panes={chartPanes}
             priceLines={priceLines}
             onPriceClick={handlePriceClick}
             drawings={drawings}
@@ -1441,8 +1620,11 @@ function ChartInner({
             anchorMarkerTime={autoView.markerTime}
             legendExtras={anchored.legend}
             footprint={footprintSpec}
+            liquidationMarkers={derivativesData.markers}
+            onBarSpacing={setBarSpacing}
           />
         </div>
+        {tapeOn && derivativesData.available && <LiquidationTape {...derivativesData.tape} />}
       </div>
       <VolumeOverlayNotices
         candlesMode={mode === "candles"}
@@ -1477,6 +1659,15 @@ function ChartInner({
         <p role="alert" className="chart-load-error">
           Footprint: {footprintData.error}
         </p>
+      )}
+      {derivativeSettings !== null && (
+        <DerivativeSettingsDialog
+          entryKey={derivativeSettings}
+          settings={derivatives}
+          onApply={(patch) => setDerivatives((prev) => applyDerivativePatch(prev, derivativeSettings, patch))}
+          onRemove={() => changeDerivativeOn(derivativeSettings, false)}
+          onClose={() => setDerivativeSettings(null)}
+        />
       )}
       {footprintDialogOpen && (
         <FootprintSettingsDialog
@@ -1563,6 +1754,10 @@ function ChartInner({
         footprintOn={footprint.on}
         onFootprintChange={changeFootprintOn}
         footprintCandlesOnly={mode !== "candles"}
+        derivatives={derivativeOnStates(derivatives)}
+        onDerivativeChange={changeDerivativeOn}
+        derivativesDisabled={derivativesData.spot}
+        derivativesCandlesOnly={mode !== "candles"}
       />
     </div>
   );

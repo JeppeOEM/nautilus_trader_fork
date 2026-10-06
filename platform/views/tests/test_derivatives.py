@@ -439,6 +439,9 @@ def test_liquidations_page_serves_the_stored_rows_with_their_price_kind(tmp_path
             "ts_event": _TEN + _S,
             "ts_init": _TEN + _S,
             "price_kind": "bankruptcy",
+            # 6 x 1 000 000 at 10^-(1 + 3)
+            "notional_units": 6_000_000,
+            "notional_precision": 4,
         },
         {
             "side": "short",
@@ -450,6 +453,9 @@ def test_liquidations_page_serves_the_stored_rows_with_their_price_kind(tmp_path
             "ts_event": _TEN + 2 * _S,
             "ts_init": _TEN + 2 * _S,
             "price_kind": "bankruptcy",
+            # 5 x 1 000 000 at 10^-(1 + 4)
+            "notional_units": 5_000_000,
+            "notional_precision": 5,
         },
     ]
     assert has_more is True
@@ -517,6 +523,8 @@ def test_liquidation_bars_serve_an_untraded_bucket_and_sum_the_notional(tmp_path
             "size_precision": 3,
             "notional_units": 4_000_000,
             "notional_precision": 4,
+            "long_notional_units": 4_000_000,
+            "short_notional_units": 0,
         },
         {
             "t": _TEN_MS + 60_000,
@@ -526,6 +534,8 @@ def test_liquidation_bars_serve_an_untraded_bucket_and_sum_the_notional(tmp_path
             "size_precision": 4,
             "notional_units": 65_000_000,
             "notional_precision": 5,
+            "long_notional_units": 65_000_000,
+            "short_notional_units": 0,
         },
         {
             "t": _TEN_MS + 120_000,
@@ -535,6 +545,8 @@ def test_liquidation_bars_serve_an_untraded_bucket_and_sum_the_notional(tmp_path
             "size_precision": 3,
             "notional_units": 0,
             "notional_precision": 4,
+            "long_notional_units": 0,
+            "short_notional_units": 0,
         },
     ]
 
@@ -555,6 +567,10 @@ def test_the_live_edge_notional_matches_the_stores_count_or_is_null(tmp_path: Pa
     store.close()
     bars = _bars(tmp_path, _LINEAR)
     assert [(bar["n"], bar["notional_units"]) for bar in bars] == [(1, 4_000_000), (1, None)]
+    assert [(bar["long_notional_units"], bar["short_notional_units"]) for bar in bars] == [
+        (4_000_000, 0),
+        (None, None),  # null exactly when the total is
+    ]
 
 
 def test_a_partially_null_stored_liquidation_group_is_ledgered_and_raised(tmp_path: Path) -> None:
@@ -586,7 +602,13 @@ def test_a_known_zero_count_beside_raw_rows_has_no_notional(tmp_path: Path) -> N
     store.close()
     _catalog(tmp_path).write_data([_liq("x", _TEN + 30 * _S, 2)])
     (bar,) = _bars(tmp_path, _LINEAR)
-    assert (bar["n"], bar["notional_units"], bar["notional_precision"]) == (0, None, None)
+    notionals = (
+        "notional_units",
+        "notional_precision",
+        "long_notional_units",
+        "short_notional_units",
+    )
+    assert (bar["n"], *(bar[key] for key in notionals)) == (0, None, None, None, None)
 
 
 # -- liquidation bars of a width the store does not fold (1W from 1D) -----------------------------
@@ -633,7 +655,7 @@ def test_a_weekly_liquidation_bar_is_the_sum_of_its_stored_days(tmp_path: Path) 
     """
     Week 2 from its seven 1D rows (Tuesday's and Thursday's liquidations, five known-0 days), sizes
     at the finest precision 4: long 4 x 10 = 40, short 5, n 2. Notional at the finest 10^-5: "b" 4 x 1 000 000 x 10 = 40 000 000, "c" 5 x 1 000 000 =
-    5 000 000, 45 000 000 in all. The 1W span cap is one week, so the page is that one bar, and
+    5 000 000, 45 000 000 in all: long ("b") 40 000 000, short ("c") 5 000 000. The 1W span cap is one week, so the page is that one bar, and
     week 1's rows are older (has_more).
     """
     _weekly_store(tmp_path)
@@ -647,6 +669,8 @@ def test_a_weekly_liquidation_bar_is_the_sum_of_its_stored_days(tmp_path: Path) 
             "size_precision": 4,
             "notional_units": 45_000_000,
             "notional_precision": 5,
+            "long_notional_units": 40_000_000,
+            "short_notional_units": 5_000_000,
         }
     ]
     assert has_more is True
@@ -777,9 +801,15 @@ def test_liquidation_bars_of_an_instrument_without_the_feed_are_null_never_zero(
     sqlite_store.apply_seconds(store, _HL, [_second(_TEN + _S, 1004)])
     store.close()
     (bar,) = _bars(tmp_path, _HL)
-    assert {k: bar[k] for k in ("long_v", "short_v", "n", "notional_units")} == dict.fromkeys(
-        ("long_v", "short_v", "n", "notional_units")
+    keys = (
+        "long_v",
+        "short_v",
+        "n",
+        "notional_units",
+        "long_notional_units",
+        "short_notional_units",
     )
+    assert {k: bar[k] for k in keys} == dict.fromkeys(keys)
     assert derivatives.liquidations_page(
         _HL, _TEN + _MIN, 10, catalog_path=str(tmp_path), recent_liquidations=_no_tail
     ) == ([], False)

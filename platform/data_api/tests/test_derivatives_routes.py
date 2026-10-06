@@ -172,6 +172,8 @@ def test_liquidations_serve_units_with_the_definitions_precisions(
                 "ts_event": _TEN,
                 "ts_init": _TEN,
                 "price_kind": "bankruptcy",
+                "notional_units": 4_000_000,  # 4 x 1 000 000 at 10^-(1 + 3)
+                "notional_precision": 4,
             }
         ],
         "has_more": False,
@@ -199,6 +201,8 @@ def test_liquidation_bars_serve_the_read_models_rows_and_gap_rows_as_nulls(
         "size_precision": 3,
         "notional_units": 4_000_000,
         "notional_precision": 4,
+        "long_notional_units": 0,
+        "short_notional_units": 4_000_000,
     }
 
     def page(*_args: object, **_kw: object) -> tuple[list[dict], bool]:

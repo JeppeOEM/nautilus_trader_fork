@@ -3,12 +3,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AUTO_ANCHOR_PRESETS } from "./autoAnchor";
 import {
   BUILT_IN_LAYOUT,
+  DERIVATIVE_KEYS,
+  DERIVATIVE_OUTPUTS,
   FOOTPRINT_DEFAULT_IMBALANCE_RATIO,
+  LIQUIDATION_MEASURES,
   FOOTPRINT_MODES,
   MAX_FOOTPRINT_ROW_TICKS,
   PROFILE_KINDS,
   layoutForSave,
   normalizeLayout,
+  sameLayout,
 } from "./chartLayout";
 import { DEFAULT_SESSION_COUNT, MAX_SESSIONS } from "./sessionProfile";
 import { DEFAULT_VOLUME_PROFILE_SETTINGS } from "./volumeProfile";
@@ -191,5 +195,67 @@ describe("normalizeLayout's volume profile settings (DW-151/153)", () => {
     expect(layout.volume_profile[key as keyof typeof layout.volume_profile]).toEqual(
       BUILT_IN_LAYOUT.volume_profile[key as keyof typeof BUILT_IN_LAYOUT.volume_profile],
     );
+  });
+});
+
+describe("the derivatives layout table (Story 33.5)", () => {
+  const { derivatives: _d, ...preDerivatives } = BUILT_IN_LAYOUT;
+  const withDerivatives = (derivatives: unknown) => ({ ...BUILT_IN_LAYOUT, derivatives });
+
+  it("has the server's keys, outputs and measures (views/preferences.py mirrors them)", () => {
+    expect(DERIVATIVE_KEYS).toEqual(["oi", "funding", "basis", "mark_index", "liquidations"]);
+    expect(DERIVATIVE_OUTPUTS.basis).toEqual(["mark_index", "mark_last"]);
+    expect(LIQUIDATION_MEASURES).toEqual(["size", "notional"]);
+    expect(BUILT_IN_LAYOUT.derivatives.liquidations).toEqual({ on: false, measure: "size", markers: true });
+  });
+
+  it("loads a layout saved before it with every entry off, silently", () => {
+    const { layout, fallbacks } = normalizeLayout(preDerivatives);
+
+    expect(fallbacks).toEqual([]);
+    expect(errors).not.toHaveBeenCalled();
+    expect(layout.derivatives).toEqual(BUILT_IN_LAYOUT.derivatives);
+  });
+
+  it("round-trips on/off, styles and the liquidation options, and writes the table whole", () => {
+    const derivatives = {
+      ...BUILT_IN_LAYOUT.derivatives,
+      oi: { on: true, style: { oi: { color: "#26a69a", line_width: 2, line_style: "dashed" } } },
+      liquidations: { on: true, measure: "notional", markers: false, style: { liquidations: { up_color: "#00ff00" } } },
+    };
+    const { layout, fallbacks } = normalizeLayout(withDerivatives(derivatives));
+
+    expect(fallbacks).toEqual([]);
+    expect(layout.derivatives).toEqual(derivatives);
+    expect(layoutForSave(layout).derivatives).toEqual(derivatives);
+    expect(sameLayout(layout, { ...layout, derivatives: { ...layout.derivatives, oi: { on: false } } })).toBe(false);
+  });
+
+  it("falls back by name for a bad field, keeping the rest of the entry", () => {
+    const bad = {
+      ...BUILT_IN_LAYOUT.derivatives,
+      oi: { on: "yes", style: { oi: { color: "#26a69a", line_width: 9 }, open: {} } },
+      liquidations: { on: true, measure: "usd", markers: true },
+      screener: { on: true },
+    };
+    const { layout, fallbacks } = normalizeLayout(withDerivatives(bad));
+
+    expect(fallbacks).toEqual([
+      "derivatives.screener",
+      "derivatives.oi.on",
+      "derivatives.oi.style.oi.line_width",
+      "derivatives.oi.style.open",
+      "derivatives.liquidations.measure",
+    ]);
+    expect(layout.derivatives.oi).toEqual({ on: false, style: { oi: { color: "#26a69a" } } });
+    expect(layout.derivatives.liquidations).toEqual({ on: true, measure: "size", markers: true });
+    expect(errors).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to every entry off for a table that is not one", () => {
+    const { layout, fallbacks } = normalizeLayout(withDerivatives(7));
+
+    expect(fallbacks).toEqual(["derivatives"]);
+    expect(layout.derivatives).toEqual(BUILT_IN_LAYOUT.derivatives);
   });
 });

@@ -178,6 +178,8 @@ export interface LiquidationBarItem {
   size_precision?: number | null;
   notional_units?: number | null;
   notional_precision?: number | null;
+  long_notional_units?: number | null;
+  short_notional_units?: number | null;
 }
 
 export interface LiquidationBarsResponse {
@@ -199,6 +201,8 @@ export interface LiquidationItem {
   ts_event: number;
   ts_init: number;
   price_kind: string;
+  notional_units: number;
+  notional_precision: number;
 }
 
 export interface LiquidationsResponse {

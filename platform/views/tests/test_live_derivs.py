@@ -20,6 +20,7 @@ are handed to `handle_derivs`/`handle_message` and `handle_liquidations` directl
 
 import asyncio
 import json
+from decimal import Decimal
 from typing import Any
 
 from kernel.liquidation import LiquidatedSide
@@ -55,6 +56,16 @@ def _liq(iid: str = _BTC, key: str = "a") -> Liquidation:
     )
 
 
+def _liq_frame(row: Liquidation) -> dict:
+    # 0.041 x 85138.50: 41 size units x 8 513 850 price units = 349 067 850 at 10^-(2 + 3).
+    return {
+        "channel": f"liquidations:{_BTC}",
+        "liq": Liquidation.to_dict(row),
+        "notional_units": 349_067_850,
+        "notional_precision": 5,
+    }
+
+
 def test_each_listener_gets_exactly_its_instruments_rows() -> None:
     bus = LiveDerivsBus()
     btc_a, btc_b = bus.subscribe(derivs_channel(_BTC)), bus.subscribe(derivs_channel(_BTC))
@@ -66,6 +77,7 @@ def test_each_listener_gets_exactly_its_instruments_rows() -> None:
         "t": _T,
         "ts_init": _T + 5,
         "value": "100.50",
+        "basis_mi_bps": None,  # no index relayed yet
     }
     assert [_drain(btc_a), _drain(btc_b)] == [[expected_btc], [expected_btc]]
     assert [m["value"] for m in _drain(eth)] == ["51234.567"]
@@ -73,8 +85,60 @@ def test_each_listener_gets_exactly_its_instruments_rows() -> None:
 
 def test_a_row_nobody_listens_to_is_dropped_without_state() -> None:
     bus = LiveDerivsBus()
-    bus.handle_derivs([_row(_BTC)])
-    assert bus._listeners == {}
+    bus.handle_derivs([_row(_BTC), _row(_BTC, "index", "100.00")])
+    assert (bus._listeners, bus._last_prices) == ({}, {})
+
+
+def test_a_mark_or_index_frame_carries_the_basis_once_both_are_known() -> None:
+    """(100.50 - 100.00) / 100.00 x 10^4 = 50 bps; a later index 100.50 makes it 0."""
+    bus = LiveDerivsBus()
+    queue = bus.subscribe(derivs_channel(_BTC))
+    bus.handle_derivs([_row(_BTC, "index", "100.00")])
+    bus.handle_derivs([_row(_BTC, "mark", "100.50"), _row(_BTC, "oi", "7")])
+    bus.handle_derivs([_row(_BTC, "index", "100.50")])
+    frames = _drain(queue)
+    assert [(m["kind"], m.get("basis_mi_bps", "absent")) for m in frames] == [
+        ("index", None),
+        ("mark", 50.0),
+        ("oi", "absent"),
+        ("index", 0.0),
+    ]
+
+
+def test_a_non_positive_index_has_no_basis() -> None:
+    bus = LiveDerivsBus()
+    queue = bus.subscribe(derivs_channel(_BTC))
+    bus.handle_derivs([_row(_BTC, "index", "0"), _row(_BTC, "mark", "100.50")])
+    assert [m["basis_mi_bps"] for m in _drain(queue)] == [None, None]
+
+
+def test_the_basis_pairs_only_one_instruments_mark_and_index() -> None:
+    bus = LiveDerivsBus()
+    btc, eth = bus.subscribe(derivs_channel(_BTC)), bus.subscribe(derivs_channel(_ETH))
+    bus.handle_derivs([_row(_BTC, "index", "100.00"), _row(_ETH, "mark", "100.50")])
+    assert [m["basis_mi_bps"] for m in _drain(btc) + _drain(eth)] == [None, None]
+
+
+def test_a_funding_frame_carries_its_annualised_rate() -> None:
+    """0.0001 per 8 h: 0.0001 x 31 536 000 / 28 800 = 0.1095; no interval: None."""
+    bus = LiveDerivsBus()
+    queue = bus.subscribe(derivs_channel(_BTC))
+    eight_hours = _row(_BTC, "funding", "0.0001") | {"interval": 28_800, "next_funding_ns": _T}
+    bus.handle_derivs([eight_hours, _row(_BTC, "funding", "0.0001")])
+    assert [m["annualised"] for m in _drain(queue)] == [0.1095, None]
+
+
+def test_the_last_unsubscribe_drops_the_pairing_state() -> None:
+    bus = LiveDerivsBus()
+    channel = derivs_channel(_BTC)
+    queue = bus.subscribe(channel)
+    bus.handle_derivs([_row(_BTC, "index", "100.00")])
+    assert bus._last_prices == {channel: {"index": Decimal("100.00")}}
+    bus.unsubscribe(channel, queue)
+    assert bus._last_prices == {}
+    queue = bus.subscribe(channel)
+    bus.handle_derivs([_row(_BTC, "mark", "100.50")])
+    assert [m["basis_mi_bps"] for m in _drain(queue)] == [None]  # the old index is gone
 
 
 def test_a_bad_row_is_ledgered_and_the_frames_other_rows_still_relayed() -> None:
@@ -151,7 +215,7 @@ def test_the_candle_bus_forwards_its_decoded_liquidations() -> None:
     queue = derivs.subscribe(liquidations_channel(_BTC))
     row = _liq()
     candles.handle_liquidations([Liquidation.to_dict(row)])
-    assert _drain(queue) == [{"channel": f"liquidations:{_BTC}", "liq": Liquidation.to_dict(row)}]
+    assert _drain(queue) == [_liq_frame(row)]
 
 
 def test_a_replayed_liquidation_is_forwarded_once() -> None:
@@ -162,7 +226,7 @@ def test_a_replayed_liquidation_is_forwarded_once() -> None:
     row = _liq()
     candles.handle_liquidations([Liquidation.to_dict(row), Liquidation.to_dict(row)])
     candles.handle_liquidations([Liquidation.to_dict(row)])
-    assert _drain(queue) == [{"channel": f"liquidations:{_BTC}", "liq": Liquidation.to_dict(row)}]
+    assert _drain(queue) == [_liq_frame(row)]
 
 
 def test_a_row_the_candle_bus_refused_is_not_forwarded() -> None:

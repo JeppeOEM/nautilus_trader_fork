@@ -29,6 +29,19 @@ const layoutApi = vi.hoisted(() => ({
   reset: vi.fn(),
 }));
 const route = vi.hoisted(() => ({ iid: "BTC-USD-PERP.DYDX" }));
+// Story 33.5: the derivatives routes, one page per route (`items`; `has_more` false), every call
+// recorded; and the two live channels, whose latest ticks and handlers a test drives.
+const derivApi = vi.hoisted(() => ({
+  pages: {} as Record<string, unknown[]>,
+  calls: [] as { route: string; args: unknown[] }[],
+}));
+const liveDerivs = vi.hoisted(() => ({
+  latest: {} as Record<string, unknown>,
+  subscribed: [] as string[],
+  liquidationsSubscribed: [] as string[],
+  onLiquidation: undefined as ((row: unknown) => void) | undefined,
+  onTick: undefined as ((tick: unknown) => void) | undefined,
+}));
 vi.mock("../api/client", () => ({
   fetchCoinLayout: (...args: unknown[]) => layoutApi.get(...args),
   saveCoinLayout: (...args: unknown[]) => layoutApi.save(...args),
@@ -40,6 +53,29 @@ vi.mock("../api/client", () => ({
   saveCoinIndicatorConfig: saveConfigMock,
   // Story 32.8: never reached (useFootprint is mocked below); listed so a stray call fails loudly.
   fetchFootprint: vi.fn(() => Promise.reject(new Error("fetchFootprint is not stubbed in this test"))),
+  ...Object.fromEntries(
+    (
+      [
+        ["fetchFunding", "funding"],
+        ["fetchOpenInterest", "open-interest"],
+        ["fetchMarkIndex", "mark-index"],
+        ["fetchLiquidations", "liquidations"],
+        ["fetchLiquidationBars", "liquidation-bars"],
+      ] as const
+    ).map(([name, route]) => [
+      name,
+      (...args: unknown[]) => {
+        derivApi.calls.push({ route, args });
+        // The liquidations page honours its cursor (the replay tape asks for the rows before a time).
+        const rows = (derivApi.pages[route] ?? []) as { ts_event?: number }[];
+        const items = route === "liquidations" ? rows.filter((r) => (r.ts_event ?? 0) < (args[1] as number)) : rows;
+        return Promise.resolve({ items, has_more: false, venue: "BYBIT", market: "perp" });
+      },
+    ]),
+  ),
+  HttpError: class extends Error {
+    status = 0;
+  },
   // IndicatorPicker (rendered by ChartPage) fetches the catalog on mount.
   fetchIndicatorCatalog: vi.fn().mockResolvedValue({
     SimpleMovingAverage: { params: {}, panel: "overlay", category: "native", source_selectable: true },
@@ -111,6 +147,22 @@ vi.mock("../hooks/useSessionCandles", () => ({
   },
 }));
 
+vi.mock("../hooks/useLiveDerivs", () => ({
+  useLiveDerivs: (iid: string, handlers: { onTick?: (tick: unknown) => void }) => {
+    liveDerivs.subscribed.push(iid);
+    liveDerivs.onTick = iid ? handlers.onTick : undefined;
+    return iid ? liveDerivs.latest : {};
+  },
+}));
+
+vi.mock("../hooks/useLiveLiquidations", () => ({
+  useLiveLiquidations: (iid: string, handlers: { onLiquidation?: (row: unknown) => void }) => {
+    liveDerivs.liquidationsSubscribed.push(iid);
+    liveDerivs.onLiquidation = handlers.onLiquidation;
+    return null;
+  },
+}));
+
 vi.mock("../hooks/useSnapshotSeries", () => ({
   useSnapshotSeries: () => ({ bid: [], ask: [], mid: [], micro: [], price: [] }),
 }));
@@ -173,7 +225,12 @@ interface ChartStubProps {
     upColor?: string;
     downColor?: string;
     configurable?: boolean;
+    format?: (value: number, time: number | null) => string;
+    text?: string;
+    zeroLine?: boolean;
   }[];
+  liquidationMarkers?: { id: string; time: number; position: string; price?: number; text?: string }[];
+  onBarSpacing?: (spacing: number) => void;
   onLegendAction?: (action: "hide" | "settings" | "remove", group: string) => void;
   initialPaneHeights?: Record<string, number>;
   onPaneHeights?: (heights: Record<string, number>) => void;
@@ -341,6 +398,13 @@ beforeEach(() => {
   drawingsApi.save.mockReset().mockResolvedValue(undefined);
   mocks.liveBar = null;
   mocks.session = { candles: [], volume: [], completeFrom: null, loading: false };
+  derivApi.pages = {};
+  derivApi.calls = [];
+  liveDerivs.latest = {};
+  liveDerivs.subscribed = [];
+  liveDerivs.liquidationsSubscribed = [];
+  liveDerivs.onLiquidation = undefined;
+  liveDerivs.onTick = undefined;
 });
 
 afterEach(() => {
@@ -756,6 +820,7 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
       "Lines",
       "Indicators",
       "Volume overlays",
+        "Liquidation tape",
       "Layout",
       "Alert",
       "Fit",
@@ -3811,7 +3876,8 @@ describe("ChartPage volume footprint (Story 32.8)", () => {
 
     expect(lastFootprintCall().enabled).toBe(false);
     expect(lastChartProps.current!.footprint).toBeNull();
-    expect(within(dialog).getByText("Candles mode only")).toBeInTheDocument();
+    const footprintRow = within(dialog).getByRole("checkbox", { name: /Footprint/ }).closest("label") as HTMLElement;
+    expect(within(footprintRow).getByText("Candles mode only")).toBeInTheDocument();
   });
 
   it("opens its settings from the legend gear; a style-only Apply keeps the row size (no refetch)", () => {
@@ -3856,5 +3922,354 @@ describe("ChartPage volume footprint (Story 32.8)", () => {
     render(page());
 
     expect(screen.getByText(/Footprint: Data API answered 500/)).toBeInTheDocument();
+  });
+});
+
+describe("ChartPage derivatives panes (Story 33.5)", () => {
+  const NS = 1_000_000_000;
+  const PERP = "BTCUSDT-LINEAR.BYBIT";
+  const ALL_ON: ChartLayout["derivatives"] = {
+    oi: { on: true },
+    funding: { on: true },
+    basis: { on: true },
+    mark_index: { on: true },
+    liquidations: { on: true, measure: "size", markers: true },
+  };
+  const bars = [600, 660, 720].map((time) => ({ time, open: 1, high: 2, low: 1, close: 1 }));
+  const pane = (id: string) => lastChartProps.current!.panes!.find((p) => p.id === id)!;
+  const derivativePanes = () => lastChartProps.current!.panes!.filter((p) => p.id.startsWith("deriv_"));
+  const flush = () => act(async () => {});
+
+  async function renderPerp(derivatives: ChartLayout["derivatives"] = ALL_ON): Promise<void> {
+    route.iid = PERP;
+    layoutApi.server[PERP] = layoutOf({ derivatives: { ...BUILT_IN_LAYOUT.derivatives, ...derivatives } });
+    render(page());
+    for (let i = 0; i < 4; i++) await flush(); // pages land (and the older-page check settles)
+  }
+
+  beforeEach(() => {
+    mocks.candles = bars;
+    mocks.venueMarket = { venue: "BYBIT", market: "perp" };
+    derivApi.pages = {
+      "open-interest": [{ t: 600_000, oi: "120", oi_change: null }, { t: 660_000 }, { t: 720_000, oi: "90", oi_change: "-30" }],
+      funding: [
+        { t: 620 * NS, rate: "0.0001", interval: 28_800, next_funding_ns: null, annualised: 0.1095 },
+        { t: 700 * NS, rate: "-0.0002", interval: 28_800, next_funding_ns: null, annualised: -0.219 },
+      ],
+      "mark-index": [{ t: 600_000, mark: "100.5", index: "100.0", basis_mi_bps: 50, basis_ml_bps: null }],
+      "liquidation-bars": [
+        {
+          t: 600_000,
+          long_v: 1500,
+          short_v: 200,
+          n: 3,
+          size_precision: 3,
+          notional_units: 170_000_000,
+          notional_precision: 5,
+          long_notional_units: 150_000_000,
+          short_notional_units: 20_000_000,
+        },
+      ],
+      liquidations: [],
+    };
+  });
+
+  it("mounts each of the five entries with its pane, kind and placement", async () => {
+    await renderPerp();
+
+    expect(derivativePanes().map((p) => [p.id, p.kind, p.placement ?? "pane", p.group])).toEqual([
+      ["deriv_oi.oi", "Line", "pane", "deriv_oi"],
+      ["deriv_funding.rate", "Histogram", "pane", "deriv_funding"],
+      ["deriv_basis.mark_index", "Line", "pane", "deriv_basis"],
+      ["deriv_basis.mark_last", "Line", "pane", "deriv_basis"],
+      ["deriv_liquidations.long", "Histogram", "pane", "deriv_liquidations"],
+      ["deriv_liquidations.short", "Histogram", "pane", "deriv_liquidations"],
+      ["deriv_mark_index.mark", "Line", "overlay", "deriv_mark_index"],
+      ["deriv_mark_index.index", "Line", "overlay", "deriv_mark_index"],
+    ]);
+    expect(pane("deriv_basis.mark_index").zeroLine).toBe(true);
+    expect(new Set(derivApi.calls.map((c) => c.route))).toEqual(
+      new Set(["open-interest", "funding", "mark-index", "liquidation-bars", "liquidations"]),
+    );
+  });
+
+  it("draws open interest with whitespace for a null bucket, the legend printing the exact text", async () => {
+    await renderPerp();
+
+    expect(pane("deriv_oi.oi").data).toEqual([{ time: 600, value: 120 }, { time: 660 }, { time: 720, value: 90 }]);
+    expect(pane("deriv_oi.oi").format!(90, 720)).toBe("90 · Δ -30");
+    expect(pane("deriv_oi.oi").format!(120, 600)).toBe("120 · Δ —");
+  });
+
+  it("holds funding per bar, up/down coloured, with rate %, annualised and the countdown", async () => {
+    await renderPerp();
+
+    const funding = pane("deriv_funding.rate");
+    // No forming bar here: the hold stops at the newest event's bar (10:01), so 10:02 is whitespace.
+    expect(funding.data).toEqual([{ time: 600, value: 0.0001 }, { time: 660, value: -0.0002 }, { time: 720 }]);
+    expect([funding.upColor, funding.downColor]).toEqual([CHART_TOKENS["--chart-up"], CHART_TOKENS["--chart-down"]]);
+    expect(funding.format!(0.0001, 600)).toBe("rate 0.0100% · ann. 10.95% · next —");
+  });
+
+  it("ticks the funding countdown every second against the latest event's next funding time", async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000, toFake: ["setInterval", "clearInterval", "Date"] });
+    try {
+      const next = (1_800_000_000_000 + (3 * 3600 + 5) * 1000) * 1_000_000;
+      derivApi.pages.funding = [{ t: 620 * NS, rate: "0.0001", interval: 28_800, next_funding_ns: next, annualised: 0.1095 }];
+      await renderPerp();
+      expect(pane("deriv_funding.rate").format!(0.0001, 600)).toContain("next 03:00:05");
+
+      act(() => vi.advanceTimersByTime(1000));
+      expect(pane("deriv_funding.rate").format!(0.0001, 600)).toContain("next 03:00:04");
+      act(() => vi.advanceTimersByTime(4 * 3600 * 1000));
+      expect(pane("deriv_funding.rate").format!(0.0001, 600)).toContain("next 00:00:00");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("draws basis against a zero line and the mark/index overlays with their exact text", async () => {
+    await renderPerp();
+
+    expect(pane("deriv_basis.mark_index").data).toEqual([{ time: 600, value: 50 }]);
+    expect(pane("deriv_basis.mark_last").data).toEqual([{ time: 600 }]);
+    expect(pane("deriv_basis.mark_index").format!(50, 600)).toBe("50.00 bps");
+    expect(pane("deriv_mark_index.index").format!(100, 600)).toBe("100.0");
+  });
+
+  it("mirrors the liquidation bars by size or notional, the legend showing the notional and n", async () => {
+    await renderPerp();
+    expect([pane("deriv_liquidations.long").data, pane("deriv_liquidations.short").data]).toEqual([
+      [{ time: 600, value: -1.5 }],
+      [{ time: 600, value: 0.2 }],
+    ]);
+    expect(pane("deriv_liquidations.short").format!(0.2, 600)).toBe("short 0.200 · notional 1700.00000 · n 3");
+
+    cleanup();
+    await renderPerp({ ...ALL_ON, liquidations: { on: true, measure: "notional", markers: true } });
+    expect(pane("deriv_liquidations.long").data).toEqual([{ time: 600, value: -1500 }]);
+  });
+
+  it("draws the liquidation markers from the rows, and hides them at a narrow bar spacing", async () => {
+    derivApi.pages.liquidations = [
+      {
+        side: "long",
+        size_units: 4,
+        price_units: 1_000_000,
+        price_precision: 1,
+        size_precision: 3,
+        venue_event_id: "a",
+        ts_event: 610 * NS,
+        ts_init: 610 * NS,
+        price_kind: "bankruptcy",
+        notional_units: 4_000_000,
+        notional_precision: 4,
+      },
+    ];
+    await renderPerp();
+    act(() => lastChartProps.current!.onBarSpacing!(12));
+    expect(lastChartProps.current!.liquidationMarkers!.map((m) => [m.id, m.time, m.position, m.price])).toEqual([
+      ["liq:a", 600, "atPriceBottom", 100000],
+    ]);
+
+    act(() => lastChartProps.current!.onBarSpacing!(4));
+    expect(lastChartProps.current!.liquidationMarkers).toEqual([]);
+    expect(pane("deriv_liquidations.long").groupLabel).toContain("markers hidden: zoom in");
+  });
+
+  it("on spot: the group is disabled, nothing is fetched or subscribed and nothing is drawn", async () => {
+    mocks.venueMarket = { venue: "BYBIT", market: "spot" };
+    await renderPerp();
+
+    expect(derivApi.calls).toEqual([]);
+    expect(liveDerivs.subscribed.every((iid) => iid === "")).toBe(true);
+    expect(liveDerivs.liquidationsSubscribed.every((iid) => iid === "")).toBe(true);
+    expect(derivativePanes()).toEqual([]);
+    expect(lastChartProps.current!.liquidationMarkers).toEqual([]);
+    expect(screen.getByRole("button", { name: "Liquidation tape" })).toBeDisabled();
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "Chart controls" })).getByRole("button", { name: "Indicators" }));
+    const group = within(screen.getByRole("dialog", { name: "Indicators" })).getByRole("group", { name: "Derivatives" });
+    expect(within(group).getByText("spot: no derivatives")).toBeInTheDocument();
+    expect(within(group).getAllByRole("checkbox").every((box) => (box as HTMLInputElement).disabled)).toBe(true);
+    expect(within(group).getByRole("checkbox", { name: "Open Interest" })).toBeChecked(); // the saved state is kept
+  });
+
+  it("fetches nothing until the candles reported the market", async () => {
+    mocks.venueMarket = null;
+    await renderPerp();
+    expect(derivApi.calls).toEqual([]);
+    expect(liveDerivs.subscribed.every((iid) => iid === "")).toBe(true);
+  });
+
+  it("cuts every pane, the markers and the tape at the replay time", async () => {
+    mocks.liveBar = { time: 780, open: 1, high: 1, low: 1, close: 1 };
+    derivApi.pages.liquidations = [610, 700].map((t) => ({
+      side: "short",
+      size_units: 1,
+      price_units: 10,
+      price_precision: 1,
+      size_precision: 0,
+      venue_event_id: `e${t}`,
+      ts_event: t * NS,
+      ts_init: t * NS,
+      price_kind: "bankruptcy",
+      notional_units: 10,
+      notional_precision: 1,
+    }));
+    await renderPerp();
+    act(() => lastChartProps.current!.onBarSpacing!(12));
+    fireEvent.click(screen.getByRole("button", { name: "Liquidation tape" }));
+    await flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    act(() => lastChartProps.current!.onPointClick!({ time: 600, price: 1 }));
+    await flush(); // the replay tape's own page
+
+    expect(derivApi.calls.filter((c) => c.route === "liquidations").at(-1)!.args.slice(1)).toEqual([660 * NS, 50]);
+    for (const p of derivativePanes()) expect(p.data.every((d) => d.time <= 600)).toBe(true);
+    expect(pane("deriv_oi.oi").data).toEqual([{ time: 600, value: 120 }]);
+    expect(lastChartProps.current!.liquidationMarkers!.map((m) => m.id)).toEqual(["liq:e610"]);
+    const tape = screen.getByRole("complementary", { name: "Liquidation tape" });
+    expect(within(tape).getAllByRole("row")).toHaveLength(2); // the header and e610
+  });
+
+  it("sets the forming slot from a live tick in it, ignores an older tick, and keeps it until the route serves the bar", async () => {
+    mocks.liveBar = { time: 780, open: 1, high: 1, low: 1, close: 1 };
+    await renderPerp();
+    act(() => liveDerivs.onTick!({ kind: "oi", t: 779 * NS, ts_init: 779 * NS, value: "77" })); // before the slot
+    expect(pane("deriv_oi.oi").data.at(-1)).toEqual({ time: 720, value: 90 });
+
+    act(() => liveDerivs.onTick!({ kind: "oi", t: 810 * NS, ts_init: 810 * NS, value: "95" }));
+    expect(pane("deriv_oi.oi").data.at(-1)).toEqual({ time: 780, value: 95 });
+    expect(pane("deriv_oi.oi").format!(95, 780)).toBe("95 · Δ —");
+
+    // The bar closed (the next one forms) but the archive has not served 780 yet: the live value stays.
+    mocks.liveBar = { time: 840, open: 1, high: 1, low: 1, close: 1 };
+    act(() => lastChartProps.current!.onPaneHeights!({ price: 500 })); // any re-render
+    expect(pane("deriv_oi.oi").data.find((d) => d.time === 780)).toEqual({ time: 780, value: 95 });
+  });
+
+  it("holds a live funding event after its slot closed, until the route has it", async () => {
+    mocks.liveBar = { time: 780, open: 1, high: 1, low: 1, close: 1 };
+    await renderPerp();
+    act(() =>
+      liveDerivs.onTick!({ kind: "funding", t: 790 * NS, ts_init: 790 * NS, value: "0.0003", interval: 28_800, next_funding_ns: null, annualised: 0.3285 }),
+    );
+    expect(pane("deriv_funding.rate").data.at(-1)).toEqual({ time: 780, value: 0.0003 });
+    expect(pane("deriv_funding.rate").format!(0.0003, 780)).toBe("rate 0.0300% · ann. 32.85% · next —");
+  });
+
+  it("does not hand the chart new series data on a countdown tick", async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000, toFake: ["setInterval", "clearInterval", "Date"] });
+    try {
+      await renderPerp();
+      const before = derivativePanes().map((p) => p.data);
+      act(() => vi.advanceTimersByTime(3000));
+      const after = derivativePanes().map((p) => p.data);
+      expect(after.every((data, i) => data === before[i])).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("in Lines mode: the group is disabled with Candles mode only, nothing drawn, the tape button disabled", async () => {
+    await renderPerp();
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    expect(derivativePanes()).toEqual([]);
+    expect(screen.getByRole("button", { name: "Liquidation tape" })).toBeDisabled();
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "Chart controls" })).getByRole("button", { name: "Indicators" }));
+    const group = within(screen.getByRole("dialog", { name: "Indicators" })).getByRole("group", { name: "Derivatives" });
+    expect(within(group).getByText("Candles mode only")).toBeInTheDocument();
+    expect(within(group).getAllByRole("checkbox").every((box) => (box as HTMLInputElement).disabled)).toBe(true);
+  });
+
+  it("disables the tape until the instrument's market is known", async () => {
+    mocks.venueMarket = null;
+    await renderPerp();
+    expect(screen.getByRole("button", { name: "Liquidation tape" })).toBeDisabled();
+  });
+
+  it("persists the on/off state, the style and the pane height in the coin's layout", async () => {
+    await renderPerp({ ...BUILT_IN_LAYOUT.derivatives });
+    expect(derivativePanes()).toEqual([]);
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "Chart controls" })).getByRole("button", { name: "Indicators" }));
+    const group = within(screen.getByRole("dialog", { name: "Indicators" })).getByRole("group", { name: "Derivatives" });
+    fireEvent.click(within(group).getByRole("checkbox", { name: "Open Interest" }));
+    await flush();
+    expect(pane("deriv_oi.oi")).toBeDefined();
+
+    act(() => lastChartProps.current!.onLegendAction!("settings", "deriv_oi"));
+    const settings = screen.getByRole("dialog", { name: "Open Interest" });
+    fireEvent.change(within(settings).getByLabelText("oi colour"), { target: { value: "#123456" } });
+    fireEvent.click(within(settings).getByRole("button", { name: "Apply" }));
+    await flush();
+    expect(pane("deriv_oi.oi").color).toBe("#123456");
+    act(() => lastChartProps.current!.onPaneHeights!({ price: 400, deriv_oi: 140 }));
+
+    cleanup(); // flushes the pending save
+    const saved = lastSaved(PERP);
+    expect(saved.derivatives.oi).toEqual({ on: true, style: { oi: { color: "#123456" } } });
+    expect(saved.pane_heights).toEqual({ price: 400, deriv_oi: 140 });
+
+    layoutApi.server[PERP] = saved;
+    render(page());
+    for (let i = 0; i < 4; i++) await flush();
+    expect(pane("deriv_oi.oi").color).toBe("#123456");
+    expect(lastChartProps.current!.initialPaneHeights).toEqual({ price: 400, deriv_oi: 140 });
+  });
+
+  it("turns an entry off from the legend's x, and changes the liquidation measure in its settings", async () => {
+    await renderPerp();
+    act(() => lastChartProps.current!.onLegendAction!("remove", "deriv_oi"));
+    expect(derivativePanes().some((p) => p.group === "deriv_oi")).toBe(false);
+
+    act(() => lastChartProps.current!.onLegendAction!("settings", "deriv_liquidations"));
+    const settings = screen.getByRole("dialog", { name: "Liquidations" });
+    fireEvent.change(within(settings).getByDisplayValue("size"), { target: { value: "notional" } });
+    fireEvent.click(within(settings).getByRole("button", { name: "Apply" }));
+    await flush();
+    expect(pane("deriv_liquidations.long").data).toEqual([{ time: 600, value: -1500 }]);
+    cleanup();
+    expect(lastSaved(PERP).derivatives.liquidations).toMatchObject({ on: true, measure: "notional", markers: true });
+    expect(lastSaved(PERP).derivatives.oi.on).toBe(false);
+  });
+
+  it("toggles the Liquidation tape, which says when the instrument has no feed", async () => {
+    await renderPerp();
+    const toggle = screen.getByRole("button", { name: "Liquidation tape" });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByRole("complementary", { name: "Liquidation tape" })).toBeNull();
+
+    fireEvent.click(toggle);
+    await flush();
+
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("complementary", { name: "Liquidation tape" })).toHaveTextContent(
+      "no liquidation feed for this instrument",
+    );
+  });
+
+  it("shows a live liquidation on the tape", async () => {
+    await renderPerp();
+    fireEvent.click(screen.getByRole("button", { name: "Liquidation tape" }));
+    await flush();
+    act(() =>
+      liveDerivs.onLiquidation!({
+        instrument_id: PERP,
+        side: "long",
+        size_units: 41,
+        price_units: 8_513_850,
+        price_precision: 2,
+        size_precision: 3,
+        venue_event_id: "live-1",
+        ts_event: 650 * NS,
+        ts_init: 650 * NS,
+        notional_units: 349_067_850,
+        notional_precision: 5,
+      }),
+    );
+    const tape = screen.getByRole("complementary", { name: "Liquidation tape" });
+    expect(within(tape).getByText("85138.50")).toBeInTheDocument();
+    expect(within(tape).getByText("3490.67850")).toBeInTheDocument();
   });
 });

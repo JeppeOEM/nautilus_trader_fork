@@ -209,6 +209,48 @@ table {
   gap: 8px;
 }
 
+/* Story 33.5: the Liquidation tape, a fixed-width panel beside the chart in the chart's own light
+   palette; its rows scroll inside it (the page itself never clips, see chart-layout.test.mjs). */
+.liquidation-tape {
+  flex: none;
+  width: 300px;
+  margin: 1.4em 0 0;
+  padding: 4px 6px;
+  color: var(--chart-text);
+  background: var(--chart-bg);
+  border: 1px solid var(--chart-border);
+  font-size: 12px;
+}
+
+.liquidation-tape-body {
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.liquidation-tape-body table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.liquidation-tape th,
+.liquidation-tape td {
+  padding: 1px 4px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.liquidation-tape-long {
+  color: var(--chart-down);
+}
+
+.liquidation-tape-short {
+  color: var(--chart-up);
+}
+
+.liquidation-tape-note {
+  color: var(--chart-text-dim);
+}
+
 .chart-workspace > .term-box {
   /* A flex child sizes to its content by default; the chart has none until it
      mounts, so without this the box collapses to a ~30px sliver. min-width:0 lets it
@@ -377,6 +419,12 @@ table {
   display: flex;
   gap: 8px;
   align-items: center;
+}
+
+/* Story 33.5: the pinned Derivatives group's heading. */
+.indicator-dialog-group {
+  color: var(--color-text-strong);
+  margin-right: 8px;
 }
 
 .indicator-dialog-results {

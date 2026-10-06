@@ -73,6 +73,7 @@ existing file stays loadable. The screener's `columns` entries never carry the t
 The paths themselves are the interface's (env vars read in `data_api`), passed in.
 """
 
+import copy
 import logging
 import math
 import os
@@ -539,7 +540,8 @@ MAX_PANE_ID_LENGTH = 512
 MAX_VISIBLE_BARS = 100_000
 MIN_PROFILE_ROWS = 2
 MAX_PROFILE_ROWS = 500
-# Required in every layout; `footprint` (Story 32.8) is optional, see `FOOTPRINT_DEFAULTS`.
+# Required in every layout; `footprint` (Story 32.8) and `derivatives` (Story 33.5) are optional, see
+# `FOOTPRINT_DEFAULTS` and `DERIVATIVES_DEFAULTS`.
 _LAYOUT_KEYS = frozenset(
     {"bar_seconds", "mode", "volume", "crosshair", "pane_heights", "visible_bars", "volume_profile"}
 )
@@ -607,6 +609,34 @@ FOOTPRINT_DEFAULTS: dict[str, Any] = {
 _FOOTPRINT_COLOR_KEYS = frozenset({"buy_color", "sell_color"})
 _FOOTPRINT_KEYS = frozenset(FOOTPRINT_DEFAULTS) | _FOOTPRINT_COLOR_KEYS
 
+# Story 33.5: the optional `derivatives` table (the chart's Derivatives group: Open Interest,
+# Funding, Basis, Mark / Index and Liquidations). Mirrors the frontend's `lib/chartLayout.ts`
+# (`DERIVATIVE_KEYS`, `DERIVATIVE_OUTPUTS`, `LIQUIDATION_MEASURES`, `DERIVATIVE_LINE_STYLES`;
+# `test_derivatives_settings_mirror_the_frontend` pins them). A layout saved before it has no table
+# and loads with `DERIVATIVES_DEFAULTS` (every entry off); a present table carries every entry and
+# each entry its `on` (Liquidations also `measure` and `markers`), with an optional `style` table
+# per output label (absent = the chart's token colours and the library's line defaults).
+DERIVATIVE_KEYS = ("oi", "funding", "basis", "mark_index", "liquidations")
+DERIVATIVE_OUTPUTS: dict[str, tuple[str, ...]] = {
+    "oi": ("oi",),
+    "funding": ("rate",),
+    "basis": ("mark_index", "mark_last"),
+    "mark_index": ("mark", "index"),
+    "liquidations": ("liquidations",),
+}
+LIQUIDATION_MEASURES = ("size", "notional")
+DERIVATIVE_LINE_STYLES = ("solid", "dashed", "dotted")
+MAX_DERIVATIVE_LINE_WIDTH = 4
+_DERIVATIVE_STYLE_COLORS = frozenset({"color", "up_color", "down_color"})
+_DERIVATIVE_STYLE_KEYS = _DERIVATIVE_STYLE_COLORS | {"line_width", "line_style"}
+DERIVATIVES_DEFAULTS: dict[str, dict[str, Any]] = {
+    "oi": {"on": False},
+    "funding": {"on": False},
+    "basis": {"on": False},
+    "mark_index": {"on": False},
+    "liquidations": {"on": False, "measure": "size", "markers": True},
+}
+
 BUILTIN_DEFAULT_LAYOUT: dict[str, Any] = {
     "bar_seconds": 60,
     "mode": "candles",
@@ -625,6 +655,7 @@ BUILTIN_DEFAULT_LAYOUT: dict[str, Any] = {
         **_PROFILE_OPTIONAL_DEFAULTS,
     },
     "footprint": dict(FOOTPRINT_DEFAULTS),
+    "derivatives": copy.deepcopy(DERIVATIVES_DEFAULTS),
 }
 
 
@@ -742,6 +773,64 @@ def _validate_footprint(footprint: Any) -> dict[str, Any]:
     return dict(footprint)
 
 
+def _check_derivative_style(prefix: str, style: dict[str, Any]) -> None:
+    for key, value in style.items():
+        name = f"{prefix}.{key}"
+        if key in _DERIVATIVE_STYLE_COLORS and (not isinstance(value, str) or not value):
+            raise LayoutError(name, "must be a non-empty string")
+        if key == "line_width":
+            _layout_int(name, value, 1, MAX_DERIVATIVE_LINE_WIDTH)
+        if key == "line_style" and value not in DERIVATIVE_LINE_STYLES:
+            raise LayoutError(name, f"must be one of {list(DERIVATIVE_LINE_STYLES)}")
+
+
+def _validate_derivative_styles(prefix: str, key: str, styles: Any) -> dict[str, Any]:
+    if not isinstance(styles, dict):
+        raise LayoutError(prefix, "must be an object of output -> style")
+    _check_keys(styles, frozenset(), frozenset(DERIVATIVE_OUTPUTS[key]), f"{prefix}.")
+    out: dict[str, Any] = {}
+    for output, style in styles.items():
+        if not isinstance(style, dict):
+            raise LayoutError(f"{prefix}.{output}", "must be an object")
+        _check_keys(style, frozenset(), _DERIVATIVE_STYLE_KEYS, f"{prefix}.{output}.")
+        _check_derivative_style(f"{prefix}.{output}", style)
+        out[output] = dict(style)
+    return out
+
+
+def _validate_derivative(key: str, entry: Any) -> dict[str, Any]:
+    prefix = f"derivatives.{key}"
+    if not isinstance(entry, dict):
+        raise LayoutError(prefix, "must be an object")
+    required = frozenset(DERIVATIVES_DEFAULTS[key])
+    _check_keys(entry, required, required | {"style"}, f"{prefix}.")
+    for flag in ("on", "markers"):
+        if flag in required and not isinstance(entry[flag], bool):
+            raise LayoutError(f"{prefix}.{flag}", "must be a boolean")
+    if "measure" in required and entry["measure"] not in LIQUIDATION_MEASURES:
+        raise LayoutError(f"{prefix}.measure", f"must be one of {list(LIQUIDATION_MEASURES)}")
+    out = {name: entry[name] for name in required}
+    if "style" in entry:
+        out["style"] = _validate_derivative_styles(f"{prefix}.style", key, entry["style"])
+    return out
+
+
+def _validate_derivatives(derivatives: Any) -> dict[str, Any]:
+    """
+    Return the derivatives settings (`DERIVATIVES_DEFAULTS`, every entry off, when the table is
+    absent), else raise `LayoutError` naming the dotted key (`derivatives.oi.on`): a present table
+    carries all five entries, each its required keys, and an unknown key, a wrong type or a style
+    outside `color`/`line_width`/`line_style`/`up_color`/`down_color` is refused, never dropped.
+    """
+    if derivatives is None:
+        return copy.deepcopy(DERIVATIVES_DEFAULTS)
+    if not isinstance(derivatives, dict):
+        raise LayoutError("derivatives", "must be an object")
+    keys = frozenset(DERIVATIVE_KEYS)
+    _check_keys(derivatives, keys, keys, "derivatives.")
+    return {key: _validate_derivative(key, derivatives[key]) for key in DERIVATIVE_KEYS}
+
+
 def _check_keys(
     table: dict[str, Any],
     required: frozenset[str] | set[str],
@@ -784,7 +873,8 @@ def _check_pane_heights(heights: Any) -> None:
 def validate_layout(layout: Any, *, tolerant: bool = False) -> dict[str, Any]:
     """
     Return a normalized copy of `layout` (the optional fixed-range anchors always present, `None`
-    when unset; the optional `footprint` table always present, `FOOTPRINT_DEFAULTS` when absent),
+    when unset; the optional `footprint` table always present, `FOOTPRINT_DEFAULTS` when absent, and
+    likewise the optional `derivatives` table, `DERIVATIVES_DEFAULTS` when absent),
     else raise `LayoutError` naming the key. Strict by design (DATA-07): an unknown or missing key
     or a wrong type is refused rather than dropped or defaulted.
 
@@ -796,7 +886,7 @@ def validate_layout(layout: Any, *, tolerant: bool = False) -> dict[str, Any]:
     """
     if not isinstance(layout, dict):
         raise LayoutError("layout", "must be an object")
-    _check_keys(layout, _LAYOUT_KEYS, _LAYOUT_KEYS | {"footprint"})
+    _check_keys(layout, _LAYOUT_KEYS, _LAYOUT_KEYS | {"footprint", "derivatives"})
     _check_timeframe_and_mode(layout, tolerant=tolerant)
     for key in ("volume", "crosshair"):
         if not isinstance(layout[key], bool):
@@ -814,6 +904,7 @@ def validate_layout(layout: Any, *, tolerant: bool = False) -> dict[str, Any]:
         "visible_bars": bars,
         "volume_profile": _validate_profile(layout["volume_profile"]),
         "footprint": _validate_footprint(layout.get("footprint")),
+        "derivatives": _validate_derivatives(layout.get("derivatives")),
     }
 
 

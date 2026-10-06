@@ -2,6 +2,7 @@ import { type Ref, useEffect, useImperativeHandle, useRef, useState } from "reac
 
 import { fetchIndicatorCatalog } from "../../api/client";
 import type { IndicatorCatalogEntry, IndicatorConfigEntry } from "../../api/schema";
+import { DERIVATIVE_KEYS, DERIVATIVE_LABELS, type DerivativeKey } from "../../lib/chartLayout";
 import { DEFAULT_SOURCE, entryId, indicatorId } from "../../lib/indicatorId";
 import IndicatorSettingsDialog, { type SettingsOutput, type SettingsPatch } from "./IndicatorSettingsDialog";
 import ParamInputs from "./ParamInputs";
@@ -52,6 +53,16 @@ interface IndicatorPickerProps {
   footprintOn?: boolean;
   onFootprintChange?: (on: boolean) => void;
   footprintCandlesOnly?: boolean;
+  /** Story 33.5: the pinned Derivatives group (Open Interest, Funding, Basis, Mark / Index,
+   * Liquidations), each entry's on-state from the coin's layout; shown only when both are given.
+   * `derivativesDisabled` (a spot instrument) disables every checkbox and tags the group
+   * "spot: no derivatives", the saved on-states kept. */
+  derivatives?: Readonly<Record<DerivativeKey, boolean>>;
+  onDerivativeChange?: (key: DerivativeKey, on: boolean) => void;
+  derivativesDisabled?: boolean;
+  /** The chart is not in Candles mode: the derivatives share the candles' bar axis, so the group is
+   * disabled and tagged "Candles mode only" (the Footprint's rule). */
+  derivativesCandlesOnly?: boolean;
   /** The legend's eye/gear/x land here (chart page only). */
   ref?: Ref<IndicatorPickerHandle>;
   /** The settings modal's title (the legend title) and Style rows for one instance id. */
@@ -101,6 +112,10 @@ export default function IndicatorPicker({
   footprintOn,
   onFootprintChange,
   footprintCandlesOnly = false,
+  derivatives,
+  onDerivativeChange,
+  derivativesDisabled = false,
+  derivativesCandlesOnly = false,
   ref,
   titleFor,
   outputsFor,
@@ -305,6 +320,10 @@ export default function IndicatorPicker({
           footprintOn={footprintOn}
           onFootprintChange={onFootprintChange}
           footprintCandlesOnly={footprintCandlesOnly}
+          derivatives={derivatives}
+          onDerivativeChange={onDerivativeChange}
+          derivativesDisabled={derivativesDisabled}
+          derivativesCandlesOnly={derivativesCandlesOnly}
         />
       )}
       {error && <p style={{ color: "var(--color-danger)" }}>{error}</p>}
@@ -425,6 +444,10 @@ function IndicatorDialog({
   footprintOn,
   onFootprintChange,
   footprintCandlesOnly,
+  derivatives,
+  onDerivativeChange,
+  derivativesDisabled,
+  derivativesCandlesOnly,
 }: {
   open: boolean;
   onClose: () => void;
@@ -437,6 +460,10 @@ function IndicatorDialog({
   footprintOn?: boolean;
   onFootprintChange?: (on: boolean) => void;
   footprintCandlesOnly: boolean;
+  derivatives?: Readonly<Record<DerivativeKey, boolean>>;
+  onDerivativeChange?: (key: DerivativeKey, on: boolean) => void;
+  derivativesDisabled: boolean;
+  derivativesCandlesOnly: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const [query, setQuery] = useState("");
@@ -500,6 +527,24 @@ function IndicatorDialog({
               {footprintCandlesOnly && <span className="indicator-dialog-tag">Candles mode only</span>}
             </label>
           )}
+        </div>
+      )}
+      {derivatives && onDerivativeChange && (
+        <div className="indicator-dialog-pinned" role="group" aria-label="Derivatives">
+          <span className="indicator-dialog-group">Derivatives</span>
+          {derivativesDisabled && <span className="indicator-dialog-tag">spot: no derivatives</span>}
+          {!derivativesDisabled && derivativesCandlesOnly && <span className="indicator-dialog-tag">Candles mode only</span>}
+          {DERIVATIVE_KEYS.map((key) => (
+            <label key={key}>
+              <input
+                type="checkbox"
+                checked={derivatives[key]}
+                disabled={disabled || derivativesDisabled || derivativesCandlesOnly}
+                onChange={(e) => onDerivativeChange(key, e.target.checked)}
+              />
+              <span>{DERIVATIVE_LABELS[key]}</span>
+            </label>
+          ))}
         </div>
       )}
       <div className="indicator-dialog-cats" role="group" aria-label="Category">

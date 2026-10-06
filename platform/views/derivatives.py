@@ -61,6 +61,7 @@ from kernel.derivs_wire import exact_text
 from kernel.derivs_wire import to_tick
 from kernel.indicators import basis_bps
 from kernel.indicators import funding_annualised
+from kernel.liquidation import LiquidatedSide
 from kernel.liquidation import Liquidation
 from kernel.liquidation import has_liquidation_feed
 from kernel.venues import market_kind
@@ -562,7 +563,12 @@ def mark_index_page(
 def _liquidation_item(row: Liquidation) -> dict:
     item = Liquidation.to_dict(row)
     del item["instrument_id"]
-    return {**item, "price_kind": PRICE_KIND}
+    return {
+        **item,
+        "price_kind": PRICE_KIND,
+        "notional_units": row.notional_units(),
+        "notional_precision": row.price_precision + row.size_precision,
+    }
 
 
 def liquidations_page(
@@ -577,7 +583,9 @@ def liquidations_page(
     Return the newest `limit` liquidations with `ts_event < before_ns`, oldest first, the archive plus the
     live tail not flushed yet, each venue event once (`liquidations_plus_recent`): the stored row
     (`Liquidation.to_dict`, integer units at its own precisions) without its `instrument_id`, plus
-    `price_kind: "bankruptcy"`. An id without the feed (`has_liquidation_feed`) reads nothing.
+    `price_kind: "bankruptcy"` and the row's notional (`notional_units()`, size x bankruptcy price,
+    at `notional_precision = price_precision + size_precision`; Story 33.5: the browser does no
+    notional arithmetic). An id without the feed (`has_liquidation_feed`) reads nothing.
     """
     if not has_liquidation_feed(instrument_id):
         return [], False
@@ -753,12 +761,16 @@ def _by_bucket(rows: list[Liquidation], bar_seconds: int) -> dict[int, list[Liqu
     return buckets
 
 
-def _notional(bar: dict, archived: list[Liquidation]) -> tuple[int | None, int | None]:
+def _side_notionals(
+    bar: dict, archived: list[Liquidation]
+) -> tuple[int | None, int | None, int | None]:
     """
-    `(notional_units, notional_precision)` of one stored bucket: None while its `liq_n` is null
-    (unknown), else `Σ notional_units()` of the bucket's archived rows rescaled to their finest
-    `price_precision + size_precision` (0 at the bar's own `pp + sp` when there are none), served
-    only when the archive holds exactly `liq_n` of them.
+    `(long_notional_units, short_notional_units, notional_precision)` of one stored bucket: None
+    while its `liq_n` is null (unknown), else each side's `Σ notional_units()` of the bucket's
+    archived rows rescaled to their finest `price_precision + size_precision` (0 for a side with
+    no rows, and both 0 at the bar's own `pp + sp` when there are none), served only when the
+    archive holds exactly `liq_n` of them (Story 33.5 adds the per-side split, so the chart's
+    mirrored notional bars need no browser arithmetic).
 
     Exact by capture's order: a flush writes the rows to the archive first and only then applies
     them to the candle store (`CaptureService._flush_once` -> `_apply_to_candle_store`), and the
@@ -769,26 +781,31 @@ def _notional(bar: dict, archived: list[Liquidation]) -> tuple[int | None, int |
     Known limit (live-edge lag): between a flush's archive write and its store apply, and after a
     store apply that failed (ledgered `collector.candle_store`, repaired by the next start's
     catch-up or the rebuild), the archive holds more rows than `liq_n`; the store's count then
-    cannot be matched to a set of rows, so the notional is None for that bucket, never a partial
+    cannot be matched to a set of rows, so every notional is None for that bucket, never a partial
     sum (a known 0 beside archived rows included). Upgrade path: the store keeps the per-bucket
-    notional sum as a folded column.
+    notional sums as folded columns.
     """
     n = bar["liq_n"]
     if n is None or len(archived) != n:
-        return None, None
+        return None, None, None
     if not archived:
         pp, sp = bar["price_precision"], bar["size_precision"]
-        return 0, None if pp is None or sp is None else pp + sp
+        return 0, 0, None if pp is None or sp is None else pp + sp
     finest = max(row.price_precision + row.size_precision for row in archived)
-    total = sum(
-        row.notional_units() * 10 ** (finest - row.price_precision - row.size_precision)
-        for row in archived
-    )
-    return total, finest
+
+    def side_sum(side: LiquidatedSide) -> int:
+        return sum(
+            row.notional_units() * 10 ** (finest - row.price_precision - row.size_precision)
+            for row in archived
+            if row.side == side
+        )
+
+    return side_sum(LiquidatedSide.LONG), side_sum(LiquidatedSide.SHORT), finest
 
 
 def _liquidation_bar_item(bar: dict, archived: list[Liquidation]) -> dict:
-    notional, precision = _notional(bar, archived)
+    long_units, short_units, precision = _side_notionals(bar, archived)
+    notional = None if long_units is None or short_units is None else long_units + short_units
     return {
         "t": bar["t"],
         "long_v": bar["liq_long_v"],
@@ -797,6 +814,8 @@ def _liquidation_bar_item(bar: dict, archived: list[Liquidation]) -> dict:
         "size_precision": bar["size_precision"],
         "notional_units": notional,
         "notional_precision": precision,
+        "long_notional_units": long_units,
+        "short_notional_units": short_units,
     }
 
 
@@ -818,7 +837,8 @@ def liquidation_bars(
     notional_units, notional_precision}`. `long_v/short_v/n` and their null-ness are the store's
     own (D-160's feed-start rule: null before or straddling the feed start and for an id without
     the feed, 0 in a known bucket none landed in); the notional is summed from the archived rows
-    (`_notional`), so it agrees with the screener's `liq_notional_1h`.
+    (`_side_notionals`, with `long_notional_units`/`short_notional_units` its per-side split at
+    the same precision and null rule), so it agrees with the screener's `liq_notional_1h`.
     """
     if is_spot(instrument_id):
         return [], False

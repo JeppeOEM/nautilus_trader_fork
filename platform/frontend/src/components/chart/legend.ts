@@ -45,8 +45,10 @@ export interface LegendSeries {
   /** False for Volume: eye and x only, no settings. Default true. */
   configurable?: boolean;
   /** How the row's number is printed, where the plain readout would lose the instrument's precision
-   * (Story 32.7's Anchored VWAP prints through `lib/units.ts`). */
-  format?: (value: number) => string;
+   * (Story 32.7's Anchored VWAP prints through `lib/units.ts`). `time` is the point's slot (chart
+   * seconds), so a row can print the exact text its data carries for that bar (Story 33.5); null when
+   * the value has no time (an extra row's lone value). */
+  format?: (value: number, time: number | null) => string;
   /** False when no configured entry owns the row: no buttons at all. Default true. */
   actionable?: boolean;
   /** False for a row with nothing to hide in place (Story 32.8's Footprint: gear and x only). Default true. */
@@ -60,18 +62,23 @@ export function formatLegendValue(value: number | null | undefined): string {
   return Math.abs(value) >= 100 ? value.toFixed(2) : Number(value.toPrecision(4)).toString();
 }
 
-function latestValue(data: IndicatorDatum[]): number | null {
-  for (let i = data.length - 1; i >= 0; i--) {
-    const point = data[i];
-    if ("value" in point) return point.value;
-  }
-  return null;
+interface Reading {
+  value: number | null;
+  time: number | null;
 }
 
-function valueAt(item: LegendSeries, param: MouseEventParams<Time> | null): number | null {
+function latestValue(data: IndicatorDatum[]): Reading {
+  for (let i = data.length - 1; i >= 0; i--) {
+    const point = data[i];
+    if ("value" in point) return { value: point.value, time: point.time as number };
+  }
+  return { value: null, time: null };
+}
+
+function valueAt(item: LegendSeries, param: MouseEventParams<Time> | null): Reading {
   if (item.hidden || !item.series || !param || param.time === undefined) return latestValue(item.data);
   const point = param.seriesData.get(item.series);
-  return point && "value" in point ? point.value : null;
+  return { value: point && "value" in point ? point.value : null, time: param.time as number };
 }
 
 function legendContainer(paneEl: HTMLElement): HTMLElement {
@@ -154,8 +161,8 @@ function rowSignature(row: RowModel, actions: boolean): string {
 function valueText(member: LegendSeries, param: MouseEventParams<Time> | null, gap: GapRun | undefined): string {
   if (member.text !== undefined) return member.text;
   if (gap && !member.hidden) return gapLabel(gap);
-  const value = valueAt(member, param);
-  return value !== null && member.format ? member.format(value) : formatLegendValue(value);
+  const { value, time } = valueAt(member, param);
+  return value !== null && member.format ? member.format(value, time) : formatLegendValue(value);
 }
 
 function legendRow(row: RowModel, param: MouseEventParams<Time> | null, gap: GapRun | undefined, actions: boolean): HTMLElement {

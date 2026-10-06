@@ -2,6 +2,7 @@ import { AUTO_ANCHOR_PRESETS, type AutoAnchorPreset, DEFAULT_AUTO_ANCHOR } from 
 import { DEFAULT_SESSION_COUNT, MAX_SESSIONS, SESSION_PERIODS } from "./sessionProfile";
 import { DEFAULT_IB_MINUTES, MAX_IB_MINUTES, MIN_IB_MINUTES } from "./tpo";
 import { DEFAULT_VOLUME_PROFILE_SETTINGS } from "./volumeProfile";
+import { type OutputStyle, LINE_STYLES } from "./indicatorStyle";
 import { TIMEFRAMES } from "../timeframes";
 
 // Story 32.6: one coin's chart layout, the shape of `GET/PUT /api/coin/{iid}/layout`
@@ -62,6 +63,51 @@ export interface FootprintSettings {
   sell_color?: string;
 }
 
+// Story 33.5: the chart's pinned Derivatives group, the optional `derivatives` table of the layout.
+// Mirrored by `views/preferences.py` (`DERIVATIVE_KEYS`, `DERIVATIVE_OUTPUTS`, `LIQUIDATION_MEASURES`;
+// `test_derivatives_settings_mirror_the_frontend` pins them, so keep the literal forms it reads).
+export type DerivativeKey = "oi" | "funding" | "basis" | "mark_index" | "liquidations";
+export const DERIVATIVE_KEYS: readonly DerivativeKey[] = ["oi", "funding", "basis", "mark_index", "liquidations"];
+/** Each entry's output labels: the keys of its `style` table (and its settings dialog's rows). */
+export const DERIVATIVE_OUTPUTS: Record<DerivativeKey, readonly string[]> = {
+  oi: ["oi"],
+  funding: ["rate"],
+  basis: ["mark_index", "mark_last"],
+  mark_index: ["mark", "index"],
+  liquidations: ["liquidations"],
+};
+/** The Indicators dialog's and the legend's name of each entry. */
+export const DERIVATIVE_LABELS: Record<DerivativeKey, string> = {
+  oi: "Open Interest",
+  funding: "Funding",
+  basis: "Basis",
+  mark_index: "Mark / Index",
+  liquidations: "Liquidations",
+};
+export type LiquidationMeasure = "size" | "notional";
+export const LIQUIDATION_MEASURES: readonly LiquidationMeasure[] = ["size", "notional"];
+
+export interface DerivativeEntry {
+  on: boolean;
+  /** Per output label; absent = the chart's token colours and the library's line defaults. */
+  style?: Record<string, OutputStyle>;
+}
+
+export interface LiquidationsEntry extends DerivativeEntry {
+  /** The bars plot the liquidated size (base units) or the notional (quote units). */
+  measure: LiquidationMeasure;
+  /** Series markers on the price pane at each liquidation's bankruptcy price. */
+  markers: boolean;
+}
+
+export interface DerivativesLayout {
+  oi: DerivativeEntry;
+  funding: DerivativeEntry;
+  basis: DerivativeEntry;
+  mark_index: DerivativeEntry;
+  liquidations: LiquidationsEntry;
+}
+
 export interface ChartLayout {
   bar_seconds: number;
   mode: LayoutMode;
@@ -73,6 +119,8 @@ export interface ChartLayout {
   visible_bars: number;
   volume_profile: VolumeProfileLayout;
   footprint: FootprintSettings;
+  /** Optional on the wire (absent = every entry off); always present once normalised. */
+  derivatives: DerivativesLayout;
 }
 
 export const BUILT_IN_LAYOUT: ChartLayout = {
@@ -105,6 +153,13 @@ export const BUILT_IN_LAYOUT: ChartLayout = {
     mode: "bid_ask",
     imbalance_ratio: FOOTPRINT_DEFAULT_IMBALANCE_RATIO,
     text: true,
+  },
+  derivatives: {
+    oi: { on: false },
+    funding: { on: false },
+    basis: { on: false },
+    mark_index: { on: false },
+    liquidations: { on: false, measure: "size", markers: true },
   },
 };
 
@@ -234,6 +289,83 @@ function footprintOf(raw: unknown, fallbacks: string[]): FootprintSettings {
   return out;
 }
 
+const STYLE_COLOR_KEYS = ["color", "up_color", "down_color"] as const;
+
+/** One output's stored style, each field kept when usable and otherwise named in `fallbacks`. */
+function outputStyleOf(raw: unknown, path: string, fallbacks: string[]): OutputStyle {
+  if (!isRecord(raw)) {
+    fallbacks.push(path);
+    return {};
+  }
+  const out: OutputStyle = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if ((STYLE_COLOR_KEYS as readonly string[]).includes(key) && isColor(value)) out[key as (typeof STYLE_COLOR_KEYS)[number]] = value;
+    else if (key === "line_width" && isInt(value, 1, 4)) out.line_width = value;
+    else if (key === "line_style" && LINE_STYLES.some((s) => s === value)) out.line_style = value as OutputStyle["line_style"];
+    else fallbacks.push(`${path}.${key}`);
+  }
+  return out;
+}
+
+function stylesOf(raw: unknown, key: DerivativeKey, path: string, fallbacks: string[]): Record<string, OutputStyle> | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) {
+    fallbacks.push(path);
+    return undefined;
+  }
+  const out: Record<string, OutputStyle> = {};
+  for (const [output, style] of Object.entries(raw)) {
+    if (DERIVATIVE_OUTPUTS[key].includes(output)) out[output] = outputStyleOf(style, `${path}.${output}`, fallbacks);
+    else fallbacks.push(`${path}.${output}`);
+  }
+  return out;
+}
+
+/** One entry: each unusable field falls back to the default by name. */
+function derivativeEntryOf(raw: unknown, key: DerivativeKey, fallbacks: string[]): DerivativeEntry & Partial<LiquidationsEntry> {
+  const base = BUILT_IN_LAYOUT.derivatives[key];
+  const path = `derivatives.${key}`;
+  if (!isRecord(raw)) {
+    fallbacks.push(path);
+    return { ...base };
+  }
+  const out: DerivativeEntry & Partial<LiquidationsEntry> = { ...base };
+  if (typeof raw.on === "boolean") out.on = raw.on;
+  else fallbacks.push(`${path}.on`);
+  if (key === "liquidations") {
+    if (LIQUIDATION_MEASURES.some((m) => m === raw.measure)) out.measure = raw.measure as LiquidationMeasure;
+    else fallbacks.push(`${path}.measure`);
+    if (typeof raw.markers === "boolean") out.markers = raw.markers;
+    else fallbacks.push(`${path}.markers`);
+  }
+  const style = stylesOf(raw.style, key, `${path}.style`, fallbacks);
+  if (style !== undefined) out.style = style;
+  return out;
+}
+
+/**
+ * The derivatives table: absent (a layout saved before Story 33.5) is every entry off, silently; a
+ * present table's unusable entries and fields fall back one by one, each named in `fallbacks`.
+ */
+export function derivativesOf(raw: unknown, fallbacks: string[]): DerivativesLayout {
+  const base = BUILT_IN_LAYOUT.derivatives;
+  if (raw === undefined) return structuredClone(base);
+  if (!isRecord(raw)) {
+    fallbacks.push("derivatives");
+    return structuredClone(base);
+  }
+  for (const key of Object.keys(raw)) {
+    if (!DERIVATIVE_KEYS.some((k) => k === key)) fallbacks.push(`derivatives.${key}`);
+  }
+  return {
+    oi: derivativeEntryOf(raw.oi, "oi", fallbacks),
+    funding: derivativeEntryOf(raw.funding, "funding", fallbacks),
+    basis: derivativeEntryOf(raw.basis, "basis", fallbacks),
+    mark_index: derivativeEntryOf(raw.mark_index, "mark_index", fallbacks),
+    liquidations: derivativeEntryOf(raw.liquidations, "liquidations", fallbacks) as LiquidationsEntry,
+  };
+}
+
 /**
  * The layout the server returned, made safe to render: any field this client cannot use (a
  * `bar_seconds` outside `TIMEFRAMES`, an unknown `mode`, a malformed number) falls back to the
@@ -263,6 +395,7 @@ export function normalizeLayout(raw: unknown): { layout: ChartLayout; fallbacks:
     visible_bars: barsOk ? bars : BUILT_IN_LAYOUT.visible_bars,
     volume_profile: profileOf(source.volume_profile, fallbacks),
     footprint: footprintOf(source.footprint, fallbacks),
+    derivatives: derivativesOf(source.derivatives, fallbacks),
   };
   if (fallbacks.length > 0) {
     console.error(
@@ -274,7 +407,8 @@ export function normalizeLayout(raw: unknown): { layout: ChartLayout; fallbacks:
 }
 
 /** The PUT body's layout: `start`/`end` are omitted while null and the footprint colours while unset
- * (the table cannot store a null, and the server refuses an empty colour). */
+ * (the table cannot store a null, and the server refuses an empty colour). The derivatives table is
+ * always written whole (the server refuses a present table missing an entry). */
 export function layoutForSave(layout: ChartLayout): Record<string, unknown> {
   const { start, end, ...profile } = layout.volume_profile;
   const { buy_color, sell_color, ...footprint } = layout.footprint;

@@ -25,10 +25,16 @@ from typing import Any
 import pytest
 
 from views.preferences import BUILTIN_DEFAULT_LAYOUT
+from views.preferences import DERIVATIVE_KEYS
+from views.preferences import DERIVATIVE_LINE_STYLES
+from views.preferences import DERIVATIVE_OUTPUTS
+from views.preferences import DERIVATIVES_DEFAULTS
 from views.preferences import FOOTPRINT_DEFAULT_IMBALANCE_RATIO
 from views.preferences import FOOTPRINT_DEFAULTS
 from views.preferences import FOOTPRINT_MODES
 from views.preferences import LAYOUT_BAR_SECONDS
+from views.preferences import LIQUIDATION_MEASURES
+from views.preferences import MAX_DERIVATIVE_LINE_WIDTH
 from views.preferences import MAX_FOOTPRINT_ROW_TICKS
 from views.preferences import MAX_IB_MINUTES
 from views.preferences import MAX_PANE_ID_LENGTH
@@ -550,3 +556,143 @@ def test_the_footprint_defaults_are_off_auto_bid_ask_ratio_3_with_text() -> None
     }
     assert FOOTPRINT_MODES == ("bid_ask", "delta", "volume")
     assert FOOTPRINT_DEFAULT_IMBALANCE_RATIO == 3
+
+
+# -- Story 33.5: the optional derivatives table ----------------------------------------------------
+
+
+def _derivatives(**entries: Any) -> dict[str, Any]:
+    return {**copy.deepcopy(DERIVATIVES_DEFAULTS), **entries}
+
+
+def test_a_layout_saved_before_story_33_5_loads_with_every_derivative_off(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    path.write_text(_PRE_32_8_FILE)  # no [derivatives] table (nor a [footprint] one)
+    loaded = load_chart_layouts(path).layouts[_IID]
+    assert loaded["derivatives"] == DERIVATIVES_DEFAULTS
+    assert not any(entry["on"] for entry in loaded["derivatives"].values())
+    assert DERIVATIVES_DEFAULTS["liquidations"] == {"on": False, "measure": "size", "markers": True}
+
+
+def test_derivatives_settings_round_trip_through_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    derivatives = _derivatives(
+        oi={"on": True, "style": {"oi": {"color": "#26a69a", "line_width": 2}}},
+        funding={"on": True, "style": {"rate": {"up_color": "#00ff00", "down_color": "#ff0000"}}},
+        basis={"on": False, "style": {"mark_last": {"line_style": "dashed"}}},
+        liquidations={"on": True, "measure": "notional", "markers": False},
+    )
+    heights = {"price": 420, "deriv_oi": 150, "deriv_liquidations": 90}
+    layout = _layout(derivatives=derivatives, pane_heights=heights)
+    save_chart_layouts(ChartLayouts({_IID: layout}, default=layout), path)
+    loaded = load_chart_layouts(path)
+    assert loaded.layouts[_IID]["derivatives"] == derivatives
+    assert loaded.layouts[_IID]["pane_heights"] == heights
+    assert loaded.default is not None
+    assert loaded.default["derivatives"] == derivatives
+
+
+@pytest.mark.parametrize(
+    ("derivatives", "key"),
+    [
+        (_derivatives(oi={"on": "yes"}), "derivatives.oi.on"),
+        (_derivatives(oi={}), "derivatives.oi.on"),
+        (_derivatives(oi={"on": True, "glow": 1}), "derivatives.oi.glow"),
+        ({**_derivatives(), "screener": {"on": True}}, "derivatives.screener"),
+        ({k: v for k, v in _derivatives().items() if k != "basis"}, "derivatives.basis"),
+        (_derivatives(funding=[]), "derivatives.funding"),
+        (
+            _derivatives(liquidations={"on": True, "markers": True}),
+            "derivatives.liquidations.measure",
+        ),
+        (
+            _derivatives(liquidations={"on": True, "measure": "usd", "markers": True}),
+            "derivatives.liquidations.measure",
+        ),
+        (
+            _derivatives(liquidations={"on": True, "measure": "size", "markers": "no"}),
+            "derivatives.liquidations.markers",
+        ),
+        (_derivatives(oi={"on": True, "style": "red"}), "derivatives.oi.style"),
+        (_derivatives(oi={"on": True, "style": {"open": {}}}), "derivatives.oi.style.open"),
+        (_derivatives(oi={"on": True, "style": {"oi": 3}}), "derivatives.oi.style.oi"),
+        (
+            _derivatives(oi={"on": True, "style": {"oi": {"glow": True}}}),
+            "derivatives.oi.style.oi.glow",
+        ),
+        (
+            _derivatives(oi={"on": True, "style": {"oi": {"color": ""}}}),
+            "derivatives.oi.style.oi.color",
+        ),
+        (
+            _derivatives(oi={"on": True, "style": {"oi": {"line_width": 5}}}),
+            "derivatives.oi.style.oi.line_width",
+        ),
+        (
+            _derivatives(oi={"on": True, "style": {"oi": {"line_style": "wavy"}}}),
+            "derivatives.oi.style.oi.line_style",
+        ),
+    ],
+)
+def test_a_bad_derivatives_setting_is_refused_naming_it(
+    derivatives: dict[str, Any], key: str
+) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(derivatives=derivatives))
+    assert raised.value.key == key
+
+
+def test_a_derivatives_value_that_is_not_a_table_is_refused() -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(derivatives=True))
+    assert raised.value.key == "derivatives"
+
+
+def test_derivatives_settings_mirror_the_frontend() -> None:
+    source = (_FRONTEND / "lib/chartLayout.ts").read_text()
+    keys = re.search(r"DERIVATIVE_KEYS: readonly DerivativeKey\[\] = \[([^\]]*)\]", source)
+    assert keys is not None
+    assert tuple(re.findall(r'"(\w+)"', keys.group(1))) == DERIVATIVE_KEYS
+    outputs = _ts_block("lib/chartLayout.ts", "export const DERIVATIVE_OUTPUTS")
+    listed = {
+        k: tuple(re.findall(r'"(\w+)"', v)) for k, v in re.findall(r"(\w+): \[([^\]]*)\]", outputs)
+    }
+    assert listed == DERIVATIVE_OUTPUTS
+    measures = re.search(
+        r"LIQUIDATION_MEASURES: readonly LiquidationMeasure\[\] = \[([^\]]*)\]", source
+    )
+    assert measures is not None
+    assert tuple(re.findall(r'"(\w+)"', measures.group(1))) == LIQUIDATION_MEASURES
+    style = (_FRONTEND / "lib/indicatorStyle.ts").read_text()
+    styles = re.search(r"LINE_STYLES: readonly LineStyleName\[\] = \[([^\]]*)\]", style)
+    assert styles is not None
+    assert tuple(re.findall(r'"(\w+)"', styles.group(1))) == DERIVATIVE_LINE_STYLES
+    widths = re.search(r"LINE_WIDTHS = \[([^\]]*)\]", style)
+    assert widths is not None
+    assert max(int(w) for w in widths.group(1).split(",")) == MAX_DERIVATIVE_LINE_WIDTH
+
+
+@pytest.mark.parametrize(
+    ("value", "accepted"),
+    [("#26a69a", True), ("red", True), ("", False), (7, False), (True, False), (None, False)],
+)
+def test_a_derivative_colour_is_refused_exactly_when_the_client_would_drop_it(
+    value: Any, accepted: bool
+) -> None:
+    """
+    The client's normaliser keeps a colour that is a non-empty string (`lib/chartLayout.ts`'s
+    `isColor`, the footprint colours' rule) and drops anything else; the server refuses exactly that.
+    """
+    source = (_FRONTEND / "lib/chartLayout.ts").read_text()
+    assert (
+        'const isColor = (value: unknown): value is string => typeof value === "string" '
+        "&& value.length > 0;"
+    ) in source
+    for key in ("color", "up_color", "down_color"):
+        derivatives = _derivatives(oi={"on": True, "style": {"oi": {key: value}}})
+        if accepted:
+            assert validate_layout(_layout(derivatives=derivatives))["derivatives"]["oi"]["style"]
+            continue
+        with pytest.raises(LayoutError) as raised:
+            validate_layout(_layout(derivatives=derivatives))
+        assert raised.value.key == f"derivatives.oi.style.oi.{key}"

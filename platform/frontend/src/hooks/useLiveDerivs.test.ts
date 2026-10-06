@@ -64,9 +64,20 @@ describe("useLiveDerivs", () => {
         value: "0.0001",
         interval: 28_800,
         next_funding_ns: 1_759_708_800_000,
+        annualised: null,
       },
-      mark: { kind: "mark", t: 1, ts_init: 2, value: "100.50" },
+      mark: { kind: "mark", t: 1, ts_init: 2, value: "100.50", basis_mi_bps: null },
     });
+  });
+
+  it("carries the server's annualised funding and mark-index basis (Story 33.5)", () => {
+    const { result } = renderHook(() => useLiveDerivs(IID));
+    act(() => latestSocket().open());
+    act(() => latestSocket().receive(funding({ annualised: 0.1095 })));
+    act(() => latestSocket().receive({ ...mark(), basis_mi_bps: 50 }));
+    expect([result.current.funding?.annualised, result.current.mark?.basis_mi_bps]).toEqual([0.1095, 50]);
+    act(() => latestSocket().receive(funding({ annualised: "0.1" })));
+    expect(result.current.funding?.annualised).toBe(0.1095); // a non-number is a malformed frame
   });
 
   it("hands every tick to onTick in arrival order", () => {

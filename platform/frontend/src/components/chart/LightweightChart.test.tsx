@@ -31,6 +31,7 @@ import {
 import { GapPrimitive } from "./primitives/GapPrimitive";
 import { MeasurementPrimitive } from "./primitives/MeasurementPrimitive";
 import { FootprintPrimitive, type FootprintRenderSpec } from "./primitives/FootprintPrimitive";
+import type { MarkerSpec } from "./LiquidationMarkers";
 
 const addSeriesMock = vi.fn();
 const seriesUpdateMock = vi.fn();
@@ -70,6 +71,11 @@ const scrollToRealTimeMock = vi.fn();
 // Story 32.6: the visible-range subscription, shared so a test can fire the handler.
 const subscribeRangeMock = vi.fn();
 const unsubscribeRangeMock = vi.fn();
+// Story 33.5: the series-markers plugin (one per candle series) and the time scale's bar spacing.
+const setMarkersMock = vi.fn();
+const detachMarkersMock = vi.fn();
+const createSeriesMarkersMock = vi.fn();
+let barSpacingPx = 6;
 
 // One shared counter so each chart.addPane() call gets its own, stable, ever-increasing
 // index -- mirrors the real library's paneIndex() behaviour closely enough for the
@@ -170,6 +176,7 @@ vi.mock("lightweight-charts", () => ({
   HistogramSeries: "HistogramSeries-sentinel",
   LineStyle: { Solid: 0, Dotted: 1, Dashed: 2 },
   createChart: (...args: unknown[]) => createChartMock(...args),
+  createSeriesMarkers: (...args: unknown[]) => createSeriesMarkersMock(...args),
 }));
 
 const { default: LightweightChart, INDICATOR_PANE_PX, PRICE_PANE_PX, VOLUME_PANE_PX, VISIBLE_BARS_DEBOUNCE_MS } = await import("./LightweightChart");
@@ -314,8 +321,13 @@ beforeEach(() => {
       scrollToRealTime: scrollToRealTimeMock,
       subscribeVisibleLogicalRangeChange: subscribeRangeMock,
       unsubscribeVisibleLogicalRangeChange: unsubscribeRangeMock,
+      options: () => ({ barSpacing: barSpacingPx }),
     }),
   }));
+  setMarkersMock.mockReset();
+  detachMarkersMock.mockReset();
+  createSeriesMarkersMock.mockReset().mockImplementation(() => ({ setMarkers: setMarkersMock, detach: detachMarkersMock }));
+  barSpacingPx = 6;
 });
 
 afterEach(() => {
@@ -2697,5 +2709,105 @@ describe("the volume footprint (Story 32.8)", () => {
 
     rerender(<LightweightChart data={[]} onChartApi={() => {}} footprint={null} onLegendAction={onLegendAction} />);
     expect(paneEl.querySelector('.chart-legend-row[data-group="footprint"]')).toBeNull();
+  });
+});
+
+describe("derivatives support (Story 33.5)", () => {
+  const pricePane = (): HTMLElement => {
+    const paneEl = document.createElement("div");
+    document.body.appendChild(paneEl);
+    const base = createChartMock.getMockImplementation()!;
+    createChartMock.mockImplementation((...args: unknown[]) => ({
+      ...base(...args),
+      panes: () => [{ ...pricePaneMock, getHTMLElement: () => paneEl }],
+    }));
+    return paneEl;
+  };
+  const markers: MarkerSpec[] = [
+    {
+      id: "liq:a",
+      time: 60 as Time,
+      shape: "circle",
+      color: "#a00",
+      position: "atPriceBottom",
+      price: 100,
+      size: 1,
+      tooltip: ["long liquidated", "size 0.004"],
+    },
+  ];
+
+  it("hands the legend the spec's format, with the slot's time, and its fixed text", () => {
+    const paneEl = pricePane();
+    const format = vi.fn((value: number, time: number | null) => `${value}@${time}`);
+    const { rerender } = render(
+      <LightweightChart
+        data={[]}
+        onChartApi={() => {}}
+        panes={[makePaneSpec("mark", { placement: "overlay", groupLabel: "Mark", data: [{ time: 60 as Time, value: 7 }], format })]}
+      />,
+    );
+    expect(paneEl.querySelector(".chart-legend-row")?.textContent).toBe("Mark7@60");
+    const legendHandler = subscribeCrosshairMoveMock.mock.calls.at(-1)![0];
+    const series = addSeriesMock.mock.results.at(-1)!.value;
+    act(() => legendHandler({ time: 60, seriesData: new Map([[series, { time: 60, value: 7 }]]) }));
+    expect(format).toHaveBeenLastCalledWith(7, 60);
+
+    rerender(
+      <LightweightChart
+        data={[]}
+        onChartApi={() => {}}
+        panes={[makePaneSpec("mark", { placement: "overlay", groupLabel: "Mark", data: [], text: "load failed" })]}
+      />,
+    );
+    expect(paneEl.querySelector(".chart-legend-row")?.textContent).toBe("Markload failed");
+  });
+
+  it("draws a dashed zero line on a spec that asks for one, and removes it when it no longer does", () => {
+    const spec = makePaneSpec("basis", { zeroLine: true });
+    const { rerender } = render(<LightweightChart data={[]} onChartApi={() => {}} panes={[spec]} />);
+    expect(createPriceLineMock).toHaveBeenCalledWith(expect.objectContaining({ price: 0, lineStyle: 2, axisLabelVisible: false }));
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} panes={[{ ...spec, zeroLine: false }]} />);
+    expect(removePriceLineMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates one markers plugin on the candle series, sets, clears and detaches it", () => {
+    const { rerender, unmount } = render(<LightweightChart data={[]} onChartApi={() => {}} />);
+    expect(createSeriesMarkersMock).not.toHaveBeenCalled();
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} liquidationMarkers={markers} />);
+    expect(createSeriesMarkersMock).toHaveBeenCalledTimes(1);
+    const [host, initial] = createSeriesMarkersMock.mock.calls[0] as [unknown, unknown[]];
+    expect(host).toBe(addSeriesMock.mock.results[0].value);
+    expect(initial).toEqual([{ id: "liq:a", time: 60, shape: "circle", color: "#a00", position: "atPriceBottom", price: 100, size: 1 }]);
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} liquidationMarkers={[]} />);
+    expect(setMarkersMock).toHaveBeenLastCalledWith([]);
+    expect(createSeriesMarkersMock).toHaveBeenCalledTimes(1);
+
+    unmount();
+    expect(detachMarkersMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a hovered marker's tooltip lines and hides them off the marker", () => {
+    render(<LightweightChart data={[]} onChartApi={() => {}} liquidationMarkers={markers} />);
+    const handler = subscribeCrosshairMoveMock.mock.calls.at(-1)![0];
+
+    act(() => handler({ time: 60, point: { x: 10, y: 20 }, seriesData: new Map(), hoveredObjectId: "liq:a" }));
+    expect(screen.getByRole("tooltip")).toHaveTextContent("long liquidatedsize 0.004");
+
+    act(() => handler({ time: 60, point: { x: 10, y: 20 }, seriesData: new Map() }));
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("reports the bar spacing on mount and after a zoom", () => {
+    const onBarSpacing = vi.fn();
+    barSpacingPx = 8;
+    render(<LightweightChart data={[]} onChartApi={() => {}} onBarSpacing={onBarSpacing} />);
+    expect(onBarSpacing).toHaveBeenLastCalledWith(8);
+
+    barSpacingPx = 3;
+    for (const [handler] of subscribeRangeMock.mock.calls) act(() => handler({ from: 0, to: 10 }));
+    expect(onBarSpacing).toHaveBeenLastCalledWith(3);
   });
 });

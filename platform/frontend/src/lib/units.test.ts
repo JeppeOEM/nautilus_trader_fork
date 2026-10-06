@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { decodeBookPrices, formatDecimal, formatUnits, MAX_PRECISION, roundToPrecision, unitsToNumber } from "./units";
+import {
+  decodeBookPrices,
+  formatCountdown,
+  formatDecimal,
+  formatDecimalText,
+  formatPercent,
+  formatUnits,
+  MAX_PRECISION,
+  roundToPrecision,
+  shiftDecimalText,
+  unitsToNumber,
+} from "./units";
 
 describe("formatUnits (Story 30.2)", () => {
   it("moves the decimal point in the integer's own digits", () => {
@@ -118,5 +129,50 @@ describe("formatDecimal and roundToPrecision (Story 32.5)", () => {
   it("refuses a non-finite value and a value whose units are not a safe integer", () => {
     expect(() => formatDecimal(Number.NaN, 2)).toThrow(RangeError);
     expect(() => formatDecimal(1e20, 2)).toThrow(RangeError);
+  });
+});
+
+describe("exact decimal text (Story 33.5)", () => {
+  it("prints decimal text exactly, canonically, at its own decimals", () => {
+    expect(formatDecimalText("120")).toBe("120");
+    expect(formatDecimalText("-30")).toBe("-30");
+    expect(formatDecimalText("0090.50")).toBe("90.50");
+    expect(formatDecimalText("-0.000")).toBe("0.000");
+    expect(formatDecimalText("51234.567000000000001")).toBe("51234.567000000000001");
+  });
+
+  it("pads or rounds half away from zero to the places asked", () => {
+    expect(formatDecimalText("0.01", 4)).toBe("0.0100");
+    expect(formatDecimalText("0.012345", 4)).toBe("0.0123");
+    expect(formatDecimalText("0.01235", 4)).toBe("0.0124");
+    expect(formatDecimalText("-0.01235", 4)).toBe("-0.0124");
+    expect(formatDecimalText("-0.00004", 4)).toBe("0.0000");
+    expect(formatDecimalText("99.995", 2)).toBe("100.00");
+    expect(formatDecimalText("7", 0)).toBe("7");
+  });
+
+  it.each(["", "1e-7", "NaN", "1.", ".5", "+1", "1,5", " 1"])("rejects %j as not decimal text", (text) => {
+    expect(() => formatDecimalText(text)).toThrow(RangeError);
+  });
+
+  it("shifts the point exactly in both directions", () => {
+    expect(shiftDecimalText("0.0001", 2)).toBe("0.01");
+    expect(shiftDecimalText("-0.0002", 2)).toBe("-0.02");
+    expect(shiftDecimalText("1.5", 3)).toBe("1500");
+    expect(shiftDecimalText("12", -3)).toBe("0.012");
+    expect(() => shiftDecimalText("1", 0.5)).toThrow(RangeError);
+  });
+
+  it("prints a server float ratio as a percent", () => {
+    expect(formatPercent(0.1095, 2)).toBe("10.95");
+    expect(formatPercent(-0.00005, 2)).toBe("-0.01");
+  });
+
+  it("formats a countdown as HH:MM:SS, clamped at zero", () => {
+    expect(formatCountdown((3 * 3600 + 5) * 1000)).toBe("03:00:05");
+    expect(formatCountdown(999)).toBe("00:00:00");
+    expect(formatCountdown(-5000)).toBe("00:00:00");
+    expect(formatCountdown(100 * 3600 * 1000)).toBe("100:00:00");
+    expect(formatCountdown(Number.NaN)).toBe("00:00:00");
   });
 });

@@ -2777,6 +2777,28 @@
               }
             ],
             "title": "Notional Precision"
+          },
+          "long_notional_units": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Long Notional Units"
+          },
+          "short_notional_units": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Short Notional Units"
           }
         },
         "type": "object",
@@ -2877,6 +2899,14 @@
           "price_kind": {
             "type": "string",
             "title": "Price Kind"
+          },
+          "notional_units": {
+            "type": "integer",
+            "title": "Notional Units"
+          },
+          "notional_precision": {
+            "type": "integer",
+            "title": "Notional Precision"
           }
         },
         "type": "object",
@@ -2889,7 +2919,9 @@
           "venue_event_id",
           "ts_event",
           "ts_init",
-          "price_kind"
+          "price_kind",
+          "notional_units",
+          "notional_precision"
         ],
         "title": "LiquidationItem"
       },

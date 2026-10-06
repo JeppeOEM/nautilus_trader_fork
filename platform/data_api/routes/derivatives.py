@@ -104,6 +104,12 @@ class LiquidationItem(BaseModel):
     ts_event: int  # ns
     ts_init: int
     price_kind: str  # "bankruptcy": Bybit's, the only feed, never the fill price
+    # Story 33.5: size x bankruptcy price (`Liquidation.notional_units()`) in units of
+    # 10^-notional_precision of the quote, notional_precision = price_precision + size_precision.
+    # Known limit (JSON range, D-170): a notional over 2^53 units is rounded by a browser's
+    # `JSON.parse`; Python consumers get the exact int. Upgrade path: a string encoding.
+    notional_units: int
+    notional_precision: int
 
 
 class LiquidationBarItem(BaseModel):
@@ -119,6 +125,11 @@ class LiquidationBarItem(BaseModel):
     # Python consumers get the exact int. Upgrade path: the candles' `pv` one, a string encoding.
     notional_units: int | None = None
     notional_precision: int | None = None
+    # Story 33.5: the notional split by liquidated side, at the same `notional_precision`, null
+    # exactly when `notional_units` is (a side with no rows is 0), so the chart's mirrored notional
+    # bars need no browser arithmetic. The JSON-range Known limit above applies to each.
+    long_notional_units: int | None = None
+    short_notional_units: int | None = None
 
 
 class _Page(BaseModel):

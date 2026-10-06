@@ -59,4 +59,28 @@ describe("HistoryPage", () => {
     expect(price[1]).toEqual({ time: 120 }); // never 0, never dropped
     expect(screen.getAllByTestId("metric-tile")).toHaveLength(1); // all-null columns skipped
   });
+
+  it("draws the OI, funding and 1h liquidation tiles, skipping an all-null one (Story 33.5)", async () => {
+    renderHistory([
+      { ts: 60 * NS, price: 100, open_interest: 51_234.5, funding_rate: 0.0001, liq_notional_1h: null },
+      { ts: 120 * NS, price: 101, open_interest: null, funding_rate: -0.0002, liq_notional_1h: null },
+    ]);
+
+    expect(await screen.findByText("Open interest (venue units)")).toBeInTheDocument();
+    expect(screen.getAllByTestId("metric-tile").map((t) => t.textContent)).toEqual(["Price", "Open interest (venue units)", "Funding rate (fraction per interval)"]);
+    expect(tileData.get("Open interest (venue units)")).toEqual([{ time: 60, value: 51_234.5 }, { time: 120 }]);
+    expect(tileData.get("Funding rate (fraction per interval)")).toEqual([
+      { time: 60, value: 0.0001 },
+      { time: 120, value: -0.0002 },
+    ]);
+  });
+
+  it("draws the 1h liquidations tile when the instrument has the feed", async () => {
+    renderHistory([{ ts: 60 * NS, liq_notional_1h: 0 }, { ts: 120 * NS, liq_notional_1h: 1500.5 }]);
+    expect(await screen.findByText("Liquidations 1h (quote notional)")).toBeInTheDocument();
+    expect(tileData.get("Liquidations 1h (quote notional)")).toEqual([
+      { time: 60, value: 0 },
+      { time: 120, value: 1500.5 },
+    ]);
+  });
 });

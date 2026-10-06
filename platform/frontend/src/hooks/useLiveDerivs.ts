@@ -24,6 +24,12 @@ export interface LiveDerivsTick {
   value: string;
   interval?: number | null;
   next_funding_ns?: number | null;
+  /** Story 33.5: a funding frame's annualised rate, computed by the server
+   * (`kernel.indicators.funding_annualised`); null without an interval. */
+  annualised?: number | null;
+  /** Story 33.5: a mark or index frame's mark-index basis in bps, computed by the server from its
+   * latest mark and index (`kernel.indicators.basis_bps`); null while either is unknown. */
+  basis_mi_bps?: number | null;
 }
 
 function isNullableNumber(value: unknown): boolean {
@@ -38,7 +44,9 @@ export function isLiveDerivsTick(message: Record<string, unknown>): boolean {
     Number.isFinite(message.ts_init) &&
     typeof message.value === "string" &&
     isNullableNumber(message.interval) &&
-    isNullableNumber(message.next_funding_ns)
+    isNullableNumber(message.next_funding_ns) &&
+    isNullableNumber(message.annualised) &&
+    isNullableNumber(message.basis_mi_bps)
   );
 }
 
@@ -52,6 +60,10 @@ function toTick(message: Record<string, unknown>): LiveDerivsTick {
   if (tick.kind === "funding") {
     tick.interval = (message.interval as number | null | undefined) ?? null;
     tick.next_funding_ns = (message.next_funding_ns as number | null | undefined) ?? null;
+    tick.annualised = (message.annualised as number | null | undefined) ?? null;
+  }
+  if (tick.kind === "mark" || tick.kind === "index") {
+    tick.basis_mi_bps = (message.basis_mi_bps as number | null | undefined) ?? null;
   }
   return tick;
 }

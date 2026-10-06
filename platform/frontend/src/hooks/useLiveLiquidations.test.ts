@@ -53,6 +53,13 @@ describe("useLiveLiquidations", () => {
     expect(result.current).toEqual(liq());
   });
 
+  it("carries the frame's server notional onto the row (Story 33.5)", () => {
+    const { result } = renderHook(() => useLiveLiquidations(IID));
+    act(() => latestSocket().open());
+    act(() => latestSocket().receive({ channel: CHANNEL, liq: liq(), notional_units: 349_067_850, notional_precision: 5 }));
+    expect(result.current).toEqual({ ...liq(), notional_units: 349_067_850, notional_precision: 5 });
+  });
+
   it("hands every row of a cascade to onLiquidation, never collapsed", () => {
     const onLiquidation = vi.fn();
     renderHook(() => useLiveLiquidations(IID, { onLiquidation }));

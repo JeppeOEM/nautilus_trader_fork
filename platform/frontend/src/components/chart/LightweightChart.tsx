@@ -3,11 +3,13 @@ import {
   HistogramSeries,
   LineSeries,
   createChart,
+  createSeriesMarkers,
   type IChartApi,
   type IPaneApi,
   type IPriceLine,
   LineStyle,
   type ISeriesApi,
+  type ISeriesMarkersPluginApi,
   type LineWidth,
   type LogicalRange,
   type LineData,
@@ -49,6 +51,7 @@ import { AnchoredVpPrimitive } from "./primitives/AnchoredVpPrimitive";
 import { AnchoredVwapPrimitive } from "./primitives/AnchoredVwapPrimitive";
 import { FootprintPrimitive, type FootprintRenderSpec } from "./primitives/FootprintPrimitive";
 import { footprintLegendText } from "../../lib/footprint";
+import type { MarkerSpec } from "./LiquidationMarkers";
 import { BarGrid, type DrawingPrimitive } from "./primitives/drawingPrimitive";
 import type { VwapPoint } from "../../lib/anchoredVwap";
 import {
@@ -113,6 +116,13 @@ export interface IndicatorPaneSpec {
   /** A histogram output's colours for value >= 0 and < 0; absent = the one `color`. */
   upColor?: string;
   downColor?: string;
+  /** Story 33.5: how the legend prints this series' value at a slot (`time`, chart seconds) -- the
+   * exact text its row carries there, through `lib/units.ts` -- instead of the plain readout. */
+  format?: (value: number, time: number | null) => string;
+  /** Story 33.5: a fixed legend readout in place of the value (e.g. "load failed"). */
+  text?: string;
+  /** Story 33.5: a dashed line at 0 in this series' pane (Basis). */
+  zeroLine?: boolean;
 }
 
 // Story 18.1: a tool-drawn horizontal price line (AC #2). `id` is the caller's stable
@@ -382,6 +392,13 @@ interface LightweightChartProps {
   /** Story 32.6: the visible bar count after a zoom, debounced; silent until `initialVisibleBars`
    * was applied (the library's own first fit must not overwrite the saved zoom) and in Lines mode. */
   onVisibleBars?: (bars: number) => void;
+  /** Story 33.5: liquidation markers on the candle series (Candles mode only), one lightweight-charts
+   * `createSeriesMarkers` plugin set on every change and detached on unmount; hovering one shows its
+   * `tooltip` lines. Empty/omitted draws none. */
+  liquidationMarkers?: readonly MarkerSpec[];
+  /** Story 33.5: the time scale's bar spacing (px), reported on mount and on every zoom, so the page
+   * can hide markers too narrow to read. */
+  onBarSpacing?: (barSpacing: number) => void;
 }
 
 /** DW-145: after a replay `setData`, bring the newest bar back into view when its time changed
@@ -422,6 +439,8 @@ interface PaneEntry {
   gap: GapPrimitive | null;
   /** `upColor|downColor` last painted into the histogram's per-point colours. */
   lastUpDown: string;
+  /** Story 33.5: the spec's dashed zero line, while `zeroLine` is set. */
+  zero: IPriceLine | null;
 }
 
 // Story 32.3: the library's `LineStyle` for each persisted style name (Solid 0, Dotted 1, Dashed 2).
@@ -547,6 +566,23 @@ function layoutPaneHeights(
   return axisPx > 0;
 }
 
+/** Adds or removes a series' dashed zero line to match its spec (Story 33.5's Basis pane). */
+function syncZeroLine(entry: PaneEntry): void {
+  const wanted = entry.spec.zeroLine === true;
+  if (wanted && !entry.zero) {
+    entry.zero = entry.series.createPriceLine({
+      price: 0,
+      color: chartVar("--chart-text-dim"),
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: false,
+    });
+  } else if (!wanted && entry.zero) {
+    entry.series.removePriceLine(entry.zero);
+    entry.zero = null;
+  }
+}
+
 // Story 32.1: the dedicated gap colour -- a chart-only token no other code reads.
 function gapColor(): string {
   return chartVar("--chart-gap");
@@ -623,6 +659,7 @@ function overPriceLine(param: MouseEventParams, series: ISeriesApi<"Candlestick"
 
 // The measurement index before the first history arrives; the effect replaces it.
 const EMPTY_MEASUREMENT_INDEX: MeasurementIndex = buildMeasurementIndex([], []);
+const NO_MARKERS: readonly MarkerSpec[] = [];
 
 /**
  * Owns the one `lightweight-charts` `createChart()` call for a coin's chart page
@@ -677,6 +714,8 @@ export default function LightweightChart({
   onPaneHeights,
   initialVisibleBars,
   onVisibleBars,
+  liquidationMarkers = NO_MARKERS,
+  onBarSpacing,
 }: LightweightChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -733,6 +772,13 @@ export default function LightweightChart({
   const markerRef = useRef<VerticalMarkerPrimitive | null>(null);
   const anchorMarkerRef = useRef<VerticalMarkerPrimitive | null>(null);
   const footprintRef = useRef<FootprintPrimitive | null>(null);
+  // Story 33.5: the liquidation markers' plugin on the candle series, and the hovered marker's tooltip.
+  const markersPluginRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const markerSpecsRef = useRef<readonly MarkerSpec[]>(liquidationMarkers);
+  markerSpecsRef.current = liquidationMarkers;
+  const [markerTip, setMarkerTip] = useState<{ lines: readonly string[]; x: number; y: number } | null>(null);
+  const barSpacingCallbackRef = useRef(onBarSpacing);
+  barSpacingCallbackRef.current = onBarSpacing;
   const drawingRegistryRef = useRef<Map<string, DrawingEntry>>(new Map());
   // Story 32.5: the bar times every drawing primitive snaps its anchors to (one grid per chart).
   const gridRef = useRef(new BarGrid());
@@ -867,6 +913,9 @@ export default function LightweightChart({
       // The gap primitives die with the chart below (chart.remove()), like the panes.
       priceGapRef.current = null;
       footprintRef.current = null;
+      // Story 33.5: the markers plugin is detached while its series still exists.
+      markersPluginRef.current?.detach();
+      markersPluginRef.current = null;
       panes.clear();
       collapsedHeights.clear();
       // Story 18.1: the price lines die with the chart here, same as the panes -- the
@@ -985,6 +1034,9 @@ export default function LightweightChart({
     anchorMarkerRef.current = null;
     // Story 32.8: the footprint lives on the candle series only, re-attached on a return to Candles.
     footprintRef.current = null;
+    // Story 33.5: so do the liquidation markers; detached here, while their series still exists.
+    markersPluginRef.current?.detach();
+    markersPluginRef.current = null;
     // Story 32.1: the price gap painter is detached from the old host while that series still
     // exists; the [gapRuns, mode] effect below attaches a fresh one to the new host.
     const priceGap = priceGapRef.current;
@@ -1173,12 +1225,14 @@ export default function LightweightChart({
           { color: spec.color, ...lineOptions(spec), ...(spec.hidden ? { visible: false } : {}) },
           pane ? pane.paneIndex() : 0,
         ) as AnySeriesApi;
-        entry = { pane, group, spec, series, lastData: spec.data, gap: null, lastUpDown: upDownKey(spec) };
+        entry = { pane, group, spec, series, lastData: spec.data, gap: null, lastUpDown: upDownKey(spec), zero: null };
         registry.set(spec.id, entry);
         setSeriesData(entry.series, paintedData(spec));
+        syncZeroLine(entry);
         continue;
       }
       entry.spec = spec;
+      syncZeroLine(entry);
       const options = entry.series.options() as { color?: string; visible?: boolean; lineWidth?: number; lineStyle?: LineStyle };
       const changes: { color?: string; visible?: boolean; lineWidth?: LineWidth; lineStyle?: LineStyle } = {};
       if (options.color !== spec.color) changes.color = spec.color;
@@ -1273,6 +1327,8 @@ export default function LightweightChart({
         hidden: spec.hidden === true,
         configurable: spec.configurable !== false,
         actionable: spec.actionable !== false,
+        format: spec.format,
+        text: spec.text,
       };
     }).concat(footprintRows, extraRows);
     // A new pane's element only exists after the library's next paint: retry per frame
@@ -1484,6 +1540,19 @@ export default function LightweightChart({
     footprintRef.current = new FootprintPrimitive(footprint);
     host.attachPrimitive(footprintRef.current);
   }, [footprint, mode]);
+
+  useEffect(() => {
+    // Story 33.5: the liquidation markers, one `createSeriesMarkers` plugin on the candle series, its
+    // markers replaced on every change (created on the first marker, re-created after a mode flip).
+    const host = seriesRef.current;
+    if (!host || mode !== "candles") return;
+    const markers = liquidationMarkers.map(({ tooltip: _tooltip, ...marker }) => marker);
+    // A tooltip open on a marker that this change removed (or merged) would outlive it under a still
+    // pointer; the next crosshair move re-opens it on whatever marker is there now.
+    setMarkerTip((prev) => (prev === null ? prev : null));
+    if (markersPluginRef.current) markersPluginRef.current.setMarkers(markers);
+    else if (markers.length > 0) markersPluginRef.current = createSeriesMarkers(host, markers);
+  }, [liquidationMarkers, mode]);
 
   useEffect(() => {
     latestRef.current = { volumeProfiles, onRangeSelect, onProfileEdgeDrag, onProfileEdgeCommit, onProfileEdgeCancel };
@@ -1795,6 +1864,20 @@ export default function LightweightChart({
     };
   }, [onPriceLineDrag, onDrawingDrag, mode]);
 
+  // Story 33.5: a hovered liquidation marker (the library reports its id as `hoveredObjectId`) shows
+  // its tooltip lines beside the pointer; read on the legend's own crosshair subscription.
+  const showMarkerTip = useCallback((param: MouseEventParams): void => {
+    const id = param.hoveredObjectId;
+    const spec = typeof id === "string" ? markerSpecsRef.current.find((m) => m.id === id) : undefined;
+    const container = containerRef.current;
+    if (!spec || !param.point || !container) {
+      setMarkerTip((prev) => (prev === null ? prev : null));
+      return;
+    }
+    const rect = container.getBoundingClientRect();
+    setMarkerTip({ lines: spec.tooltip, x: rect.left + param.point.x, y: rect.top + param.point.y });
+  }, []);
+
   useEffect(() => {
     // Legend values follow the crosshair; off-chart (time undefined) they fall back to the
     // latest value. Its own subscription, declared after the drag one above.
@@ -1802,10 +1885,11 @@ export default function LightweightChart({
     if (!chart) return;
     const handle = (param: MouseEventParams): void => {
       renderLegends(chart, legendItemsRef.current, param, gapLookupRef.current, handleLegendAction);
+      showMarkerTip(param);
     };
     chart.subscribeCrosshairMove(handle);
     return () => chart.unsubscribeCrosshairMove(handle);
-  }, [mode, handleLegendAction]);
+  }, [mode, handleLegendAction, showMarkerTip]);
 
   useEffect(() => {
     // Story 18.1 (AC #3): the drag's start/end. Capture phase so a line grab runs
@@ -1924,6 +2008,23 @@ export default function LightweightChart({
     };
   }, [pendingAnchor, mode]);
 
+  useEffect(() => {
+    // Story 33.5: the bar spacing, on mount and after every zoom (the visible range changes with it).
+    const chart = chartRef.current;
+    if (!chart) return;
+    const timeScale = chart.timeScale();
+    let last: number | null = null;
+    const report = (): void => {
+      const spacing = timeScale.options().barSpacing;
+      if (spacing === last) return;
+      last = spacing;
+      barSpacingCallbackRef.current?.(spacing);
+    };
+    report();
+    timeScale.subscribeVisibleLogicalRangeChange(report);
+    return () => timeScale.unsubscribeVisibleLogicalRangeChange(report);
+  }, []);
+
   const menuSpec = menu ? (priceLines.find((l) => l.id === menu.id) ?? drawings.find((d) => d.id === menu.id)) : undefined;
   const menuHasSettings =
     !!menuSpec &&
@@ -1935,6 +2036,21 @@ export default function LightweightChart({
   return (
     <>
       <div ref={containerRef} />
+      {markerTip && (
+        <div
+          role="tooltip"
+          className="chart-marker-tip"
+          style={{
+            position: "fixed", left: markerTip.x + 12, top: markerTip.y + 12, zIndex: 1000, padding: "4px 6px",
+            background: chartVar("--chart-bg"), color: chartVar("--chart-text"),
+            border: `1px solid ${chartVar("--chart-border")}`, pointerEvents: "none",
+          }}
+        >
+          {markerTip.lines.map((line) => (
+            <div key={line}>{line}</div>
+          ))}
+        </div>
+      )}
       {menu && menuSpec && (
         <div
           role="menu"

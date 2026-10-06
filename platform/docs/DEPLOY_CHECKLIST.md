@@ -1550,6 +1550,44 @@ compose service or bind mount changed.
       `w=new WebSocket(`ws://${location.host}/ws/live`);w.onmessage=e=>{const m=JSON.parse(e.data);if(m.channel?.startsWith('derivs:'))console.log(m)};w.onopen=()=>w.send(JSON.stringify({subscribe:'derivs:BTCUSDT-LINEAR.BYBIT'}))`
       logs `derivs:BTCUSDT-LINEAR.BYBIT` frames about once a second, and only that id's.
 
+### 33-5-chart-panes-for-open-interest-funding-basis-and-liquidations-and-mark-index-overlay (commit: this story's)
+
+The chart gains a pinned **Derivatives** group (Open Interest, Funding, Basis and Liquidations
+panes, the Mark / Index overlay, liquidation markers) and a **Liquidation tape**; the History page
+gains OI, Funding and Liquidations 1h tiles. Backend, added fields only: `/liquidations` items gain
+`notional_units`/`notional_precision`, `/liquidation-bars` rows gain
+`long_notional_units`/`short_notional_units`, `derivs:{iid}` frames gain `annualised` (funding) and
+`basis_mi_bps` (mark/index), `liquidations:{iid}` frames gain `notional_units`/`notional_precision`,
+and `chart_layouts.toml` accepts an optional `[<id>.derivatives]` table (absent = every entry
+off; no file is rewritten). Only the `data_api` image changes (it carries the frontend build); no
+config key, env var, compose service, bind mount or migration.
+
+- [ ] On the VPS, pull this commit and rebuild/restart the data_api:
+      `cd ~/nautilus_trader_fork/platform && docker compose up -d --build data_api`.
+- [ ] Curl the added fields (`N=$(date +%s%N)`):
+      `curl -s "localhost:9100/api/coin/BTCUSDT-LINEAR.BYBIT/liquidation-bars?before_ns=$N&limit=3" | head -c 800`
+      shows `long_notional_units` and `short_notional_units` on every row (null exactly where
+      `notional_units` is), and
+      `curl -s "localhost:9100/api/coin/BTCUSDT-LINEAR.BYBIT/liquidations?before_ns=$N&limit=3" | head -c 800`
+      shows `notional_units` and `notional_precision` on every item.
+- [ ] In the browser, open the BTCUSDT linear chart, Indicators -> Derivatives, tick all five:
+      four panes appear under the chart (Open Interest, Funding, Basis, Liquidations) and two lines
+      on the price pane (mark, index); the Funding legend shows `rate`, `ann.` and a `next`
+      countdown that ticks every second; a liquidation shows as a circle on the price pane (zoom in
+      if the legend says `markers hidden: zoom in`) whose hover tooltip ends with `bankruptcy`.
+      Scroll back: the panes page back with the candles, with whitespace (never a joined line)
+      where the archive has a hole.
+- [ ] Reload the page: the five entries come back on, with any pane height you dragged
+      (`grep -A12 'BTCUSDT-LINEAR.BYBIT".derivatives' data/preferences/chart_layouts.toml` shows the
+      table). Open `BTCUSDT-SPOT.BYBIT`: the Derivatives group is disabled with `spot: no
+      derivatives`, the Liquidation tape button is disabled, and the browser's network tab shows no
+      request to the derivatives routes.
+- [ ] Toggle **Liquidation tape** in the top bar on the linear chart: the panel lists the newest
+      liquidations; on `SOL-USD-PERP.HYPERLIQUID` it reads `no liquidation feed for this instrument`.
+- [ ] Check the ledger shows no `derivatives.read` or `live_derivs.parse` line since the restart and
+      the ErrorBar no `useDerivativePages`/`useLiquidationEvents` console error: any one is a DATA-07
+      finding to explain, not noise.
+
 ### 33-14-liquidation-cascade-bot-shorts-into-a-long-liquidation-cascade-backtested-and-paper-run (commit: this story's)
 
 A new paper strategy, `liquidation_cascade` (`research/strategies/liquidation_cascade_strategy.py`,

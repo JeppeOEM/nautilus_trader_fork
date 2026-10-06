@@ -19,6 +19,10 @@ export interface LiveLiquidation {
   venue_event_id: string;
   ts_event: number;
   ts_init: number;
+  /** Story 33.5: the frame's server notional (`Liquidation.notional_units()` at
+   * `price_precision + size_precision`), absent from a frame without it. */
+  notional_units?: number;
+  notional_precision?: number;
 }
 
 const INTEGER_KEYS = ["size_units", "price_units", "price_precision", "size_precision", "ts_event", "ts_init"];
@@ -68,7 +72,11 @@ export function useLiveLiquidations(
     return openLiveSubscription(`liquidations:${instrumentId}`, {
       onMessage: (message) => {
         if (!isLiveLiquidation(message.liq)) return;
-        const row = message.liq;
+        const row: LiveLiquidation = { ...message.liq };
+        if (Number.isInteger(message.notional_units) && Number.isInteger(message.notional_precision)) {
+          row.notional_units = message.notional_units as number;
+          row.notional_precision = message.notional_precision as number;
+        }
         handlersRef.current.onLiquidation?.(row);
         setLatest(row);
       },

@@ -15,11 +15,21 @@ import type {
   FootprintItem,
   FootprintResponse,
   FootprintRow,
+  FundingItem,
+  FundingResponse,
   HealthResponse,
   IndicatorCatalogEntry,
   IndicatorConfigEntry,
   IndicatorValuesResponse,
+  LiquidationBarItem,
+  LiquidationBarsResponse,
+  LiquidationItem,
+  LiquidationsResponse,
+  MarkIndexItem,
+  MarkIndexResponse,
   MetricsHistoryResponse,
+  OpenInterestItem,
+  OpenInterestResponse,
   RankingModeResponse,
   RankingsResponse,
   SnapshotSeriesResponse,
@@ -38,11 +48,21 @@ export type {
   FootprintItem,
   FootprintResponse,
   FootprintRow,
+  FundingItem,
+  FundingResponse,
   HealthResponse,
   IndicatorCatalogEntry,
   IndicatorConfigEntry,
   IndicatorValuesResponse,
+  LiquidationBarItem,
+  LiquidationBarsResponse,
+  LiquidationItem,
+  LiquidationsResponse,
+  MarkIndexItem,
+  MarkIndexResponse,
   MetricsHistoryResponse,
+  OpenInterestItem,
+  OpenInterestResponse,
   RankingsResponse,
   SnapshotSeriesResponse,
   TechnicalsColumn,
@@ -140,6 +160,66 @@ export async function fetchFootprint(
   const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/footprint?${params}`);
   if (!res.ok) throw new HttpError(res.status, `GET /api/coin/${instrumentId}/footprint failed: ${res.status}`);
   return (await res.json()) as FootprintResponse;
+}
+
+// Story 33.5: the derivatives read models (Story 33.4, `data_api/routes/derivatives.py`), on
+// fetchCandles()'s cursor contract. Bucketed pages (open interest, mark/index, liquidation bars) take
+// `bar_seconds`; event pages (funding, liquidations) do not. Each URL is written inline, so
+// `data_api/tests/test_frontend_contract.py` checks it against the served routes.
+function cursorParams(beforeNs: number, limit: number, barSeconds?: number): URLSearchParams {
+  const params = new URLSearchParams({ before_ns: String(beforeNs), limit: String(limit) });
+  if (barSeconds !== undefined) params.set("bar_seconds", String(barSeconds));
+  return params;
+}
+
+async function readPage<T>(res: Response, route: string, instrumentId: string): Promise<T> {
+  if (!res.ok) throw new HttpError(res.status, `GET /api/coin/${instrumentId}/${route} failed: ${res.status}`);
+  return (await res.json()) as T;
+}
+
+export async function fetchFunding(instrumentId: string, beforeNs: number, limit: number): Promise<FundingResponse> {
+  const params = cursorParams(beforeNs, limit);
+  const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/funding?${params}`);
+  return readPage<FundingResponse>(res, "funding", instrumentId);
+}
+
+export async function fetchOpenInterest(
+  instrumentId: string,
+  beforeNs: number,
+  limit: number,
+  barSeconds: number,
+): Promise<OpenInterestResponse> {
+  const params = cursorParams(beforeNs, limit, barSeconds);
+  const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/open-interest?${params}`);
+  return readPage<OpenInterestResponse>(res, "open-interest", instrumentId);
+}
+
+export async function fetchMarkIndex(
+  instrumentId: string,
+  beforeNs: number,
+  limit: number,
+  barSeconds: number,
+): Promise<MarkIndexResponse> {
+  const params = cursorParams(beforeNs, limit, barSeconds);
+  const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/mark-index?${params}`);
+  return readPage<MarkIndexResponse>(res, "mark-index", instrumentId);
+}
+
+export async function fetchLiquidations(instrumentId: string, beforeNs: number, limit: number): Promise<LiquidationsResponse> {
+  const params = cursorParams(beforeNs, limit);
+  const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/liquidations?${params}`);
+  return readPage<LiquidationsResponse>(res, "liquidations", instrumentId);
+}
+
+export async function fetchLiquidationBars(
+  instrumentId: string,
+  beforeNs: number,
+  limit: number,
+  barSeconds: number,
+): Promise<LiquidationBarsResponse> {
+  const params = cursorParams(beforeNs, limit, barSeconds);
+  const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/liquidation-bars?${params}`);
+  return readPage<LiquidationBarsResponse>(res, "liquidation-bars", instrumentId);
 }
 
 // Story 15.7: cursor-paginated bid/ask/mid/micro/price history (AD-F3) for Lines mode --
