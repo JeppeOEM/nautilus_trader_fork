@@ -1660,7 +1660,8 @@ decision: 2026-10-05 Keep definition leaves until the coin's trade days are veri
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: Capture appends `_archive_gaps/*.jsonl` without a lock, so a nightly `load_gaps` can read a torn last line, raise ValueError and refuse the instrument-day. evidence: archive/infrastructure/gap_markers.py `load_gaps`, collector_core/gap_markers.py append. This predates 25.1.
-status: open
+status: done 2026-10-06
+resolution: already resolved: Resolved by e6272ad9c6 (sweep DW-211): platform/capture/infrastructure/gap_markers.py:83-104 and archive/infrastructure/gap_markers.py append under flock(LOCK_EX) with O_APPEND, one _write_all+fsync, and _truncate_back on any failure, which is the chosen 'single O_APPEND write + truncate-back' decision
 decision: 2026-10-05 Single O_APPEND os.write per line plus truncate-back on OSError — Make marker appends one write, truncate back on failure.
 
 ### DW-210: repair_catalog deletes a flagged snapshot with `delete_data_range(..., snap.ts_event, snap.ts_event)`, but the catalog range-filters on `ts_init`, which …
