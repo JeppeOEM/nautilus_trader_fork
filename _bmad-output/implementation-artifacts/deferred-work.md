@@ -2315,10 +2315,18 @@ source_spec: `_bmad-output/implementation-artifacts/spec-32-8-volume-footprint-b
 reason: `kernel.catalog_files.query_second_ohlc` and the other pre-existing catalog readers behind `candle_page` let a truncated or corrupt Parquet file's `pyarrow.ArrowInvalid`/`OSError` escape unmapped, so the chart request fails as a bare 500 that no `error_ledger.record` site counts (DATA-07). evidence: Only the new `query_trade_columns` (Story 32.8 second follow-up review) maps an unreadable file to a ledgered error; `query_second_ohlc` and its siblings call `pq.read_table`/`pq.read_schema` with no handler, and `data_api/routes/candles.py` maps only `ImpossibleCandle`.
 status: open
 
-- source_spec: `_bmad-output/implementation-artifacts/spec-dw-capture-service-lifecycle.md`
-  summary: Anything raising in `CaptureService._run` between `_connect` and the `try` that guards the loops (`subscribe_global`, `_catch_up_candle_store`'s unguarded `self._second_sink.watermarks()`, `apply`) leaves the client connected and feeding a service that is gone, with no `_disconnect`, no drain and no final flush, so the messages already queued are dropped without a ledger line.
-  evidence: pre-existing: at baseline e6272ad9c6 `_run` has the same order (`await self._connect(...)` ... `self._catch_up_candle_store()` / `await self.apply(...)` before `try:`), and `_catch_up_candle_store` iterates `self._second_sink.watermarks()` with no handler there either; `run()`'s `finally` only closes the second sink. Surfaced by the 2026-10-06 follow-up review of the DW-267 drain, which covers only failures after the loops start.
+### DW-290: `CaptureService._run` failures between `_connect` and the loop-guarding `try` leave the client connected with no disconnect, drain or final flush
 
-- source_spec: `_bmad-output/implementation-artifacts/spec-dw-197-199-alert-store-durability.md`
-  summary: Runtime-rewritten data files are git-tracked (`platform/data/alerts/alerts.toml`, as `platform/data/preferences/*.toml` already are), so any upstream change to a tracked copy makes the VPS `git pull` refuse the locally rewritten file.
-  evidence: The 32-5 and DW-197 DEPLOY_CHECKLIST entries both need `git checkout --` surgery for exactly this; upgrade path is gitignoring the files (keeping a `.gitkeep`), since `AlertStore._load` and the preference readers already start empty on a missing file.
+origin: migrated from legacy ledger (flat append from spec-dw-capture-service-lifecycle.md, 2026-10-06 follow-up review of the DW-267 drain), 2026-10-06
+location: platform/capture/application/capture_service.py
+source_spec: `_bmad-output/implementation-artifacts/spec-dw-capture-service-lifecycle.md`
+reason: Anything raising in `CaptureService._run` between `_connect` and the `try` that guards the loops (`subscribe_global`, `_catch_up_candle_store`'s unguarded `self._second_sink.watermarks()`, `apply`) leaves the client connected and feeding a service that is gone, with no `_disconnect`, no drain and no final flush, so the messages already queued are dropped without a ledger line. Evidence: pre-existing: at baseline e6272ad9c6 `_run` has the same order (`await self._connect(...)` ... `self._catch_up_candle_store()` / `await self.apply(...)` before `try:`), and `_catch_up_candle_store` iterates `self._second_sink.watermarks()` with no handler there either; `run()`'s `finally` only closes the second sink. Surfaced by the 2026-10-06 follow-up review of the DW-267 drain, which covers only failures after the loops start.
+status: open
+
+### DW-291: Runtime-rewritten data files (`platform/data/alerts/alerts.toml`, `platform/data/preferences/*.toml`) are git-tracked, so an upstream change makes the VPS `git pull` refuse the locally rewritten file
+
+origin: migrated from legacy ledger (flat append from spec-dw-197-199-alert-store-durability.md), 2026-10-06
+location: platform/data/alerts/alerts.toml
+source_spec: `_bmad-output/implementation-artifacts/spec-dw-197-199-alert-store-durability.md`
+reason: Runtime-rewritten data files are git-tracked (`platform/data/alerts/alerts.toml`, as `platform/data/preferences/*.toml` already are), so any upstream change to a tracked copy makes the VPS `git pull` refuse the locally rewritten file. Evidence: The 32-5 and DW-197 DEPLOY_CHECKLIST entries both need `git checkout --` surgery for exactly this; upgrade path is gitignoring the files (keeping a `.gitkeep`), since `AlertStore._load` and the preference readers already start empty on a missing file.
+status: open
