@@ -2812,8 +2812,8 @@ Three readers, all over that one fold, so they cannot disagree:
   collector has not migrated yet, read through `PRAGMA table_info`); `partial` is
   `seconds_observed < 0.9 * bar_seconds` (D-15), meaning the collector only saw part of the
   bucket and its high/low/volume are understated. Only buckets that traded are returned
-  (`o IS NOT NULL`). `latest`, `oldest_t`, `newest_t`, `bucket_starts`, `flow_delta_before`
-  (§2.15) and `watermarks` are the other reads; the coverage ones (`oldest_t(traded_only=False)`,
+  (`o IS NOT NULL`). `latest`, `oldest_t`, `newest_t`, `bucket_starts`, `flow_totals`
+  (§2.15, Story 33.6; was `flow_delta_before`) and `watermarks` are the other reads; the coverage ones (`oldest_t(traded_only=False)`,
   `newest_t`, `bucket_starts`) count only `seconds_observed > 0`, so a liquidation-only row never
   makes a span look observed.
 - **The forming bar** — `candles.application.forming.forming_bar(rows, bar_seconds,
@@ -2914,6 +2914,38 @@ A second with an empty side cannot be drawn at all and is never written by the g
 fails the request (500) and counts `views.snapshot_without_top`. Gap rows are the only rendering rule:
 `SNAPSHOT_GAP_THRESHOLD_MS` (2500 ms) in Lines mode, one bar in the bar-spaced panes
 (`with_gap_markers`).
+
+**Order-flow indicators from the stored aggregates (Story 33.6)** `[added 2026-10-06: Story 33.6]`.
+Custom picker entries (`views.indicator_picker`) over each bar's §2.15 columns, formulas in
+`kernel.indicators` (SSOT-01: `organic_delta_units`, `units_ratio`, `bar_vwap`, `snapshot_depth`,
+`depth_within_bps`); exact integer sums rescaled to the finest precision present, a float only in
+the output. Every catalog entry now carries `units` (output -> `price`/`size`/`size_mean`/`count`/`ratio`,
+`GET /api/indicators/catalog`, `{}` for a native entry): the legend formats that output at the
+instrument's precision through `frontend/src/lib/units.ts`. Null rule for all: a bar whose flow is
+null (pre-migration) is None, never 0; a cumulative mode carries its total across it without its
+term (D-161); a bar whose `liq_*` are null (no feed: spot, Hyperliquid, dYdX, or a bucket before
+the feed's start, D-160) is None for the two liquidation-based entries. None, never an error, for
+every ordinary condition, since the Technicals replay one window for every coin.
+
+| Entry (panel) | Formula | Units | None when | Window |
+|---|---|---|---|---|
+| `VolumeDelta` (histogram) | `buy_v - sell_v` | size | flow null | every bar |
+| `OrganicDelta` (histogram) | `(buy_v - liq_short_v) - (sell_v - liq_long_v)` (a long liquidation is a forced sell, a short one a forced buy) | size | flow or `liq_*` null | every bar |
+| `ForcedShare` (histogram) | `(liq_long_v + liq_short_v) / (buy_v + sell_v)`, never clamped: can exceed 1 (D-188) | ratio | flow or `liq_*` null, 0 volume | every bar |
+| `TradeCount` (histogram, `split: false`) | `buy_n + sell_n` (`value`); with `split`, `buy_n` (`buys`) and `-sell_n` (`sells`) | count | flow null | every bar |
+| `AverageTradeSize` (oscillator) | `(buy_v + sell_v) / (buy_n + sell_n)` | size mean (`size_mean`: printed 3 decimals finer than the size step) | flow null, no trade | every bar |
+| `StoredVWAP` (overlay, `mode: bar\|session`, default `session`) | `bar`: `pv / (buy_v + sell_v)` per bar; `session`: `Σpv / ΣV` from each UTC midnight (1D and wider: each bar its own session), the second-close VWAP (D-158, D-190) | price | flow null, 0 volume, uncovered prefix (D-187) | every bar |
+| `AnchoredStoredVWAP` (overlay, **unlisted**, `anchor_t` epoch-ms digit string) | `Σpv / ΣV` from the bar holding `anchor_t` (`bucket_start_ms` at the chart's width, where the drawing's handle snaps); the stored-source Anchored VWAP drawing's line, never in `merged_catalog` (picker, saved configs, Technicals refuse it), replayed by the values route | price | before the anchor; an anchor the store does not reach is the entry's error naming both times | every bar |
+| `DepthWithinBps` (oscillator, `bps: 10.0`, `0 < bps <= 1000`) | per side (`bid`, `ask`) the size within `bps` of the mid of the bar's **last** stored 1 s book in `[t, t + bar)` (D-189) | size | no snapshot in the bar, edge past the stored 20 levels (NaN), the live window, a bar ending before the cap | `MAX_QUERY_SPAN_SECONDS` (7 days) back from the window's end, applied inside the replay; as a Technicals column every bar of that window is still read (up to 7 daily files' book columns per coin per cache miss at 1D, D-189) |
+
+The `session` modes (CVD and `StoredVWAP`) and the anchored entry seed their sum with an **exact store
+prefix** (`views.indicator_picker._store_prefix` -> `candles.application.queries.flow_totals`):
+the stored bars of the widest stored width tiling the chart's over `[start, first bar of the page)`.
+It is covered when the page's first bar is at or before the start, or when the store's first observed
+bar of that width is (`queries.oldest_t(traded_only=False)`); otherwise the session's bars are None
+and an anchor is an error -- never a partial sum (D-187). Before Story 33.6 CVD's `session` restarted
+at the page's first bar (D-186). `DepthWithinBps` is the one raw-seconds reader: two column-projected
+passes (`kernel.catalog_files.query_snapshot_times`, then `query_books_at` for the chosen rows only).
 
 **Removed in Story 33.4** `[amended 2026-10-06: Story 33.4]`: `compute_chart_series` (the legacy
 `/catalog/chart-series` endpoint's per-second microprice, spread, imbalance and depth series),
@@ -3287,7 +3319,7 @@ changes); this one is executed trades.
 The one seconds -> bars fold (§2.5, `candles.domain.fold.fold_arrays`) also sums each bucket's
 order flow and liquidations, as **exact integers**, into ten columns stored beside `o/h/l/c/v`,
 served after them, and pushed on `/ws/live`. They are stored inputs, not signals (SIGNAL-01): a
-flow indicator (CVD now, Story 33.6's set next) reads them, never a raw-second replay.
+flow indicator (CVD, and Story 33.6's set, §2.7) reads them, never a raw-second replay.
 
 | Column | Units | What it sums |
 |---|---|---|
@@ -3454,10 +3486,13 @@ pre-migration gap therefore omits the gap's bars until the operator's history re
 page whose bars are older than the store's first bar of that width (`raw_1s` history, pruned
 1m/5m) has no prefix, so `all` accumulates from 0 at the page's first bar, as `visible` does. Its `anchor` param (catalog `choices`, checked at save):
 - `visible` (the default): 0 before the first candle on screen -- net flow within the view;
-- `session`: 0 at each UTC day's first bar (`bucket_start_ms(t, 86_400)`), so on 1D and wider
-  every bar is its own session;
+- `session`: 0 at each UTC day's midnight (`bucket_start_ms(t, 86_400)`), so on 1D and wider
+  every bar is its own session; the page's first session is seeded with the exact stored sum over
+  `[midnight, first bar)` and is None where the store does not cover it (Story 33.6, D-186/D-187;
+  before it the sum restarted at the page's first bar);
 - `all`: the exact stored `Σ(buy_v - sell_v)` before the first candle
-  (`candles.application.queries.flow_delta_before`, one indexed SQLite aggregate per precision, at
+  (`candles.application.queries.flow_totals`, one indexed SQLite aggregate per precision pair and UTC
+  day, at
   the widest stored width tiling the chart's: 10m -> 5m, 30m/45m -> 15m, 1W -> 1D) plus the running
   sum. Known limit (audit D-159): the store keeps 1m bars 30 days and 5m bars 90 (`RETAIN_DAYS`), so
   at 1m, 5m and 10m "all" starts at that retention edge, not at the first trade ever; and the
@@ -3468,6 +3503,16 @@ page whose bars are older than the store's first bar of that width (`raw_1s` his
 
 There is no raw-second replay and no 7-day window for CVD any more: every bar of every width,
 historical or live, has a value from its stored flow.
+
+**Readers (Story 33.6).** Besides CVD, `VolumeDelta`, `OrganicDelta`, `ForcedShare`, `TradeCount`,
+`AverageTradeSize`, `StoredVWAP` and the unlisted `AnchoredStoredVWAP` read these columns per bar
+(§2.7's table); the store prefix of their cumulative modes is `queries.flow_totals(db, iid,
+bar_seconds, before_ms, since_ms=None)`, which returns `FlowTotals(delta_units, volume_units,
+size_precision, pv_units, pv_precision)` (`pv_precision` = the finest price precision plus the finest
+size precision) or None. It groups by both precisions and the UTC day, so no SQLite `SUM` spans more
+than a day (a day's sum fits int64 whenever its stored 1D bar does); a known-flow row with a null
+precision or `pv` raises naming the instrument. In the browser only the Volume pane's `delta` colour
+mode reads `buy_v`/`sell_v` (a plotting conversion, D-191); every formula stays server-side.
 
 ### 2.16 Derivatives and liquidations read models (`views/derivatives.py`, Story 33.4)
 
@@ -3891,8 +3936,9 @@ can find and add a coin without looking its id up elsewhere.
 | `DydxSecondSnapshot` mid-price sequence (300-tick window) | `statistics.stdev` fast volatility | `volatility_fast` | separate from `volatility_score` and catalog `volatility` — 3 distinct volatility numbers by design |
 | `DydxSecondSnapshot.close_price` (25h lookback; `TradeTick` pre-cutover) | `ranking.domain.metrics.price_stats_from_series()` → `pct_change_1h/24h`, catalog `volatility` | `pct_1h`, `pct_24h`, `volatility` | over the in-memory `PriceSeriesStore` (fed live, backfilled once per instrument from the catalog), refreshed every 60s by the ranking slow loop. `pct_1w`/`pct_1m` come from `metrics_store`'s persisted prices (`price_near_days_ago`), `None` until 7/30 days of history exist |
 | dYdX indexer `volume24H`, Bybit v5 tickers `turnover24h` (linear; spot USDT/USDC-quoted only), Hyperliquid `metaAndAssetCtxs` `dayNtlVlm` (independent polls in `ranking/infrastructure/volume_*`) | — (used as-is, USD) | `volume24h` | **this is the sort key when mode = `"volume"` (default)**; an instrument with no volume is absent from that mode and counted at `ranking_engine.volume24h` |
-| `DydxSecondSnapshot.buy_volume`/`sell_volume`/`buy_count`/`sell_count`/`close_price` units (§1.7) | the candle store's `buy_v`, `sell_v`, `buy_n`, `sell_n`, `pv` (§2.15, folded once by `candles.domain.fold`) → CVD (`anchor` session/visible/all), Story 33.6's flow indicators | *not present* | per bar, exact integers at the bar's precisions; `/api/candles` and `/ws/live` serve them (Story 33.3) |
-| `Liquidation.side`/`size_units` (§1.26, Bybit linear only) | the candle store's `liq_long_v`, `liq_short_v`, `liq_n` (§2.15) | *not present* | each `venue_event_id` once (`liquidations_applied`); null for an instrument without the feed, 0 for a quiet bucket of one with it (Story 33.3) |
+| `DydxSecondSnapshot.buy_volume`/`sell_volume`/`buy_count`/`sell_count`/`close_price` units (§1.7) | the candle store's `buy_v`, `sell_v`, `buy_n`, `sell_n`, `pv` (§2.15, folded once by `candles.domain.fold`) → CVD (`anchor` session/visible/all), `VolumeDelta`, `TradeCount` (`buy_n`/`sell_n`), `AverageTradeSize`, `StoredVWAP`/`AnchoredStoredVWAP` (`pv`) (§2.7, Story 33.6) | *not present* | per bar, exact integers at the bar's precisions; `/api/candles` and `/ws/live` serve them (Story 33.3) |
+| `Liquidation.side`/`size_units` (§1.26, Bybit linear only) | the candle store's `liq_long_v`, `liq_short_v`, `liq_n` (§2.15) → `OrganicDelta`, `ForcedShare` (§2.7, Story 33.6) | *not present* | each `venue_event_id` once (`liquidations_applied`); null for an instrument without the feed, 0 for a quiet bucket of one with it (Story 33.3) |
+| `DydxSecondSnapshot.bid/ask_prices`, `bid/ask_sizes` (the bar's last row, 7 days back at most) | `snapshot_depth()` → `depth_within_bps()` → the picker's `DepthWithinBps` (§2.7, Story 33.6) | *not present* | two column-projected passes, `kernel.catalog_files.query_snapshot_times` then `query_books_at` |
 | `OrderBookDeltas` | `views.chart_series.CancellationTracker`, the picker's delta OFI (§2.6, §2.7) | *not present* | chart-picker-only; never reaches `ranking_engine` |
 | `MarkPriceUpdate` / `IndexPriceUpdate` | `kernel.indicators.basis_bps` (live over `derivs:raw`, §1.27; on read in `views.derivatives`, §2.16) | `basis_mi_bps`, `basis_ml_bps` (Story 33.4) | also research notebook frames (`CatalogFrames.mark_index`, Story 27.1); `ranking` does not backfill prices from marks (Story 31.3) and has no mark/index backfill |
 | `FundingRateUpdate` | `kernel.indicators.funding_annualised` | `funding_rate`, `funding_annualised`, `next_funding_ns` (Story 33.4) | live over `derivs:raw`; `/api/coin/{id}/funding` (§2.16); research notebook frames (`CatalogFrames.funding`) |

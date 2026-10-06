@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 
+from views.preferences import ANCHORED_VWAP_SOURCES
 from views.preferences import DRAWING_KINDS
 from views.preferences import VWAP_SOURCES
 from views.preferences import DrawingError
@@ -278,9 +279,26 @@ def test_the_closed_sets_mirror_the_frontend() -> None:
     assert kinds is not None
     assert tuple(re.findall(r'"(\w+)"', kinds.group(1))) == DRAWING_KINDS
     vwap = (root / "anchoredVwap.ts").read_text()
-    sources = re.search(r"VWAP_SOURCES = \[([^\]]*)\]", vwap)
+    sources = re.search(r"\bVWAP_SOURCES = \[([^\]]*)\]", vwap)
     assert sources is not None
     assert tuple(re.findall(r'"(\w+)"', sources.group(1))) == VWAP_SOURCES
+
+
+def test_anchored_vwap_sources_mirror_the_frontend() -> None:
+    """Story 33.6: the drawing's sources are the bar prices plus `stored`, in the client's order."""
+    vwap = (Path(__file__).parents[2] / "frontend/src/lib/anchoredVwap.ts").read_text()
+    sources = re.search(r"\bANCHORED_VWAP_SOURCES = \[([^\]]*)\]", vwap)
+    assert sources is not None
+    assert tuple(re.findall(r'"(\w+)"', sources.group(1))) == ANCHORED_VWAP_SOURCES
+    assert (*VWAP_SOURCES, "stored") == ANCHORED_VWAP_SOURCES
+
+
+def test_an_anchored_vwap_drawing_takes_the_stored_source(tmp_path: Path) -> None:
+    item = {**_anchored_vwap(), "source": "stored"}
+    assert validate_drawing(item) == item
+    path = tmp_path / "chart_drawings.toml"
+    save_chart_drawings({_IID: [item]}, path)
+    assert load_chart_drawings(path) == {_IID: [item]}
 
 
 def test_an_old_file_of_the_four_original_kinds_loads_unchanged(tmp_path: Path) -> None:

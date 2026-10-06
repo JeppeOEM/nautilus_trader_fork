@@ -96,6 +96,10 @@ DRAWING_KINDS = ("hline", "trendline", "fib", "position", "anchored_vp", "anchor
 # row bounds are the layout's `MIN_PROFILE_ROWS`..`MAX_PROFILE_ROWS` (one engine, one row limit).
 # `test_*_mirror_the_frontend` in `views/tests/test_chart_drawings.py` pins the pair.
 VWAP_SOURCES = ("hlc3", "close", "ohlc4")
+# Story 33.6: the Anchored VWAP drawing alone also takes `stored` (the bars' exact stored `pv` and
+# volume, served by `views.indicator_picker`'s unlisted `AnchoredStoredVWAP`); the Anchored VP keeps
+# `VWAP_SOURCES`. Mirrors the frontend's `ANCHORED_VWAP_SOURCES` (`lib/anchoredVwap.ts`).
+ANCHORED_VWAP_SOURCES = (*VWAP_SOURCES, "stored")
 FIB_LABEL_SIDES = ("left", "right")
 POSITION_SIDES = ("long", "short")
 MAX_DRAWING_LINE_WIDTH = 4
@@ -397,7 +401,7 @@ def _check_position(item: dict[str, Any]) -> None:
 
 
 def _check_anchored_vp(item: dict[str, Any]) -> None:
-    """An Anchored VP: the anchor bar, the engine's row count and value area, the two colours."""
+    """Check an Anchored VP: the anchor bar, the row count and value area, the two colours."""
     _check_time(item.get("time"), "time")
     _require_int(item, "rows", MIN_PROFILE_ROWS, MAX_PROFILE_ROWS)
     _require_number(item, "value_area_pct")
@@ -409,10 +413,10 @@ def _check_anchored_vp(item: dict[str, Any]) -> None:
 
 
 def _check_anchored_vwap(item: dict[str, Any]) -> None:
-    """An Anchored VWAP: the anchor bar, the source, the bands switch and the band colour."""
+    """Check an Anchored VWAP: the anchor bar, the source, the bands switch and the band colour."""
     _check_time(item.get("time"), "time")
-    if item.get("source") not in VWAP_SOURCES:
-        raise DrawingError("source", f"must be one of {list(VWAP_SOURCES)}")
+    if item.get("source") not in ANCHORED_VWAP_SOURCES:
+        raise DrawingError("source", f"must be one of {list(ANCHORED_VWAP_SOURCES)}")
     if not isinstance(item.get("bands"), bool):
         raise DrawingError("bands", "must be a boolean")
     if not isinstance(item.get("band_color"), str):
@@ -540,8 +544,9 @@ MAX_PANE_ID_LENGTH = 512
 MAX_VISIBLE_BARS = 100_000
 MIN_PROFILE_ROWS = 2
 MAX_PROFILE_ROWS = 500
-# Required in every layout; `footprint` (Story 32.8) and `derivatives` (Story 33.5) are optional, see
-# `FOOTPRINT_DEFAULTS` and `DERIVATIVES_DEFAULTS`.
+# Required in every layout; `footprint` (Story 32.8), `derivatives` (Story 33.5) and
+# `volume_color_by` (Story 33.6) are optional, see `FOOTPRINT_DEFAULTS`, `DERIVATIVES_DEFAULTS` and
+# `VOLUME_COLOR_MODES`.
 _LAYOUT_KEYS = frozenset(
     {"bar_seconds", "mode", "volume", "crosshair", "pane_heights", "visible_bars", "volume_profile"}
 )
@@ -637,6 +642,12 @@ DERIVATIVES_DEFAULTS: dict[str, dict[str, Any]] = {
     "liquidations": {"on": False, "measure": "size", "markers": True},
 }
 
+# Story 33.6: the optional `volume_color_by` key, how the Volume pane colours its bars: `direction`
+# (up when the close is at or above the open) or `delta` (the sign of the bar's `buy_v - sell_v`).
+# Mirrors the frontend's `VOLUME_COLOR_MODES` (`lib/chartLayout.ts`;
+# `test_volume_color_modes_mirror_the_frontend` pins them). Absent loads as the first, `direction`.
+VOLUME_COLOR_MODES = ("direction", "delta")
+
 BUILTIN_DEFAULT_LAYOUT: dict[str, Any] = {
     "bar_seconds": 60,
     "mode": "candles",
@@ -656,6 +667,7 @@ BUILTIN_DEFAULT_LAYOUT: dict[str, Any] = {
     },
     "footprint": dict(FOOTPRINT_DEFAULTS),
     "derivatives": copy.deepcopy(DERIVATIVES_DEFAULTS),
+    "volume_color_by": VOLUME_COLOR_MODES[0],
 }
 
 
@@ -873,8 +885,9 @@ def _check_pane_heights(heights: Any) -> None:
 def validate_layout(layout: Any, *, tolerant: bool = False) -> dict[str, Any]:
     """
     Return a normalized copy of `layout` (the optional fixed-range anchors always present, `None`
-    when unset; the optional `footprint` table always present, `FOOTPRINT_DEFAULTS` when absent, and
-    likewise the optional `derivatives` table, `DERIVATIVES_DEFAULTS` when absent),
+    when unset; the optional `footprint` table always present, `FOOTPRINT_DEFAULTS` when absent,
+    likewise the optional `derivatives` table, `DERIVATIVES_DEFAULTS` when absent, and the optional
+    `volume_color_by`, `direction` when absent),
     else raise `LayoutError` naming the key. Strict by design (DATA-07): an unknown or missing key
     or a wrong type is refused rather than dropped or defaulted.
 
@@ -886,7 +899,9 @@ def validate_layout(layout: Any, *, tolerant: bool = False) -> dict[str, Any]:
     """
     if not isinstance(layout, dict):
         raise LayoutError("layout", "must be an object")
-    _check_keys(layout, _LAYOUT_KEYS, _LAYOUT_KEYS | {"footprint", "derivatives"})
+    _check_keys(
+        layout, _LAYOUT_KEYS, _LAYOUT_KEYS | {"footprint", "derivatives", "volume_color_by"}
+    )
     _check_timeframe_and_mode(layout, tolerant=tolerant)
     for key in ("volume", "crosshair"):
         if not isinstance(layout[key], bool):
@@ -905,7 +920,20 @@ def validate_layout(layout: Any, *, tolerant: bool = False) -> dict[str, Any]:
         "volume_profile": _validate_profile(layout["volume_profile"]),
         "footprint": _validate_footprint(layout.get("footprint")),
         "derivatives": _validate_derivatives(layout.get("derivatives")),
+        "volume_color_by": _validate_volume_color_by(
+            layout.get("volume_color_by", VOLUME_COLOR_MODES[0])
+        ),
     }
+
+
+def _validate_volume_color_by(mode: Any) -> str:
+    """
+    Return the Volume colour mode (the caller passes `direction` when absent), else raise naming
+    the key: an explicit null is a wrong value, refused like any other (strict by design).
+    """
+    if mode not in VOLUME_COLOR_MODES:
+        raise LayoutError("volume_color_by", f"must be one of {list(VOLUME_COLOR_MODES)}")
+    return str(mode)
 
 
 def _layout_table(layout: dict[str, Any]) -> dict[str, Any]:

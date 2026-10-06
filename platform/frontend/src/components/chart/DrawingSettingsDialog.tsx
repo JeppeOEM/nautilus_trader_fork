@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { VWAP_SOURCES, type VwapSource } from "../../lib/anchoredVwap";
+import { ANCHORED_VWAP_SOURCES, type AnchoredVwapSource, STORED_VWAP_SOURCE } from "../../lib/anchoredVwap";
 import {
   type AnchoredVpDrawing,
   type AnchoredVpForm,
@@ -278,7 +278,10 @@ function AnchoredVpSettings({ drawing, onApply, onRemove, onClose }: Omit<Props,
 }
 
 function AnchoredVwapSettings({ drawing, onApply, onRemove, onClose }: Omit<Props, "drawing" | "precision"> & { drawing: AnchoredVwapDrawing }) {
-  const [source, setSource] = useState<VwapSource>(drawing.source);
+  const [source, setSource] = useState<AnchoredVwapSource>(drawing.source);
+  // Story 33.6: the stored source has no bands (the stored columns carry no per-trade prices to
+  // spread them); its saved `bands` switch is kept for when the source is switched back.
+  const stored = source === STORED_VWAP_SOURCE;
   const [bands, setBands] = useState(drawing.bands);
   // No stored colour means the drawing token (what the line is drawn in): the picker shows that.
   const [color, setColor] = useState(drawing.color ?? "");
@@ -290,8 +293,8 @@ function AnchoredVwapSettings({ drawing, onApply, onRemove, onClose }: Omit<Prop
         <h3>Inputs</h3>
         <label>
           Source:
-          <select value={source} aria-label="Source" onChange={(e) => setSource(e.target.value as VwapSource)}>
-            {VWAP_SOURCES.map((s) => (
+          <select value={source} aria-label="Source" onChange={(e) => setSource(e.target.value as AnchoredVwapSource)}>
+            {ANCHORED_VWAP_SOURCES.map((s) => (
               <option key={s} value={s}>
                 {s}
               </option>
@@ -299,9 +302,16 @@ function AnchoredVwapSettings({ drawing, onApply, onRemove, onClose }: Omit<Prop
           </select>
         </label>
         <label>
-          <input type="checkbox" aria-label="Bands on" checked={bands} onChange={(e) => setBands(e.target.checked)} />
+          <input
+            type="checkbox"
+            aria-label="Bands on"
+            checked={bands && !stored}
+            disabled={stored}
+            onChange={(e) => setBands(e.target.checked)}
+          />
           Bands (±1σ, ±2σ)
         </label>
+        {stored && <p className="indicator-dialog-tag">Stored source: bands need per-trade prices.</p>}
       </section>
       <section aria-label="Style">
         <h3>Style</h3>

@@ -1447,7 +1447,10 @@ VIEWS_QUERY_SERVICES: dict[str, frozenset[str]] = {
             "oldest_t",
             "candle_dicts_for_window",
             "open_store",
-            "flow_delta_before",
+            # Story 33.6: the exact store prefix of CVD/stored-VWAP session and anchored modes, and
+            # its result type.
+            "flow_totals",
+            "FlowTotals",
             # Story 33.3 review: the archive-side folds' feed start, one indexed SELECT of the
             # store's persisted `liquidation_feed_since` before any archive scan.
             "liquidation_feed_since",
@@ -1467,8 +1470,18 @@ VIEWS_QUERY_SERVICES: dict[str, frozenset[str]] = {
     # technicals fallback bounds `liq_*` exactly as the store and the `raw_1s` page do (loop 2).
     # `first_bucket_at_or_after`: the feed-start boundary of a 1W liquidation bar composed from
     # stored 1D rows (`views.derivatives`, Story 33.4 review), D-160's rule at the composed width.
+    # `FLOW_KEYS`/`LIQUIDATION_KEYS`/`PRECISION_KEYS`: the groups the fold nulls together, so the
+    # Story 33.6 flow replays name a partial (corrupt) group by the fold's own definition.
     "candles.domain.fold": frozenset(
-        {"bucket_start_ms", "BAR_SECONDS", "archive_liquidations", "first_bucket_at_or_after"}
+        {
+            "bucket_start_ms",
+            "BAR_SECONDS",
+            "archive_liquidations",
+            "first_bucket_at_or_after",
+            "FLOW_KEYS",
+            "LIQUIDATION_KEYS",
+            "PRECISION_KEYS",
+        }
     ),
     "ranking.application.queries": frozenset({"history", "nearest", "HISTORY_MAX_DAYS"}),
 }

@@ -4,6 +4,7 @@ import {
   anchoredVwap,
   breakAtGaps,
   sourcePrice,
+  storedVwapPoints,
   volumeWeightedStdDev,
   weightedStdDevFromSums,
 } from "./anchoredVwap";
@@ -113,5 +114,32 @@ describe("breakAtGaps (Story 32.7)", () => {
     const chartBars = [{ time: 100 }, { time: 200, open: 1 }, { time: 300, open: 1 }, { time: 400, open: 1 }];
 
     expect(breakAtGaps(points, chartBars).map((q) => q.breakBefore === true)).toEqual([false, false]);
+  });
+});
+
+describe("storedVwapPoints (Story 33.6)", () => {
+  it("takes the server's values as the points from the anchor on, without bands", () => {
+    const points = storedVwapPoints(
+      [{ time: 100, value: 9 }, { time: 200, value: 1000.05 }, { time: 300, value: 1000.5 }],
+      200,
+    );
+
+    expect(points.map((p) => [p.time, p.vwap, p.sd, p.upper2, p.lower2])).toEqual([
+      [200, 1000.05, 0, 1000.05, 1000.05],
+      [300, 1000.5, 0, 1000.5, 1000.5],
+    ]);
+    expect(points.some((p) => p.breakBefore)).toBe(false);
+  });
+
+  it("breaks the line over a missing value, and starts at the first value after the anchor", () => {
+    const points = storedVwapPoints(
+      [{ time: 100 }, { time: 200, value: null }, { time: 300, value: 5 }, { time: 400 }, { time: 500, value: 6 }],
+      100,
+    );
+
+    expect(points.map((p) => [p.time, p.breakBefore === true])).toEqual([
+      [300, false],
+      [500, true],
+    ]);
   });
 });

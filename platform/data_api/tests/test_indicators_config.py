@@ -144,6 +144,32 @@ def test_the_catalog_serves_the_cvd_anchor_choices(
     assert cvd["choices"] == {"anchor": ["session", "visible", "all"]}
 
 
+def test_the_catalog_serves_each_outputs_unit_and_never_an_unlisted_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Story 33.6: a custom entry carries `units` (output -> price/size/count/ratio), a native entry
+    `{}`; the stored Anchored VWAP drawing's unlisted entry is not offered.
+    """
+    body = _client(tmp_path, monkeypatch).get("/api/indicators/catalog").json()
+    assert body["StoredVWAP"]["units"] == {"value": "price"}
+    assert body["TradeCount"]["units"] == {"value": "count", "buys": "count", "sells": "count"}
+    assert body["SimpleMovingAverage"]["units"] == {}
+    assert "AnchoredStoredVWAP" not in body
+
+
+def test_an_unlisted_entry_is_refused_at_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+    entry = {"name": "AnchoredStoredVWAP", "params": {"anchor_t": "0"}, "category": "custom"}
+    response = client.put(f"/api/coin/{_IID}/indicators", json=[entry])
+    assert response.status_code == 400
+    assert "AnchoredStoredVWAP" in response.json()["detail"]
+
+
 def test_a_cvd_anchor_outside_its_choices_is_refused_at_save(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

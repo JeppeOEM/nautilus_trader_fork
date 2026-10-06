@@ -49,6 +49,12 @@ export const FOOTPRINT_MODES: readonly FootprintMode[] = ["bid_ask", "delta", "v
 export const FOOTPRINT_DEFAULT_IMBALANCE_RATIO = 3;
 export const MAX_FOOTPRINT_ROW_TICKS = 1000000;
 
+// Story 33.6: how the Volume pane colours its bars, the optional `volume_color_by` key of the layout
+// (absent = `direction`). Mirrored by `views/preferences.py`'s `VOLUME_COLOR_MODES`
+// (`test_volume_color_modes_mirror_the_frontend`).
+export type VolumeColorMode = "direction" | "delta";
+export const VOLUME_COLOR_MODES: readonly VolumeColorMode[] = ["direction", "delta"];
+
 export interface FootprintSettings {
   on: boolean;
   /** Price ticks per row; 0 = auto (the server's smallest size giving at most 24 rows per bar). */
@@ -121,6 +127,8 @@ export interface ChartLayout {
   footprint: FootprintSettings;
   /** Optional on the wire (absent = every entry off); always present once normalised. */
   derivatives: DerivativesLayout;
+  /** Story 33.6: how the Volume pane colours its bars. Optional on the wire (absent = `direction`). */
+  volume_color_by: VolumeColorMode;
 }
 
 export const BUILT_IN_LAYOUT: ChartLayout = {
@@ -161,6 +169,7 @@ export const BUILT_IN_LAYOUT: ChartLayout = {
     mark_index: { on: false },
     liquidations: { on: false, measure: "size", markers: true },
   },
+  volume_color_by: "direction",
 };
 
 export const PROFILE_KINDS: readonly ProfileKind[] = ["off", "visible", "fixed", "session", "auto", "tpo"];
@@ -366,6 +375,15 @@ export function derivativesOf(raw: unknown, fallbacks: string[]): DerivativesLay
   };
 }
 
+/** The Volume colour mode: absent (a layout saved before Story 33.6) is `direction`, silently; an
+ * unknown value falls back to it by name. */
+function volumeColorByOf(raw: unknown, present: boolean, fallbacks: string[]): VolumeColorMode {
+  if (!present) return BUILT_IN_LAYOUT.volume_color_by;
+  const mode = VOLUME_COLOR_MODES.find((m) => m === raw);
+  if (mode === undefined) fallbacks.push("volume_color_by");
+  return mode ?? BUILT_IN_LAYOUT.volume_color_by;
+}
+
 /**
  * The layout the server returned, made safe to render: any field this client cannot use (a
  * `bar_seconds` outside `TIMEFRAMES`, an unknown `mode`, a malformed number) falls back to the
@@ -396,6 +414,7 @@ export function normalizeLayout(raw: unknown): { layout: ChartLayout; fallbacks:
     volume_profile: profileOf(source.volume_profile, fallbacks),
     footprint: footprintOf(source.footprint, fallbacks),
     derivatives: derivativesOf(source.derivatives, fallbacks),
+    volume_color_by: volumeColorByOf(source.volume_color_by, "volume_color_by" in source, fallbacks),
   };
   if (fallbacks.length > 0) {
     console.error(

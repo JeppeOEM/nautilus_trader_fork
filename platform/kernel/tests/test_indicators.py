@@ -19,9 +19,12 @@ from kernel.indicators import MultiLevelOBI
 from kernel.indicators import MultiLevelOFI
 from kernel.indicators import OnlineLogisticTrend
 from kernel.indicators import OrderFlowImbalance
+from kernel.indicators import bar_vwap
 from kernel.indicators import mid_price
+from kernel.indicators import organic_delta_units
 from kernel.indicators import spread
 from kernel.indicators import trade_aggregates
+from kernel.indicators import units_ratio
 from kernel.indicators import volume_delta
 from kernel.tests.snapshot_factory import make_snapshot
 
@@ -229,3 +232,38 @@ if __name__ == "__main__":
     test_trade_aggregates_sums_across_snapshots()
     test_trade_aggregates_empty_list()
     print("ok")
+
+
+# -- Story 33.6: per-bar order flow over integer units ---------------------------------------
+
+
+def test_organic_delta_takes_long_liquidations_out_of_sells_and_shorts_out_of_buys() -> None:
+    # buy 70, sell 30, 10 forced sells (long liquidations), 5 forced buys (short liquidations):
+    # (70 - 5) - (30 - 10) = 45.
+    assert organic_delta_units(70, 30, 10, 5) == 45
+
+
+def test_organic_delta_sign_mapping_is_not_symmetric() -> None:
+    """Swapping the two liquidation sides moves the result by 2 x (long - short), so it is pinned."""
+    assert organic_delta_units(70, 30, 5, 10) == 35
+    assert organic_delta_units(0, 0, 4, 0) == 4  # a pure forced sell leaves organic buying of 4
+
+
+def test_units_ratio_is_exact_across_precisions() -> None:
+    assert units_ratio(15, 1, 100, 1) == 0.15  # forced share 1.5 / 10.0
+    assert units_ratio(105, 1, 7, 0) == 1.5  # average trade size 10.5 over 7 trades
+    assert units_ratio(1, 1, 3, 2) == 10 / 3  # 0.1 / 0.03, one rounding at the return
+
+
+def test_units_ratio_is_none_at_a_zero_denominator() -> None:
+    assert units_ratio(0, 1, 0, 1) is None
+    assert units_ratio(5, 1, 0, 0) is None
+
+
+def test_bar_vwap_divides_pv_by_volume_at_the_price_scale() -> None:
+    # pv 1_000_050 at 10^-(2+1) is 1000.050 price x size, over volume 10 at 10^-1 (1.0): 1000.05.
+    assert bar_vwap(1_000_050, 10, 2) == 1000.05
+
+
+def test_bar_vwap_is_none_at_zero_volume() -> None:
+    assert bar_vwap(0, 0, 2) is None

@@ -263,6 +263,49 @@ def test_query_top_of_book_empty_window_and_unknown_instrument(book_catalog: str
     assert catalog_files.query_top_of_book(book_catalog, "NOPE.DYDX", 0, 2 * _DAY0) == []
 
 
+# -- Story 33.6: the two-pass per-bar book read ------------------------------------------------
+
+
+def test_query_snapshot_times_lists_every_row_ascending_across_files(book_catalog: str) -> None:
+    times = catalog_files.query_snapshot_times(book_catalog, _IID, _DAY0, _DAY0 + NS_PER_DAY)
+    assert times.dtype == np.int64
+    assert times.tolist() == [_DAY0 + k * NS_PER_S for k in range(6)]
+
+
+def test_query_snapshot_times_bounds_are_inclusive_ts_event(book_catalog: str) -> None:
+    lo, hi = _DAY0 + NS_PER_S, _DAY0 + 2 * NS_PER_S
+    assert catalog_files.query_snapshot_times(book_catalog, _IID, lo, hi).tolist() == [lo, hi]
+
+
+def test_query_snapshot_times_empty_window_and_unknown_instrument(book_catalog: str) -> None:
+    after = _DAY0 + 10 * NS_PER_S
+    assert catalog_files.query_snapshot_times(book_catalog, _IID, after, after + NS_PER_S).size == 0
+    assert catalog_files.query_snapshot_times(book_catalog, "NOPE.DYDX", 0, 2 * _DAY0).size == 0
+
+
+def test_query_books_at_decodes_only_the_requested_rows(book_catalog: str) -> None:
+    """Gap-encoded prices come back absolute, best first, at the stored precisions (4 and 4)."""
+    at = [_DAY0 + k * NS_PER_S for k in range(6)]
+    books = catalog_files.query_books_at(book_catalog, _IID, [at[3], at[0], at[4]])
+    assert sorted(books) == [at[0], at[3], at[4]]
+    assert books[at[3]] == {
+        "ts_event": at[3],
+        "price_precision": 4,
+        "size_precision": 4,
+        "bid_prices": [103.0, 102.0],
+        "bid_sizes": [10.3, 10.2],
+        "ask_prices": [104.0, 105.0],
+        "ask_sizes": [10.4, 10.5],
+    }
+    assert (books[at[4]]["bid_prices"], books[at[4]]["ask_prices"]) == ([], [106.0])
+
+
+def test_query_books_at_omits_a_stamp_no_row_carries(book_catalog: str) -> None:
+    missing = _DAY0 + NS_PER_S // 3
+    assert catalog_files.query_books_at(book_catalog, _IID, [missing]) == {}
+    assert catalog_files.query_books_at(book_catalog, _IID, []) == {}
+
+
 def test_module_never_writes_or_builds_a_catalog() -> None:
     """AD-D3: read helpers only -- no `ParquetDataCatalog`, no write/rename/delete call."""
     tree = ast.parse(Path(catalog_files.__file__).read_text())
@@ -301,6 +344,8 @@ def _legacy_file(tmp_path: Path) -> Path:
     [
         lambda root: catalog_files.query_second_ohlc(root, _IID, 0, 2 * _DAY0),
         lambda root: catalog_files.query_top_of_book(root, _IID, 0, 2 * _DAY0),
+        lambda root: catalog_files.query_snapshot_times(root, _IID, 0, 2 * _DAY0),
+        lambda root: catalog_files.query_books_at(root, _IID, [_DAY0]),
         lambda root: catalog_files.second_ohlc_arrays(catalog_files.snapshot_files(root, _IID)),
     ],
 )

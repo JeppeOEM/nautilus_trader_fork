@@ -105,7 +105,8 @@ export interface IndicatorPaneSpec {
    * and re-added at its former position and height when shown. The spec (and its data) stays in
    * this array either way, so showing refetches nothing. */
   hidden?: boolean;
-  /** False for Volume: its legend row gets the eye and the x but no settings gear. */
+  /** False for a row with no settings: it gets the eye and the x but no gear (Volume has one since
+   * Story 33.6: its colour mode). */
   configurable?: boolean;
   /** False for a series no configured entry owns (stale values between an Apply and its refetch):
    * its legend row is a plain readout, with no buttons that could act on nothing. Default true. */
@@ -227,6 +228,8 @@ export interface LegendExtra {
   /** The value shown, or null while there is none (a VWAP with no volume yet). */
   value: number | null;
   format: (value: number) => string;
+  /** Story 33.6: a fixed readout in place of the value (a stored VWAP's replay error). */
+  text?: string;
 }
 
 interface LightweightChartProps {
@@ -371,6 +374,9 @@ interface LightweightChartProps {
    * before the live socket's first message, or synchronously reset on instrument/bar-size
    * change) and is a no-op, not a clear of the last-drawn bar. */
   liveBar?: LiveBar | null;
+  /** Story 33.6: the forming bar's Volume colour (the page's `volume_color_by` mapping, the same one
+   * its closed bars are painted with); absent = the volume pane's own colour. */
+  liveVolumeColor?: string;
   /** Story 32.8: the volume footprint of the closed bars, drawn by one `FootprintPrimitive` on the
    * candle series (Candles mode only) with a "Footprint" legend row (gear and x) on the price pane;
    * `null`/omitted removes both. */
@@ -709,6 +715,7 @@ export default function LightweightChart({
   onProfileEdgeCommit,
   onProfileEdgeCancel,
   liveBar,
+  liveVolumeColor,
   onLegendAction,
   initialPaneHeights,
   onPaneHeights,
@@ -1311,6 +1318,7 @@ export default function LightweightChart({
         data: extra.value === null ? [] : [{ time: 0 as Time, value: extra.value }],
         pane: null,
         format: extra.format,
+        text: extra.text,
         actionable: false,
       }),
     );
@@ -1381,15 +1389,18 @@ export default function LightweightChart({
     lastPaintedTimeRef.current = time;
     // The server seeds its forming bar with the whole bucket (LiveCandleBus.seed), so it is
     // painted as-is -- no client-side merge with history (one aggregation path, AD-F7).
-    const { volume, ...candle } = liveBar;
-    series.update(candle);
+    const { time: barTime, open, high, low, close, volume } = liveBar;
+    series.update({ time: barTime, open, high, low, close });
     // Volume pane follows the forming bar; its series only exists once the panes effect has
-    // added it, and is absent in Lines mode's registry-less state -- both are no-ops.
-    panesRef.current.get("volume")?.series.update({ time: liveBar.time, value: volume });
+    // added it, and is absent in Lines mode's registry-less state -- both are no-ops. Story 33.6:
+    // painted like its closed bars (`liveVolumeColor`), so a forming bar is never the flat colour.
+    panesRef.current
+      .get("volume")
+      ?.series.update({ time: barTime, value: volume, ...(liveVolumeColor ? { color: liveVolumeColor } : {}) });
     // `mode`: Lines -> Candles recreates seriesRef with no data. `data`: every setData()
     // replaces the series with history that lacks the forming bar. Both must repaint the
     // held `liveBar` at once, not wait for the next websocket tick.
-  }, [liveBar, mode, panes, data]);
+  }, [liveBar, liveVolumeColor, mode, panes, data]);
 
   useEffect(() => {
     // Story 18.1 (AC #2/#4): the priceLines prop's own registry-diff effect, the exact

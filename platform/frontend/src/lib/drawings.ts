@@ -19,7 +19,7 @@
  * precision on the candles response and snap to it here.
  */
 
-import { DEFAULT_VWAP_SOURCE, type VwapSource } from "./anchoredVwap";
+import { type AnchoredVwapSource, DEFAULT_VWAP_SOURCE } from "./anchoredVwap";
 import { formatDecimal, roundToPrecision } from "./units";
 
 export interface Anchor {
@@ -112,7 +112,8 @@ export interface AnchoredVwapDrawing {
   kind: "anchored_vwap";
   id: string;
   time: number;
-  source: VwapSource;
+  /** A bar price, or (Story 33.6) `stored`: the bars' exact stored `pv`/volume, served by the server. */
+  source: AnchoredVwapSource;
   /** The ±1σ and ±2σ bands. */
   bands: boolean;
   color?: string;

@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 
+from views.indicator_picker import CUSTOM_INDICATOR_CATALOG
 from views.indicator_picker import MAX_ABS_FLOAT_PARAM
 from views.indicator_picker import MAX_INT_PARAM
 from views.indicator_picker import check_params
@@ -32,6 +33,16 @@ from views.indicator_picker import merged_catalog
 def test_every_catalog_default_passes() -> None:
     for name, entry in merged_catalog().items():
         check_params(name, entry["params"])
+
+
+def test_every_custom_default_passes_listed_or_not() -> None:
+    """
+    `merged_catalog` lists only listed entries; the unlisted `AnchoredStoredVWAP` (Story 33.6) keeps
+    a default that passes too (`anchor_t` "0", the epoch, a digit string), so every catalog default
+    is one its own check accepts.
+    """
+    for name, spec in CUSTOM_INDICATOR_CATALOG.items():
+        check_params(name, spec.params)
 
 
 def test_partial_params_and_valid_enum_names_pass() -> None:

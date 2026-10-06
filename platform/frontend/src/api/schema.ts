@@ -146,6 +146,7 @@ export interface IndicatorCatalogEntry {
   category: string;
   choices?: Record<string, string[]>;
   source_selectable?: boolean;
+  units?: Record<string, string>;
 }
 
 export interface IndicatorConfigEntry {

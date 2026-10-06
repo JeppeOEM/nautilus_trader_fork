@@ -45,6 +45,7 @@ from views.preferences import MIN_PROFILE_ROWS
 from views.preferences import PROFILE_ANCHORS
 from views.preferences import PROFILE_KINDS
 from views.preferences import PROFILE_SESSIONS
+from views.preferences import VOLUME_COLOR_MODES
 from views.preferences import ChartLayouts
 from views.preferences import IndicatorEntry
 from views.preferences import LayoutError
@@ -696,3 +697,39 @@ def test_a_derivative_colour_is_refused_exactly_when_the_client_would_drop_it(
         with pytest.raises(LayoutError) as raised:
             validate_layout(_layout(derivatives=derivatives))
         assert raised.value.key == f"derivatives.oi.style.oi.{key}"
+
+
+# -- Story 33.6: the optional volume_color_by key --------------------------------------------------
+
+
+def test_a_layout_saved_before_story_33_6_loads_colouring_volume_by_direction(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    path.write_text(_PRE_32_8_FILE)  # no volume_color_by key
+    assert load_chart_layouts(path).layouts[_IID]["volume_color_by"] == "direction"
+    assert BUILTIN_DEFAULT_LAYOUT["volume_color_by"] == "direction"
+
+
+def test_volume_color_by_round_trips_through_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    layout = _layout(volume_color_by="delta")
+    save_chart_layouts(ChartLayouts({_IID: layout}, default=layout), path)
+    loaded = load_chart_layouts(path)
+    assert loaded.layouts[_IID]["volume_color_by"] == "delta"
+    assert loaded.default is not None
+    assert loaded.default["volume_color_by"] == "delta"
+
+
+@pytest.mark.parametrize("mode", ["buy_sell", "", None, 1, True, ["delta"]])
+def test_a_bad_volume_color_by_is_refused_naming_it(mode: Any) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(volume_color_by=mode))
+    assert raised.value.key == "volume_color_by"
+
+
+def test_volume_color_modes_mirror_the_frontend() -> None:
+    source = (_FRONTEND / "lib/chartLayout.ts").read_text()
+    modes = re.search(r"VOLUME_COLOR_MODES: readonly VolumeColorMode\[\] = \[([^\]]*)\]", source)
+    assert modes is not None
+    assert tuple(re.findall(r'"(\w+)"', modes.group(1))) == VOLUME_COLOR_MODES

@@ -2586,6 +2586,14 @@
             "type": "boolean",
             "title": "Source Selectable",
             "default": false
+          },
+          "units": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Units",
+            "default": {}
           }
         },
         "type": "object",

@@ -47,6 +47,7 @@ _LAYOUT_KEYS = {
     "volume_profile",
     "footprint",  # optional on the wire, always served (Story 32.8)
     "derivatives",  # likewise (Story 33.5)
+    "volume_color_by",  # likewise (Story 33.6)
 }
 
 
@@ -133,6 +134,18 @@ def test_put_with_a_bad_mode_is_a_422_naming_it_and_writes_nothing(
     assert response.status_code == 422
     assert "mode" in response.json()["detail"]
     assert not (tmp_path / "chart_layouts.toml").exists()
+
+
+def test_put_with_a_bad_volume_color_by_is_a_422_naming_it(client: TestClient) -> None:
+    """Story 33.6: the optional key takes `direction` or `delta` only."""
+    layout = _layout(volume_color_by="rainbow")
+    response = client.put(f"/api/coin/{_IID}/layout", json={"layout": layout})
+    assert response.status_code == 422
+    assert "volume_color_by" in response.json()["detail"]
+    saved = client.put(
+        f"/api/coin/{_IID}/layout", json={"layout": _layout(volume_color_by="delta")}
+    )
+    assert saved.json()["layout"]["volume_color_by"] == "delta"
 
 
 def test_put_with_a_missing_body_key_or_bad_json(client: TestClient) -> None:

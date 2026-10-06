@@ -28,7 +28,9 @@ import {
   type VolumeProfileSettings,
 } from "../lib/volumeProfile";
 import { DEFAULT_AUTO_ANCHOR, anchorBars, anchorTime } from "../lib/autoAnchor";
-import { anchoredVwap, breakAtGaps } from "../lib/anchoredVwap";
+import { STORED_VWAP_SOURCE, type VwapPoint, anchoredVwap, breakAtGaps, storedVwapPoints } from "../lib/anchoredVwap";
+import { formatIndicatorValue, isIndicatorUnit } from "../lib/indicatorFormat";
+import { volumeBarColor } from "../lib/volumeColor";
 import {
   DEFAULT_IB_MINUTES,
   type InitialBalance,
@@ -57,6 +59,7 @@ import {
 import { chartVar, fibLevelColor } from "../components/chart/chartTheme";
 import DrawingSettingsDialog from "../components/chart/DrawingSettingsDialog";
 import FootprintSettingsDialog from "../components/chart/FootprintSettingsDialog";
+import VolumeSettingsDialog from "../components/chart/VolumeSettingsDialog";
 import type { FootprintRenderSpec } from "../components/chart/primitives/FootprintPrimitive";
 import {
   type Drawing,
@@ -90,6 +93,7 @@ import {
   type DerivativesLayout,
   type FootprintSettings,
   type LiquidationMeasure,
+  type VolumeColorMode,
   type VolumeProfileLayout,
 } from "../lib/chartLayout";
 import { useChartDerivatives } from "../hooks/useChartDerivatives";
@@ -100,6 +104,7 @@ import { useSessionCandles } from "../hooks/useSessionCandles";
 import { useVisibleRange } from "../hooks/useVisibleRange";
 import { useLiveCandle } from "../hooks/useLiveCandle";
 import { usePickerIndicatorValues } from "../hooks/usePickerIndicatorValues";
+import { useStoredAnchoredVwap } from "../hooks/useStoredAnchoredVwap";
 import { useSnapshotSeries } from "../hooks/useSnapshotSeries";
 
 // The default chart is candles + a volume pane only; every other indicator is added
@@ -564,6 +569,9 @@ function ChartInner({
   // The forming bar is part of "the latest bar" here (not under a replay, which hides it): a drawing
   // placed on it draws at once, and the line and profile include it, like the candle beside them.
   const anchoredLive = replay.mode === "active" ? null : liveBar;
+  // Story 33.6: a stored-source Anchored VWAP's line is the server's (`AnchoredStoredVWAP`, the bars'
+  // exact stored `pv` / volume), fetched by its own values hook: never a picker pane.
+  const storedVwap = useStoredAnchoredVwap(instrumentId, chart, allDrawings, barSeconds, mode === "candles");
   const anchored = useMemo(() => {
     // A coin with no anchored drawing (nearly every one) skips the per-tick copy of its bars.
     if (mode !== "candles" || !allDrawings.some((d) => d.kind === "anchored_vp" || d.kind === "anchored_vwap")) {
@@ -609,23 +617,35 @@ function ChartInner({
         }
         continue;
       }
-      const points = anchorBar === null ? [] : breakAtGaps(anchoredVwap(bars, anchorBar, d.source), chartBars);
+      const source = d.source;
+      const stored = source === STORED_VWAP_SOURCE;
+      let points: VwapPoint[] = [];
+      // The stored line is the server's values, cut at the replay time like every pane; no bands. A
+      // stored line whose request failed on any page draws nothing: the pages that did load would be
+      // a partial line passed off as whole (audit D-187); the legend names the error.
+      if (anchorBar !== null && stored && storedVwap.errors[d.id] === undefined) {
+        points = storedVwapPoints(trimAfter(storedVwap.values[d.id] ?? NONE, cutoffTime), anchorBar);
+      } else if (anchorBar !== null && !stored) {
+        points = breakAtGaps(anchoredVwap(bars, anchorBar, source), chartBars);
+      }
       // The snapped bar, like the Anchored VP: the anchor handle sits on the bar the line starts from.
-      specs.push({ ...d, time: anchorBar ?? d.time, points });
+      specs.push({ ...d, ...(stored ? { bands: false } : {}), time: anchorBar ?? d.time, points });
       const latest = points.at(-1);
       const color = d.color ?? chartVar("--chart-drawing");
+      const error = stored ? storedVwap.errors[d.id] : undefined;
       legend.push({
         id: `avwap-${d.id}`,
         label: `AVWAP (${d.source})`,
         color,
         value: latest === undefined || precision === null ? null : latest.vwap,
         format: (value) => (precision === null ? String(value) : safeDecimal(value, precision.price)),
+        ...(error === undefined ? {} : { text: `failed: ${error}` }),
       });
     }
     // Shared empty arrays: a coin with none (nearly every one) must not hand the chart a fresh
     // array, hence a "changed" prop, on every bar.
     return { specs: specs.length > 0 ? specs : NONE, profiles: profiles.length > 0 ? profiles : NONE, legend: legend.length > 0 ? legend : NONE };
-  }, [allDrawings, mode, replay.displayed, volume, anchoredLive, precision]);
+  }, [allDrawings, mode, replay.displayed, volume, anchoredLive, precision, storedVwap, cutoffTime]);
   const plainDrawings = useMemo<DrawingSpec[]>(
     () =>
       allDrawings.flatMap((d): DrawingSpec[] => {
@@ -683,6 +703,35 @@ function ChartInner({
     },
     [onVolumeChange],
   );
+  // Story 33.6: how the Volume pane colours its bars (the layout's `volume_color_by`), set from the
+  // Volume legend row's gear. Each bar is painted here, the forming one by the chart with the same
+  // mapping (`liveVolumeColor`); the data in state keeps its flow for the next mode change.
+  const [volumeColorBy, setVolumeColorBy] = useState<VolumeColorMode>(initialLayout.volume_color_by);
+  useEffect(() => patchLayout({ volume_color_by: volumeColorBy }), [volumeColorBy, patchLayout]);
+  const [volumeDialogOpen, setVolumeDialogOpen] = useState(false);
+  const volumePalette = useMemo(
+    () => ({ up: chartVar("--chart-up"), down: chartVar("--chart-down"), neutral: assignPaneColor("volume", DEFAULT_PANE_IDS) }),
+    [],
+  );
+  const paintedVolume = useMemo(
+    () =>
+      volume.map((d) =>
+        "value" in d
+          ? { time: d.time, value: d.value, color: volumeBarColor(d, volumeColorBy, volumePalette.up, volumePalette.down, volumePalette.neutral) }
+          : d,
+      ),
+    [volume, volumeColorBy, volumePalette],
+  );
+  const liveVolumeColor =
+    liveBar === null || replay.mode === "active"
+      ? undefined
+      : volumeBarColor(
+          { o: liveBar.open, c: liveBar.close, buy_v: liveBar.buy_v, sell_v: liveBar.sell_v },
+          volumeColorBy,
+          volumePalette.up,
+          volumePalette.down,
+          volumePalette.neutral,
+        );
   const entriesById = useMemo(() => new Map(pickerEntries.map((e) => [entryId(e), e] as const)), [pickerEntries]);
   // The coin's indicator instance ids: the pane ids a saved height may still belong to.
   const paneIdsRef = useRef<ReadonlySet<string>>(new Set());
@@ -694,11 +743,10 @@ function ChartInner({
             {
               id: "volume",
               kind: "Histogram" as const,
-              data: volume,
-              color: assignPaneColor("volume", DEFAULT_PANE_IDS),
+              data: paintedVolume,
+              color: volumePalette.neutral,
               groupLabel: "Volume",
               hidden: volumeHidden,
-              configurable: false,
             },
           ]
         : []),
@@ -708,6 +756,14 @@ function ChartInner({
         const entry = entriesById.get(instanceId);
         const name = entry?.name ?? catalogNameForKey(key, catalog) ?? key;
         const style = outputStyle(entry, output);
+        // Story 33.6: an output the catalog gives a unit prints at the instrument's decimals (a
+        // native entry has none, and keeps the legend's default readout, as does every entry while
+        // the precision is unknown).
+        const unit = catalog[catalogNameForKey(key, catalog) ?? ""]?.units?.[output];
+        const format =
+          precision !== null && isIndicatorUnit(unit)
+            ? (value: number): string => formatIndicatorValue(value, unit, precision)
+            : undefined;
         return {
           id: key,
           // One legend row, one pane per instance (RSI(14) and RSI(21) are two), even for stale
@@ -730,10 +786,11 @@ function ChartInner({
           lineStyle: style.line_style,
           upColor: style.up_color,
           downColor: style.down_color,
+          ...(format ? { format } : {}),
         };
       }),
     ],
-    [volumeOn, volumeHidden, volume, pickerSeriesKeys, pickerValues, catalog, entriesById, cutoffTime],
+    [volumeOn, volumeHidden, paintedVolume, volumePalette, pickerSeriesKeys, pickerValues, catalog, entriesById, cutoffTime, precision],
   );
 
   // Story 32.8: the volume footprint, a field of the coin's layout (on/off and its settings). It is
@@ -813,6 +870,7 @@ function ChartInner({
       }
       if (group === "volume") {
         if (action === "hide") setVolumeHidden((h) => !h);
+        else if (action === "settings") setVolumeDialogOpen(true);
         else if (action === "remove") {
           changeVolumeOn(false);
         }
@@ -1614,6 +1672,7 @@ function ChartInner({
             onVisibleBars={handleVisibleBars}
             // Story 18.4: the real-time forming bar would reveal "future" price action.
             liveBar={replay.mode === "active" ? null : liveBar}
+            liveVolumeColor={liveVolumeColor}
             markerTime={replay.markerTime}
             // DW-145: keep the replay head in view as it advances.
             followNewest={replay.mode === "active"}
@@ -1667,6 +1726,14 @@ function ChartInner({
           onApply={(patch) => setDerivatives((prev) => applyDerivativePatch(prev, derivativeSettings, patch))}
           onRemove={() => changeDerivativeOn(derivativeSettings, false)}
           onClose={() => setDerivativeSettings(null)}
+        />
+      )}
+      {volumeDialogOpen && (
+        <VolumeSettingsDialog
+          colorBy={volumeColorBy}
+          onApply={setVolumeColorBy}
+          onRemove={() => changeVolumeOn(false)}
+          onClose={() => setVolumeDialogOpen(false)}
         />
       )}
       {footprintDialogOpen && (

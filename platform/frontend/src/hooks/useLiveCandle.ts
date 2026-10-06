@@ -13,7 +13,27 @@ import { openLiveSubscription } from "./liveSubscription";
  */
 interface LiveCandleMessage {
   channel: string;
-  bar: { t: number; o: number; h: number; l: number; c: number; v: number };
+  bar: {
+    t: number;
+    o: number;
+    h: number;
+    l: number;
+    c: number;
+    v: number;
+    // Story 33.3's per-bar order flow and liquidation aggregates, appended to the frozen six keys
+    // (`candles.application.forming.forming_bar`): integer units at the row's precisions, null
+    // where unknown (no flow, no liquidation feed). Optional: a server before 33.3 sends none.
+    buy_v?: number | null;
+    sell_v?: number | null;
+    buy_n?: number | null;
+    sell_n?: number | null;
+    pv?: number | null;
+    liq_long_v?: number | null;
+    liq_short_v?: number | null;
+    liq_n?: number | null;
+    price_precision?: number | null;
+    size_precision?: number | null;
+  };
 }
 
 function isLiveCandleMessage(message: Record<string, unknown>): message is Record<string, unknown> & LiveCandleMessage {
@@ -24,12 +44,24 @@ function isLiveCandleMessage(message: Record<string, unknown>): message is Recor
   return ["t", "o", "h", "l", "c"].every((k) => Number.isFinite(bar[k]));
 }
 
-/** The forming bar plus its bucket volume (`bar.v`), so the volume pane can follow it too. */
-export type LiveBar = CandlestickData<Time> & { volume: number };
+/** The forming bar plus its bucket volume (`bar.v`), so the volume pane can follow it too, and its
+ * buy/sell volume in integer units (Story 33.6: the Volume pane's `delta` colour; null = unknown). */
+export type LiveBar = CandlestickData<Time> & { volume: number; buy_v?: number | null; sell_v?: number | null };
+
+const unitsOrNull = (value: unknown): number | null => (typeof value === "number" && Number.isFinite(value) ? value : null);
 
 function toChartDatum(bar: LiveCandleMessage["bar"]): LiveBar {
   const time = (bar.t / 1000) as UTCTimestamp; // wire is ms, lightweight-charts wants seconds
-  return { time, open: bar.o, high: bar.h, low: bar.l, close: bar.c, volume: Number.isFinite(bar.v) ? bar.v : 0 };
+  return {
+    time,
+    open: bar.o,
+    high: bar.h,
+    low: bar.l,
+    close: bar.c,
+    volume: Number.isFinite(bar.v) ? bar.v : 0,
+    buy_v: unitsOrNull(bar.buy_v),
+    sell_v: unitsOrNull(bar.sell_v),
+  };
 }
 
 export interface LiveCandleHandlers {

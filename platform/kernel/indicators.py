@@ -39,6 +39,8 @@ Story 33.14 added `LiquidationCascade`, the one cascade definition: the research
 (`research.strategies.liquidation_cascade_strategy`, backtest and live paper bot alike) feeds it,
 and `research.application.liquidations.replay_cascade` replays it for episodes -- 33.13's
 `cascade_episodes` extends that replay rather than redefining a cascade.
+Story 33.6 added `organic_delta_units`, `units_ratio` and `bar_vwap`, the per-bar order-flow
+formulas behind the chart's stored-aggregate indicators (`views.indicator_picker`).
 """
 
 import math
@@ -46,6 +48,7 @@ from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from fractions import Fraction
 
 import numpy as np
 
@@ -796,6 +799,61 @@ def trade_aggregates(snapshots: list[dict]) -> tuple[float, float, int, int]:
         sum(s["buy_count"] for s in snapshots),
         sum(s["sell_count"] for s in snapshots),
     )
+
+
+# -----------------------------------------------------------------------------------
+# Per-bar order flow (Story 33.6, SSOT-01): the one formula per stored per-bar aggregate, over the
+# candle store's exact integer units (`candles.domain.fold`, `docs/DATA_DICTIONARY.md` §2.15). The
+# caller maps a null input to None before calling (DATA-01: null is unknown, never 0); these take
+# known integers only and turn a value into a `float` at the return, never before (DATA-04).
+# -----------------------------------------------------------------------------------
+
+
+def organic_delta_units(buy_v: int, sell_v: int, liq_long_v: int, liq_short_v: int) -> int:
+    """
+    Return the bar's delta without its forced flow, in the bar's `10^-size_precision` units:
+    `(buy_v - liq_short_v) - (sell_v - liq_long_v)`.
+
+    Sign mapping: a *long* liquidation closes a long position by selling, so `liq_long_v` is forced
+    sell volume and is taken out of `sell_v`; a *short* liquidation closes a short by buying, so
+    `liq_short_v` is forced buy volume and is taken out of `buy_v`. All four share the bar's one
+    `size_precision` (the fold stores the bucket's finest and rescales every part to it). A bar
+    with unknown flow or unknown liquidations has no organic delta: the caller returns None.
+    """
+    return (buy_v - liq_short_v) - (sell_v - liq_long_v)
+
+
+def units_ratio(
+    num_units: int, num_precision: int, den_units: int, den_precision: int
+) -> float | None:
+    """
+    Return `(num_units * 10^-num_precision) / (den_units * 10^-den_precision)` as one exact
+    `Fraction` rounded to a float once; None when the denominator is 0 (a quiet bar has no share
+    and no average, never a division error or an infinity). `ForcedShare` passes
+    `liq_long_v + liq_short_v` over `buy_v + sell_v` (one size precision), `AverageTradeSize`
+    `buy_v + sell_v` at the size precision over `buy_n + sell_n` at precision 0.
+    """
+    if den_units == 0:
+        return None
+    return float(Fraction(num_units * 10**den_precision, den_units * 10**num_precision))
+
+
+def bar_vwap(pv_units: int, volume_units: int, price_precision: int) -> float | None:
+    """
+    Return the volume-weighted price `pv / (volume * 10^price_precision)`, an exact `Fraction`
+    rounded to a float once; None at 0 volume (no trade, no price).
+
+    `pv_units` is in `10^-(price_precision + size_precision)` and `volume_units` in
+    `10^-size_precision`, so the size scale cancels and only the price scale remains: e.g.
+    `pv = 1_000_050` at `pp = 2, sp = 1` over 10 units of volume is `1_000_050 / (10 * 100)` =
+    1000.05. A sum over bars of mixed precisions is rescaled by the caller to the finest price and
+    size precision present first, so the same identity holds. The stored `pv` weights each second's
+    traded volume at that second's close (`candles.domain.fold`'s Known limit), so this is the
+    second-close VWAP, not every trade at its own price.
+    """
+    if volume_units == 0:
+        return None
+    return float(Fraction(pv_units, volume_units * 10**price_precision))
 
 
 # -----------------------------------------------------------------------------------

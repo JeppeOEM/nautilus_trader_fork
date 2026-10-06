@@ -1588,6 +1588,49 @@ config key, env var, compose service, bind mount or migration.
       the ErrorBar no `useDerivativePages`/`useLiquidationEvents` console error: any one is a DATA-07
       finding to explain, not noise.
 
+### 33-6-order-flow-indicators-from-the-stored-per-bar-aggregates (commit: this story's)
+
+The indicator picker gains seven order-flow entries read from the candle store's per-bar aggregates
+(`VolumeDelta`, `OrganicDelta`, `ForcedShare`, `TradeCount`, `AverageTradeSize`, `StoredVWAP`,
+`DepthWithinBps`), the Anchored VWAP drawing a `stored` source, the Volume pane a `colour by`
+setting, and CVD's `session` anchor is seeded from the store instead of restarting at the page
+(audit D-186). Backend, added fields only: every `GET /api/indicators/catalog` entry gains `units`,
+`chart_drawings.toml` accepts `source = "stored"` on an `anchored_vwap` item, and
+`chart_layouts.toml` an optional `volume_color_by` key (absent = `direction`; no file is
+rewritten). Only the `data_api` image changes (it carries the frontend build); no config key, env
+var, compose service, bind mount or migration.
+
+- [ ] On the VPS, pull this commit and rebuild/restart the data_api:
+      `cd ~/nautilus_trader_fork/platform && docker compose up -d --build data_api`.
+- [ ] Curl the catalog: `curl -s localhost:9100/api/indicators/catalog | python3 -c 'import json,sys; c=json.load(sys.stdin); print({k: c[k]["units"] for k in ("VolumeDelta","StoredVWAP","TradeCount","DepthWithinBps","CumulativeVolumeDelta")}, "AnchoredStoredVWAP" in c)'`
+      prints `{'VolumeDelta': {'value': 'size'}, 'StoredVWAP': {'value': 'price'}, 'TradeCount':
+      {'value': 'count', 'buys': 'count', 'sells': 'count'}, 'DepthWithinBps': {'bid': 'size',
+      'ask': 'size'}, 'CumulativeVolumeDelta': {'value': 'size'}} False` (the `False`: the
+      anchored entry is unlisted).
+- [ ] Curl one value page (`N=$(date +%s%N)`):
+      `curl -s "localhost:9100/api/coin/BTCUSDT-LINEAR.BYBIT/indicator-values?before_ns=$N&limit=3&bar_seconds=60&entries=%5B%7B%22name%22%3A%22StoredVWAP%22%2C%22params%22%3A%7B%22mode%22%3A%22session%22%7D%7D%2C%7B%22name%22%3A%22CumulativeVolumeDelta%22%2C%22params%22%3A%7B%22anchor%22%3A%22session%22%7D%7D%5D" | head -c 1200`
+      shows `errors: {}` and a number (not null) on each of the three rows for both series: the
+      1m store covers today's midnight, so both session prefixes are covered.
+- [ ] In the browser, on the BTCUSDT linear chart at 1m, 1h and 1D, add each of the seven entries
+      from Indicators: each draws on every loaded bar (Depth only on the last 7 days) and its
+      legend prints at the instrument's precision (VWAP at the price's decimals, sizes at the
+      size's, Forced share as a percentage). On `BTCUSDT-SPOT.BYBIT`, Organic delta and Forced
+      share are empty (no liquidation feed), never 0.
+- [ ] CVD with `anchor: session` on 1m: scroll back half a day and back again -- the level at a
+      given bar does not change with the scroll position (D-186's fix).
+- [ ] Add an Anchored VWAP drawing, set its source to `stored` (bands disabled), reload: the
+      source persists (`grep -B2 -A8 anchored_vwap data/preferences/chart_drawings.toml` shows
+      `source = "stored"`) and the line starts at the anchor bar. Set the Volume pane's gear ->
+      `colour by: delta`, reload: it persists (`volume_color_by = "delta"` in
+      `data/preferences/chart_layouts.toml`).
+- [ ] The Technicals tab offers the seven entries but not `AnchoredStoredVWAP`; a `VolumeDelta`
+      column fills for every ranked coin.
+- [ ] If a `DepthWithinBps` Technicals column is ever added at 1D/1W, watch the data_api's CPU and
+      memory (`docker stats --no-stream`) across two 90 s refreshes: each ranked coin reads up to 7
+      daily snapshot files' book columns per refresh (audit D-189's cost note).
+- [ ] Check the ledger shows no new `technicals.values` line since the restart and the ErrorBar no
+      console error: any one is a DATA-07 finding to explain, not noise.
+
 ### 33-14-liquidation-cascade-bot-shorts-into-a-long-liquidation-cascade-backtested-and-paper-run (commit: this story's)
 
 A new paper strategy, `liquidation_cascade` (`research/strategies/liquidation_cascade_strategy.py`,

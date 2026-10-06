@@ -125,7 +125,7 @@ def test_an_unmigrated_file_read_only_serves_the_new_keys_as_null(tmp_path: Path
     with sqlite_store.connect_ro(str(path)) as db:
         assert db is not None
         (bar,) = queries.window(db, _IID, 60, 1 << 62, 5)
-        assert queries.flow_delta_before(db, _IID, 60, 1 << 62) is None
+        assert queries.flow_totals(db, _IID, 60, 1 << 62) is None
     assert list(bar)[-len(AGGREGATE_KEYS) :] == list(AGGREGATE_KEYS)
     assert all(bar[key] is None for key in AGGREGATE_KEYS)
     assert bar["o"] == 100.0

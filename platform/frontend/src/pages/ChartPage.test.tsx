@@ -201,6 +201,20 @@ vi.mock("../hooks/usePickerIndicatorValues", () => {
   } };
 });
 
+// Story 33.6: the stored-source Anchored VWAP's own values hook (its entries and paging are tested in
+// useStoredAnchoredVwap.test.ts). Records the drawings the page hands it; answers `values`/`errors`
+// by drawing id (stable objects, like the real hook's memo).
+const storedVwap = vi.hoisted(() => ({
+  drawings: [] as unknown[],
+  result: { values: {}, errors: {} } as { values: Record<string, unknown[]>; errors: Record<string, string> },
+}));
+vi.mock("../hooks/useStoredAnchoredVwap", () => ({
+  useStoredAnchoredVwap: (_iid: string, _chart: unknown, drawings: unknown[]) => {
+    storedVwap.drawings = drawings;
+    return storedVwap.result;
+  },
+}));
+
 vi.mock("react-router", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react-router")>();
   return { ...actual, useParams: () => ({ iid: route.iid }) };
@@ -213,7 +227,7 @@ interface ChartStubProps {
   panes?: {
     id: string;
     kind: string;
-    data: { time: number }[];
+    data: { time: number; value?: number; color?: string }[];
     placement?: string;
     group?: string;
     groupLabel?: string;
@@ -252,6 +266,7 @@ interface ChartStubProps {
   onMeasureEnd?: () => void;
   data?: { time: number }[];
   liveBar?: unknown;
+  liveVolumeColor?: string;
   markerTime?: number | null;
   followNewest?: boolean;
   anchorMarkerTime?: number | null;
@@ -300,7 +315,7 @@ const render = (ui: ReactElement) =>
   ui.type === MemoryRouter ? rtlRender(ui) : rtlRender(ui, { wrapper: MemoryRouter });
 // Imported after the mocks above so ChartPage picks up the mocked client/hooks/chart.
 const { default: ChartPage } = await import("./ChartPage");
-const { fetchCoinIndicatorConfig } = await import("../api/client");
+const { fetchCoinIndicatorConfig, fetchIndicatorCatalog } = await import("../api/client");
 const { SAVE_DEBOUNCE_MS, SAVE_RETRY_MS } = await import("../hooks/useChartDrawings");
 const { BUILT_IN_LAYOUT } = await import("../lib/chartLayout");
 type ChartLayout = import("../lib/chartLayout").ChartLayout;
@@ -405,6 +420,8 @@ beforeEach(() => {
   liveDerivs.liquidationsSubscribed = [];
   liveDerivs.onLiquidation = undefined;
   liveDerivs.onTick = undefined;
+  storedVwap.drawings = [];
+  storedVwap.result = { values: {}, errors: {} };
 });
 
 afterEach(() => {
@@ -2311,17 +2328,20 @@ describe("ChartPage legend controls (Story 32.3)", () => {
     expect(saveConfigMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", [RSI]);
   });
 
-  it("gives Volume an eye (hide, no save) and an x (the Indicators toggle) but no settings", () => {
+  it("gives Volume an eye (hide, no save), a gear (its colour mode, Story 33.6) and an x (the Indicators toggle)", () => {
     render(page());
-    expect(paneOf("volume")).toMatchObject({ configurable: false, hidden: false });
+    expect(paneOf("volume").configurable).not.toBe(false);
+    expect(paneOf("volume").hidden).toBe(false);
 
     legend("hide", "volume");
     expect(paneOf("volume").hidden).toBe(true);
     legend("hide", "volume");
     expect(paneOf("volume").hidden).toBe(false);
 
-    legend("settings", "volume"); // there is no gear: nothing opens
-    expect(screen.queryByRole("dialog", { name: /Volume/ })).toBeNull();
+    legend("settings", "volume");
+    const dialog = screen.getByRole("dialog", { name: "Volume settings" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog", { name: "Volume settings" })).toBeNull();
 
     legend("remove", "volume");
     expect(lastChartProps.current!.panes!.map((p) => p.id)).toEqual([]);
@@ -4271,5 +4291,200 @@ describe("ChartPage derivatives panes (Story 33.5)", () => {
     const tape = screen.getByRole("complementary", { name: "Liquidation tape" });
     expect(within(tape).getByText("85138.50")).toBeInTheDocument();
     expect(within(tape).getByText("3490.67850")).toBeInTheDocument();
+  });
+});
+
+describe("ChartPage order-flow indicators (Story 33.6)", () => {
+  const paneOf = (id: string) => lastChartProps.current!.panes!.find((p) => p.id === id)!;
+  const legendAction = (action: "hide" | "settings" | "remove", group: string) =>
+    act(() => lastChartProps.current!.onLegendAction!(action, group));
+  let baseCatalog: Awaited<ReturnType<typeof fetchIndicatorCatalog>>;
+
+  beforeEach(async () => {
+    baseCatalog = await fetchIndicatorCatalog();
+    vi.mocked(fetchIndicatorCatalog).mockResolvedValue({
+      ...baseCatalog,
+      VolumeDelta: { params: {}, panel: "histogram", category: "custom", units: { value: "size" } },
+      TradeCount: { params: { split: false }, panel: "histogram", category: "custom", units: { value: "count", buys: "count", sells: "count" } },
+      StoredVWAP: { params: { mode: "session" }, panel: "overlay", category: "custom", units: { value: "price" } },
+      ForcedShare: { params: {}, panel: "histogram", category: "custom", units: { value: "ratio" } },
+    });
+  });
+  afterEach(() => {
+    vi.mocked(fetchIndicatorCatalog).mockResolvedValue(baseCatalog);
+  });
+
+  async function mountWith(entries: object[], values: Record<string, never[]>): Promise<void> {
+    vi.mocked(fetchCoinIndicatorConfig).mockResolvedValueOnce(entries as never);
+    picker.values = values;
+    render(page());
+    await act(async () => {}); // catalog + saved config
+  }
+
+  describe("unit-formatted legends", () => {
+    it("prints each output in its catalog unit at the instrument's precision", async () => {
+      await mountWith(
+        [
+          { name: "VolumeDelta", params: {}, category: "custom" },
+          { name: "TradeCount", params: { split: true }, category: "custom" },
+          { name: "StoredVWAP", params: { mode: "bar" }, category: "custom" },
+          { name: "ForcedShare", params: {}, category: "custom" },
+        ],
+        {
+          "VolumeDelta.value": [],
+          "TradeCount_split=True.buys": [],
+          "TradeCount_split=True.sells": [],
+          "StoredVWAP_mode=bar.value": [],
+          "ForcedShare.value": [],
+        },
+      );
+
+      // precision { price: 2, size: 3 }
+      expect(paneOf("VolumeDelta.value").format!(4, null)).toBe("4.000");
+      expect(paneOf("TradeCount_split=True.buys").format!(7, null)).toBe("7");
+      expect(paneOf("TradeCount_split=True.sells").format!(-3, null)).toBe("-3");
+      expect(paneOf("StoredVWAP_mode=bar.value").format!(1000.05, null)).toBe("1000.05");
+      expect(paneOf("ForcedShare.value").format!(1.25, null)).toBe("125.00%");
+    });
+
+    it("leaves a native entry, and every entry while the precision is unknown, on the default readout", async () => {
+      mocks.precision = null;
+      await mountWith(
+        [
+          { name: "VolumeDelta", params: {}, category: "custom" },
+          { name: "RelativeStrengthIndex", params: { period: 14 }, category: "native" },
+        ],
+        { "VolumeDelta.value": [], "RelativeStrengthIndex_period=14.value": [] },
+      );
+
+      expect(paneOf("VolumeDelta.value").format).toBeUndefined();
+      expect(paneOf("RelativeStrengthIndex_period=14.value").format).toBeUndefined();
+    });
+  });
+
+  describe("the stored Anchored VWAP", () => {
+    const bar = (t: number) => ({ time: t, open: 10, high: 12, low: 9, close: 11 });
+    const STORED = { kind: "anchored_vwap", id: "anchored_vwap-1", time: 200, source: "stored", bands: true, band_color: "#b26a00" };
+    const vwapSpec = () =>
+      lastChartProps.current!.drawings!.find((d) => d.kind === "anchored_vwap")! as unknown as {
+        bands: boolean;
+        points: { time: number; vwap: number; breakBefore?: boolean }[];
+      };
+
+    beforeEach(() => {
+      mocks.candles = [bar(100), bar(200), bar(300), bar(400)];
+      mocks.volume = [100, 200, 300, 400].map((time) => ({ time, value: 1 }));
+    });
+
+    it("hands its own values hook the drawings, and draws the server's values with no bands", async () => {
+      drawingsApi.server = [STORED];
+      storedVwap.result = {
+        values: { "anchored_vwap-1": [{ time: 100 }, { time: 200, value: 12.5 }, { time: 300 }, { time: 400, value: 13.25 }] },
+        errors: {},
+      };
+      await renderReady(page());
+
+      expect(storedVwap.drawings).toEqual([STORED]);
+      // Never a picker pane: the picker's values hook saw no AnchoredStoredVWAP entry.
+      expect(lastChartProps.current!.panes!.some((p) => p.id.startsWith("AnchoredStoredVWAP"))).toBe(false);
+      expect(vwapSpec().bands).toBe(false);
+      expect(vwapSpec().points.map((p) => [p.time, p.vwap, p.breakBefore === true])).toEqual([
+        [200, 12.5, false],
+        [400, 13.25, true],
+      ]);
+      const legend = lastChartProps.current!.legendExtras![0];
+      expect(legend.label).toBe("AVWAP (stored)");
+      expect(legend.format(legend.value!)).toBe("13.25");
+    });
+
+    it("shows the entry's replay error in the drawing's legend row", async () => {
+      drawingsApi.server = [STORED];
+      // Values from a page that did load are not drawn beside the error: a partial line.
+      storedVwap.result = { values: { "anchored_vwap-1": [{ time: 200, value: 12.5 }] }, errors: { "anchored_vwap-1": "no exact stored sum from the anchor 1970-01-01T00:03:20Z: the candle store's first 60 s bar is 1970-01-01T01:00:00Z" } };
+      await renderReady(page());
+
+      const legend = lastChartProps.current!.legendExtras![0] as { text?: string; value: number | null };
+      expect(legend.text).toBe("failed: no exact stored sum from the anchor 1970-01-01T00:03:20Z: the candle store's first 60 s bar is 1970-01-01T01:00:00Z");
+      expect(legend.value).toBeNull();
+      expect(vwapSpec().points).toEqual([]);
+    });
+
+    it("is offered in the drawing's settings, which turn its bands off with a note, and is saved", async () => {
+      vi.useFakeTimers();
+      try {
+        drawingsApi.server = [{ ...STORED, source: "hlc3", bands: true }];
+        await renderReady(page());
+        act(() => lastChartProps.current!.onDrawingSettings!("anchored_vwap-1"));
+        const dialog = screen.getByRole("dialog", { name: "Anchored VWAP settings" });
+        const source = within(dialog).getByLabelText<HTMLSelectElement>("Source");
+        expect(Array.from(source.options).map((o) => o.value)).toEqual(["hlc3", "close", "ohlc4", "stored"]);
+
+        fireEvent.change(source, { target: { value: "stored" } });
+        expect(within(dialog).getByLabelText("Bands on")).toBeDisabled();
+        expect(within(dialog).getByText(/bands need per-trade prices/)).toBeInTheDocument();
+        fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+        await act(async () => {
+          vi.advanceTimersByTime(SAVE_DEBOUNCE_MS + 1);
+        });
+
+        const saved = drawingsApi.save.mock.calls.at(-1)![1] as Record<string, unknown>[];
+        expect(saved[0]).toMatchObject({ id: "anchored_vwap-1", source: "stored" });
+        expect(storedVwap.drawings).toEqual([expect.objectContaining({ id: "anchored_vwap-1", source: "stored" })]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe("the Volume colour", () => {
+    const volumePoints = [
+      { time: 100, value: 10, o: 1, c: 2, buy_v: 3, sell_v: 7 },
+      { time: 200, value: 4, o: 2, c: 1, buy_v: null, sell_v: null },
+    ];
+    const colours = () => paneOf("volume").data.map((d) => d.color);
+
+    beforeEach(() => {
+      mocks.candles = [
+        { time: 100, open: 1, high: 2, low: 1, close: 2 },
+        { time: 200, open: 2, high: 2, low: 1, close: 1 },
+      ];
+      mocks.volume = volumePoints;
+    });
+
+    it("colours by direction by default, the forming bar included", () => {
+      mocks.liveBar = { time: 300, open: 1, high: 2, low: 1, close: 0.5, volume: 5, buy_v: 4, sell_v: 1 };
+      render(page());
+
+      expect(colours()).toEqual([CHART_TOKENS["--chart-up"], CHART_TOKENS["--chart-down"]]);
+      expect(paneOf("volume").data[0]).toEqual({ time: 100, value: 10, color: CHART_TOKENS["--chart-up"] });
+      expect(lastChartProps.current!.liveVolumeColor).toBe(CHART_TOKENS["--chart-down"]);
+    });
+
+    it("colours by delta from the saved layout: the sign, shaded by one-sidedness; unknown flow neutral", () => {
+      layoutApi.server[IID] = layoutOf({ volume_color_by: "delta" });
+      mocks.liveBar = { time: 300, open: 1, high: 2, low: 1, close: 0.5, volume: 5, buy_v: 4, sell_v: 1 };
+      render(page());
+
+      // 3 vs 7: down at 0.4; null flow: the pane's own colour.
+      expect(colours()).toEqual(["rgba(239, 83, 80, 0.4)", paneOf("volume").color]);
+      // The forming bar: 4 vs 1, up at 0.6, though its candle closed down.
+      expect(lastChartProps.current!.liveVolumeColor).toBe("rgba(37, 163, 153, 0.6)");
+    });
+
+    it("the Volume gear sets the mode, repaints and saves it in the layout", () => {
+      render(page());
+      legendAction("settings", "volume");
+      const dialog = screen.getByRole("dialog", { name: "Volume settings" });
+      const select = within(dialog).getByLabelText<HTMLSelectElement>("Colour by");
+      expect(select.value).toBe("direction");
+
+      fireEvent.change(select, { target: { value: "delta" } });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+      expect(screen.queryByRole("dialog", { name: "Volume settings" })).toBeNull();
+      expect(colours()[0]).toBe("rgba(239, 83, 80, 0.4)");
+      cleanup(); // flushes the pending save
+      expect(lastSaved().volume_color_by).toBe("delta");
+    });
   });
 });

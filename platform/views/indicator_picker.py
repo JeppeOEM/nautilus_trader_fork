@@ -38,7 +38,11 @@ params/panel/dispatch, but deliberately does not mirror its `enum_params` round-
 indicator needs an enum-typed param yet -- add it if one does, DESIGN-01) and a custom indicator's
 `replay` receives a `ReplayWindow` (instrument id + window bounds) alongside the candle list, since
 it needs to fetch its own order-book/trade-level/second-snapshot rows for that window -- a candle
-dict alone (o/h/l/c/v) doesn't carry that data.
+dict alone (o/h/l/c/v) doesn't carry that data. Since Story 33.3 a candle dict also carries the bar's
+exact order-flow and liquidation sums, which CVD and Story 33.6's order-flow entries read instead
+(their cumulative modes seeded from an exact store prefix); `DepthWithinBps` is the one entry
+reading raw seconds. Each entry declares its outputs' `units` (the legend's formatting), and an
+unlisted one (`listed=False`) is replayed but never offered.
 
 `CUSTOM_INDICATOR_CATALOG` is filled once, at import, by the registrations below each replay: a
 static table, never mutated at runtime. Per DESIGN-02, the two catalogs stay unaware of each other's contents -- the native half never reads
@@ -51,26 +55,42 @@ coupling to catalog internals.
 import math
 import os
 from collections.abc import Callable
+from collections.abc import Iterable
 from collections.abc import Sequence
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field
+from datetime import UTC
+from datetime import datetime
 from enum import Enum
 from typing import Any
 from typing import Literal
+from typing import NamedTuple
 from typing import Protocol
 
+import numpy as np
 from candles.application import queries
+from candles.domain.fold import FLOW_KEYS
+from candles.domain.fold import LIQUIDATION_KEYS
+from candles.domain.fold import PRECISION_KEYS
 from candles.domain.fold import bucket_start_ms
+from kernel import catalog_files
 from kernel.candle_patterns import CandlePattern
 from kernel.candle_patterns import PatternName
 from kernel.candle_patterns import Thresholds
+from kernel.indicators import bar_vwap
+from kernel.indicators import depth_within_bps
+from kernel.indicators import organic_delta_units
+from kernel.indicators import snapshot_depth
+from kernel.indicators import units_ratio
+from kernel.second_snapshot import BOOK_DEPTH
 from kernel.venues import venue_of
 
 from nautilus_trader import indicators as _ind
 from nautilus_trader.indicators import MovingAverageType
 from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.enums import PriceType
+from views.chart_series import MAX_QUERY_SPAN_SECONDS
 from views.chart_series import CancellationTracker
 from views.chart_series import stored_bar
 
@@ -544,7 +564,20 @@ class CustomIndicatorSpec:
     # A string param's allowed values, served as the catalog's `choices` (the picker's dropdown)
     # and enforced by `check_params`, as a native enum param's are.
     choices: dict[str, list[str]] = field(default_factory=dict)
+    # Output -> one of `INDICATOR_UNITS` (Story 33.6): the legend formats that output at the
+    # instrument's precision through `frontend/src/lib/units.ts`. An output without one keeps the
+    # legend's generic formatting.
+    units: dict[str, str] = field(default_factory=dict)
+    # False keeps the entry out of `custom_catalog_json`, so out of `merged_catalog`: the picker, the
+    # indicator-config PUT, the layout seed and the Technicals refuse it, while the values route
+    # (`replay_entry`) still replays it -- the stored Anchored VWAP drawing's series (Story 33.6).
+    listed: bool = True
 
+
+# What a custom output's value measures (Story 33.6): a price (`price_precision`), a size
+# (`size_precision`), a mean of sizes (finer than the size step: an average of 0.0004 on a 0.001
+# grid must not print as 0), a whole count, or a ratio (shown as a percentage).
+INDICATOR_UNITS = ("price", "size", "size_mean", "count", "ratio")
 
 CUSTOM_INDICATOR_CATALOG: dict[str, CustomIndicatorSpec] = {}
 
@@ -564,10 +597,19 @@ def replay_custom(
 
 
 def custom_catalog_json() -> dict[str, Any]:
-    """`CUSTOM_INDICATOR_CATALOG` serialized for the merged `/data/indicators/catalog` response."""
+    """
+    `CUSTOM_INDICATOR_CATALOG`'s listed entries serialized for the merged
+    `/api/indicators/catalog` response; an unlisted one (`listed=False`) is left out.
+    """
     return {
-        name: {"params": spec.params, "panel": spec.panel, "choices": spec.choices}
+        name: {
+            "params": spec.params,
+            "panel": spec.panel,
+            "choices": spec.choices,
+            "units": spec.units,
+        }
         for name, spec in CUSTOM_INDICATOR_CATALOG.items()
+        if spec.listed
     }
 
 
@@ -581,6 +623,134 @@ def _bucket_ns(ts_ns: int, bar_seconds: int) -> int:
 
 CVD_ANCHORS = ("session", "visible", "all")
 _DAY_SECONDS = 86_400
+_ZERO_TOTALS = queries.FlowTotals(0, 0, 0, 0, 0)
+# Running exact sums at one `_Scale`: (delta, volume) in `10^-size`, pv in `10^-(price + size)`.
+_Running = tuple[int, int, int]
+
+
+class _Scale(NamedTuple):
+    """The finest price and size precision of a replay's bars and store prefixes."""
+
+    price: int
+    size: int
+
+
+def _bar_totals(candle: dict) -> queries.FlowTotals | None:
+    """One bar's stored order flow as `FlowTotals`; None when its flow is null (unknown)."""
+    if candle.get("buy_v") is None:
+        return None
+    if any(
+        candle.get(key) is None for key in ("sell_v", "pv", "price_precision", "size_precision")
+    ):
+        # Impossible by the fold (the flow group and its precisions are null together); a corrupt
+        # row is named, never a bare `TypeError` (DATA-07).
+        raise ValueError(
+            f"bar t={candle['t']}: known buy_v but a null sell_v, pv or precision (a corrupt row)"
+        )
+    buy_v, sell_v, sp = candle["buy_v"], candle["sell_v"], candle["size_precision"]
+    pv_precision = candle["price_precision"] + sp
+    return queries.FlowTotals(buy_v - sell_v, buy_v + sell_v, sp, candle["pv"], pv_precision)
+
+
+def _scale_of(candles: list[dict], seeds: Iterable[queries.FlowTotals | None]) -> _Scale:
+    """Return the finest precisions present: every term is rescaled to them by `10**k`, exactly."""
+    totals = [t for t in (*map(_bar_totals, candles), *seeds) if t is not None]
+    return _Scale(
+        price=max([t.pv_precision - t.size_precision for t in totals], default=0),
+        size=max([t.size_precision for t in totals], default=0),
+    )
+
+
+def _scaled(totals: queries.FlowTotals, scale: _Scale) -> _Running:
+    size_k = scale.size - totals.size_precision
+    pv_k = scale.price + scale.size - totals.pv_precision
+    return (
+        totals.delta_units * 10**size_k,
+        totals.volume_units * 10**size_k,
+        totals.pv_units * 10**pv_k,
+    )
+
+
+def _running_totals(
+    candles: list[dict], seeds: dict[int, queries.FlowTotals | None], scale: _Scale
+) -> list[_Running | None]:
+    """
+    Return the exact running sums at each bar, restarting at every index of `seeds` from that seed (the
+    segment's store prefix, already summed); a None seed (an uncovered prefix) leaves its segment
+    None, and a bar before the first seeded index is None. A bar whose flow is null is None and the
+    total carries on past it, without its term (DATA-01: unknown, never 0, never a reset).
+    """
+    out: list[_Running | None] = []
+    total: _Running | None = None
+    for i, candle in enumerate(candles):
+        if i in seeds:
+            seed = seeds[i]
+            total = None if seed is None else _scaled(seed, scale)
+        bar = _bar_totals(candle)
+        if total is None or bar is None:
+            out.append(None)
+            continue
+        delta, volume, pv = _scaled(bar, scale)
+        total = (total[0] + delta, total[1] + volume, total[2] + pv)
+        out.append(total)
+    return out
+
+
+def _store_prefix(
+    candles: list[dict], window: ReplayWindow, start_ms: int
+) -> queries.FlowTotals | None:
+    """
+    Return the exact stored flow over `[start_ms, the page's first bar)`: the seed of a cumulative
+    mode starting at `start_ms` (a session's UTC midnight, an anchor). Covered when the page's
+    first bar is at or before `start_ms` (the page holds the whole segment: zero), or when the
+    store's first observed bar of the widest stored width tiling the chart's (`stored_bar`) is
+    (`queries.oldest_t`, then one `queries.flow_totals` aggregate); otherwise uncovered, None: no
+    `candles_dir`, no store file, no tiling width (sub-minute and 90 s charts) or a store starting
+    after `start_ms`. A covered range with no known-flow bar is zero (no trade there).
+
+    Known limit: a page older than the 1m/5m retention (`RETAIN_DAYS`), or than the store itself,
+    has no prefix, so its session or anchored values are None -- never a partial sum passed off as
+    whole. Upgrade path: fold the raw seconds of `[start_ms, first bar)` for the prefix.
+    Known limit: like CVD `all`'s prefix, the sum covers *known* stored bars only -- a null-flow bar
+    (pre-migration, until the 33-3 history rebuild) contributes nothing (audit D-161).
+    Known limit: "covered" tests where the store starts, not that it is continuous: a capture outage
+    inside `[start_ms, first bar)` stored no bar, so the prefix sums the observed bars around it,
+    exactly as the running total carries on across an outage inside the page itself (audit D-187).
+    Upgrade path: check the range against the capture's recorded gaps (`archive.application.
+    rebuild_day.coverage`'s gap markers) and return None over one.
+    """
+    if not candles or candles[0]["t"] <= start_ms:
+        return _ZERO_TOTALS
+    width = stored_bar(window.bar_seconds)
+    if window.candles_dir is None or width is None:
+        return None
+    iid = window.instrument_id
+    with queries.open_store(window.candles_dir, venue_of(iid)) as db:
+        if db is None:
+            return None
+        first = queries.oldest_t(db, iid, width, traded_only=False)
+        if first is None or first > start_ms:
+            return None
+        totals = queries.flow_totals(db, iid, width, candles[0]["t"], since_ms=start_ms)
+    return _ZERO_TOTALS if totals is None else totals
+
+
+def _session_seeds(
+    candles: list[dict], window: ReplayWindow
+) -> dict[int, queries.FlowTotals | None]:
+    """
+    Bar index -> seed of each UTC-day session (`bucket_start_ms(t, 86_400)`) in the page: the first
+    session from the store prefix (`_store_prefix`), every later one from zero, since the page holds
+    it from its midnight. At 1D and wider every bar is its own session.
+    """
+    seeds: dict[int, queries.FlowTotals | None] = {}
+    session: int | None = None
+    for i, candle in enumerate(candles):
+        day = bucket_start_ms(candle["t"], _DAY_SECONDS)
+        if day != session:
+            seeds[i] = _store_prefix(candles, window, day) if session is None else _ZERO_TOTALS
+            session = day
+    return seeds
 
 
 def _cvd_replay(
@@ -597,9 +767,12 @@ def _cvd_replay(
     `anchor` picks where the sum starts:
     - `visible`: 0 before the first candle given (net flow within the current view; panning moves
       where it restarts);
-    - `session`: 0 at every UTC day's first bar (`bucket_start_ms(t, 86_400)`), so on 1D and wider
-      every bar is its own session;
-    - `all`: the stored bars before the first candle (`queries.flow_delta_before` at the widest
+    - `session`: 0 at every UTC day's midnight (`bucket_start_ms(t, 86_400)`), so on 1D and wider
+      every bar is its own session. A page starting after its first session's midnight is seeded
+      with the stored bars since that midnight (`_store_prefix`, Story 33.6: before it the sum
+      restarted at the page's first bar, audit D-186); a prefix the store does not cover leaves that
+      session's bars None, never a partial sum;
+    - `all`: the stored bars before the first candle (`queries.flow_totals` at the widest
       stored width dividing `bar_seconds`) plus the running total. Known limit: the store keeps
       1m bars 30 days and 5m bars 90 (`RETAIN_DAYS`), so at 1m/5m/10m "all" starts at that
       retention edge, not at the first trade ever (audit D-159); upgrade path: a per-day delta
@@ -620,29 +793,25 @@ def _cvd_replay(
     so `all` accumulates from 0 at the page's first bar, as `visible` does (audit D-159). Upgrade
     path: the per-day delta table above.
     """
-    anchor = params["anchor"]
-    if anchor not in CVD_ANCHORS:
-        raise ValueError(f"anchor={anchor!r} is not one of the choices {list(CVD_ANCHORS)}")
-    prefix = _cvd_prefix(candles, window) if anchor == "all" else None
-    known = [c["size_precision"] for c in candles if c.get("buy_v") is not None]
-    precision = max([*known, prefix[1] if prefix else 0])
-    total = 0 if prefix is None else prefix[0] * 10 ** (precision - prefix[1])
-    session: int | None = None
-    values: list[float | None] = []
-    for candle in candles:
-        if anchor == "session" and bucket_start_ms(candle["t"], _DAY_SECONDS) != session:
-            session, total = bucket_start_ms(candle["t"], _DAY_SECONDS), 0
-        if candle.get("buy_v") is None:
-            values.append(None)
-            continue
-        delta = candle["buy_v"] - candle["sell_v"]
-        total += delta * 10 ** (precision - candle["size_precision"])
-        values.append(total / 10**precision)
-    return {"value": values}
+    _check_cvd_params(params)
+    seeds = _cvd_seeds(candles, params["anchor"], window)
+    scale = _scale_of(candles, seeds.values())
+    running = _running_totals(candles, seeds, scale)
+    return {"value": [None if r is None else r[0] / 10**scale.size for r in running]}
 
 
-def _cvd_prefix(candles: list[dict], window: ReplayWindow) -> tuple[int, int] | None:
-    """Return the exact stored delta before the first candle, `(units, precision)`, or None."""
+def _cvd_seeds(
+    candles: list[dict], anchor: str, window: ReplayWindow
+) -> dict[int, queries.FlowTotals | None]:
+    if anchor == "session":
+        return _session_seeds(candles, window)
+    if anchor == "all":
+        return {0: _cvd_prefix(candles, window) or _ZERO_TOTALS}
+    return {0: _ZERO_TOTALS}
+
+
+def _cvd_prefix(candles: list[dict], window: ReplayWindow) -> queries.FlowTotals | None:
+    """Return the exact stored flow before the first candle, or None."""
     if window.candles_dir is None:
         raise ValueError("CVD anchor 'all' needs the candle store (no candles_dir given)")
     if not candles:
@@ -655,7 +824,7 @@ def _cvd_prefix(candles: list[dict], window: ReplayWindow) -> tuple[int, int] | 
     with queries.open_store(window.candles_dir, venue_of(window.instrument_id)) as db:
         if db is None:
             return None
-        return queries.flow_delta_before(db, window.instrument_id, width, candles[0]["t"])
+        return queries.flow_totals(db, window.instrument_id, width, candles[0]["t"])
 
 
 def _check_cvd_params(params: dict[str, Any]) -> None:
@@ -671,6 +840,7 @@ CUSTOM_INDICATOR_CATALOG["CumulativeVolumeDelta"] = CustomIndicatorSpec(
     replay=_cvd_replay,
     check_params=_check_cvd_params,
     choices={"anchor": list(CVD_ANCHORS)},
+    units={"value": "size"},
 )
 
 
@@ -868,6 +1038,354 @@ CUSTOM_INDICATOR_CATALOG["OrderFlowImbalance"] = CustomIndicatorSpec(
     panel="oscillator",
     replay=_ofi_replay,
     check_params=_check_positive_window,
+)
+
+
+# -- Story 33.6: order-flow indicators from the bars' stored aggregates -------------------------
+# Every entry below reads the candle dicts' Story 33.3 columns (`candles.domain.fold.AGGREGATE_KEYS`,
+# `docs/DATA_DICTIONARY.md` §2.15), never a raw second, except `DepthWithinBps`. The formulas are
+# `kernel.indicators`' (SSOT-01); a value becomes a float only at the output (DATA-04). A bar whose
+# flow is null (pre-migration) is None, and an organic/forced figure is None on a bar whose
+# liquidations are null (no feed: spot, Hyperliquid, dYdX; or before the feed's start), never 0
+# (DATA-01). None, never an error, for every ordinary condition: the Technicals replay one window
+# for every coin, and one raising column fails them all (`ranking_columns._latest_of_group`).
+
+
+def _flow_values(
+    candles: list[dict], value_of: Callable[[dict], float | None]
+) -> list[float | None]:
+    """`value_of(bar)` for every bar with known flow, None for a null-flow bar."""
+    return [None if c.get("buy_v") is None else value_of(_whole_flow(c)) for c in candles]
+
+
+def _whole_flow(candle: dict) -> dict:
+    """
+    Return `candle` once its known flow group (`FLOW_KEYS`) and precisions are whole. Impossible
+    otherwise by the fold (the group and its precisions are null together); a corrupt row is named,
+    never a bare `TypeError` (DATA-07), as `_bar_totals` does.
+    """
+    _require_whole(candle, (*FLOW_KEYS, *PRECISION_KEYS), "buy_v")
+    return candle
+
+
+def _require_whole(candle: dict, group: tuple[str, ...], known: str) -> None:
+    missing = [key for key in group if candle.get(key) is None]
+    if missing:
+        raise ValueError(
+            f"bar t={candle['t']}: known {known} but a null {', '.join(missing)} (a corrupt row)"
+        )
+
+
+def _size(units: int, candle: dict) -> float:
+    return units / 10 ** candle["size_precision"]
+
+
+def _liquidations_known(candle: dict) -> bool:
+    """Return whether the bar's liquidation group (`LIQUIDATION_KEYS`) is known; a partial raises."""
+    if candle.get("liq_long_v") is None:
+        return False
+    _require_whole(candle, LIQUIDATION_KEYS, "liq_long_v")
+    return True
+
+
+def _volume_delta_replay(
+    candles: list[dict], params: dict[str, Any], window: ReplayWindow
+) -> dict[str, list[float | None]]:
+    """Per bar `buy_v - sell_v` (the bar's own delta, `kernel.indicators.volume_delta`'s per bar)."""
+    return {"value": _flow_values(candles, lambda c: _size(c["buy_v"] - c["sell_v"], c))}
+
+
+def _organic(candle: dict) -> float | None:
+    if not _liquidations_known(candle):
+        return None
+    units = organic_delta_units(
+        candle["buy_v"], candle["sell_v"], candle["liq_long_v"], candle["liq_short_v"]
+    )
+    return _size(units, candle)
+
+
+def _organic_delta_replay(
+    candles: list[dict], params: dict[str, Any], window: ReplayWindow
+) -> dict[str, list[float | None]]:
+    """
+    Per bar the delta without its forced flow, `(buy_v - liq_short_v) - (sell_v - liq_long_v)`
+    (`kernel.indicators.organic_delta_units`: a long liquidation is a forced sell, a short one a
+    forced buy). None where the bar's liquidations are null.
+    """
+    return {"value": _flow_values(candles, _organic)}
+
+
+def _forced_share(candle: dict) -> float | None:
+    if not _liquidations_known(candle):
+        return None
+    sp = candle["size_precision"]
+    forced = candle["liq_long_v"] + candle["liq_short_v"]
+    return units_ratio(forced, sp, candle["buy_v"] + candle["sell_v"], sp)
+
+
+def _forced_share_replay(
+    candles: list[dict], params: dict[str, Any], window: ReplayWindow
+) -> dict[str, list[float | None]]:
+    """
+    Per bar `(liq_long_v + liq_short_v) / (buy_v + sell_v)`: the share of the traded volume that was
+    forced. None at 0 volume and where the liquidations are null.
+
+    Known limit: never clamped, so it can exceed 1 (DATA-07): the liquidations come from Bybit's
+    `allLiquidation` socket and the volume from the trade feed, two streams stamped apart, so a
+    liquidation can land in the bar before or after the trades that filled it, and a trade the
+    feed missed (a recorded gap) lowers the denominator. Upgrade path: match each liquidation to
+    its fill trades (`verification/liquidations.py`'s matcher) and fold the matched volume.
+    """
+    return {"value": _flow_values(candles, _forced_share)}
+
+
+def _check_split(params: dict[str, Any]) -> None:
+    if not isinstance(params.get("split"), bool):
+        raise ValueError(f"split must be a boolean, got {params.get('split')!r}")
+
+
+def _trade_count_replay(
+    candles: list[dict], params: dict[str, Any], window: ReplayWindow
+) -> dict[str, list[float | None]]:
+    """
+    Per bar the trade count `buy_n + sell_n` (`value`), or with `split` the buys (`buys`, up) and
+    the sells (`sells`, drawn down as a negative count).
+    """
+    _check_split(params)
+    if not params["split"]:
+        return {"value": _flow_values(candles, lambda c: float(c["buy_n"] + c["sell_n"]))}
+    return {
+        "buys": _flow_values(candles, lambda c: float(c["buy_n"])),
+        "sells": _flow_values(candles, lambda c: -float(c["sell_n"])),
+    }
+
+
+def _average_trade_size_replay(
+    candles: list[dict], params: dict[str, Any], window: ReplayWindow
+) -> dict[str, list[float | None]]:
+    """Per bar `(buy_v + sell_v) / (buy_n + sell_n)`, exact; None for a bar with no trade."""
+
+    def average(c: dict) -> float | None:
+        volume = c["buy_v"] + c["sell_v"]
+        return units_ratio(volume, c["size_precision"], c["buy_n"] + c["sell_n"], 0)
+
+    return {"value": _flow_values(candles, average)}
+
+
+VWAP_MODES = ("bar", "session")
+
+
+def _check_vwap_mode(params: dict[str, Any]) -> None:
+    if params.get("mode") not in VWAP_MODES:
+        raise ValueError(
+            f"mode={params.get('mode')!r} is not one of the choices {list(VWAP_MODES)}"
+        )
+
+
+def _vwap_values(
+    candles: list[dict], seeds: dict[int, queries.FlowTotals | None]
+) -> list[float | None]:
+    """Return the running `Σpv / ΣV` of `_running_totals`, exact until `bar_vwap`'s one float."""
+    scale = _scale_of(candles, seeds.values())
+    running = _running_totals(candles, seeds, scale)
+    return [None if r is None else bar_vwap(r[2], r[1], scale.price) for r in running]
+
+
+def _stored_vwap_replay(
+    candles: list[dict], params: dict[str, Any], window: ReplayWindow
+) -> dict[str, list[float | None]]:
+    """
+    Return the volume-weighted price from the bars' stored `pv` and volume (`bar_vwap`):
+    `bar`, each bar's own `pv / V`; `session`, the cumulative `Σpv / ΣV` from each UTC midnight
+    (at 1D and wider every bar is its own session), seeded from the store as CVD's `session` is
+    and carrying across a null-flow bar. None at 0 volume and over an uncovered session prefix.
+
+    Known limit: `pv` weights each second's traded volume at that second's close (the second-close
+    VWAP, `candles.domain.fold`), not every trade at its own price, so it can differ from a
+    per-trade VWAP inside a second that swept several levels (audit D-190). Upgrade path: the
+    fold's own, Story 32.8's raw trade reader summing `price x size` per trade.
+    """
+    _check_vwap_mode(params)
+    if params["mode"] == "bar":
+        return {"value": _vwap_values(candles, dict.fromkeys(range(len(candles)), _ZERO_TOTALS))}
+    return {"value": _vwap_values(candles, _session_seeds(candles, window))}
+
+
+def _check_anchor_t(params: dict[str, Any]) -> None:
+    """`anchor_t` is epoch ms as a string of at most 15 ASCII digits (a drawing's bar time)."""
+    anchor = params.get("anchor_t")
+    if not (
+        isinstance(anchor, str) and anchor.isascii() and anchor.isdigit() and len(anchor) <= 15
+    ):
+        raise ValueError(f"anchor_t must be epoch milliseconds as a digit string, got {anchor!r}")
+
+
+def _anchored_vwap_replay(
+    candles: list[dict], params: dict[str, Any], window: ReplayWindow
+) -> dict[str, list[float | None]]:
+    """
+    Return the stored-source Anchored VWAP drawing's line (unlisted: never offered by the picker): the
+    cumulative `Σpv / ΣV` from the bar holding `anchor_t` (`bucket_start_ms` at the chart's width, the
+    bar the drawing's handle snaps to, so the stored line starts where the hlc3/close/ohlc4 ones do),
+    None before it, seeded with the stored bars between that bar and the page's first bar when the
+    page starts after it. An anchor the
+    store does not reach (older than its first bar of the width, or no store) raises `ValueError`
+    naming both times, the drawing's legend error -- never a sum from the page start passed off as
+    one from the anchor. Same second-close `pv` Known limit as `StoredVWAP`.
+    """
+    _check_anchor_t(params)
+    anchor_ms = bucket_start_ms(int(params["anchor_t"]), window.bar_seconds)
+    first = next((i for i, c in enumerate(candles) if c["t"] >= anchor_ms), None)
+    if first is None:
+        return {"value": [None] * len(candles)}
+    prefix = _store_prefix(candles, window, anchor_ms)
+    if prefix is None:
+        raise ValueError(
+            f"no exact stored sum from the anchor {_iso_ms(anchor_ms)}: {_store_start(window)}"
+        )
+    return {"value": _vwap_values(candles, {first: prefix})}
+
+
+def _iso_ms(ms: int) -> str:
+    """Epoch ms as UTC ISO text (`2026-10-06T10:00:00Z`), what a legend error shows a reader."""
+    return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _store_start(window: ReplayWindow) -> str:
+    """Return why the store cannot seed an anchor's sum, naming its first bar when it has one."""
+    width = stored_bar(window.bar_seconds)
+    if width is None:
+        return f"no stored bar width tiles a {window.bar_seconds} s chart"
+    if window.candles_dir is None:
+        return "no candle store"
+    with queries.open_store(window.candles_dir, venue_of(window.instrument_id)) as db:
+        first = (
+            None
+            if db is None
+            else queries.oldest_t(db, window.instrument_id, width, traded_only=False)
+        )
+    if first is None:
+        return f"the candle store holds no {width} s bar"
+    return f"the candle store's first {width} s bar is {_iso_ms(first)}"
+
+
+MAX_DEPTH_BPS = 1000.0
+
+
+def _check_bps(params: dict[str, Any]) -> None:
+    bps = params.get("bps")
+    if isinstance(bps, bool) or not isinstance(bps, int | float) or not 0 < bps <= MAX_DEPTH_BPS:
+        raise ValueError(f"bps must be a number above 0 and at most {MAX_DEPTH_BPS:g}, got {bps!r}")
+
+
+def _last_snapshot_per_bar(
+    candles: list[dict], window: ReplayWindow, read_from_ms: int, end_ms: int
+) -> list[int | None]:
+    """
+    Each bar's last snapshot `ts_event` in `[t, t + bar)` at or after `read_from_ms`, or None:
+    pass one of the two-pass read (`kernel.catalog_files.query_snapshot_times`, one column).
+    """
+    times = catalog_files.query_snapshot_times(
+        _CATALOG_PATH, window.instrument_id, read_from_ms * 1_000_000, end_ms * 1_000_000 - 1
+    )
+    bar_ms = window.bar_seconds * 1000
+    picks: list[int | None] = []
+    for candle in candles:
+        index = int(np.searchsorted(times, (candle["t"] + bar_ms) * 1_000_000)) - 1
+        inside = index >= 0 and times[index] >= candle["t"] * 1_000_000
+        picks.append(int(times[index]) if inside else None)
+    return picks
+
+
+def _depth_at(book: dict[str, Any] | None, bps: float) -> tuple[float | None, float | None]:
+    """Return the bid and ask size within `bps` of one book's mid; None for no book or past it."""
+    profile = None if book is None else snapshot_depth(book, BOOK_DEPTH)
+    if profile is None:
+        return None, None
+    bids, asks = depth_within_bps(profile, [bps])
+    return _finite(bids[0]), _finite(asks[0])
+
+
+def _finite(value: float) -> float | None:
+    return None if math.isnan(value) else value
+
+
+def _depth_within_bps_replay(
+    candles: list[dict], params: dict[str, Any], window: ReplayWindow
+) -> dict[str, list[float | None]]:
+    """
+    Per bar the resting size within `bps` of the mid on each side (`bid`, `ask`) of the bar's last
+    stored 1 s book in `[t, t + bar)` (`kernel.indicators.snapshot_depth` -> `depth_within_bps`):
+    the one entry reading raw seconds. None for a bar with no snapshot, an edge past the stored
+    20 levels (NaN), the live window and every bar ending before the cap.
+
+    Known limit: the read is capped at `MAX_QUERY_SPAN_SECONDS` (7 days) back from the window's end,
+    applied here because the Technicals pass an uncapped window, so at 1D only the last 7 bars and
+    at 1W the last one carry a value, and a bar straddling the cap reads only its seconds after it.
+    The read is two passes, the stamps then only the chosen rows' books (MEM-01). The last snapshot
+    is a point sample: depth that came and went inside the bar is not shown. Upgrade path: a stored
+    per-bar depth aggregate in the candle fold.
+    Known limit (cost): as a Technicals column only the newest closed bar is kept, yet every bar of
+    the capped window is read -- at 1D, up to 7 daily snapshot files' book columns per ranked coin
+    per 90 s cache miss (`query_books_at` reads a file one at a time, row groups pruned by the
+    stamps). Upgrade path: a latest-bar-only window from `ranking_columns.technicals_values`, or the
+    stored per-bar depth above.
+    """
+    _check_bps(params)
+    nothing: list[float | None] = [None] * len(candles)
+    if window.start_ms is None or window.end_ms is None or not candles:
+        return {"bid": nothing, "ask": list(nothing)}
+    read_from = max(window.start_ms, window.end_ms - MAX_QUERY_SPAN_SECONDS * 1000)
+    picks = _last_snapshot_per_bar(candles, window, read_from, window.end_ms)
+    stamps = [p for p in picks if p is not None]
+    books = catalog_files.query_books_at(_CATALOG_PATH, window.instrument_id, stamps)
+    depths = [_depth_at(None if p is None else books.get(p), params["bps"]) for p in picks]
+    return {"bid": [d[0] for d in depths], "ask": [d[1] for d in depths]}
+
+
+CUSTOM_INDICATOR_CATALOG["VolumeDelta"] = CustomIndicatorSpec(
+    params={}, panel="histogram", replay=_volume_delta_replay, units={"value": "size"}
+)
+CUSTOM_INDICATOR_CATALOG["OrganicDelta"] = CustomIndicatorSpec(
+    params={}, panel="histogram", replay=_organic_delta_replay, units={"value": "size"}
+)
+CUSTOM_INDICATOR_CATALOG["ForcedShare"] = CustomIndicatorSpec(
+    params={}, panel="histogram", replay=_forced_share_replay, units={"value": "ratio"}
+)
+CUSTOM_INDICATOR_CATALOG["TradeCount"] = CustomIndicatorSpec(
+    params={"split": False},
+    panel="histogram",
+    replay=_trade_count_replay,
+    check_params=_check_split,
+    units={"value": "count", "buys": "count", "sells": "count"},
+)
+CUSTOM_INDICATOR_CATALOG["AverageTradeSize"] = CustomIndicatorSpec(
+    params={}, panel="oscillator", replay=_average_trade_size_replay, units={"value": "size_mean"}
+)
+CUSTOM_INDICATOR_CATALOG["StoredVWAP"] = CustomIndicatorSpec(
+    params={"mode": "session"},
+    panel="overlay",
+    replay=_stored_vwap_replay,
+    check_params=_check_vwap_mode,
+    choices={"mode": list(VWAP_MODES)},
+    units={"value": "price"},
+)
+# Unlisted: the stored-source Anchored VWAP drawing's series, never a picker entry. Its default
+# `anchor_t` "0" (the epoch) only satisfies `check_params`; the drawing always sends its own bar time.
+CUSTOM_INDICATOR_CATALOG["AnchoredStoredVWAP"] = CustomIndicatorSpec(
+    params={"anchor_t": "0"},
+    panel="overlay",
+    replay=_anchored_vwap_replay,
+    check_params=_check_anchor_t,
+    units={"value": "price"},
+    listed=False,
+)
+CUSTOM_INDICATOR_CATALOG["DepthWithinBps"] = CustomIndicatorSpec(
+    params={"bps": 10.0},
+    panel="oscillator",
+    replay=_depth_within_bps_replay,
+    check_params=_check_bps,
+    units={"bid": "size", "ask": "size"},
 )
 
 

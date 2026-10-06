@@ -19,7 +19,8 @@ and of the raw trade archive's integer columns (`query_trade_columns`, Story 32.
 archived liquidations (`query_liquidations`, and their archive-side start,
 `liquidation_feed_since_ns`, Story 33.3), and of the archived open interest
 (`query_open_interest`, Story 33.4) and mark and index price columns (`query_price_columns`, with
-`newest_ts_event_before` for a sparse page's gap jump, Story 33.4 review).
+`newest_ts_event_before` for a sparse page's gap jump, Story 33.4 review), and of the books at chosen
+stamps (`query_snapshot_times` then `query_books_at`, Story 33.6).
 
 Invariant: reading only. Nothing here writes, renames or deletes a catalog file, or constructs a
 `ParquetDataCatalog` (the catalog object's decoder turns every row's 20-level book into Python
@@ -27,15 +28,16 @@ objects; these helpers read the Parquet files directly with `pyarrow`). The dire
 from Nautilus's own `class_to_filename`, so they can never drift from what `write_data` writes.
 Files are selected by their name's `ts_init` span (`kernel.clocks.CatalogFileSpan`) and rows by
 their exact `ts_event` (MEM-01: callers read one instrument, and the rebuilds one day, at a time).
-Only `query_second_ohlc` and `query_top_of_book` widen the span by `READ_SPAN_MARGIN_NS`
-(`query_index_prices`, `query_price_columns`, `query_trade_columns`, `query_liquidations`,
+Only `query_second_ohlc`, `query_top_of_book` and the two Story 33.6 book readers widen the span by
+`READ_SPAN_MARGIN_NS` (`query_index_prices`, `query_price_columns`, `query_trade_columns`, `query_liquidations`,
 `query_open_interest` and `newest_ts_event_before` by `MAX_TS_INIT_SKEW_NS`);
 `files_by_day` and `data_file_ranges` take the span as written, as their pre-kernel originals did --
 the rebuild re-reads a whole day, so a row whose `ts_init` lands in the neighbouring file is picked
 up there.
 
 The snapshot readers decode the integer layout (Story 30.2) only through `kernel.second_snapshot`'s
-column decoders (`trade_float_columns`, `top_of_book_units`, `price_of`/`quantity_of`); a
+column decoders (`trade_float_columns`, `top_of_book_units`, `book_float_rows`,
+`price_of`/`quantity_of`); a
 float-layout file is refused with `LegacySnapshotLayoutError` (`require_integer_layout`), never
 read.
 """
@@ -43,8 +45,10 @@ read.
 import glob
 import os
 from collections.abc import Callable
+from collections.abc import Sequence
 from decimal import Decimal
 from types import MappingProxyType
+from typing import Any
 from typing import NamedTuple
 
 import numpy as np
@@ -65,6 +69,7 @@ from kernel.second_snapshot import TOP_OF_BOOK_COLUMNS
 from kernel.second_snapshot import VOLUME_UNIT_COLUMNS
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import SecondOHLC
+from kernel.second_snapshot import book_float_rows
 from kernel.second_snapshot import price_of
 from kernel.second_snapshot import quantity_of
 from kernel.second_snapshot import require_integer_layout
@@ -259,6 +264,67 @@ def _top_rows(path: str, start_ns: int, end_ns: int) -> list[TopOfBook]:
         )
         for top in top_of_book_units(table)
     ]
+
+
+def _overlapping_snapshot_files(
+    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int
+) -> list[str]:
+    """Return the instrument's snapshot files whose span meets [start_ns, end_ns] within the margin."""
+    return [
+        path
+        for path in snapshot_files(catalog_path, instrument_id)
+        if CatalogFileSpan.from_path(path).overlaps(start_ns, end_ns, READ_SPAN_MARGIN_NS)
+    ]
+
+
+def query_snapshot_times(
+    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int
+) -> np.ndarray:
+    """
+    Return the `ts_event` of every second-snapshot row in [start_ns, end_ns], ascending, as an
+    int64 array: the first pass of a per-bar book read (Story 33.6's `DepthWithinBps` picks each bar's
+    last row from it). One column leaves the files, so a 7-day window is ~600k integers, never a
+    book (MEM-01); the same file selection as `query_top_of_book`.
+    """
+    arrays = [
+        _read_snapshot_columns(path, ["ts_event"], start_ns, end_ns)
+        .column("ts_event")
+        .to_numpy()
+        .astype(np.int64)
+        for path in _overlapping_snapshot_files(catalog_path, instrument_id, start_ns, end_ns)
+    ]
+    if not arrays:
+        return np.empty(0, dtype=np.int64)
+    return np.sort(np.concatenate(arrays))
+
+
+def query_books_at(
+    catalog_path: str, instrument_id: str, ts_events: Sequence[int]
+) -> dict[int, dict[str, Any]]:
+    """
+    `ts_event` -> the book of the second-snapshot row stamped exactly then, for the given stamps
+    only: the second pass after `query_snapshot_times`. Each dict is `kernel.second_snapshot.
+    book_float_rows`' (`as_floats`' book keys plus `ts_event`), the shape `kernel.indicators.
+    snapshot_depth` takes. A stamp no row carries is absent from the result.
+
+    Only the book columns and the precisions are projected, and rows are filtered by the stamps
+    before any list leaves Arrow, so Python holds one decoded book per selected row (MEM-01).
+    Known limit: a file is still read whole within the stamps' span (its row groups' statistics
+    cannot prune scattered stamps), one file at a time in Arrow memory; upgrade path: the Parquet
+    page index, or a per-bar book column written by the fold.
+    """
+    wanted = sorted(set(ts_events))
+    if not wanted:
+        return {}
+    books: dict[int, dict[str, Any]] = {}
+    for path in _overlapping_snapshot_files(catalog_path, instrument_id, wanted[0], wanted[-1]):
+        require_integer_layout(pq.read_schema(path), path)
+        table = pq.read_table(
+            path, columns=list(TOP_OF_BOOK_COLUMNS), filters=[("ts_event", "in", wanted)]
+        )
+        for book in book_float_rows(table):
+            books[book["ts_event"]] = book
+    return books
 
 
 class IndexPrice(NamedTuple):

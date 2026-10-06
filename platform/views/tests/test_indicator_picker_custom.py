@@ -25,13 +25,17 @@ coverage here -- they use subset/membership assertions, not exact-dict equality,
 entries (CumulativeVolumeDelta and later additions) live in the same module-level catalog.
 """
 
+import re
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 from candles.infrastructure.sqlite_store import CandleStore
 from candles.infrastructure.sqlite_store import db_path_for_venue
+from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import SecondOHLC
+from kernel.tests.snapshot_factory import make_snapshot
 from kernel.venues import venue_of
 
 from nautilus_trader.model.data import BookOrder
@@ -44,6 +48,7 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from views import indicator_picker as ci
+from views.chart_series import MAX_QUERY_SPAN_SECONDS
 from views.indicator_picker import CustomIndicatorSpec
 from views.indicator_picker import ReplayWindow
 
@@ -98,6 +103,7 @@ def test_catalog_json_returns_params_and_panel_per_entry() -> None:
         "params": {"scale": 1.0},
         "panel": "histogram",
         "choices": {},
+        "units": {},
     }
     assert (
         "category" not in ci.custom_catalog_json()["PlaceholderCustom"]
@@ -110,13 +116,36 @@ _HOUR_MS = 3_600_000
 _DAY1_MS = 20_000 * 86_400_000  # a UTC midnight
 
 
-def _flow_bar(t: int, buy_v: int | None, sell_v: int | None, size_precision: int = 1) -> dict:
-    """Build a candle as `candle_page` serves it: only the keys CVD reads besides `t`."""
+def _flow_bar(
+    t: int,
+    buy_v: int | None,
+    sell_v: int | None,
+    size_precision: int = 1,
+    *,
+    price_precision: int = 2,
+    pv: int = 0,
+    buy_n: int = 1,
+    sell_n: int = 1,
+    liq: tuple[int, int, int] | None = None,
+) -> dict:
+    """
+    Build a candle as `candle_page` serves it: `t` and the Story 33.3 aggregates the flow
+    indicators read. `buy_v is None` is a pre-migration bar (the whole flow group and the
+    precisions null); `liq` is `(liq_long_v, liq_short_v, liq_n)`, None for no feed.
+    """
     flow = buy_v is not None
+    liq_long_v, liq_short_v, liq_n = liq if liq is not None else (None, None, None)
     return {
         "t": t,
         "buy_v": buy_v,
         "sell_v": sell_v,
+        "buy_n": buy_n if flow else None,
+        "sell_n": sell_n if flow else None,
+        "pv": pv if flow else None,
+        "liq_long_v": liq_long_v,
+        "liq_short_v": liq_short_v,
+        "liq_n": liq_n,
+        "price_precision": price_precision if flow else None,
         "size_precision": size_precision if flow else None,
     }
 
@@ -152,10 +181,48 @@ def test_cvd_a_null_flow_bar_is_none_and_the_total_carries_on() -> None:
     assert result["value"] == [3.0, None, 5.0]
 
 
-def test_cvd_session_restarts_at_each_utc_day() -> None:
+def test_cvd_session_with_no_store_is_none_until_a_session_the_page_holds_whole() -> None:
+    """
+    Day 1's session starts at 00:00, before the page's first bar (10:00), and no store covers
+    [00:00, 10:00): that session is None, never a sum restarted at 10:00 (audit D-186). Day 2
+    starts inside the page, so it restarts at its midnight from 0.
+    """
     params = {"anchor": "session"}
     result = ci.replay_custom(_MATRIX, "CumulativeVolumeDelta", params, _hourly(_MATRIX))
-    assert result["value"] == [3.0, None, 2.0]
+    assert result["value"] == [None, None, 2.0]
+
+
+def _store_day1_morning(candles_dir: Path, *, from_midnight: bool = True) -> None:
+    """
+    Store two day-1 seconds at size precision 0, each buying 12 and selling 2 at close 1 (price
+    precision 0): delta +10, volume 14, pv 14 each. The first is at 00:00 (the session's start)
+    unless `from_midnight` is False (then 01:00), the second at 09:00.
+    """
+    store = CandleStore(db_path_for_venue(candles_dir, venue_of(_IID)))
+    first_hour = 0 if from_midnight else 1
+    for hour in (first_hour, 9):
+        ts = (_DAY1_MS + hour * _HOUR_MS) * 1_000_000
+        store.apply(_IID, [SecondOHLC(ts, 1.0, 1.0, 1.0, 1.0, 12.0, 2.0, 0, 0, 1, 12, 2, 1, 1)])
+    store.close()
+
+
+def test_cvd_session_is_seeded_with_the_stored_bars_since_midnight(tmp_path: Path) -> None:
+    """
+    The store covers day 1 from 00:00: [00:00, 10:00) adds +20 at size precision 0, run at the
+    page's 1 -> 200 + 30 = 230 -> 23.0 at 10:00; day 2 restarts at its own midnight.
+    """
+    _store_day1_morning(tmp_path)
+    window = _hourly(_MATRIX, str(tmp_path))
+    result = ci.replay_custom(_MATRIX, "CumulativeVolumeDelta", {"anchor": "session"}, window)
+    assert result["value"] == [23.0, None, 2.0]
+
+
+def test_cvd_session_with_a_store_starting_after_midnight_is_none(tmp_path: Path) -> None:
+    """The store's first 1h bar is 01:00, after the session's 00:00: uncovered, never partial."""
+    _store_day1_morning(tmp_path, from_midnight=False)
+    window = _hourly(_MATRIX, str(tmp_path))
+    result = ci.replay_custom(_MATRIX, "CumulativeVolumeDelta", {"anchor": "session"}, window)
+    assert result["value"] == [None, None, 2.0]
 
 
 def test_cvd_session_on_daily_bars_is_each_bars_own_delta() -> None:
@@ -220,6 +287,7 @@ def test_cvd_registered_in_production_catalog_with_correct_shape() -> None:
         "params": {"anchor": "visible"},
         "panel": "oscillator",
         "choices": {"anchor": ["session", "visible", "all"]},
+        "units": {"value": "size"},
     }
 
 
@@ -316,6 +384,7 @@ def test_cancel_pressure_registered_in_production_catalog_with_correct_shape() -
         "params": {"window": 200},
         "panel": "histogram",
         "choices": {},
+        "units": {},
     }
 
 
@@ -471,4 +540,355 @@ def test_ofi_registered_in_production_catalog_with_correct_shape() -> None:
         "params": {"window": 20},
         "panel": "oscillator",
         "choices": {},
+        "units": {},
     }
+
+
+# -- Story 33.6: order-flow indicators from the bars' stored aggregates ---------------------------
+
+
+def _one(name: str, bar: dict, params: dict | None = None, output: str = "value") -> float | None:
+    """Replay `name` over the one bar and return its single value of `output`."""
+    (value,) = ci.replay_custom([bar], name, params or {}, _hourly([bar]))[output]
+    return value
+
+
+_LIQ_BAR = _flow_bar(0, 70, 30, liq=(10, 5, 2))  # size precision 1: 7.0 bought, 3.0 sold
+
+
+def test_volume_delta_is_the_bars_buy_minus_sell() -> None:
+    assert _one("VolumeDelta", _flow_bar(0, 70, 30)) == 4.0
+
+
+def test_organic_delta_takes_long_liquidations_from_sells_and_short_ones_from_buys() -> None:
+    """(70 - 5) - (30 - 10) = 45 units at size precision 1 -> 4.5 (the sign mapping, pinned)."""
+    assert _one("OrganicDelta", _LIQ_BAR) == 4.5
+
+
+def test_without_a_liquidation_feed_only_the_plain_delta_has_a_value() -> None:
+    bar = _flow_bar(0, 70, 30)  # liq_* null: spot, Hyperliquid, or before the feed's start
+    assert _one("OrganicDelta", bar) is None
+    assert _one("ForcedShare", bar) is None
+    assert _one("VolumeDelta", bar) == 4.0
+
+
+def test_forced_share_is_forced_over_traded_volume_and_never_clamped() -> None:
+    assert _one("ForcedShare", _LIQ_BAR) == 0.15  # 15 / 100
+    assert _one("ForcedShare", _flow_bar(0, 7, 3, liq=(20, 5, 3))) == 2.5  # above 1, as is
+
+
+def test_a_quiet_bar_has_a_zero_delta_and_no_share_average_or_vwap() -> None:
+    quiet = _flow_bar(0, 0, 0, buy_n=0, sell_n=0, liq=(0, 0, 0))
+    assert _one("VolumeDelta", quiet) == 0.0
+    assert _one("OrganicDelta", quiet) == 0.0
+    assert _one("ForcedShare", quiet) is None
+    assert _one("AverageTradeSize", quiet) is None
+    assert _one("StoredVWAP", quiet, {"mode": "bar"}) is None
+
+
+def test_a_pre_migration_bar_is_none_for_every_flow_indicator() -> None:
+    bar = _flow_bar(0, None, None)
+    for name in ("VolumeDelta", "OrganicDelta", "ForcedShare", "TradeCount", "AverageTradeSize"):
+        assert _one(name, bar) is None
+    assert _one("StoredVWAP", bar, {"mode": "bar"}) is None
+
+
+def test_trade_count_totals_or_splits_buys_up_and_sells_down() -> None:
+    bar = _flow_bar(0, 70, 30, buy_n=7, sell_n=3)
+    assert _one("TradeCount", bar) == 10.0
+    assert _one("TradeCount", bar, {"split": True}, "buys") == 7.0
+    assert _one("TradeCount", bar, {"split": True}, "sells") == -3.0
+
+
+def test_trade_count_refuses_a_non_boolean_split_at_replay_and_at_save() -> None:
+    with pytest.raises(ValueError, match="split"):
+        ci.replay_custom([_LIQ_BAR], "TradeCount", {"split": 1}, _hourly([_LIQ_BAR]))
+    with pytest.raises(ValueError, match="split"):
+        ci.check_params("TradeCount", {"split": "yes"})
+
+
+def test_average_trade_size_is_exact_volume_over_trades() -> None:
+    """10.5 units of size over 7 trades: 105 / (7 x 10) = 1.5."""
+    assert _one("AverageTradeSize", _flow_bar(0, 100, 5, buy_n=4, sell_n=3)) == 1.5
+
+
+def test_stored_vwap_bar_is_pv_over_volume_at_the_price_scale() -> None:
+    """Pv 1_000_050 at 10^-(2+1) over 10 units of volume at 10^-1: 1_000_050 / (10 x 100)."""
+    bar = _flow_bar(0, 6, 4, price_precision=2, pv=1_000_050)
+    assert _one("StoredVWAP", bar, {"mode": "bar"}) == 1000.05
+
+
+# Day 1 10:00 at (2, 1): 7.0 at 3.00 (pv 300 x 70); 11:00 null; day 2 00:00 at (3, 2): 1.00 at
+# 4.000 (pv 4000 x 100). Each session's VWAP is its own bars' price unless a prefix joins in.
+_VWAP_PAGE = [
+    _flow_bar(_DAY1_MS + 10 * _HOUR_MS, 50, 20, 1, price_precision=2, pv=21_000),
+    _flow_bar(_DAY1_MS + 11 * _HOUR_MS, None, None),
+    _flow_bar(_DAY1_MS + 24 * _HOUR_MS, 60, 40, 2, price_precision=3, pv=400_000),
+]
+
+
+def test_stored_vwap_session_is_seeded_from_the_store_and_carries_across_a_null_bar(
+    tmp_path: Path,
+) -> None:
+    """
+    The store's [00:00, 10:00) holds 28 at price 1 (pv 28 at precision 0); the 10:00 bar adds 7.0
+    at 3.00: (28 + 21) / 35 = 1.4. The null 11:00 bar is None; day 2 restarts: 4.0.
+    """
+    _store_day1_morning(tmp_path)
+    window = _hourly(_VWAP_PAGE, str(tmp_path))
+    result = ci.replay_custom(_VWAP_PAGE, "StoredVWAP", {"mode": "session"}, window)
+    assert result["value"] == [1.4, None, 4.0]
+
+
+def test_stored_vwap_session_with_an_uncovered_prefix_is_none() -> None:
+    result = ci.replay_custom(_VWAP_PAGE, "StoredVWAP", {}, _hourly(_VWAP_PAGE))
+    assert result["value"] == [None, None, 4.0]
+
+
+def test_stored_vwap_session_sums_mixed_precisions_exactly() -> None:
+    """
+    One day, 1.0 at 2.00 (pp 2, sp 1: pv 200 x 10) then 0.10 at 3.000 (pp 3, sp 2: pv 3000 x 10),
+    rescaled to (3, 2): pv 2000 x 10^2 + 30_000 = 230_000 over 100 + 10 = 110 units of 10^-2 ->
+    230_000 / (110 x 10^3) = 2.3 / 1.1.
+    """
+    bars = [
+        _flow_bar(_DAY1_MS, 10, 0, 1, price_precision=2, pv=2000),
+        _flow_bar(_DAY1_MS + _HOUR_MS, 10, 0, 2, price_precision=3, pv=30_000),
+    ]
+    result = ci.replay_custom(bars, "StoredVWAP", {}, _hourly(bars))
+    assert result["value"] == [2.0, 230_000 / 110_000]
+
+
+def test_stored_vwap_on_daily_bars_is_each_bars_own_price() -> None:
+    days = [_flow_bar(_DAY1_MS + d * 86_400_000, 6, 4, pv=300 * (d + 1) * 10) for d in range(2)]
+    window = ReplayWindow(_IID, 86_400, days[0]["t"], days[-1]["t"] + 86_400_000)
+    assert ci.replay_custom(days, "StoredVWAP", {}, window)["value"] == [3.0, 6.0]
+
+
+def test_stored_vwap_refuses_an_unknown_mode() -> None:
+    with pytest.raises(ValueError, match="mode"):
+        ci.replay_custom(_VWAP_PAGE, "StoredVWAP", {"mode": "week"}, _hourly(_VWAP_PAGE))
+    with pytest.raises(ValueError, match="not one of the choices"):
+        ci.check_params("StoredVWAP", {"mode": "week"})
+
+
+_ANCHOR_PAGE = [
+    _flow_bar(_DAY1_MS + 10 * _HOUR_MS, 10, 0, pv=10_000),  # 1.0 at 10.00
+    _flow_bar(_DAY1_MS + 11 * _HOUR_MS, 10, 0, pv=20_000),  # 1.0 at 20.00
+    _flow_bar(_DAY1_MS + 12 * _HOUR_MS, 20, 0, pv=80_000),  # 2.0 at 40.00
+]
+
+
+def _anchored(anchor_ms: int, candles_dir: str | None = None) -> list[float | None]:
+    params = {"anchor_t": str(anchor_ms)}
+    window = _hourly(_ANCHOR_PAGE, candles_dir)
+    return ci.replay_custom(_ANCHOR_PAGE, "AnchoredStoredVWAP", params, window)["value"]
+
+
+def test_anchored_stored_vwap_is_none_before_the_anchor_then_cumulative() -> None:
+    """From 11:00: 20.00, then (20 + 80) / 3.0 units of 10^-1 -> 100_000 / (30 x 100)."""
+    assert _anchored(_DAY1_MS + 11 * _HOUR_MS) == [None, 20.0, 100_000 / 3000]
+
+
+def test_anchored_stored_vwap_before_the_page_is_seeded_from_the_store(tmp_path: Path) -> None:
+    """
+    Anchor 00:00, store from 00:00: 28 at 1.0 (pv 28) before the page, then 1.0 at 10.00:
+    (28 x 1000 + 10_000) / ((280 + 10) x 100) = 38_000 / 29_000.
+    """
+    _store_day1_morning(tmp_path)
+    assert _anchored(_DAY1_MS, str(tmp_path))[0] == 38_000 / 29_000
+
+
+def test_anchored_stored_vwap_inside_a_bar_starts_at_that_bar() -> None:
+    """An anchor at 11:37 on 1h bars is the 11:00 bar's, where the drawing's handle snaps."""
+    assert _anchored(_DAY1_MS + 11 * _HOUR_MS + 37 * 60_000) == _anchored(_DAY1_MS + 11 * _HOUR_MS)
+
+
+def test_anchored_stored_vwap_before_the_store_names_both_times(tmp_path: Path) -> None:
+    """`_DAY1_MS` is 2024-10-04 00:00 UTC (day 20,000); the store starts an hour later."""
+    _store_day1_morning(tmp_path, from_midnight=False)
+    both = r"anchor 2024-10-04T00:00:00Z: .*first 3600 s bar is 2024-10-04T01:00:00Z"
+    with pytest.raises(ValueError, match=both):
+        _anchored(_DAY1_MS, str(tmp_path))
+    with pytest.raises(ValueError, match="no candle store"):
+        _anchored(_DAY1_MS)
+
+
+def test_anchored_stored_vwap_on_an_untiled_width_says_so() -> None:
+    bars = [_flow_bar(_DAY1_MS + 30_000 * i, 1, 0, pv=1000) for i in range(2)]
+    window = ReplayWindow(_IID, 30, bars[0]["t"], bars[-1]["t"] + 30_000)
+    with pytest.raises(ValueError, match="no stored bar width tiles a 30 s chart"):
+        ci.replay_custom(bars, "AnchoredStoredVWAP", {"anchor_t": str(_DAY1_MS - 30_000)}, window)
+
+
+def test_a_bar_with_known_flow_but_null_pv_is_named_not_a_type_error() -> None:
+    bar = {**_flow_bar(_DAY1_MS, 1, 0, pv=1000), "pv": None}
+    with pytest.raises(ValueError, match="corrupt row"):
+        ci.replay_custom([bar], "StoredVWAP", {"mode": "bar"}, _hourly([bar]))
+
+
+@pytest.mark.parametrize(
+    ("name", "params", "nulled"),
+    [
+        ("TradeCount", {"split": False}, "sell_n"),
+        ("TradeCount", {"split": True}, "buy_n"),
+        ("AverageTradeSize", {}, "buy_n"),
+        ("VolumeDelta", {}, "sell_v"),
+        ("VolumeDelta", {}, "size_precision"),
+        ("OrganicDelta", {}, "liq_short_v"),
+        ("ForcedShare", {}, "liq_n"),
+    ],
+)
+def test_a_partial_flow_or_liquidation_group_is_named_not_a_type_error(
+    name: str, params: dict, nulled: str
+) -> None:
+    bar = {**_flow_bar(_DAY1_MS, 7, 3, liq=(1, 1, 2)), nulled: None}
+    with pytest.raises(ValueError, match=f"null {nulled}.*corrupt row"):
+        ci.replay_custom([bar], name, params, _hourly([bar]))
+
+
+def test_anchored_stored_vwap_after_every_bar_is_all_none() -> None:
+    assert _anchored(_DAY1_MS + 13 * _HOUR_MS) == [None, None, None]
+
+
+@pytest.mark.parametrize("anchor", ["", "17e11", "-1", "١٢", "1" * 16, 1_700_000_000_000])
+def test_anchored_stored_vwap_refuses_an_anchor_that_is_not_digits(anchor: object) -> None:
+    with pytest.raises(ValueError, match="anchor_t"):
+        ci.check_params("AnchoredStoredVWAP", {"anchor_t": anchor})
+    with pytest.raises(ValueError, match="anchor_t"):
+        ci.replay_custom(_ANCHOR_PAGE, "AnchoredStoredVWAP", {"anchor_t": anchor}, _window())
+
+
+def test_the_unlisted_anchored_entry_is_absent_from_the_catalog_but_replayed() -> None:
+    """Out of the picker, saved configs and the Technicals; the values route still serves it."""
+    assert "AnchoredStoredVWAP" not in ci.merged_catalog()
+    assert "AnchoredStoredVWAP" not in ci.custom_catalog_json()
+    ci.check_params("AnchoredStoredVWAP", ci.CUSTOM_INDICATOR_CATALOG["AnchoredStoredVWAP"].params)
+    entry = _Request("AnchoredStoredVWAP", {"anchor_t": str(_DAY1_MS + 11 * _HOUR_MS)})
+    by_time, errors = ci.values_by_time(_ANCHOR_PAGE, [entry], _hourly(_ANCHOR_PAGE))
+    assert errors == {}
+    key = ci.indicator_id(entry.name, entry.params) + ".value"
+    assert [by_time[c["t"]][key] for c in _ANCHOR_PAGE] == [None, 20.0, 100_000 / 3000]
+
+
+@dataclass(frozen=True)
+class _Request:
+    name: str
+    params: dict
+    source: str = "close"
+
+
+def test_the_new_entries_are_listed_with_their_units_and_panels() -> None:
+    catalog = ci.merged_catalog()
+    expected = {
+        "VolumeDelta": ("histogram", {"value": "size"}),
+        "OrganicDelta": ("histogram", {"value": "size"}),
+        "ForcedShare": ("histogram", {"value": "ratio"}),
+        "TradeCount": ("histogram", {"value": "count", "buys": "count", "sells": "count"}),
+        "AverageTradeSize": ("oscillator", {"value": "size_mean"}),
+        "StoredVWAP": ("overlay", {"value": "price"}),
+        "DepthWithinBps": ("oscillator", {"bid": "size", "ask": "size"}),
+    }
+    for name, (panel, units) in expected.items():
+        assert (catalog[name]["panel"], catalog[name]["units"], catalog[name]["category"]) == (
+            panel,
+            units,
+            "custom",
+        )
+    assert catalog["StoredVWAP"]["choices"] == {"mode": ["bar", "session"]}
+    assert catalog["StoredVWAP"]["params"] == {"mode": "session"}
+    assert catalog["TradeCount"]["params"] == {"split": False}
+    assert catalog["DepthWithinBps"]["params"] == {"bps": 10.0}
+
+
+def test_every_custom_unit_is_a_known_unit() -> None:
+    for spec in ci.CUSTOM_INDICATOR_CATALOG.values():
+        assert set(spec.units.values()) <= set(ci.INDICATOR_UNITS)
+
+
+# -- DepthWithinBps over a real snapshot catalog ----------------------------------------------
+
+_MIN_MS = 60_000
+_DEPTH_T0_MS = _DAY1_MS + 10 * _HOUR_MS
+
+
+def _depth_snapshot(ts_ms: int, bid_size: float) -> DydxSecondSnapshot:
+    """Build a book around mid 100 at 5 bps and 10 bps each side; the bid's touch size varies."""
+    return make_snapshot(
+        _IID,
+        bid_prices=[99.95, 99.9],
+        bid_sizes=[bid_size, 2.0],
+        ask_prices=[100.05, 100.1],
+        ask_sizes=[3.0, 4.0],
+        ts_event=(ts_ms + 500) * 1_000_000,
+    )
+
+
+def _depth_catalog(root: Path) -> None:
+    """Minute 0: two snapshots (the later, bid 1.5, is the bar's); minute 1: none; minute 2: one."""
+    ParquetDataCatalog(str(root)).write_data(
+        [
+            _depth_snapshot(_DEPTH_T0_MS, 9.0),
+            _depth_snapshot(_DEPTH_T0_MS + 30_000, 1.5),
+            _depth_snapshot(_DEPTH_T0_MS + 2 * _MIN_MS + 59_000, 0.5),
+        ]
+    )
+
+
+def _depth(
+    monkeypatch: pytest.MonkeyPatch, root: Path, bps: float, end_ms: int | None = None
+) -> dict[str, list[float | None]]:
+    _depth_catalog(root)
+    monkeypatch.setattr(ci, "_CATALOG_PATH", str(root))
+    bars = [{"t": _DEPTH_T0_MS + k * _MIN_MS} for k in range(3)]
+    end = _DEPTH_T0_MS + 3 * _MIN_MS if end_ms is None else end_ms
+    window = ReplayWindow(_IID, 60, _DEPTH_T0_MS, end)
+    return ci.replay_custom(bars, "DepthWithinBps", {"bps": bps}, window)
+
+
+def test_depth_within_bps_reads_each_bars_last_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Within 8 bps only the 5 bps levels count: bid 1.5 (minute 0's last row), ask 3.0."""
+    result = _depth(monkeypatch, tmp_path, 8.0)
+    assert result == {"bid": [1.5, None, 0.5], "ask": [3.0, None, 3.0]}
+
+
+def test_depth_past_the_stored_levels_is_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The deepest stored level is 10 bps out: the size within 20 bps is unknown (NaN), so None."""
+    assert _depth(monkeypatch, tmp_path, 20.0) == {"bid": [None] * 3, "ask": [None] * 3}
+
+
+def test_depth_reads_nothing_older_than_the_seven_day_cap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With the window's end 7 days + 90 s after minute 0, minute 0 ends before the cap: None."""
+    end = _DEPTH_T0_MS + MAX_QUERY_SPAN_SECONDS * 1000 + 90_000
+    result = _depth(monkeypatch, tmp_path, 8.0, end_ms=end)
+    assert result == {"bid": [None, None, 0.5], "ask": [None, None, 3.0]}
+
+
+def test_depth_in_the_live_window_is_none() -> None:
+    result = ci.replay_custom([{"t": 0}], "DepthWithinBps", {}, _window())
+    assert result == {"bid": [None], "ask": [None]}
+
+
+@pytest.mark.parametrize("bps", [0, -1.0, 1000.5, True])
+def test_depth_refuses_bps_outside_its_range(bps: object) -> None:
+    with pytest.raises(ValueError, match="bps"):
+        ci.check_params("DepthWithinBps", {"bps": bps})
+    with pytest.raises(ValueError, match="bps"):
+        ci.replay_custom([{"t": 0}], "DepthWithinBps", {"bps": bps}, _window())
+
+
+def test_indicator_units_mirror_the_frontend() -> None:
+    # The legend formatter ignores a unit it does not know (the generic readout), so a unit added on
+    # one side only would silently drop its precision formatting.
+    source = (Path(__file__).parents[2] / "frontend/src/lib/indicatorFormat.ts").read_text()
+    match = re.search(r"export const INDICATOR_UNITS = \[([^\]]*)\]", source)
+    assert match is not None
+    assert tuple(part.strip(' "') for part in match.group(1).split(",")) == ci.INDICATOR_UNITS
+    used = {unit for spec in ci.CUSTOM_INDICATOR_CATALOG.values() for unit in spec.units.values()}
+    assert used <= set(ci.INDICATOR_UNITS)

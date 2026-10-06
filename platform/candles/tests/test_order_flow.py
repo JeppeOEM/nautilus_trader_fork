@@ -20,6 +20,7 @@ stated precisions, `pv` in `10^-(price_precision + size_precision)`. The fold, t
 (migration aside: `test_schema_is_frozen.py`) and the rebuild over a real catalog.
 """
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -549,39 +550,69 @@ def test_prune_drops_applied_ids_past_the_catch_up_horizon(tmp_path: Path) -> No
     assert db.execute("SELECT COUNT(*) FROM liquidations_applied").fetchone() == (0,)
 
 
-def test_flow_delta_before_sums_mixed_precision_exactly(tmp_path: Path) -> None:
+def _three_minutes(db: sqlite3.Connection) -> None:
     """
-    Minute 0 at size precision 2: buys 5, sells 2 (delta 3 = 30 at 3); minute 1 at 3: buys 7,
-    sells 9 (delta -2); minute 2 not before the cursor. 30 - 2 = 28 at precision 3.
+    Minute 0 at (price, size) precision (1, 2): close 1.0, buys 5, sells 2 (pv 10 x 7 = 70 at
+    10^-3); minute 1 at (2, 3): close 1.00, buys 7, sells 9 (pv 100 x 16 = 1600 at 10^-5); minute 2
+    at (1, 3): close 1.0, buys 100 (pv 10 x 100 = 1000 at 10^-4).
+    """
+    sqlite_store.apply_seconds(db, _SPOT, [_sec(0, 10, 5, 2, 1, 1, (1, 2))])
+    sqlite_store.apply_seconds(db, _SPOT, [_sec(60, 100, 7, 9, 1, 1, (2, 3))])
+    sqlite_store.apply_seconds(db, _SPOT, [_sec(120, 10, 100, 0, 1, 0, (1, 3))])
+
+
+def test_flow_totals_sum_mixed_precisions_exactly(tmp_path: Path) -> None:
+    """
+    Minutes 0 and 1, rescaled to size precision 3 and price precision 2: delta 30 - 2 = 28,
+    volume 70 + 16 = 86, pv 70 x 10^2 + 1600 = 8600 at 10^-5 (a VWAP of 8600 / (86 x 10^2) = 1.0).
     """
     db = _db(tmp_path)
-    sqlite_store.apply_seconds(db, _SPOT, [_sec(0, 10, 5, 2, 1, 1, (1, 2))])
-    sqlite_store.apply_seconds(db, _SPOT, [_sec(60, 10, 7, 9, 1, 1, (1, 3))])
-    sqlite_store.apply_seconds(db, _SPOT, [_sec(120, 10, 100, 0, 1, 0, (1, 3))])
-    assert queries.flow_delta_before(db, _SPOT, 60, _DAY0_MS + 120_000) == (28, 3)
-    assert queries.flow_delta_before(db, _SPOT, 60, _DAY0_MS) is None
-    assert queries.flow_delta_before(db, _SPOT, 300, 1 << 62) == (128, 3)
+    _three_minutes(db)
+    totals = queries.flow_totals(db, _SPOT, 60, _DAY0_MS + 120_000)
+    assert totals == queries.FlowTotals(28, 86, 3, 8600, 5)
+    assert queries.flow_totals(db, _SPOT, 60, _DAY0_MS) is None
+    assert queries.flow_totals(db, _SPOT, 300, 1 << 62) == queries.FlowTotals(128, 186, 3, 18600, 5)
 
 
-def test_flow_delta_before_ignores_a_liquidation_only_row(tmp_path: Path) -> None:
+def test_flow_totals_since_bounds_the_range_below_inclusively(tmp_path: Path) -> None:
+    """Minutes 1 and 2 only: delta -2 + 100, volume 16 + 100, pv 1600 + 1000 x 10 at 10^-5."""
+    db = _db(tmp_path)
+    _three_minutes(db)
+    totals = queries.flow_totals(db, _SPOT, 60, 1 << 62, since_ms=_DAY0_MS + 60_000)
+    assert totals == queries.FlowTotals(98, 116, 3, 11600, 5)
+    assert queries.flow_totals(db, _SPOT, 60, 1 << 62, since_ms=_DAY0_MS + 180_000) is None
+
+
+def test_flow_totals_add_up_across_utc_days(tmp_path: Path) -> None:
+    """The per-day grouping only splits the SQLite sums: two days still total as one range."""
+    db = _db(tmp_path)
+    sqlite_store.apply_seconds(db, _SPOT, [_sec(0, 10, 5, 2, 1, 1, (1, 3))])
+    sqlite_store.apply_seconds(db, _SPOT, [_sec(86_400, 10, 1, 4, 1, 1, (1, 3))])
+    assert queries.flow_totals(db, _SPOT, 60, 1 << 62) == queries.FlowTotals(0, 12, 3, 120, 4)
+
+
+def test_flow_totals_ignore_a_liquidation_only_row(tmp_path: Path) -> None:
     """
     Minute 0 observed at size precision 2: buys 5, sells 2, delta 3. A liquidation-only row at
-    minute 5 (`seconds_observed` 0, flow 0, size precision 4) observed nothing: the anchor stays
-    (3, 2), not (300, 4).
+    minute 5 (`seconds_observed` 0, flow 0, size precision 4) observed nothing: the totals stay at
+    size precision 2, not 4.
     """
     db = _db(tmp_path)
     sqlite_store.apply_seconds(db, _LINEAR, [_sec(0, 10, 5, 2, 1, 1, (1, 2))])
     sqlite_store.apply_liquidations(db, _LINEAR, [_liq("a", 300, 4, sp=4)])
-    assert queries.flow_delta_before(db, _LINEAR, 60, 1 << 62) == (3, 2)
+    assert queries.flow_totals(db, _LINEAR, 60, 1 << 62) == queries.FlowTotals(3, 7, 2, 70, 3)
 
 
-def test_flow_delta_before_refuses_known_flow_without_a_precision(tmp_path: Path) -> None:
-    """A corrupt row (flow known, `size_precision` null: impossible by the fold) is named."""
+@pytest.mark.parametrize("column", ["size_precision", "price_precision", "pv"])
+def test_flow_totals_refuse_known_flow_without_a_precision_or_pv(
+    tmp_path: Path, column: str
+) -> None:
+    """A corrupt row (flow known, a precision or `pv` null: impossible by the fold) is named."""
     db = _db(tmp_path)
     sqlite_store.apply_seconds(db, _SPOT, [_sec(0, 10, 5, 2, 1, 1, (1, 2))])
-    db.execute("UPDATE candles SET size_precision = NULL WHERE bar_seconds = 60")
-    with pytest.raises(ValueError, match="no size_precision"):
-        queries.flow_delta_before(db, _SPOT, 60, 1 << 62)
+    db.execute(f"UPDATE candles SET {column} = NULL WHERE bar_seconds = 60")  # noqa: S608
+    with pytest.raises(ValueError, match="no precision or no pv"):
+        queries.flow_totals(db, _SPOT, 60, 1 << 62)
 
 
 # -- the rebuild over a real catalog ---------------------------------------------------------------

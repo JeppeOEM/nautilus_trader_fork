@@ -91,6 +91,9 @@ class IndicatorCatalogEntry(BaseModel):
     choices: dict[str, list[str]] = {}
     # True only for a native indicator fed exactly the close: the legend's Source select (32.3).
     source_selectable: bool = False
+    # Output -> `price`/`size`/`size_mean`/`count`/`ratio` (`indicator_picker.INDICATOR_UNITS`, Story 33.6): the
+    # legend formats that output at the instrument's precision; `{}` (every native entry) = generic.
+    units: dict[str, str] = {}
 
 
 @router.get("/api/indicators/catalog")

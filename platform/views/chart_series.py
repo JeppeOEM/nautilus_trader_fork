@@ -758,8 +758,10 @@ def indicator_values_page(
         # the cap has no input read, so its custom value is None -- a gap, never a fabricated one.
         # Known limit: at 1D only the last 7 bars, and at 1W only the last bar, carry a cancel
         # pressure or delta OFI value; upgrade path: a stored per-bar aggregate of these inputs
-        # (like the candle store's order flow), read instead of replaying raw rows. CVD reads the
-        # bars' own `buy_v`/`sell_v` (Story 33.3), so every bar of every width carries it.
+        # (like the candle store's order flow), read instead of replaying raw rows. CVD and Story
+        # 33.6's order-flow entries read the bars' own stored aggregates (Story 33.3), so every bar
+        # of every width carries them; `DepthWithinBps` applies this same cap inside its replay,
+        # since the Technicals' window is not capped.
         start_ms=max(kept[0]["t"], end_ms - MAX_QUERY_SPAN_SECONDS * 1000),
         end_ms=end_ms,
         candles_dir=candles_dir,

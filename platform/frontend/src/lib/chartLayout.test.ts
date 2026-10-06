@@ -10,6 +10,7 @@ import {
   FOOTPRINT_MODES,
   MAX_FOOTPRINT_ROW_TICKS,
   PROFILE_KINDS,
+  VOLUME_COLOR_MODES,
   layoutForSave,
   normalizeLayout,
   sameLayout,
@@ -257,5 +258,39 @@ describe("the derivatives layout table (Story 33.5)", () => {
 
     expect(fallbacks).toEqual(["derivatives"]);
     expect(layout.derivatives).toEqual(BUILT_IN_LAYOUT.derivatives);
+  });
+});
+
+describe("the volume colour mode (Story 33.6)", () => {
+  const { volume_color_by: _v, ...preVolumeColor } = BUILT_IN_LAYOUT;
+
+  it("has the server's modes and defaults to direction (views/preferences.py mirrors them)", () => {
+    expect(VOLUME_COLOR_MODES).toEqual(["direction", "delta"]);
+    expect(BUILT_IN_LAYOUT.volume_color_by).toBe("direction");
+  });
+
+  it("loads a layout saved before it colouring by direction, silently", () => {
+    const { layout, fallbacks } = normalizeLayout(preVolumeColor);
+
+    expect(fallbacks).toEqual([]);
+    expect(errors).not.toHaveBeenCalled();
+    expect(layout.volume_color_by).toBe("direction");
+  });
+
+  it("round-trips delta through the save, and a change is a change", () => {
+    const { layout, fallbacks } = normalizeLayout({ ...BUILT_IN_LAYOUT, volume_color_by: "delta" });
+
+    expect(fallbacks).toEqual([]);
+    expect(layout.volume_color_by).toBe("delta");
+    expect(layoutForSave(layout).volume_color_by).toBe("delta");
+    expect(sameLayout(layout, { ...layout, volume_color_by: "direction" })).toBe(false);
+  });
+
+  it("falls back to direction by name for a mode it does not know", () => {
+    const { layout, fallbacks } = normalizeLayout({ ...BUILT_IN_LAYOUT, volume_color_by: "buy_sell" });
+
+    expect(fallbacks).toEqual(["volume_color_by"]);
+    expect(layout.volume_color_by).toBe("direction");
+    expect(errors).toHaveBeenCalledTimes(1);
   });
 });

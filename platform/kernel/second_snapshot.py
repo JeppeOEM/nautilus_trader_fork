@@ -77,6 +77,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import chain
 from itertools import pairwise
+from typing import Any
 from typing import Literal
 from typing import NamedTuple
 from typing import Protocol
@@ -792,6 +793,34 @@ def top_of_book_units(table: pa.Table) -> list[TopOfBookUnits]:
     columns += [_precisions(table, name).tolist() for name in PRECISION_COLUMNS]
     columns += [pc.list_element(table.column(name), 0).to_pylist() for name in _TOP_COLUMNS]
     return [TopOfBookUnits(*values) for values in zip(*columns, strict=True)]
+
+
+_SIDES: tuple[Side, Side] = ("bid", "ask")
+
+
+def book_float_rows(table: pa.Table) -> list[dict[str, Any]]:
+    """
+    Every row of a table holding `TOP_OF_BOOK_COLUMNS`, as the book half of `as_floats` (Story
+    33.6): `ts_event`, the two precisions and the four lists, prices decoded from the gap layout
+    (`decode_book_prices`) and every value `unit_float` at the row's stored precisions. A null list
+    reads as an empty side, as `top_of_book_units` treats it. For the few rows a reader selected
+    (`kernel.catalog_files.query_books_at`), never a long window: each row's book becomes Python
+    objects here (MEM-01).
+    """
+    price_p = _precisions(table, "price_precision").tolist()
+    size_p = _precisions(table, "size_precision").tolist()
+    ts_event = table.column("ts_event").to_pylist()
+    lists = {name: table.column(name).to_pylist() for name in _TOP_COLUMNS}
+    rows: list[dict[str, Any]] = []
+    for i, ts in enumerate(ts_event):
+        pp, sp = price_p[i], size_p[i]
+        book: dict[str, Any] = {"ts_event": ts, "price_precision": pp, "size_precision": sp}
+        for side in _SIDES:
+            prices = decode_book_prices(lists[f"{side}_prices"][i] or [], side)
+            book[f"{side}_prices"] = [unit_float(u, pp) for u in prices]
+            book[f"{side}_sizes"] = [unit_float(u, sp) for u in lists[f"{side}_sizes"][i] or []]
+        rows.append(book)
+    return rows
 
 
 # -- the columnar batch encoder (Story 28.2): the flush's path into `write_data` ------------------

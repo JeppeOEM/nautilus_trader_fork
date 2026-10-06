@@ -22,6 +22,13 @@ import type { TimedBar } from "./sessionProfile";
 export const VWAP_SOURCES = ["hlc3", "close", "ohlc4"] as const;
 export type VwapSource = (typeof VWAP_SOURCES)[number];
 export const DEFAULT_VWAP_SOURCE: VwapSource = "hlc3";
+// Story 33.6: the Anchored VWAP drawing's sources -- the bar prices above plus `stored`, the bars'
+// exact stored `pv` and volume from the backend's unlisted `AnchoredStoredVWAP` entry. Mirrored by
+// `views/preferences.py`'s `ANCHORED_VWAP_SOURCES` (`test_anchored_vwap_sources_mirror_the_frontend`).
+export const ANCHORED_VWAP_SOURCES = ["hlc3", "close", "ohlc4", "stored"] as const;
+export type AnchoredVwapSource = (typeof ANCHORED_VWAP_SOURCES)[number];
+/** The source whose line the server computes (`AnchoredStoredVWAP`); it has no bands. */
+export const STORED_VWAP_SOURCE = "stored" satisfies AnchoredVwapSource;
 
 /** The price a bar contributes to the average. */
 export function sourcePrice(bar: TimedBar, source: VwapSource): number {
@@ -128,4 +135,41 @@ export function breakAtGaps(points: readonly VwapPoint[], chartBars: readonly { 
   }
   for (; i < points.length; i++) out.push(points[i]);
   return out;
+}
+
+/**
+ * Story 33.6: the stored-source Anchored VWAP's points from the values the server replayed for it
+ * (`AnchoredStoredVWAP`, `Σpv / ΣV` from the anchor, one value per bar: `null`/absent before the
+ * anchor, for a bar with no stored flow, and for a gap slot). No maths here: each value is the
+ * point, at or after `anchorTime`; a missing value between two points breaks the line
+ * (`breakBefore`), like `breakAtGaps`. There are no bands (`sd` 0): the stored columns carry no
+ * per-trade prices to spread them.
+ */
+export function storedVwapPoints(
+  values: readonly { time: unknown; value?: number | null }[],
+  anchorTime: number,
+): VwapPoint[] {
+  const points: VwapPoint[] = [];
+  let missing = false;
+  for (const datum of values) {
+    const time = datum.time as number;
+    if (time < anchorTime) continue;
+    const vwap = datum.value;
+    if (typeof vwap !== "number" || !Number.isFinite(vwap)) {
+      missing = points.length > 0;
+      continue;
+    }
+    points.push({
+      time,
+      vwap,
+      sd: 0,
+      upper1: vwap,
+      lower1: vwap,
+      upper2: vwap,
+      lower2: vwap,
+      ...(missing ? { breakBefore: true } : {}),
+    });
+    missing = false;
+  }
+  return points;
 }

@@ -27,6 +27,7 @@ from collections.abc import Iterator
 from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
+from typing import NamedTuple
 
 from kernel.liquidation import Liquidation
 from kernel.second_snapshot import SecondRow
@@ -277,42 +278,78 @@ def candle_dicts_for_window(
     ]
 
 
-def flow_delta_before(
-    db: sqlite3.Connection, iid: str, bar_seconds: int, before_ms: int
-) -> tuple[int, int] | None:
+class FlowTotals(NamedTuple):
     """
-    Return the exact sum of `buy_v - sell_v` over the instrument's stored bars of one width with `t < before_ms`
-    and known flow, as `(units, size_precision)`: the CVD `all` anchor (Story 33.3). One indexed
-    SQLite aggregate per precision present (`GROUP BY size_precision`), rescaled here to the finest
-    by `10**k`, exact in Python integers; no row reaches Python (MEM-01). None when the store holds
-    no such bar (an unmigrated file included).
+    Exact sums over stored bars, each rescaled to the finest precision present: `delta_units`
+    (`buy_v - sell_v`) and `volume_units` (`buy_v + sell_v`) in `10^-size_precision`, `pv_units`
+    in `10^-pv_precision`, where `pv_precision` is the finest price precision plus the finest size
+    precision (so `pv / (volume * 10^(pv_precision - size_precision))` is the VWAP,
+    `kernel.indicators.bar_vwap`).
+    """
 
-    Known limit: the aggregate is O(stored bars of that width before the window), at most 43,200
-    rows at 1m (`RETAIN_DAYS`). Upgrade path: a per-day delta table summed by day.
+    delta_units: int
+    volume_units: int
+    size_precision: int
+    pv_units: int
+    pv_precision: int
 
-    Known limit: SQLite's `SUM` over INTEGER raises "integer overflow" past int64 rather than wrap;
-    that reaches the caller as `sqlite3.OperationalError`, a loud failure, never a wrong total.
+
+def flow_totals(
+    db: sqlite3.Connection,
+    iid: str,
+    bar_seconds: int,
+    before_ms: int,
+    since_ms: int | None = None,
+) -> FlowTotals | None:
+    """
+    Return the exact order-flow sums of the instrument's stored bars of one width with
+    `since_ms <= t < before_ms` (no lower bound when `since_ms` is None) and known flow: the store
+    prefix of CVD's `all` and `session` anchors and of the stored VWAP's session and anchored modes
+    (Stories 33.3 and 33.6). One indexed SQLite aggregate grouped by the two precisions and the UTC
+    day, rescaled here to the finest by `10**k`, exact in Python integers; only those group rows reach
+    Python, never a bar (MEM-01). None when the store holds no such bar (an unmigrated file
+    included).
+
+    Grouped per UTC day too, so no SQLite `SUM` (which raises "integer overflow" past int64 rather
+    than wrap) ever spans more than a day: a day's sum of any stored width equals that day's stored
+    1D bar, which the store write already holds inside int64 (`check_storable`), so a long anchored
+    `pv` sum (BTC spot's ~2e17 a day) never overflows. Known limit: the aggregate is O(stored bars of
+    that width in the range), at most 43,200 rows at 1m (`RETAIN_DAYS`), and returns one row per day
+    and precision pair. Upgrade path: a per-day totals table summed by day.
 
     Only observed bars count (`seconds_observed > 0`): a liquidation-only row carries flow 0 at
     its liquidation's size precision, which would add nothing but could raise the returned
-    precision. A row with known flow but no `size_precision` cannot exist (`domain.fold`: the
-    precisions are null only when both integer groups are) -- its units would be unreadable, so it
-    raises `ValueError` naming the instrument and width rather than being skipped (DATA-07).
+    precision. A row with known flow but no precision or no `pv` cannot exist (`domain.fold`: the
+    flow group is null together, and the precisions only when both integer groups are) -- its units
+    would be unreadable, so it raises `ValueError` naming the instrument and width rather than
+    being skipped (DATA-07).
     """
     if "buy_v" not in table_columns(db):
         return None
     rows = db.execute(
-        "SELECT size_precision, SUM(buy_v - sell_v) FROM candles WHERE instrument_id = ? "
-        "AND bar_seconds = ? AND t < ? AND buy_v IS NOT NULL AND seconds_observed > 0 "
-        "GROUP BY size_precision",
-        (iid, bar_seconds, before_ms),
+        "SELECT price_precision, size_precision, SUM(buy_v - sell_v), SUM(buy_v + sell_v), "
+        "SUM(pv), COUNT(*) - COUNT(pv) FROM candles WHERE instrument_id = ? AND bar_seconds = ? "
+        "AND t >= ? AND t < ? AND buy_v IS NOT NULL AND seconds_observed > 0 "
+        "GROUP BY price_precision, size_precision, t / 86400000",
+        (iid, bar_seconds, -(1 << 62) if since_ms is None else since_ms, before_ms),
     ).fetchall()
     if not rows:
         return None
-    if any(p is None for p, _units in rows):
+    if any(pp is None or sp is None or missing_pv for pp, sp, *_sums, missing_pv in rows):
         raise ValueError(
-            f"{iid} {bar_seconds}s: a stored bar has known flow but no size_precision before "
+            f"{iid} {bar_seconds}s: a stored bar has known flow but no precision or no pv before "
             f"t={before_ms}: its units cannot be read (impossible by the fold; a corrupt row)"
         )
-    precision = max(row[0] for row in rows)
-    return sum(units * 10 ** (precision - p) for p, units in rows), precision
+    return _rescaled_totals(rows)
+
+
+def _rescaled_totals(rows: list[tuple]) -> FlowTotals:
+    """Sum `flow_totals`' group rows, each rescaled to the finest price and size precision."""
+    price_p = max(row[0] for row in rows)
+    size_p = max(row[1] for row in rows)
+    delta = volume = pv = 0
+    for pp, sp, delta_units, volume_units, pv_units, _missing in rows:
+        delta += delta_units * 10 ** (size_p - sp)
+        volume += volume_units * 10 ** (size_p - sp)
+        pv += pv_units * 10 ** (price_p + size_p - pp - sp)
+    return FlowTotals(delta, volume, size_p, pv, price_p + size_p)
