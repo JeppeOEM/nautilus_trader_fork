@@ -181,3 +181,27 @@ def test_loops_are_added_only_before_run(tmp_path: Path) -> None:
     c._started = True  # as `run()` leaves it
     with pytest.raises(RuntimeError, match="would never run"):
         c.add_loops(loop)
+
+
+def test_the_first_round_runs_before_the_first_sleep(tmp_path: Path) -> None:
+    """DW-237: a process restarting faster than the period still records a poll."""
+    c = _collector(tmp_path)
+    rounds = 0
+
+    async def fetch() -> PolledRows:
+        nonlocal rounds
+        rounds += 1
+        return PolledRows([_oi(_BYBIT)], [])
+
+    async def scenario() -> None:
+        task = asyncio.ensure_future(
+            c.poll_loop(
+                fetch, 3600, site=sites.OPEN_INTEREST_POLL, failure="poll failed", plan_only=True
+            )
+        )
+        with pytest.raises(TimeoutError):  # asleep for the hour after its first round
+            await asyncio.wait_for(task, 0.2)
+
+    asyncio.run(scenario())
+    assert rounds == 1
+    assert _buffered(c) == [_BYBIT]

@@ -21,6 +21,7 @@ types and a real catalog (TEST-03); the clients are in-test duck types.
 
 import asyncio
 import json
+import logging
 import os
 import threading
 import time
@@ -53,6 +54,7 @@ from capture.infrastructure.coverage_file import repair_torn_tail
 from capture.infrastructure.parquet_writer import ParquetArchiveWriter
 from capture.tests import test_venue_time as venue
 from capture.tests.test_collector import _BYBIT
+from capture.tests.test_collector import _HL
 from capture.tests.test_collector import _LINEAR
 from capture.tests.test_collector import _S
 from capture.tests.test_collector import _SPOT_ID
@@ -62,11 +64,14 @@ from capture.tests.test_collector import _deltas
 from capture.tests.test_collector import _FakeFetch
 from capture.tests.test_collector import _fetched
 from capture.tests.test_collector import _LifecycleClient
+from capture.tests.test_collector import _RecordingSink
 from capture.tests.test_collector import _rest
 from capture.tests.test_collector import _seed_trade
 from capture.tests.test_collector import _tick
+from capture.tests.test_collector import _trade
 from capture.tests.test_collector import _two_instrument_collector
 from nautilus_trader.model.data import TradeTick
+from nautilus_trader.model.enums import AggressorSide
 
 
 _T = 1_790_000_000 * _S
@@ -969,3 +974,241 @@ def test_a_candle_store_a_day_behind_is_ledgered(tmp_path: Path) -> None:
     c._second_sink._through[_BYBIT] = 0  # type: ignore[union-attr]  # watermark at the epoch
     c._catch_up_candle_store()
     assert "more than a day behind" in error_ledger.last_details()["collector.candle_store_behind"]
+
+
+def test_a_failed_catch_up_is_one_line_per_start_naming_every_instrument(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """DW-189: a store-wide fault at start must not write one line per instrument."""
+    error_ledger.reset()
+    sink = _RecordingSink(failing_with={_BYBIT: OSError, _SPOT_ID: OSError, _HL: AttributeError})
+    now = time.time_ns()
+    sink._through.update(dict.fromkeys((_BYBIT, _SPOT_ID, _HL), now - 60 * _S))
+    c = _collector(tmp_path, second_sink=sink)
+    with caplog.at_level(logging.ERROR):
+        c._catch_up_candle_store()
+    assert error_ledger.counts() == {"collector.candle_store_catch_up": 1}
+    (record,) = [r for r in caplog.records if "catch-up failed" in r.getMessage()]
+    message = record.getMessage()
+    assert "for 3 instruments (AttributeError on 1, OSError on 2)" in message
+    assert all(iid in message for iid in (_BYBIT, _SPOT_ID, _HL))
+    assert record.exc_info is not None
+    assert record.exc_info[0] is OSError  # the most frequent type's traceback
+
+
+# -- the coverage record exists from the start (DW-264) -------------------------------------------
+
+
+class _CoverageWatchingClient(_LifecycleClient):
+    """Notes, at `connect`, whether the venue's coverage record already exists."""
+
+    def __init__(self, events: list[str], path: Path) -> None:
+        super().__init__(events)
+        self._path = path
+
+    async def connect(self, loop: object, instruments: list) -> None:
+        self.events.append(f"connect (coverage exists: {self._path.exists()})")
+
+
+def _stopped_run(c: CaptureService, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(capture_mod, "instruments_from_pyo3", lambda pyo3: [])
+    c._applied.clear()  # `run()` applies the plan itself
+    c.stop()
+    asyncio.run(c.run())
+
+
+def test_the_coverage_record_is_created_before_the_client_connects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    catalog = tmp_path / "catalog"
+    path = coverage_path(str(catalog), "BYBIT")
+    events: list[str] = []
+    _stopped_run(_collector(catalog, client=_CoverageWatchingClient(events, path)), monkeypatch)
+    assert events[0] == "connect (coverage exists: True)"
+    assert path.read_text() == ""  # nothing to note in a run stopped before its first tick
+    assert "collector.coverage_write" not in error_ledger.counts()
+
+
+def test_creating_the_coverage_record_never_truncates_it(tmp_path: Path) -> None:
+    writer = ParquetArchiveWriter(str(tmp_path / "catalog"))
+    writer.append_coverage("BYBIT", ['{"a":1}'])
+    writer.ensure_coverage("BYBIT")
+    assert coverage_path(writer.catalog_path, "BYBIT").read_text() == '{"a":1}\n'
+
+
+def test_a_coverage_record_that_cannot_be_created_is_ledgered_and_the_run_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    events: list[str] = []
+    c = _collector(tmp_path / "catalog", client=_LifecycleClient(events))
+
+    def refuse(venue_code: str) -> None:
+        raise PermissionError("read-only mount")
+
+    monkeypatch.setattr(c._archive, "ensure_coverage", refuse)
+    _stopped_run(c, monkeypatch)
+    assert error_ledger.counts() == {"collector.coverage_write": 1}
+    assert (
+        "could not be created at start" in error_ledger.last_details()["collector.coverage_write"]
+    )
+    assert events[0] == "connect"
+
+
+# -- a failed build is a ledgered retry, never a process exit (DW-241) ----------------------------
+
+
+def test_a_build_that_raises_is_ledgered_and_sigterm_ends_the_backoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    monkeypatch.setattr(capture_mod, "_RESTART_BACKOFF_S", 30.0)
+
+    def build() -> CaptureService:
+        os.kill(os.getpid(), capture_mod.signal.SIGTERM)
+        raise ConnectionError("venue REST unreachable")
+
+    started = time.monotonic()
+    asyncio.run(run_forever(build, init_rust_logging=False))
+    assert error_ledger.counts() == {"collector.crash": 1}
+    assert "build failed" in error_ledger.last_details()["collector.crash"]
+    assert time.monotonic() - started < 10  # the 30 s backoff was cut short by the signal
+
+
+def test_a_failed_build_is_retried_after_its_backoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    monkeypatch.setattr(capture_mod, "_RESTART_BACKOFF_S", 0.0)
+    attempts = 0
+
+    def build() -> CaptureService:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            os.kill(os.getpid(), capture_mod.signal.SIGTERM)
+        raise ConnectionError(f"attempt {attempts} failed")
+
+    asyncio.run(run_forever(build, init_rust_logging=False))
+    assert attempts == 2
+    assert error_ledger.counts() == {"collector.crash": 2}
+
+
+# -- the shutdown drain (DW-267) ------------------------------------------------------------------
+
+
+def _fresh_trades(first: int, count: int) -> list[TradeTick]:
+    return [_trade(100.0, 1.0, AggressorSide.BUYER, n) for n in range(first, first + count)]
+
+
+def _archived_ids(c: CaptureService) -> list[str]:
+    now = time.time_ns()
+    recent = c._archive.recent_trades(_BYBIT, now - 60 * _S, now + 60 * _S, c._ledger)
+    return sorted(trade_id for trade_id, _ts_init in recent.ids)
+
+
+def test_a_clean_stop_processes_the_backlog_and_the_residue_behind_the_sentinel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    monkeypatch.setattr(capture_mod, "instruments_from_pyo3", lambda pyo3: [])
+    c = _collector(tmp_path / "catalog", client=_LifecycleClient([]))
+    c._applied.clear()
+    for trade in _fresh_trades(0, 100):  # queued ahead of the stop
+        c._on_data(trade)
+    c.stop()
+    for trade in _fresh_trades(100, 5):  # pushed behind the sentinel before the disconnect
+        c._on_data(trade)
+    asyncio.run(c.run())
+    assert _archived_ids(c) == sorted(str(n) for n in range(105))
+    assert "collector.ingest_abandoned" not in error_ledger.counts()
+    assert c._ingest_backlog() == 0
+
+
+def test_a_crash_processes_the_queue_before_the_final_flush(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    monkeypatch.setattr(capture_mod, "instruments_from_pyo3", lambda pyo3: [])
+    c = _collector(tmp_path / "catalog", client=_LifecycleClient([]))
+    c._applied.clear()
+
+    async def dies_with_a_backlog() -> None:
+        for trade in _fresh_trades(0, 10):
+            c._on_data(trade)
+        raise RuntimeError("loop died")
+
+    c.add_loops(dies_with_a_backlog)
+    with pytest.raises(RuntimeError, match="loop died"):
+        asyncio.run(c.run())
+    assert _archived_ids(c) == sorted(str(n) for n in range(10))
+    assert "collector.ingest_abandoned" not in error_ledger.counts()
+
+
+def test_what_the_drain_budget_leaves_is_ledgered_once_with_its_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    monkeypatch.setattr(capture_mod, "_INGEST_DRAIN_S", 0.0)
+    c = _collector(tmp_path / "catalog", client=_LifecycleClient([]))
+    for trade in _fresh_trades(0, 7):
+        c._on_data(trade)
+    # A crash's end of run (no stop, so no sentinel to wait for), its budget already spent.
+    asyncio.run(c._end_run([], deadline=0.0))
+    assert error_ledger.counts() == {"collector.ingest_abandoned": 1}
+    assert error_ledger.last_details()["collector.ingest_abandoned"].startswith("7 queued messages")
+
+
+class _LateDeliveryClient(_LifecycleClient):
+    """Schedules one message at `disconnect`, as a Rust callback still in flight would."""
+
+    def __init__(self, events: list[str], late: list[TradeTick], on_data: list) -> None:
+        super().__init__(events)
+        self._late = late
+        self._on_data = on_data
+
+    async def disconnect(self) -> None:
+        self.events.append("disconnect")
+        loop = asyncio.get_running_loop()
+        for trade in self._late:
+            loop.call_soon(self._on_data[0], trade)
+
+
+def test_a_callback_the_disconnect_left_in_flight_is_drained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    monkeypatch.setattr(capture_mod, "instruments_from_pyo3", lambda pyo3: [])
+    on_data: list = []
+    client = _LateDeliveryClient([], _fresh_trades(0, 3), on_data)
+    c = _collector(tmp_path / "catalog", client=client)
+    on_data.append(c._on_data)
+    c._applied.clear()
+    c.stop()
+    asyncio.run(c.run())
+    assert _archived_ids(c) == ["0", "1", "2"]
+    assert "collector.ingest_abandoned" not in error_ledger.counts()
+
+
+def test_a_cancellation_during_the_drain_wait_still_ends_the_run(tmp_path: Path) -> None:
+    """A second stop landing in the drain wait must not skip the cancel, disconnect and flush."""
+    error_ledger.reset()
+    events: list[str] = []
+    c = _collector(tmp_path / "catalog", client=_LifecycleClient(events))
+    c._on_data(_fresh_trades(0, 1)[0])
+    c.stop()
+
+    async def cancelled_mid_drain() -> asyncio.Future[None]:
+        never_drains: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        unwind = asyncio.ensure_future(c._unwind(never_drains, [never_drains]))
+        await asyncio.sleep(0.05)
+        unwind.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await unwind
+        return never_drains
+
+    never_drains = asyncio.run(cancelled_mid_drain())
+    assert never_drains.cancelled()
+    assert events == ["disconnect"]
+    assert _archived_ids(c) == ["0"]

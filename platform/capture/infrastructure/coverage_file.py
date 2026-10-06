@@ -78,6 +78,21 @@ def _after_last_newline(f: BinaryIO, size: int) -> int:
     return 0
 
 
+def ensure_file(path: Path) -> None:
+    """
+    Create `path` (and its directory) if missing, never truncating it, and `fsync` the file and
+    its directory, so the empty record survives a crash right after start. Raises (`OSError`).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("ab") as f:
+        os.fsync(f.fileno())
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def append_lines(path: Path, lines: Sequence[str]) -> None:
     """
     Append `lines` in order and `fsync`; raises (`OSError`, ...) with the file truncated back to

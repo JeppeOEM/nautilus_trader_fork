@@ -126,6 +126,7 @@ so data_api serves every venue's ids with zero per-route code.
 """
 
 import asyncio
+import contextlib
 import functools
 import http.client
 import itertools
@@ -141,6 +142,7 @@ from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Mapping
 from time import perf_counter_ns
+from typing import IO
 from typing import Any
 from typing import ClassVar
 
@@ -235,6 +237,14 @@ _INGEST_YIELD_EVERY = 64
 # ahead of it and returns when it reaches it, and an idle loop wakes at once. It replaced a 1 s `wait_for` around
 # every `get()`, whose timer handle and cancellation scope were paid per message (Story 28.2).
 _INGEST_STOP = object()
+# The shutdown drain's one budget (`_unwind`), from the start of the unwind: the ingest loop runs
+# to its stop sentinel, then the residue the client pushed behind it is processed, so what was
+# accepted reaches the final flush. Known limit: the stop grace is Docker's default 10 s (compose
+# sets no `stop_grace_period`) and the final flush, the disconnect and the live-stream close must
+# fit in it too, so a backlog that needs longer than this is abandoned (counted once at
+# `collector.ingest_abandoned`, never silently). Upgrade path: a `stop_grace_period` with this
+# raised to match, once a measured shutdown shows the need.
+_INGEST_DRAIN_S = 2.0
 # Coverage lines kept for the next flush after a failed append. Beyond it the oldest are dropped
 # and the loss is ledgered: a disk that refuses writes for hours must not grow memory (MEM-02).
 _COVERAGE_PENDING_MAX = 10_000
@@ -244,6 +254,11 @@ _MALFORMED_SHOWN = 10
 # The rate-limited rejection lines (no book, empty top, unencodable): one line per instrument per
 # minute, not per second, while the rejection lasts.
 _REJECTION_LOG_EVERY_NS = 60_000_000_000
+
+# `run_forever`'s restart backoff: the first wait after a crash or a failed build, doubled per
+# consecutive failure up to the cap, reset by a clean run.
+_RESTART_BACKOFF_S = 1.0
+_RESTART_BACKOFF_MAX_S = 60.0
 
 # OBS-01: zero book updates across all instruments for 30s+ is a pipeline failure, not a
 # quiet market. Deployed unattended, so this pushes a notification rather than relying on
@@ -510,6 +525,9 @@ class CaptureService:
         self._retry_subscribe: set[str] = set()
         self._retry_unsubscribe: set[str] = set()
         self._delta_store: set[str] = set(store_deltas)
+        # Ids whose raw-delta archive must start at a snapshot head (`_store_delta_message`): set by
+        # `apply` when an id becomes stored, cleared by its first Clear-headed message.
+        self._delta_head_pending: set[str] = set()
         # The most recent `apply`'s result and wall-clock ns, reported on `collector:status`.
         self._last_applied: Applied | None = None
         self._last_applied_ns = 0
@@ -629,9 +647,41 @@ class CaptureService:
 
     # -- the one ledger caller -----------------------------------------------------------------
 
-    def _ledger(self, site: str, detail: str = "", exc: BaseException | None = None) -> None:
-        """Record on the error ledger: capture's only call to it (DATA-07); `site` is a `sites` constant."""
+    @staticmethod
+    def _ledger(site: str, detail: str = "", exc: BaseException | None = None) -> None:
+        """
+        Record on the error ledger: capture's only call to it (DATA-07); `site` is a `sites`
+        constant. Static so `run_forever` can ledger a failed `build()`, which leaves no instance.
+        """
         error_ledger.record(site, detail, exc)
+
+    def _ledger_failures(self, site: str, what: str, failures: Mapping[str, Exception]) -> None:
+        """
+        Ledger every instrument's failure of one pass in one line: how many failed, each
+        distinct exception type with how many instruments it hit, and every failed id, with the
+        traceback of the type that hit the most (ties break on the name, so the line is
+        reproducible).
+
+        One line per pass, never one per instrument: a store-wide fault (disk full, a locked file)
+        fails every instrument at once, and one line each would exceed the ledger's
+        60-lines-per-site-per-minute cap and suppress the very detail this is here to record. One
+        line carries one traceback, so a store-wide `OSError` on 29 coins must not be masked by an
+        incidental `AttributeError` on the thirtieth, nor reduce to whichever failed first.
+        """
+        if not failures:
+            return
+        hits = Counter(type(e).__name__ for e in failures.values())
+        first_of_type: dict[str, Exception] = {}
+        for e in failures.values():
+            first_of_type.setdefault(type(e).__name__, e)
+        worst = min(hits, key=lambda name: (-hits[name], name))
+        self._ledger(
+            site,
+            f"{what} failed for {len(failures)} instruments "
+            f"({', '.join(f'{n} on {hits[n]}' for n in sorted(hits))}): "
+            + ", ".join(sorted(failures)),
+            first_of_type[worst],
+        )
 
     # -- the collected set and its aggregates -------------------------------------------------
 
@@ -796,7 +846,7 @@ class CaptureService:
                 self._crosscheck_arrivals[iid] += 1
                 self._crosscheck_events[iid].set()
             if iid in self._delta_store:
-                self._buffer[(OrderBookDeltas, iid)].append(data)
+                self._store_delta_message(iid, data)
             book = self._books.get(iid) or self._book(iid)
             if self._venue_time:
                 book.hold(data, now_ns, self._last_closed_second)
@@ -812,6 +862,22 @@ class CaptureService:
             pass  # derivable from the snapshots; not persisted
         else:  # mark/index price, funding rate, open interest, ... -> catalog as-is
             self._buffer[(type(data), str(data.instrument_id))].append(data)
+
+    def _store_delta_message(self, iid: str, data: OrderBookDeltas) -> None:
+        """
+        Buffer one message of a stored id for the raw-delta archive. While the id waits for its
+        head (`_delta_head_pending`, armed by `apply`), a message is dropped unless it starts with
+        a Clear -- a snapshot, the only point a backtest can rebuild the book from -- which
+        disarms the gate. A dropped message predates the head, so no reader could use it: the
+        archive starts at the head by definition. Called only for stored ids, so an unstored id's
+        hot path pays nothing for the gate.
+        """
+        if iid in self._delta_head_pending:
+            items = data.deltas
+            if not items or not items[0].is_clear:
+                return
+            self._delta_head_pending.discard(iid)
+        self._buffer[(OrderBookDeltas, iid)].append(data)
 
     def _accept_live_trade(
         self, iid: str, data: TradeTick, feed: Feed, now_ns: int, arrival_ns: int
@@ -1168,37 +1234,17 @@ class CaptureService:
         catch-up or `python -m candles.rebuild` repairs it.
 
         One instrument's failure is isolated but the flush is ledgered once, naming every instrument
-        that failed. A store-wide fault (disk full, a locked file) fails every subscribed instrument
-        in the same flush, and one line each would exceed the ledger's 60-lines-per-site-per-minute
-        cap and suppress the very detail this is here to record.
+        that failed (`_ledger_failures`).
         """
         if self._second_sink is None:
             return
-        failed: list[str] = []
-        by_type: dict[str, Exception] = {}
-        hits: Counter[str] = Counter()
+        failures: dict[str, Exception] = {}
         for iid, rows in flushed.items():
             try:
                 self._second_sink.apply(iid, rows)
             except Exception as e:
-                failed.append(iid)
-                # One line carries one traceback, so keep one exception per distinct type and name
-                # them all in the detail: a store-wide fault plus an incidental second cause must
-                # not reduce to whichever instrument `flushed` happened to yield first.
-                by_type.setdefault(type(e).__name__, e)
-                hits[type(e).__name__] += 1
-        if failed:
-            # The traceback goes to the cause that hit the most instruments, not the alphabetically
-            # first one: a store-wide `OSError` on 29 coins must not be masked by an incidental
-            # `AttributeError` on the thirtieth. Ties break on the name, so the line is reproducible.
-            worst = min(hits, key=lambda name: (-hits[name], name))
-            self._ledger(
-                sites.CANDLE_STORE,
-                f"candle store write failed for {len(failed)} instruments "
-                f"({', '.join(f'{n} on {hits[n]}' for n in sorted(hits))}): "
-                + ", ".join(sorted(failed)),
-                by_type[worst],
-            )
+                failures[iid] = e
+        self._ledger_failures(sites.CANDLE_STORE, "candle store write", failures)
 
     def _catch_up_candle_store(self) -> None:
         """
@@ -1213,6 +1259,10 @@ class CaptureService:
         process it means a venue entrypoint forgot `second_sink=` and every bar is silently missing.
         This is the one place that runs exactly once per start, so the report belongs here, on the
         error ledger (DATA-07), not a bare `logger.warning`.
+
+        A failed catch-up is ledgered once per start, naming every instrument (`_ledger_failures`):
+        a store-wide fault fails every one of them at the same instant. So is a store more than a
+        day behind: after a long downtime every watermark trips it together.
         """
         if self._second_sink is None:
             self._ledger(
@@ -1223,20 +1273,24 @@ class CaptureService:
             return
         catalog_path = self._archive.catalog_path
         now_ns = time.time_ns()
+        failures: dict[str, Exception] = {}
+        behind: dict[str, int] = {}
         for iid, mark in self._second_sink.watermarks().items():
             if now_ns - mark > _CATCH_UP_MAX_NS:
-                self._ledger(
-                    sites.CANDLE_STORE_BEHIND,
-                    f"candle store for {iid} is more than a day behind the archive (watermark "
-                    f"{mark}): not caught up at start; run python -m candles.rebuild",
-                )
+                behind[iid] = mark
                 continue
             try:
                 self._second_sink.apply(iid, query_second_ohlc(catalog_path, iid, mark + 1, now_ns))
             except Exception as e:
-                self._ledger(
-                    sites.CANDLE_STORE_CATCH_UP, f"candle store catch-up failed for {iid}", e
-                )
+                failures[iid] = e
+        if behind:
+            self._ledger(
+                sites.CANDLE_STORE_BEHIND,
+                f"candle store more than a day behind the archive for {len(behind)} instruments: "
+                "not caught up at start; run python -m candles.rebuild: "
+                + ", ".join(f"{iid} (watermark {mark})" for iid, mark in sorted(behind.items())),
+            )
+        self._ledger_failures(sites.CANDLE_STORE_CATCH_UP, "candle store catch-up", failures)
 
     async def _flush_loop(self) -> None:
         while not self._stop.is_set():
@@ -2124,12 +2178,22 @@ class CaptureService:
         by `_subscription_retry_loop`; an id the venue does not list is ledgered and never retried.
         Never raises for a per-instrument failure. Runs under `_subscription_lock`, so it never
         interleaves with a retry round. The result and its time are kept for `capture_status()`.
+
+        An id newly in `store_deltas` must not start its raw-delta archive mid-stream (a backtest
+        cannot rebuild a book from deltas without their snapshot): it is armed to wait for its
+        head (`_store_delta_message`), and an already-collected one gets a fresh snapshot
+        (`_resync_newly_stored`). A freshly added id needs none: its subscribe snapshot is the head.
+        A stored id re-added while its old subscription lingers is armed too
+        (`_arm_lingering_heads`): its resync snapshot is the head.
         """
+        newly_stored = set(diff.store_deltas) - self._delta_store
         self._delta_store = set(diff.store_deltas)
+        self._delta_head_pending = (self._delta_head_pending & self._delta_store) | newly_stored
         subscribed: set[str] = set()
         unsubscribed: set[str] = set()
         failed: set[str] = set()
         async with self._subscription_lock:
+            self._arm_lingering_heads(diff.added)
             for iid in sorted(diff.removed):
                 # A failed subscribe may have sent part of the id's channels, or left them for the
                 # client's reconnect replay: its removal unsubscribes it too, and it lingers (holds
@@ -2150,11 +2214,44 @@ class CaptureService:
             for iid in sorted(diff.added):
                 self._plan_ids.add(iid)
                 (subscribed if await self._subscribe_added(iid) else failed).add(iid)
+            await self._resync_newly_stored(newly_stored - diff.added)
             # Recorded under the lock, so the last apply to finish is the one reported.
             applied = Applied(frozenset(subscribed), frozenset(unsubscribed), frozenset(failed))
             self._last_applied = applied
             self._last_applied_ns = time.time_ns()
         return applied
+
+    def _arm_lingering_heads(self, added: Iterable[str]) -> None:
+        """
+        Arm the head gate for each stored id re-added while it still lingers on the wire (a failed
+        unsubscribe kept it in `_applied`): its old subscription keeps streaming deltas across the
+        stint it spent out of the plan, so its archive must resume at the fresh snapshot
+        `_subscribe_added` asks for, not mid-stream. The caller holds `_subscription_lock`.
+        """
+        self._delta_head_pending |= {
+            iid for iid in added if iid in self._applied and iid in self._delta_store
+        }
+
+    async def _resync_newly_stored(self, iids: Iterable[str]) -> None:
+        """
+        Force a fresh snapshot for each already-collected id whose deltas just became stored, so
+        its archive gets a head now rather than at the next unrelated resync; the caller holds
+        `_subscription_lock`. A full-snapshot venue (no `resync_orderbook`) needs no wire call:
+        its next message is a Clear-headed snapshot, which disarms the gate by itself. A failed
+        resync is ledgered by `_resync_wire` and retried by the sampler; the gate stays armed.
+
+        Known limit: the resync drops the live book, so each such id skips its 1 s snapshots until
+        the fresh snapshot lands (stale-book gate, noted like any resync), and the resyncs run one
+        after another under the lock. Upgrade path: a head synthesised from the live book, if the
+        archive ever accepts a capture-stamped snapshot.
+        """
+        if not hasattr(self._client, "resync_orderbook"):
+            return
+        for iid in sorted(iids):
+            if not self._is_collected(iid):
+                continue  # pending or removed: its subscribe snapshot will be the head
+            self._book(iid).resync()
+            await self._resync_wire(iid)
 
     async def _prepare_ids(self, iids: Iterable[str]) -> None:
         """
@@ -2349,10 +2446,12 @@ class CaptureService:
         plan_only: bool,
     ) -> None:
         """
-        Every `every_seconds`, buffer the rows `fetch` returns (`PolledRows.rows`: Nautilus `Data`
-        rows carrying an `instrument_id`, e.g. a venue's REST open-interest poll) for the next
-        flush, and ledger its `malformed` rows at `site` in one line per round (with `plan_only`,
-        the planned ids and the rows whose id could not be read). Rows go
+        Buffer the rows `fetch` returns (`PolledRows.rows`: Nautilus `Data` rows carrying an
+        `instrument_id`, e.g. a venue's REST open-interest poll) for the next flush, at once and
+        then every `every_seconds`, and ledger its `malformed` rows at `site` in one line per round
+        (with `plan_only`, the planned ids and the rows whose id could not be read). The first
+        round runs before the first sleep, so a process restarting faster than `every_seconds`
+        still records a poll. Rows go
         straight into the buffer, never through `_on_data`: REST-polled data must not count as WS
         feed liveness (story 22.5) nor feed a reconnect's silence detection (story 22.14). With
         `plan_only` only the plan's ids are kept -- the plan, not the applied set: polled ticker
@@ -2361,22 +2460,32 @@ class CaptureService:
         continues (DATA-07). Invariant: for ungated venue values only (open interest); rows skip
         the book/trade gate (`TradeIntake`, `SecondSampler`), so a composition root never polls
         a book or trade type through it.
-        Known limit: the first fetch waits one period, so a process restarting faster than
-        `every_seconds` records no poll at all (unchanged from the per-venue loops it replaced);
-        upgrade path: fetch once before the first sleep.
         """
         while not self._stop.is_set():
+            await self._poll_round(fetch, site=site, failure=failure, plan_only=plan_only)
+            if self._stop.is_set():
+                return
             await asyncio.sleep(every_seconds)
-            try:
-                wanted = set(self._plan_ids) if plan_only else None
-                polled = await fetch()
-                for item in polled.rows:
-                    iid = str(item.instrument_id)
-                    if wanted is None or iid in wanted:
-                        self._buffer[(type(item), iid)].append(item)
-                self._report_malformed(polled.malformed, wanted, site)
-            except Exception as e:
-                self._ledger(site, failure, e)
+
+    async def _poll_round(
+        self,
+        fetch: Callable[[], Awaitable[PolledRows]],
+        *,
+        site: str,
+        failure: str,
+        plan_only: bool,
+    ) -> None:
+        """One `poll_loop` round: fetch, keep the wanted rows, report the malformed; never raises."""
+        try:
+            wanted = set(self._plan_ids) if plan_only else None
+            polled = await fetch()
+            for item in polled.rows:
+                iid = str(item.instrument_id)
+                if wanted is None or iid in wanted:
+                    self._buffer[(type(item), iid)].append(item)
+            self._report_malformed(polled.malformed, wanted, site)
+        except Exception as e:
+            self._ledger(site, failure, e)
 
     def _report_malformed(
         self, malformed: list[tuple[str | None, str]], wanted: set[str] | None, site: str
@@ -2399,9 +2508,10 @@ class CaptureService:
         """
         Run until `stop()` or a loop dies, then close the second sink this service was handed.
 
-        The sink is closed in this outer `finally`, after `_run`'s own unwind (every loop
-        cancelled and gathered -- including a venue's `candle_prune_loop`, which shares the
-        sink's store -- then the final flush, the disconnect, the live-stream close), so nothing
+        The sink is closed in this outer `finally`, after `_run`'s own unwind (`_unwind`: the
+        ingest backlog drained, every loop cancelled and gathered -- including a venue's
+        `candle_prune_loop`, which shares the sink's store -- the disconnect, the residue behind
+        the stop processed, then the final flush and the live-stream close), so nothing
         touches the store after it, and also when `_run` fails before its loops start
         (`fetch_instruments`, `_connect`). Each `run_forever` attempt builds a fresh sink, so this
         is what keeps a crash-restart from leaking one SQLite connection per attempt;
@@ -2430,6 +2540,7 @@ class CaptureService:
         self._instruments = {str(i.id): i for i in converted}  # the trade backfill's precisions
         self._archive.write_instruments(converted)
 
+        await self._ensure_coverage()
         await self._connect(list(by_id.values()))
         if hasattr(self._client, "subscribe_global"):
             await self._client.subscribe_global()
@@ -2448,7 +2559,6 @@ class CaptureService:
         self._arm_restart_backfill(applied.subscribed | applied.failed)
 
         loops: tuple[Callable[[], Awaitable[None]], ...] = (
-            self._ingest_loop,
             self._flush_loop,
             self._second_loop,
             self._watchdog_loop,
@@ -2464,7 +2574,10 @@ class CaptureService:
             *self._extra_loops,
         )
         # ensure_future (not create_task): extra_loops are typed as Awaitable, not Coroutine.
-        tasks: list[asyncio.Future[Any]] = [asyncio.ensure_future(loop()) for loop in loops]
+        # The ingest loop is held by name, not by position: `_unwind` drains it before it
+        # cancels the rest.
+        ingest: asyncio.Future[Any] = asyncio.ensure_future(self._ingest_loop())
+        tasks: list[asyncio.Future[Any]] = [ingest, *(asyncio.ensure_future(lp()) for lp in loops)]
         stop_task: asyncio.Future[Any] = asyncio.ensure_future(self._stop.wait())
         try:
             # A loop dying is an unexpected bug: surface it so run_forever() does a clean restart.
@@ -2474,25 +2587,128 @@ class CaptureService:
                     task.result()
         finally:
             stop_task.cancel()
-            for task in tasks:
-                task.cancel()
-            # Let every loop unwind first: an interrupted backfill ledgers itself and leaves what
-            # it archived in the buffer, which the final flush below then writes.
-            await asyncio.gather(*tasks, return_exceptions=True)
-            self._ledger_abandoned_backfills()
-            await self._disconnect()
-            self._close_report_cycle()
+            await self._unwind(ingest, tasks)
+
+    async def _unwind(self, ingest: asyncio.Future[Any], tasks: list[asyncio.Future[Any]]) -> None:
+        """
+        End a run without losing what was queued (DATA-05), in one `_INGEST_DRAIN_S` budget.
+        After a `stop()` the ingest loop first runs to its sentinel while the sampler and the
+        flush keep going; then every loop is cancelled and gathered, the client disconnected, and
+        the residue it pushed behind the sentinel -- or, after a crash, the whole queue --
+        processed, so accepted trades reach the final flush. What the budget leaves is counted
+        once (`collector.ingest_abandoned`), and so is anything still delivered after it.
+
+        The drain wait sits in a `try`: a cancellation landing in it (a second stop) must still
+        cancel every loop, disconnect and flush, exactly as before the drain existed.
+        """
+        deadline = asyncio.get_running_loop().time() + _INGEST_DRAIN_S
+        try:
+            if self._stop.is_set():
+                await self._await_ingest_drain(ingest, deadline)
+        finally:
+            await self._end_run(tasks, deadline)
+
+    async def _end_run(self, tasks: list[asyncio.Future[Any]], deadline: float) -> None:
+        """Cancel and gather every loop, disconnect, drain the residue, then the final flush."""
+        for task in tasks:
+            task.cancel()
+        # Let every loop unwind first: an interrupted backfill ledgers itself and leaves what
+        # it archived in the buffer, which the final flush below then writes.
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await self._disconnect()
+        # One pass of the loop first: a Rust callback scheduled (`call_soon_threadsafe`) before
+        # the disconnect returned runs only at an await, and must land before the drain counts.
+        await asyncio.sleep(0)
+        abandoned = self._drain_ingest_residue(deadline)
+        # After the drain: a message it processed can schedule a backfill no loop will run.
+        self._ledger_abandoned_backfills()
+        self._close_report_cycle()
+        try:
             try:
-                try:
-                    await self._flush_once(final=True)
-                finally:
-                    # The partial window before a stop or a crash: the one a restart is
-                    # explained by.
-                    await self._report_hotpath()
+                await self._flush_once(final=True)
             finally:
-                # Even when a second cancellation lands in the report's publish.
-                if self._live_stream is not None:
-                    await self._live_stream.close()
+                # The partial window before a stop or a crash: the one a restart is
+                # explained by.
+                await self._report_hotpath()
+        finally:
+            self._ledger_late_arrivals(abandoned)
+            # Even when a second cancellation lands in the report's publish.
+            if self._live_stream is not None:
+                await self._live_stream.close()
+
+    @staticmethod
+    async def _await_ingest_drain(ingest: asyncio.Future[Any], deadline: float) -> None:
+        """
+        Wait, until `deadline` (loop time), for the ingest loop to reach the stop sentinel. The
+        bound expiring must not cancel the loop mid-message -- `_end_run` cancels it between
+        messages, with every other loop, right after.
+        """
+        if ingest.done():
+            return
+        remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+        # `wait`, not `wait_for`: it neither cancels the loop on the timeout nor raises the loop's
+        # own failure here (the gather in `_end_run` collects that).
+        await asyncio.wait({ingest}, timeout=remaining)
+
+    def _drain_ingest_residue(self, deadline: float) -> int:
+        """
+        Process what is still queued, synchronously, until `deadline` (loop time): after the
+        disconnect the queue is finite. A stop sentinel is skipped, each message gets the ingest
+        loop's own try and ledger, and what the deadline leaves is ledgered once and its count
+        returned.
+        """
+        queue = self._ingest_queue
+        loop = asyncio.get_running_loop()
+        while not queue.empty() and loop.time() < deadline:
+            item = queue.get_nowait()
+            if item is _INGEST_STOP:
+                self._ingest_stop_queued = False
+                continue
+            self._process_queued(*item)
+        abandoned = self._ingest_backlog()
+        if abandoned > 0:
+            self._ledger(
+                sites.INGEST_ABANDONED,
+                f"{abandoned} queued messages not processed within the {_INGEST_DRAIN_S:.0f} s "
+                "shutdown drain, DROPPED (their book updates and trades are not archived)",
+            )
+        return abandoned
+
+    def _ledger_late_arrivals(self, abandoned: int) -> None:
+        """
+        Ledger what reached the queue after the residue drain (a callback the disconnect left in
+        flight, delivered during the final flush's awaits): nothing processes it any more. The
+        `abandoned` messages the drain already counted are not counted twice.
+        """
+        late = self._ingest_backlog() - abandoned
+        if late > 0:
+            self._ledger(
+                sites.INGEST_ABANDONED,
+                f"{late} messages delivered after the shutdown drain, DROPPED (not archived)",
+            )
+
+    def _process_queued(self, data: Any, feed: Feed) -> None:
+        """Process one drained message as `_ingest_loop` does: a failure ledgered, never raised."""
+        try:
+            self._process_data(data, feed)
+        except Exception as e:
+            self._ledger(sites.PROCESS, f"failed to process {type(data).__name__}, DROPPED", e)
+
+    async def _ensure_coverage(self) -> None:
+        """
+        Create the coverage record before the loops start (`ArchiveWriter.ensure_coverage`), so a
+        reader sees this venue's file -- empty, not missing -- from the start, not only after the
+        first flush that has a line. A failure is ledgered and capture runs on: the first append
+        creates the file too, and its own failure is ledgered there.
+        """
+        try:
+            await asyncio.to_thread(self._archive.ensure_coverage, self._venue)
+        except Exception as e:
+            self._ledger(
+                sites.COVERAGE_WRITE,
+                "coverage record could not be created at start; the first append retries it",
+                e,
+            )
 
     async def _connect(self, instruments: list) -> None:
         """
@@ -2525,14 +2741,8 @@ class CaptureService:
         """
         Ask `run()` to unwind: the one place `_stop` is set. The stop sentinel goes behind every
         queued message, so an `_ingest_loop` left running processes what it holds and returns at
-        the sentinel, and an idle one wakes at once. A second call queues nothing.
-
-        Known limit: `run()` itself does not wait for that drain. It cancels every loop as soon as
-        `_stop` is set, so a backlog still queued at shutdown (at most what arrived since the
-        ingest loop last yielded, `_INGEST_YIELD_EVERY` messages apart, plus what the client
-        pushes before `_disconnect`) is abandoned unprocessed and unledgered, exactly as under the
-        1 s poll this replaced. Upgrade path: await the ingest task to its sentinel (bounded)
-        before cancelling the others, and ledger `_ingest_backlog()` if the bound is hit.
+        the sentinel, and an idle one wakes at once. A second call queues nothing. `run()` waits
+        for that drain, bounded, before it cancels the other loops (`_unwind`).
         """
         if self._stop.is_set():
             return
@@ -2550,9 +2760,11 @@ async def run_forever(
 ) -> None:
     """
     Process entrypoint: build a capture service per attempt (the venue's
-    `build_capture_from_file`), restart with backoff on crash, stop cleanly on SIGINT/SIGTERM.
-    `init_rust_logging=False` is for an entrypoint that installs its own richer `init_logging`
-    first (dYdX's WS_RAW file sink, story 22.2).
+    `build_capture_from_file`), restart with backoff on crash -- a raising `build()` included, so
+    a venue REST or config fault at start is a ledgered retry, never a process exit -- and stop
+    cleanly on SIGINT/SIGTERM, also in the middle of a backoff. `init_rust_logging=False` is for an
+    entrypoint that installs its own richer `init_logging` first (dYdX's WS_RAW file sink, story
+    22.2).
     """
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -2579,49 +2791,100 @@ async def run_forever(
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGINT, shutting_down.set)
     loop.add_signal_handler(signal.SIGTERM, shutting_down.set)
+    await _restart_loop(build, shutting_down)
+    del _log_guard
 
-    backoff_seconds = 1.0
-    first = True
+
+async def _restart_loop(build: Callable[[], CaptureService], shutting_down: asyncio.Event) -> None:
+    """
+    Build and run one service per attempt until shutdown, holding the capture lock (taken with
+    the first built service) for the process lifetime and releasing it however this ends.
+    """
+    backoff_seconds = _RESTART_BACKOFF_S
     capture_lock = None
     try:
         while not shutting_down.is_set():
-            collector = build()
-            if first:
-                # Held (shared) for the process lifetime: `repair_catalog` refuses to write under
-                # a running collector, and an archive tool holding it exclusively makes capture
-                # wait. Released by the `finally` below however this loop ends.
-                try:
-                    capture_lock = await collector._archive.acquire_lock(
-                        collector.venue, shutting_down, collector._ledger
-                    )
-                    if capture_lock is not None and not shutting_down.is_set():
-                        # The plan, not `_instrument_ids()`: nothing is applied before `run()`.
-                        collector._archive.quarantine_corrupt(
-                            sorted(collector._plan_ids), collector._ledger
-                        )
-                except BaseException:
-                    collector._close_second_sink()  # built, never run: `run()` cannot close it
-                    raise
-                if capture_lock is None or shutting_down.is_set():  # shut down while waiting
-                    collector._close_second_sink()  # built, never run: `run()` cannot close it
+            collector = _build_or_none(build, backoff_seconds)
+            if collector is None:
+                backoff_seconds = await _back_off(shutting_down, backoff_seconds)
+                continue
+            if capture_lock is None:
+                capture_lock = await _take_capture_lock(collector, shutting_down)
+                if capture_lock is None:  # shut down while waiting
                     break
-                first = False
-            watcher = asyncio.create_task(_stop_on_shutdown(shutting_down, collector))
-            try:
-                await collector.run()
-                backoff_seconds = 1.0  # clean stop (signal) -- reset for any future crash
-            except Exception as e:
-                collector._ledger(
-                    sites.CRASH, f"collector crashed, restarting in {backoff_seconds:.0f}s", e
-                )
-                await asyncio.sleep(backoff_seconds)
-                backoff_seconds = min(backoff_seconds * 2, 60.0)
-            finally:
-                watcher.cancel()
+            backoff_seconds = await _run_attempt(collector, shutting_down, backoff_seconds)
     finally:
         if capture_lock is not None:
             capture_lock.close()  # releases the flock; the file itself is never unlinked
-    del _log_guard
+
+
+def _build_or_none(
+    build: Callable[[], CaptureService], backoff_seconds: float
+) -> CaptureService | None:
+    """Build one attempt's service; a raising `build()` is ledgered (`collector.crash`), None."""
+    try:
+        return build()
+    except Exception as e:
+        CaptureService._ledger(sites.CRASH, f"build failed, retrying in {backoff_seconds:.0f}s", e)
+        return None
+
+
+async def _take_capture_lock(
+    collector: CaptureService, shutting_down: asyncio.Event
+) -> IO[str] | None:
+    """
+    Take the venue's capture lock with the first built service, then quarantine its plan's
+    corrupt files; None when shut down while waiting. Held (shared) for the process lifetime:
+    `repair_catalog` refuses to write under a running collector, and an archive tool holding it
+    exclusively makes capture wait. A service built but never run is closed here, since `run()`
+    cannot close it, and a lock whose quarantine raised is released before the error propagates.
+    """
+    capture_lock = None
+    try:
+        capture_lock = await collector._archive.acquire_lock(
+            collector.venue, shutting_down, collector._ledger
+        )
+        if capture_lock is not None and not shutting_down.is_set():
+            # The plan, not `_instrument_ids()`: nothing is applied before `run()`.
+            collector._archive.quarantine_corrupt(sorted(collector._plan_ids), collector._ledger)
+    except BaseException:
+        if capture_lock is not None:
+            capture_lock.close()
+        collector._close_second_sink()
+        raise
+    if capture_lock is not None and shutting_down.is_set():
+        capture_lock.close()
+        capture_lock = None
+    if capture_lock is None:
+        collector._close_second_sink()
+    return capture_lock
+
+
+async def _run_attempt(
+    collector: CaptureService, shutting_down: asyncio.Event, backoff_seconds: float
+) -> float:
+    """Run one service to its end; return the backoff the next attempt starts from."""
+    watcher = asyncio.create_task(_stop_on_shutdown(shutting_down, collector))
+    try:
+        await collector.run()
+        return _RESTART_BACKOFF_S  # clean stop (signal) -- reset for any future crash
+    except Exception as e:
+        collector._ledger(
+            sites.CRASH, f"collector crashed, restarting in {backoff_seconds:.0f}s", e
+        )
+        return await _back_off(shutting_down, backoff_seconds)
+    finally:
+        watcher.cancel()
+
+
+async def _back_off(shutting_down: asyncio.Event, seconds: float) -> float:
+    """
+    Wait `seconds` before the next attempt, or less when shutdown is asked for (SIGTERM must not
+    sit out a 60 s backoff past compose's stop grace); return the next, doubled, capped backoff.
+    """
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(shutting_down.wait(), seconds)
+    return min(seconds * 2, _RESTART_BACKOFF_MAX_S)
 
 
 async def _stop_on_shutdown(shutting_down: asyncio.Event, collector: CaptureService) -> None:

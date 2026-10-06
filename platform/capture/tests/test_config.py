@@ -230,3 +230,38 @@ def test_dydx_ws_raw_sink_must_be_a_boolean(tmp_path: Path, value: str) -> None:
     path.write_text(f"ws_raw_sink = {value}\n" + _DYDX)
     with pytest.raises(ValueError, match="ws_raw_sink must be true or false"):
         load_venue_config(path, "DYDX")
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "snapshot_interval_seconds",
+        "stale_book_seconds",
+        "crossed_resync_seconds",
+        "stale_trade_seconds",
+        "feed_stale_seconds",
+        "book_crosscheck_seconds",
+        "hold_back_seconds",
+    ],
+)
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), True, "5", 10**400])
+def test_a_seconds_value_must_be_a_finite_number(key: str, value: object) -> None:
+    """DW-243: TOML accepts nan/inf, and `nan <= 0` is False, so it passed every range check."""
+    with pytest.raises(ValueError, match=f"{key} must be a finite number"):
+        core_config_from_dict({key: value}, ("mainnet",))
+
+
+@pytest.mark.parametrize("key", ["flush_interval_seconds", "seen_trade_ids"])
+@pytest.mark.parametrize("value", [1.5, 2.0, True, "60"])
+def test_a_count_must_be_an_integer_never_truncated(key: str, value: object) -> None:
+    """DW-243: `int()` turned a `1.5` into 1 and `true` into 1, both then passing."""
+    with pytest.raises(ValueError, match=f"{key} must be an integer"):
+        core_config_from_dict({key: value}, ("mainnet",))
+
+
+def test_integral_seconds_values_are_accepted_as_floats() -> None:
+    config = core_config_from_dict(
+        {"stale_book_seconds": 12, "feed_stale_seconds": 3}, ("mainnet",)
+    )
+    assert (config.stale_book_seconds, config.feed_stale_seconds) == (12.0, 3.0)
+    assert isinstance(config.stale_book_seconds, float)

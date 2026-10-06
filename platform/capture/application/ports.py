@@ -164,6 +164,15 @@ class ArchiveWriter(Protocol):
         """
         ...
 
+    def ensure_coverage(self, venue: str) -> None:
+        """
+        Create the venue's coverage record if it is missing -- its directory too -- without
+        truncating an existing one, and fsync the file and its directory, serialized with
+        `append_coverage`. Called once at start, so a reader finds the file (empty) before the
+        first flush has a line. Raises on failure: the service ledgers it and runs on.
+        """
+        ...
+
 
 class RecentTrades(NamedTuple):
     """

@@ -489,3 +489,109 @@ def test_a_successful_removal_forgets_the_book_buffers_nothing_and_deletes_no_fi
     assert _sampled(c) == []
     assert sorted(p for p in tmp_path.rglob("*") if p.is_file()) == before
     assert archived.read_bytes() == b"archived before the removal"
+
+
+# -- a newly stored id's raw-delta archive starts at a snapshot head (DW-233) ----------------------
+
+
+def _update(iid: str) -> OrderBookDeltas:
+    """Build a Clear-less message: one level changed, nothing a book can be rebuilt from."""
+    ts = time.time_ns()
+    inst = InstrumentId.from_str(iid)
+    order = BookOrder(OrderSide.BUY, Price(100.0, 2), Quantity(2.0, 3), 0)
+    return OrderBookDeltas(inst, [OrderBookDelta(inst, BookAction.UPDATE, order, 0, 0, ts, ts)])
+
+
+def _stored(c: CaptureService, iid: str) -> list[OrderBookDeltas]:
+    return list(c._buffer[(OrderBookDeltas, iid)])
+
+
+def test_storing_a_collected_id_resyncs_it_and_archives_from_the_head(tmp_path: Path) -> None:
+    client = _WireClient(resync=True)
+    c = _collector(tmp_path, client)
+    _apply(c, added=frozenset({_A}))
+    c._process_data(_book(_A))
+    client.calls.clear()
+    _apply(c, store_deltas=frozenset({_A}))
+    assert client.calls == [f"resync {_A}"]
+    assert c._book(_A).book is None  # the local book went first (DATA-03's order)
+    before_head = _update(_A)
+    c._process_data(before_head)
+    assert _stored(c, _A) == []  # predates the head: no reader could use it
+    head, after = _book(_A), _update(_A)
+    c._process_data(head)
+    c._process_data(after)
+    assert _stored(c, _A) == [head, after]
+
+
+def test_storing_an_added_id_needs_no_resync_its_subscribe_snapshot_is_the_head(
+    tmp_path: Path,
+) -> None:
+    client = _WireClient(resync=True)
+    c = _collector(tmp_path, client)
+    _apply(c, added=frozenset({_A}), store_deltas=frozenset({_A}))
+    assert client.calls == [f"subscribe {_A}"]
+    head = _book(_A)
+    c._process_data(head)
+    assert _stored(c, _A) == [head]
+
+
+def test_a_full_snapshot_venue_s_next_snapshot_is_the_head_without_a_wire_call(
+    tmp_path: Path,
+) -> None:
+    client = _WireClient()  # no `resync_orderbook`: every message is a snapshot (Hyperliquid)
+    c = _collector(tmp_path, client)
+    _apply(c, added=frozenset({_A}))
+    client.calls.clear()
+    _apply(c, store_deltas=frozenset({_A}))
+    assert client.calls == []
+    c._process_data(_update(_A))
+    head = _book(_A)
+    c._process_data(head)
+    assert _stored(c, _A) == [head]
+
+
+def test_a_failed_head_resync_is_ledgered_and_keeps_the_gate_armed(tmp_path: Path) -> None:
+    error_ledger.reset()
+    client = _WireClient(resync=True)
+    c = _collector(tmp_path, client)
+    _apply(c, added=frozenset({_A}))
+
+    async def failing(iid: str) -> None:
+        raise ConnectionError("ws send failed")
+
+    client.resync_orderbook = failing
+    _apply(c, store_deltas=frozenset({_A}))
+    assert error_ledger.counts() == {"collector.resync": 1}
+    assert c._book(_A).resync_pending  # the sampler retries it
+    c._process_data(_update(_A))
+    assert _stored(c, _A) == []
+
+
+def test_an_unstored_id_keeps_no_gate_and_archives_nothing(tmp_path: Path) -> None:
+    c = _collector(tmp_path, _WireClient(resync=True))
+    _apply(c, added=frozenset({_A}), store_deltas=frozenset({_A}))
+    _apply(c, store_deltas=frozenset())
+    assert c._delta_head_pending == set()
+    c._process_data(_book(_A))
+    assert _stored(c, _A) == []
+
+
+def test_a_stored_id_re_added_while_lingering_archives_from_its_resync_head(
+    tmp_path: Path,
+) -> None:
+    client = _WireClient(resync=True)
+    client.fail_unsubscribe.add(_A)
+    c = _collector(tmp_path, client, plan=(_A,))
+    stored = frozenset({_A})
+    _apply(c, added=frozenset({_A}), store_deltas=stored)
+    c._process_data(_book(_A))  # the subscribe snapshot: the archive's first head
+    c._buffer.clear()
+    _apply(c, removed=frozenset({_A}), store_deltas=stored)  # the unsubscribe fails: it lingers
+    _apply(c, added=frozenset({_A}), store_deltas=stored)
+    assert client.calls[-1] == f"resync {_A}"
+    c._process_data(_update(_A))  # the old subscription, mid-stream across the removed stint
+    assert _stored(c, _A) == []
+    head = _book(_A)
+    c._process_data(head)
+    assert _stored(c, _A) == [head]

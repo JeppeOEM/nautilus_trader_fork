@@ -24,6 +24,8 @@ here -- `platform/tests/test_boundaries.py` greps for both. The strings are publ
 # ingest
 ENQUEUE = "collector.enqueue"
 PROCESS = "collector.process"
+# queued messages the shutdown drain's budget left unprocessed (`CaptureService._unwind`)
+INGEST_ABANDONED = "collector.ingest_abandoned"
 UNPLANNED_MESSAGE = "collector.unplanned_message"
 UNKNOWN_MESSAGE = "collector.unknown_message"
 STALE_TRADE = "collector.stale_trade"

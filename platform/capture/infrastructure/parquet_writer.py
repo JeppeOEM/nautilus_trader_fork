@@ -42,6 +42,7 @@ from capture.application.ports import RecentTrades
 from capture.infrastructure.capture_lock import acquire_capture_lock
 from capture.infrastructure.coverage_file import append_lines
 from capture.infrastructure.coverage_file import coverage_path
+from capture.infrastructure.coverage_file import ensure_file
 from capture.infrastructure.coverage_file import repair_torn_tail
 from capture.infrastructure.gap_markers import record_gap
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -151,6 +152,10 @@ class ParquetArchiveWriter:
                 self._coverage_checked.discard(path)
                 raise
             return self._coverage_repaired.pop(path, 0)
+
+    def ensure_coverage(self, venue: str) -> None:
+        with self._coverage_lock:
+            ensure_file(coverage_path(self._path, venue))
 
 
 def _trades_in_span(

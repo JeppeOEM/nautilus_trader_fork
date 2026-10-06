@@ -1492,7 +1492,9 @@ resolution-undo: dcc0700427eddf493cae780ae257b14adaad477dcd1d81d72caf42af892bf69
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-24-1-candles-context-behind-the-secondsink-port.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-24-1-candles-context-behind-the-secondsink-port.md` summary: `Collector._catch_up_candle_store` still calls `error_ledger.record("collector.candle_store_catch_up", ...)` inside its per-instrument loop, the exact shape Story 24.1's first review pass removed from `_apply_to_candle_store` 30 lines above for the ledger's 60-lines-per-site-per-minute write cap. evidence: pre-existing — identical per-instrument `record` at the baseline (`git show 7cd2f91aa2:platform/collector_core/collector.py`, `_catch_up_candle_store`), moved verbatim onto the port. Reachable: a fault that lets `watermarks()` succeed but fails every `apply` (disk full, a corrupt catalog day) emits one line per instrument, and dYdX's `_MAX_COLLECTED_INSTRUMENTS = 30` plus `run_forever`'s 1s/2s/4s restart backoff can put several starts inside one minute, so the site blows its cap and the `suppressed` carry hides the detail. Lower urgency than the flush path (once per start, not every 30 s), and the fix is the same consolidation already applied there.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw2-capture-service-lifecycle
+resolution-undo: 0048a9d04f44fc28ce1ff055a57d3d109c101be1016932f3bf35d6b4fc4e6436 2026-10-06 7374617475733a206f70656e
 
 ### DW-190: `_catch_up_candle_store` iterates `self._second_sink.watermarks()`, which only lists instruments that already have a stored row, so an instrument whose every …
 
@@ -1839,7 +1841,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-4-collection-control-plan-intent-vs-applied-set.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-4-collection-control-plan-intent-vs-applied-set.md` summary: Turning `store_order_book_deltas` on for an instrument that is already collected (a hand edit picked up by the reload) starts its raw `OrderBookDeltas` archive mid-stream, with no Clear + snapshot at its head, so a backtest cannot rebuild that instrument's book from the archived deltas until the next reconnect or resync. evidence: platform/dydx_collector/collector.py `DydxCollector.apply` (swaps `_delta_store`, forces no resync for newly stored ids) and `_apply_deltas` (buffers from the next message); the same swap without a resync existed in dydx_collector/collector.py `_apply_config` at baseline c9fab9c5d7 (line 342).
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw2-capture-service-lifecycle
+resolution-undo: 0048a9d04f44fc28ce1ff055a57d3d109c101be1016932f3bf35d6b4fc4e6436 2026-10-06 7374617475733a206f70656e
 
 ### DW-234: Four pub/sub subscribers use a bare `pubsub.listen()` with no liveness check, so a half-open Redis connection leaves them frozen until their process restarts. …
 
@@ -1870,7 +1874,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-26-2-capture-package-and-venue-packages-with-entrypoints.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-26-2-capture-package-and-venue-packages-with-entrypoints.md` summary: `CaptureService.poll_loop` sleeps one full period (`open_interest_poll_seconds`, 300 s) before its first fetch, so a collector crash-looping faster than that (`run_forever` backs off at most 60 s) never records open interest, and nothing is ledgered; the gap shows only in the data. evidence: platform/capture/application/capture_service.py `poll_loop` (`await asyncio.sleep(every_seconds)` precedes the first `fetch()`, now marked Known limit); the same sleep-first order in dydx_collector/collector.py and bybit_collector/collector.py `_open_interest_loop` at baseline 7fbdb4fe76.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw2-capture-service-lifecycle
+resolution-undo: 0048a9d04f44fc28ce1ff055a57d3d109c101be1016932f3bf35d6b4fc4e6436 2026-10-06 7374617475733a206f70656e
 
 ### DW-238: `platform/tests/test_skew_constants.py` checks dYdX's `hold_back_seconds` against `READ_SPAN_MARGIN_NS` by reading the committed 0-byte placeholder …
 
@@ -1900,7 +1906,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-26-2-capture-package-and-venue-packages-with-entrypoints.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-26-2-capture-package-and-venue-packages-with-entrypoints.md` summary: `run_forever` calls `build()` outside its try/backoff block, so a build failure on a restart attempt (config load, candle store, Redis, control plane) escapes and exits the process instead of backing off; only compose's `restart: always` recovers it. evidence: platform/capture/application/capture_service.py `run_forever` (`collector = build()` precedes the `try`); same structure in collector_core/collector.py at baseline 7fbdb4fe76.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw2-capture-service-lifecycle
+resolution-undo: 0048a9d04f44fc28ce1ff055a57d3d109c101be1016932f3bf35d6b4fc4e6436 2026-10-06 7374617475733a206f70656e
 
 ### DW-242: `bot_tui/app.py` `_MAX_COLLECTED_INSTRUMENTS = 29`, whose comment says it must match dYdX's `DYDX_MAX_COLLECTED_INSTRUMENTS = 30`, so the TUI refuses a `start` …
 
@@ -1915,7 +1923,9 @@ resolution: already resolved: no _MAX_COLLECTED_INSTRUMENTS remains in platform/
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-26-2-capture-package-and-venue-packages-with-entrypoints.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-26-2-capture-package-and-venue-packages-with-entrypoints.md` summary: `core_config_from_dict` accepts TOML `nan`/`inf` for its float thresholds (`nan <= 0` is False, so a `nan` `stale_book_seconds` disables the stale gate and `inf` overflows `int(x * 1e9)`), and silently truncates a float or bool `flush_interval_seconds`/`seen_trade_ids` through `int()`. evidence: platform/capture/application/config.py `core_config_from_dict` (`float(raw.get(...))`, `int(raw.get(...))`, then `<= 0` checks only); the same code in collector_core/config.py at baseline 7fbdb4fe76.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw2-capture-service-lifecycle
+resolution-undo: 0048a9d04f44fc28ce1ff055a57d3d109c101be1016932f3bf35d6b4fc4e6436 2026-10-06 7374617475733a206f70656e
 
 ### DW-244: The platform images install `pandas==3.0.4` (`platform/requirements.txt:2`) over nautilus_trader 1.229.0's own `pandas>=2.3.3,<3.0.0` (`pyproject.toml:31` …
 
@@ -2085,7 +2095,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-31-4-trades-proven-id-by-id-against-the-venue.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-31-4-trades-proven-id-by-id-against-the-venue.md` summary: A collector that has never written a coverage line has no `coverage/<venue>.jsonl`, so `verification.conservation` and `verification.trades` fail a clean day as "coverage record MISSING" (audit D-92, OPEN). Capture should create and fsync the file at start. evidence: `CaptureService._write_coverage` returns on an empty flush (`if not lines: return`). On the soak, `data/coverage/bybit.jsonl` was still absent at 15:16Z, 2 h 17 min into a clean Bybit run. This blocks a passing Bybit verdict in Story 31.11.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw2-capture-service-lifecycle
+resolution-undo: 0048a9d04f44fc28ce1ff055a57d3d109c101be1016932f3bf35d6b4fc4e6436 2026-10-06 7374617475733a206f70656e
 
 ### DW-265: Every `verification.*` day tool reports PASS (exit 0) over nothing when the venue's plan is an explicit `instruments = []`: nothing refuses an empty plan …
 
@@ -2107,7 +2119,9 @@ decision: 2026-10-05 Read cgroup memory each flush and ledger above threshold �
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-28-2-capture-python-overhead-removed-baseline-lowered.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-28-2-capture-python-overhead-removed-baseline-lowered.md` summary: On shutdown `CaptureService.run()` cancels `_ingest_loop` as soon as `_stop` is set. Any backlog still in `_ingest_queue`, and whatever the client pushes before `_disconnect`, is abandoned without being processed and without a ledger line, which breaks DATA-05's "never silent". The fix is to await the ingest task to its stop sentinel (bounded) before cancelling the other loops, and to ledger `_ingest_backlog()` if the bound is hit. evidence: `run()`'s `finally` (`capture_service.py` ~:2383) cancels every task right after `asyncio.wait(FIRST_COMPLETED)` returns on `stop_task`. `_ingest_loop` only yields every `_INGEST_YIELD_EVERY` (64) messages, so the rest are dropped. This predates 28.2: the 1 s `wait_for` poll was cancelled the same way. 28.2's sentinel makes a drain possible, and the gap is documented as a `Known limit:` on `stop()`.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw2-capture-service-lifecycle
+resolution-undo: 0048a9d04f44fc28ce1ff055a57d3d109c101be1016932f3bf35d6b4fc4e6436 2026-10-06 7374617475733a206f70656e
 
 ### DW-268: One persisted stale/invalid `source` makes the whole indicator-values request 422 and blanks every picker series, instead of a per-entry error.
 
@@ -2278,3 +2292,7 @@ location: platform/kernel/catalog_files.py
 source_spec: `_bmad-output/implementation-artifacts/spec-32-8-volume-footprint-bars-from-the-raw-trade-archive-toggled-from-the-indicators-menu.md`
 reason: `kernel.catalog_files.query_second_ohlc` and the other pre-existing catalog readers behind `candle_page` let a truncated or corrupt Parquet file's `pyarrow.ArrowInvalid`/`OSError` escape unmapped, so the chart request fails as a bare 500 that no `error_ledger.record` site counts (DATA-07). evidence: Only the new `query_trade_columns` (Story 32.8 second follow-up review) maps an unreadable file to a ledgered error; `query_second_ohlc` and its siblings call `pq.read_table`/`pq.read_schema` with no handler, and `data_api/routes/candles.py` maps only `ImpossibleCandle`.
 status: open
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-dw-capture-service-lifecycle.md`
+  summary: Anything raising in `CaptureService._run` between `_connect` and the `try` that guards the loops (`subscribe_global`, `_catch_up_candle_store`'s unguarded `self._second_sink.watermarks()`, `apply`) leaves the client connected and feeding a service that is gone, with no `_disconnect`, no drain and no final flush, so the messages already queued are dropped without a ledger line.
+  evidence: pre-existing: at baseline e6272ad9c6 `_run` has the same order (`await self._connect(...)` ... `self._catch_up_candle_store()` / `await self.apply(...)` before `try:`), and `_catch_up_candle_store` iterates `self._second_sink.watermarks()` with no handler there either; `run()`'s `finally` only closes the second sink. Surfaced by the 2026-10-06 follow-up review of the DW-267 drain, which covers only failures after the loops start.
