@@ -348,12 +348,17 @@ backup-catalog:
 	mkdir -p $(RCLONE_CONFIG_DIR)
 	$(COMPOSE) run --rm --no-deps archive python3 -m archive.backup_catalog --catalog /app/catalog
 
-## Rebuild the SQLite candle store from the raw 1s archive (first deploy, or after a
-## "candle store write failed" / archive.repair_catalog run). Skips today unless the collector is stopped
-## and --include-open-day is added.
+## Rebuild one venue's SQLite candle store from the raw 1s archive (first deploy, or after a
+## "candle store write failed" / archive.repair_catalog run). VENUE is required
+## (DYDX|BYBIT|HYPERLIQUID): one store per venue, so only that venue's ids are folded, into
+## /app/candles_dir/candles_<venue>.db (candles.rebuild derives the path, AD-D12; DW-194). Run it
+## for the venue whose collector logged the failure. Skips today unless that venue's collector is
+## stopped and --include-open-day is added.
 build-candles:
+	@test -n "$(VENUE)" || { echo "build-candles: VENUE is required, e.g. make build-candles VENUE=BYBIT" >&2; exit 1; }
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
-		python3 -m candles.rebuild --catalog /app/catalog --db /app/candles_dir/candles_dydx.db
+		python3 -m candles.rebuild --catalog /app/catalog --candles-dir /app/candles_dir \
+		--venue $(VENUE)
 
 ## Launch the bot_tui terminal UI (Story 4.1) -- an interactive urwid app, not a
 ## daemon, so it's run via `docker compose run` (never `up -d`) and gated behind the

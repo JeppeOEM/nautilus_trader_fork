@@ -336,9 +336,9 @@ Every derived value was compared with `verification/domain/reference_signals.py`
    venue whose collector holds its capture lock, `repair.capture_running`, Story 25.1). Back up `catalog/` first: it rewrites
    Parquet files. Expected to report nothing on the VPS (D-33); the local dev catalog
    still has the rows as of 2026-09-20.
-5. After the first deploy of the candle store: `make build-candles` (populates
-   `candles_dydx.db` from the raw 1s archive; until then charts and technicals fall back
-   to the slow Parquet path).
+5. After the first deploy of the candle store: `make build-candles VENUE=<VENUE>` once per
+   venue (DYDX, BYBIT, HYPERLIQUID; populates that venue's `candles_<venue>.db` from the raw 1s
+   archive; until then charts and technicals fall back to the slow Parquet path).
 6. Schedule `make consolidate` nightly (D-36) and run it once by hand for existing history (record its summary line in D-36); then delete `<catalog>/data/custom_dydx_minute_rollup/` (D-35, unused). Configure the rclone remote + `RCLONE_REMOTE`/`RCLONE_BUCKET` in `platform/.env` and schedule `make backup-catalog` right after it, in the same cron line (D-33; README "Nightly maintenance").
 7. Stop the three collectors, then merge the per-venue open-interest history (D-40):
    `python -m archive.tools.migrate_open_interest --catalog /app/catalog` (report), then

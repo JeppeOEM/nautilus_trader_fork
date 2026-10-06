@@ -16,9 +16,20 @@ r"""
 Rebuild the SQLite candle store from the Parquet 1s snapshots (the archive is the source of truth).
 
 Usage:
-    python -m candles.rebuild --catalog /app/catalog --db /app/candles_dir/candles.db \\
-        [--instrument BTCUSDT-LINEAR.BYBIT ...] [--venue BYBIT] \\
+    python -m candles.rebuild --catalog /app/catalog --candles-dir /app/candles_dir --venue BYBIT \\
+        [--instrument BTCUSDT-LINEAR.BYBIT ...] \\
         [--start 2026-09-01] [--end 2026-09-18] [--day 2026-09-20] [--include-open-day]
+    python -m candles.rebuild --catalog /app/catalog --db /app/candles_dir/candles_bybit.db \\
+        --venue BYBIT --day 2026-09-20 --workers 1
+
+Exactly one of `--db` (an explicit store file, the nightly job's form) or `--candles-dir` (the
+per-venue store `db_path_for_venue(dir, venue)`, AD-D12; needs `--venue`) names the store, so `make
+build-candles VENUE=V` folds only V's ids into V's own store (DW-194). Known limit: `--db` without
+`--venue` still folds every venue's ids into that one file, and `--db` is not checked against
+`--venue`; pass both, or prefer `--candles-dir`. Upgrade path: require `--venue` with `--db` once
+every caller passes it. `--venue` must be a known venue (`kernel.venues.VENUE_KINDS`, upper case):
+a misspelled venue is refused rather than matching no ids. A valid venue with no snapshots in the
+catalog is a real "nothing to rebuild" (exit 0).
 
 Use it for first population and to repair after a "candle store write failed" error. Idempotent: each
 UTC day is deleted and recomputed whole. Today is skipped unless --include-open-day, which is only safe
@@ -39,6 +50,7 @@ import os
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+from kernel.venues import VENUE_KINDS
 from observability import error_ledger
 
 from candles.application.rebuild import DAY_NS
@@ -48,6 +60,7 @@ from candles.application.rebuild import parse_date_ns
 from candles.application.rebuild import rebuild_instrument
 from candles.application.rebuild import venue_instruments
 from candles.infrastructure.sqlite_store import CandleStore
+from candles.infrastructure.sqlite_store import db_path_for_venue
 
 
 logger = logging.getLogger(__name__)
@@ -63,11 +76,19 @@ def _parser() -> argparse.ArgumentParser:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--catalog", required=True)
-    parser.add_argument("--db", required=True, help="path of candles.db")
+    store = parser.add_mutually_exclusive_group(required=True)
+    store.add_argument("--db", help="path of the candle store file")
+    store.add_argument(
+        "--candles-dir", help="directory of the per-venue stores; the store is candles_<venue>.db"
+    )
     parser.add_argument(
         "--instrument", action="append", help="repeatable; default: all with snapshots"
     )
-    parser.add_argument("--venue", help="only ids of this venue, e.g. DYDX")
+    parser.add_argument(
+        "--venue",
+        choices=sorted(VENUE_KINDS),
+        help="only ids of this venue, e.g. DYDX; with --candles-dir it also names the store",
+    )
     parser.add_argument("--start", help="YYYY-MM-DD (UTC); default: first snapshot")
     parser.add_argument("--end", help="YYYY-MM-DD (UTC, inclusive); default: last snapshot")
     parser.add_argument("--day", help="YYYY-MM-DD (UTC): shorthand for --start D --end D")
@@ -95,6 +116,17 @@ def _jobs(args: argparse.Namespace) -> list[tuple[str, str, str, int, int, bool]
     return jobs
 
 
+def _venue_store(parser: argparse.ArgumentParser, candles_dir: str, venue: str | None) -> str:
+    """Resolve `--candles-dir` to the venue's own store (AD-D12), or exit with a usage error."""
+    if venue is None:
+        parser.error("--candles-dir requires --venue (one store per venue)")
+    if not candles_dir or not Path(candles_dir).is_dir():
+        # A typo or a missing mount point (an empty string would be the cwd): refused, never a fresh
+        # store nothing reads. An empty directory mounted in the wrong place is indistinguishable.
+        parser.error(f"--candles-dir {candles_dir!r} is not an existing directory")
+    return db_path_for_venue(candles_dir, venue)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = _parser()
     args = parser.parse_args(argv)
@@ -102,6 +134,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--day cannot be combined with --start/--end")
     if args.day:
         args.start = args.end = args.day
+    if args.candles_dir is not None:
+        args.db = _venue_store(parser, args.candles_dir, args.venue)
     logging.basicConfig(level=logging.INFO)
     # Its own durable file (Story 31.8): the nightly saga's `build_candles` step runs this as a
     # child process, whose ledger lines once reached stdout only.

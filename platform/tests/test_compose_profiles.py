@@ -139,3 +139,25 @@ def test_the_nightly_keeps_dydx_until_its_days_age_out() -> None:
     venues = tomllib.loads(_ARCHIVE_CONFIG.read_text())["venues"]
 
     assert "DYDX" in venues
+
+
+def test_build_candles_rebuilds_one_venues_own_store() -> None:
+    """
+    DW-194: a hard-coded `--db .../candles_dydx.db` folded every venue's ids into the dYdX store.
+    The target names the venue and lets `candles.rebuild` derive its store (AD-D12).
+    """
+    commands = _compose_commands("build-candles")
+
+    assert len(commands) == 1
+    tokens = commands[0]
+    assert tokens[tokens.index("--venue") + 1] == "$(VENUE)"
+    assert tokens[tokens.index("--candles-dir") + 1] == "/app/candles_dir"
+    assert "--db" not in tokens
+
+
+def test_build_candles_refuses_a_missing_venue_before_compose_runs() -> None:
+    """Without VENUE the target would run `--venue` with no value: the guard must come first."""
+    recipe = _makefile_recipes()["build-candles"]
+
+    assert recipe[0].startswith('@test -n "$(VENUE)" ||')
+    assert recipe[0].endswith("exit 1; }")

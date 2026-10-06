@@ -1533,7 +1533,9 @@ decision: 2026-10-05 Make CandleStore an AbstractContextManager used by each __m
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: CLAUDE.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-24-1-candles-context-behind-the-secondsink-port.md` summary: `make build-candles` passes no `--venue`, so on the shared three-venue catalog it folds Bybit and Hyperliquid instruments into `candles_dydx.db` (where `data_api` can never read them) and repairs neither of the other two stores — while `CLAUDE.md` DATA-05 and `docs/DATA_INTEGRITY_AUDIT.md` D-35 point the operator at that target as *the* repair for a `collector.candle_store` failure, which is a venue-neutral ledger site all three collectors emit. evidence: `platform/Makefile:220-222` runs `python3 -m candles.rebuild --catalog /app/catalog --db /app/candles_dir/candles_dydx.db`; `candles/rebuild.py:_jobs` falls back to `all_instruments(catalog)`, which enumerates every id under the one catalog root. Pre-existing and unchanged in shape: the baseline at `7cd2f91aa2` has the identical target against `collector_core.build_candles`, whose `--venue` flag was equally optional. `candles/tests/test_rebuild.py:151` proves the filter is load-bearing. The fix is a per-venue target (or a `VENUE=` variable like `make nightly` already takes), which is a Makefile-surface decision rather than a patch inside this story's diff.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw2-makefile-venue-candles
+resolution-undo: 1a6b7740085079c55586e14fa69e2d038c3f8ef250f63ca0a0f98c58703adbc1 2026-10-06 7374617475733a206f70656e
 
 ### DW-195: the hourly retention prune runs `store.prune()` synchronously on the collector's event loop, and the `candles` table's primary key leads with `instrument_id` …
 

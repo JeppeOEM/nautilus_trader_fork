@@ -411,7 +411,8 @@ B2). Cheap targets: Cloudflare R2
 (no egress fees) or Backblaze B2; both have a free tier covering the first few GB, but prices and
 free allowances change -- check the current pricing pages before choosing.
 
-`candles_*.db` needs no backup: it is derived from the catalog, and `make build-candles` rebuilds it.
+`candles_*.db` needs no backup: it is derived from the catalog, and `make build-candles VENUE=<VENUE>`
+rebuilds one venue's store.
 
 ---
 

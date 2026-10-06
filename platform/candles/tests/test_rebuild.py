@@ -45,14 +45,15 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
 _IID = "BTC-USD-PERP.DYDX"
+_BYBIT_IID = "BTCUSDT-LINEAR.BYBIT"
 _DAY = "2026-01-15"
 _SECOND_NS = 1_000_000_000
 
 
-def _snapshot(ts_event: int, price: float | None) -> DydxSecondSnapshot:
+def _snapshot(ts_event: int, price: float | None, iid: str = _IID) -> DydxSecondSnapshot:
     traded = price is not None
     return make_snapshot(
-        instrument_id=InstrumentId.from_str(_IID),
+        instrument_id=InstrumentId.from_str(iid),
         bid_prices=[99.0],
         bid_sizes=[1.0],
         ask_prices=[101.0],
@@ -161,6 +162,80 @@ def test_a_venue_filter_keeps_only_that_venues_ids(catalog: str, tmp_path: Path)
     store = CandleStore(db)
     assert dict(store.watermarks()) == {}
     store.close()
+
+
+def test_a_candles_dir_rebuild_writes_the_venues_own_store(catalog: str, tmp_path: Path) -> None:
+    """DW-194: `make build-candles VENUE=V` folds only V's ids, into `candles_<v>.db`."""
+    day_ns = parse_date_ns(_DAY)
+    ParquetDataCatalog(catalog).write_data(
+        [_snapshot(day_ns + s * _SECOND_NS, 50.0, _BYBIT_IID) for s in range(120)]
+    )
+    candles_dir = tmp_path / "candles_dir"
+    candles_dir.mkdir()
+    argv = ["--catalog", catalog, "--candles-dir", str(candles_dir), "--day", _DAY]
+
+    assert _run([*argv, "--venue", "DYDX", "--workers", "1"]) == 0
+    assert _run([*argv, "--venue", "BYBIT", "--workers", "1"]) == 0
+
+    assert sorted(path.name for path in candles_dir.glob("*.db")) == [
+        "candles_bybit.db",
+        "candles_dydx.db",
+    ]
+    dydx = CandleStore(str(candles_dir / "candles_dydx.db"))
+    assert list(dydx.watermarks()) == [_IID]
+    dydx.close()
+    bybit = CandleStore(str(candles_dir / "candles_bybit.db"))
+    assert list(bybit.watermarks()) == [_BYBIT_IID]
+    bybit.close()
+
+
+def test_a_candles_dir_without_a_venue_is_refused(catalog: str, tmp_path: Path) -> None:
+    candles_dir = tmp_path / "candles_dir"
+    candles_dir.mkdir()
+    argv = ["--catalog", catalog, "--candles-dir", str(candles_dir), "--day", _DAY]
+
+    assert _run(argv) == 2  # argparse's usage error, before any store is opened
+    assert list(candles_dir.iterdir()) == []
+
+
+def test_a_candles_dir_that_does_not_exist_is_refused(catalog: str, tmp_path: Path) -> None:
+    """A wrong mount must not create a fresh store under a path nothing reads."""
+    missing = tmp_path / "no_such_dir"
+    argv = ["--catalog", catalog, "--candles-dir", str(missing), "--venue", "DYDX", "--day", _DAY]
+
+    assert _run(argv) == 2
+    assert not missing.exists()
+
+
+def test_an_empty_candles_dir_is_refused_not_the_cwd(
+    catalog: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    argv = ["--catalog", catalog, "--candles-dir", "", "--venue", "DYDX", "--day", _DAY]
+
+    assert _run(argv) == 2
+    assert list(tmp_path.glob("*.db")) == []
+
+
+@pytest.mark.parametrize("given", ["neither", "both"])
+def test_exactly_one_store_option_is_required(given: str, catalog: str, tmp_path: Path) -> None:
+    both = ["--db", str(tmp_path / "c.db"), "--candles-dir", str(tmp_path)]
+    store = both if given == "both" else []
+    argv = ["--catalog", catalog, *store, "--venue", "DYDX", "--day", _DAY]
+
+    assert _run(argv) == 2  # argparse's mutually exclusive, required group
+    assert list(tmp_path.glob("*.db")) == []
+
+
+@pytest.mark.parametrize("venue", ["Bybit", "BINANCE"])
+def test_an_unknown_venue_is_refused(venue: str, catalog: str, tmp_path: Path) -> None:
+    db = tmp_path / "c.db"
+    argv = ["--catalog", catalog, "--db", str(db), "--day", _DAY, "--venue", venue]
+
+    assert _run(argv) == 2  # argparse's choices error, not a run that rebuilds nothing
+    assert not db.exists()
 
 
 def test_day_cannot_be_combined_with_a_range(catalog: str, tmp_path: Path) -> None:
