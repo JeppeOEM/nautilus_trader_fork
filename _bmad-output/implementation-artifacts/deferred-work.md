@@ -2258,3 +2258,9 @@ status: open
 - source_spec: `_bmad-output/implementation-artifacts/spec-33-3-per-bar-order-flow-and-liquidation-aggregates-in-the-candle-store-folded-once.md`
   summary: `verification.catalog`'s structure check does not know the `custom_liquidation` data type (Story 33.1), so a real Bybit day whose catalog holds liquidation files is likely flagged by the catalog tool; it needs a `NautilusReads.known` entry (or equivalent) and a test over an on-disk liquidation directory.
   evidence: Story 33.3's implementation had to monkeypatch `LiquidationCatalog.first_ts_event` in `verification/tests/test_catalog.py` because writing a real `Liquidation` into the fixture catalog made the structure check fail; raised by the 33.3 Blind Hunter review (loop-1 re-derivation pass, finding 16).
+- source_spec: `_bmad-output/implementation-artifacts/spec-quick-volume-overlays-modal-and-grouped-tool-rail.md`
+  summary: The Volume overlays dialog lists VRVP, the session slot and placed FRVPs but not the Anchored VP / Anchored VWAP drawings, which are volume overlays too and are still edited only from their chart context menu.
+  evidence: `VolumeOverlaysDialog.tsx` takes no drawings; Anchored VP/VWAP live in `useChartDrawings` with their own `DrawingSettingsDialog` (Story 32.7). Raised by the quick-dev Blind Hunter review; left out because the operator's request named FRVPs only and these already have a working edit path.
+- source_spec: `_bmad-output/implementation-artifacts/spec-quick-volume-overlays-modal-and-grouped-tool-rail.md`
+  summary: The rail's last-used tool per group (`ChartPage`'s `toolMemory`) is not persisted, so a page reload shows each group's first tool again (Known limit in `ChartPage.tsx`).
+  evidence: TradingView keeps the last-used tool across sessions; persisting it needs a per-viewer UI preference beside the coin layout, since the layout table's shape (`lib/chartLayout.ts`, `views/preferences.py`) was out of scope for this change.
