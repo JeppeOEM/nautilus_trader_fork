@@ -87,15 +87,23 @@ def snap_dict(iid: str, bid: float = 99.0, ask: float = 101.0, ts_event: int = 0
     return DydxSecondSnapshot.to_dict(snap(iid, bid, ask, ts_event=ts_event))
 
 
-def mark_fresh(target: RankingBoard, iid: str, received_ns: int) -> None:
-    """Stamp freshness only: an empty book feeds no tracker."""
-    target.ingest(snap(iid, bid=None, ask=None), received_ns)
+def mark_fresh(target: RankingBoard, iid: str, received_ns: int, ts_event: int = 0) -> None:
+    """
+    Stamp freshness only: an empty book feeds no tracker.
+
+    Asserts the snapshot was taken: the board drops a snapshot whose ts_event does not advance the
+    instrument's last one (freshness included), so a second call for one instrument must pass a
+    later `ts_event` -- never silently leave the instrument unstamped.
+    """
+    dropped = target.ingest(snap(iid, bid=None, ask=None, ts_event=ts_event), received_ns)
+    assert dropped == [], dropped
 
 
 def feed_prices(target: RankingBoard, iid: str, prices: list[float], received_ns: int) -> None:
-    """Feed mids one second apart (bid == ask == price)."""
+    """Feed mids one second apart (bid == ask == price), from ts_event 0; each must be taken."""
     for i, price in enumerate(prices):
-        target.ingest(snap(iid, price, price, ts_event=i * SEC_NS), received_ns)
+        dropped = target.ingest(snap(iid, price, price, ts_event=i * SEC_NS), received_ns)
+        assert dropped == [], dropped
 
 
 def set_volumes(target: RankingBoard, volumes: dict[str, float], now_ns: int) -> None:

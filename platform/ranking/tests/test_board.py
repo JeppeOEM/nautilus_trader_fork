@@ -17,8 +17,12 @@ Invariant tests for `RankingBoard` (AD-9, Story 22.10; one per command, AC #2 of
 the live-tick fields it publishes.
 """
 
+import math
+
 import pytest
 
+from ranking.domain import board as board_module
+from ranking.domain.board import MAX_FUTURE_SKEW_NS
 from ranking.domain.board import RECENTLY_STALE_WINDOW_NS
 from ranking.domain.board import STALE_NS
 from ranking.domain.board import RankingsPublisher
@@ -44,7 +48,7 @@ def test_ingest_skips_a_non_positive_mid_without_raising(bid: float, ask: float)
     b = board()
     dropped = b.ingest(snap("ZERO-USD-PERP.DYDX", bid, ask), NOW_NS)
     assert len(dropped) == 1  # returned to be ledgered
-    assert "non-positive mid" in dropped[0]
+    assert "non-finite/non-positive mid" in dropped[0]
     assert b.current_ranks(NOW_NS) == []  # volume mode, no volume
     b.switch_mode(RankingMode.VOLATILITY)
     assert b.current_ranks(NOW_NS)[0]["volatility_score"] is None  # nothing fed
@@ -75,6 +79,140 @@ def test_ingest_with_no_trade_records_no_price_but_still_feeds_the_book_trackers
     row = b.slow_rows(NOW_NS, {}, {})[0]
     assert row["price"] is None
     assert row["spread"] == 2.0  # the book trackers were fed
+
+
+@pytest.mark.parametrize("ts_offset", [0, -SEC_NS])  # a duplicate, then an older snapshot
+def test_ingest_drops_a_duplicate_or_older_snapshot_whole(ts_offset: int) -> None:
+    """DW-218: a redelivered or replayed snapshot feeds nothing -- no book, no flow, no price."""
+    b = board()
+    first_ts = NOW_NS - 10 * SEC_NS
+    first = snap(BTC, 100.0, 101.0, first_ts, buy_volume=3.0, buy_count=1, close_price=100.25)
+    b.ingest(first, NOW_NS)
+    set_volumes(b, {BTC: 1.0}, NOW_NS)
+    replay_ts = first_ts + ts_offset
+    replay = snap(BTC, 90.0, 95.0, replay_ts, buy_volume=3.0, buy_count=1, close_price=92.0)
+
+    dropped = b.ingest(replay, NOW_NS)
+
+    assert len(dropped) == 1  # one detail for the whole snapshot, returned to be ledgered
+    assert "duplicate/out-of-order snapshot DROPPED" in dropped[0]
+    assert f"last ts_event={first_ts}" in dropped[0]
+    row = b.current_ranks(NOW_NS)[0]
+    assert (row["spread"], row["price"]) == (1.0, 100.5)  # the first book, not the replay's
+    assert (row["cvd"], row["buy_count"]) == (3.0, 1)  # its trades are not counted twice
+    assert row["volatility_score"] is None  # one mid only: the replay's mid was not fed
+    assert b.slow_rows(NOW_NS, {}, {})[0]["price"] == 100.25  # no price point either
+
+
+def test_a_far_future_snapshot_is_dropped_and_never_freezes_the_instrument() -> None:
+    """A broken clock's one far-future ts_event must not make every real snapshot after it "old"."""
+    b = board()
+    b.ingest(snap(BTC, 100.0, 101.0, NOW_NS - 2 * SEC_NS), NOW_NS)
+    set_volumes(b, {BTC: 1.0}, NOW_NS)
+
+    dropped = b.ingest(snap(BTC, 90.0, 95.0, NOW_NS + MAX_FUTURE_SKEW_NS + 1), NOW_NS)
+
+    assert len(dropped) == 1
+    assert "ahead of its arrival" in dropped[0]
+    assert b.ingest(snap(BTC, 100.0, 103.0, NOW_NS - SEC_NS), NOW_NS) == []  # still taken
+    assert b.current_ranks(NOW_NS)[0]["spread"] == 3.0
+
+
+def test_a_snapshot_within_the_future_skew_is_taken() -> None:
+    b = board()
+
+    assert b.ingest(snap(BTC, ts_event=NOW_NS + MAX_FUTURE_SKEW_NS), NOW_NS) == []
+
+
+def test_an_accepted_lead_never_takes_a_live_instrument_out_of_the_ranks() -> None:
+    """
+    A lead inside the skew bound makes the real snapshots behind it read as out of order, so they
+    stamp no freshness. The bound sits under STALE_NS, so the instrument stays ranked until the
+    real ts_event passes the lead and the gate takes it again.
+    """
+    assert MAX_FUTURE_SKEW_NS < STALE_NS
+    b = board()
+    b.ingest(snap(BTC, 100.0, 101.0, NOW_NS - SEC_NS), NOW_NS - SEC_NS)
+    set_volumes(b, {BTC: 1.0}, NOW_NS)
+    b.ingest(snap(BTC, 100.0, 101.0, NOW_NS + MAX_FUTURE_SKEW_NS), NOW_NS)
+
+    refused = 0
+    for second in range(1, MAX_FUTURE_SKEW_NS // SEC_NS + 2):
+        now = NOW_NS + second * SEC_NS
+        refused += len(b.ingest(snap(BTC, 100.0, 102.0, now), now))
+        assert [r["instrument_id"] for r in b.current_ranks(now)] == [BTC]
+
+    assert refused == MAX_FUTURE_SKEW_NS // SEC_NS
+    assert b.current_ranks(now)[0]["spread"] == 2.0  # the gate took the real snapshot again
+
+
+def test_a_refused_first_snapshot_leaves_no_instrument_behind() -> None:
+    """A far-future first snapshot must not list the instrument as fresh with no data."""
+    b = board()
+
+    b.ingest(snap(BTC, ts_event=NOW_NS + MAX_FUTURE_SKEW_NS + 1), NOW_NS)
+
+    assert b.instrument_ids() == []
+
+
+def test_a_dropped_snapshot_does_not_stamp_freshness() -> None:
+    """DW-218, DATA-01: a redelivered old snapshot is no evidence that the market is live."""
+    b = board()
+    b.ingest(snap(BTC, ts_event=SEC_NS), NOW_NS - STALE_NS - 1)
+    set_volumes(b, {BTC: 1.0}, NOW_NS)
+
+    assert len(b.ingest(snap(BTC, ts_event=SEC_NS), NOW_NS)) == 1
+
+    assert b.current_ranks(NOW_NS) == []
+    assert b.stale_ids(NOW_NS) == [BTC]
+
+
+def test_an_in_order_snapshot_after_a_drop_is_taken_whole() -> None:
+    b = board()
+    b.ingest(snap(BTC, 100.0, 101.0, NOW_NS - 3 * SEC_NS), NOW_NS - STALE_NS - 1)
+    b.ingest(snap(BTC, 100.0, 101.0, NOW_NS - 4 * SEC_NS), NOW_NS)  # dropped
+    set_volumes(b, {BTC: 1.0}, NOW_NS)
+
+    taken = b.ingest(snap(BTC, 100.0, 103.0, NOW_NS - 2 * SEC_NS, close_price=101.0), NOW_NS)
+
+    assert taken == []
+
+    row = b.current_ranks(NOW_NS)[0]  # freshness stamped by the in-order snapshot
+    assert (row["spread"], row["price"]) == (3.0, 101.5)
+    assert row["volatility_score"] is None  # two mids, one return: fed, but not yet a score
+    assert b.slow_rows(NOW_NS, {}, {})[0]["price"] == 101.0
+
+
+def test_the_gate_covers_one_sided_snapshots_too() -> None:
+    """An older two-sided snapshot after a newer one-sided one is dropped: the gate is per snapshot."""
+    b = board()
+    b.ingest(snap(BTC, bid=None, ask=None, ts_event=5 * SEC_NS), NOW_NS)
+    set_volumes(b, {BTC: 1.0}, NOW_NS)
+
+    dropped = b.ingest(snap(BTC, 100.0, 101.0, 4 * SEC_NS), NOW_NS)
+
+    assert len(dropped) == 1
+    assert "ts_event=4000000000 <= last ts_event=5000000000" in dropped[0]
+    assert b.current_ranks(NOW_NS)[0]["spread"] is None  # no book tracker was fed
+
+
+@pytest.mark.parametrize("bad_mid", [math.nan, math.inf, -math.inf])
+def test_ingest_skips_a_non_finite_mid(bad_mid: float, monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    The integer layout cannot carry a non-finite price (Story 30.2), so the mid is substituted at
+    the board's own `calc_mid_price` seam: the guard is proven, not the encoder.
+    """
+    monkeypatch.setattr(board_module, "calc_mid_price", lambda _row: bad_mid)
+    b = board()
+    set_volumes(b, {BTC: 1.0}, NOW_NS)
+
+    dropped = b.ingest(snap(BTC, 100.0, 101.0), NOW_NS)
+
+    assert len(dropped) == 1
+    assert "non-finite/non-positive mid" in dropped[0]
+    monkeypatch.undo()
+    row = b.current_ranks(NOW_NS)[0]
+    assert (row["spread"], row["ofi_10"], row["volatility_score"]) == (None, None, None)
 
 
 def test_freshness_is_stamped_on_receipt_not_on_the_snapshots_exchange_time() -> None:
@@ -223,6 +361,31 @@ def test_age_out_drops_an_instrument_silent_past_the_window_and_it_returns_fresh
     b.switch_mode(RankingMode.VOLATILITY)
     rows = {r["instrument_id"]: r for r in b.current_ranks(NOW_NS)}
     assert rows["DEAD-USD-PERP.DYDX"]["volatility_score"] is None  # old returns forgotten
+
+
+def test_slow_rows_skip_a_stale_instrument_so_metrics_db_gets_a_gap() -> None:
+    """DW-217, DATA-01: a stale instrument's last values are not current, so no row stamps them."""
+    b = board()
+    b.ingest(snap(BTC, ts_event=NOW_NS - SEC_NS, close_price=100.0), NOW_NS)
+    sol_ts = NOW_NS - 60 * SEC_NS
+    b.ingest(snap("SOL-USD-PERP.DYDX", ts_event=sol_ts, close_price=150.0), NOW_NS - STALE_NS - 1)
+
+    rows = b.slow_rows(NOW_NS, {}, {})
+
+    assert [row["instrument_id"] for row in rows] == [BTC]
+    assert b.stale_ids(NOW_NS) == ["SOL-USD-PERP.DYDX"]  # still visible as stale, not ledgered
+
+
+def test_a_stale_instrument_that_returns_gets_slow_rows_again() -> None:
+    b = board()
+    sol = "SOL-USD-PERP.DYDX"
+    b.ingest(snap(sol, ts_event=NOW_NS - 60 * SEC_NS, close_price=150.0), NOW_NS - STALE_NS - 1)
+    assert b.slow_rows(NOW_NS, {}, {}) == []
+
+    b.ingest(snap(sol, ts_event=NOW_NS - SEC_NS, close_price=151.0), NOW_NS)
+
+    rows = b.slow_rows(NOW_NS, {}, {})
+    assert [(r["instrument_id"], r["price"]) for r in rows] == [(sol, 151.0)]
 
 
 def test_age_out_keeps_a_recently_stale_instrument() -> None:

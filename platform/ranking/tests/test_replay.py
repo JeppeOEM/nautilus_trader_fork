@@ -43,6 +43,14 @@ other ranking changes (`cvd` None on an empty window, `price` never the slow-loo
 pct bound, the 24 h volatility window, the bounded nearest row) do not arise in this burst: every
 row is two-sided and fed, its 30 s spacing never shortens a pct base past 300 s, and it spans
 under 2 h.
+
+DW-217 changed exactly one stored row, deliberately: `metrics.db` gets no row for an instrument
+that is stale when the slow loop reads the board, so the recording's row for `STALE_IID` (silent
+since batch `STALE_AFTER_BATCH`, its last values stamped with the cycle's `ts`) is no longer
+written (DATA-01). The fixture is not re-recorded: the stored rows must equal the recorded ones
+with that row removed (`_without_stale_row`), and nothing else. No published byte changed: a stale
+instrument was never ranked, and the burst has no duplicate or out-of-order snapshot for the
+ingest gate to drop.
 """
 
 import asyncio
@@ -258,6 +266,14 @@ def _spread_rounded(message: str) -> str:
     return json.dumps(decoded)
 
 
+def _without_stale_row(columns: list[str], rows: list[list]) -> list[list]:
+    """Return the recorded rows minus `STALE_IID`'s, which DW-217 no longer writes."""
+    iid = columns.index("instrument_id")
+    kept = [r for r in rows if r[iid] != STALE_IID]
+    assert len(kept) == len(rows) - 1  # the recording held exactly one: the removal is not vacuous
+    return kept
+
+
 def _run_burst(db_path: Path, catalog_path: Path) -> list[str]:
     batches = generate_burst()
     clock = FakeClock(WALL0_NS)
@@ -304,7 +320,7 @@ def test_rankings_live_bytes_and_metrics_rows_match_the_pre_move_engine(
     assert [hashlib.sha256(m.encode()).hexdigest() for m in pre_29_1] == fixture["publish_sha256"]
     assert _stored_rows(tmp_path / "pre.db") == (
         fixture["metrics_columns"],
-        fixture["metrics_rows"],
+        _without_stale_row(fixture["metrics_columns"], fixture["metrics_rows"]),
     )
 
 

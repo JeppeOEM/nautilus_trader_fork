@@ -45,7 +45,14 @@ class VolatilityTracker:
         self._buffers: dict[str, deque[tuple[int, float]]] = {}
 
     def update(self, instrument_id: str, ts_event_ns: int, mid_price: float) -> None:
-        """Append (ts_event_ns, mid_price) and evict entries older than lookback_seconds."""
+        """
+        Append (ts_event_ns, mid_price) and evict entries older than lookback_seconds.
+
+        Precondition: ts_event_ns is strictly greater than the instrument's previous update. The
+        returns in score() and the front-only eviction both assume ascending order, and nothing
+        here re-checks it; `RankingBoard.ingest`, the sole caller, holds it with its per-instrument
+        ts_event gate (a duplicate or older snapshot never reaches this method).
+        """
         buf = self._buffers.setdefault(instrument_id, deque())
         buf.append((ts_event_ns, mid_price))
         cutoff = ts_event_ns - self._lookback_ns

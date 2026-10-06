@@ -285,9 +285,8 @@ class RankingEngine:
             try:
                 start_ns = now_ns - self._board.price_lookback_ns
                 series = await asyncio.to_thread(self._prices.series, iid, start_ns)
-                mismatch = self._board.backfill(iid, series)
-                if mismatch is not None:
-                    error_ledger.record("ranking_engine.price_backfill", mismatch)
+                for detail in self._board.backfill(iid, series):
+                    error_ledger.record("ranking_engine.price_backfill", detail)
             except Exception as exc:
                 error_ledger.record(
                     "ranking_engine.price_backfill",

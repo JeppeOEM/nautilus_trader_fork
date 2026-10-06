@@ -55,6 +55,16 @@ from ranking.domain.volatility import VolatilityTracker
 # past this an instrument leaves the ranks. Compared against arrival time, never ts_event (DATA-01).
 STALE_NS: int = 30_000_000_000
 
+# A snapshot's ts_event lies before its publish: the collector's sample time in arrival mode
+# (dYdX), exchange second S + 0.5 s in venue mode (Bybit, Hyperliquid), published after S closes.
+# Venue mode compares the venue's clock with this process's, so a leading ts_event is clock skew,
+# and past this bound it is a broken clock or a corrupt entry, never a sample. Such a snapshot is
+# dropped, never taken as the ingest gate's last ts_event. An accepted lead of L makes every real
+# snapshot for the next ~L read as out of order, during which freshness is not stamped. The bound
+# therefore sits well under STALE_NS: an accepted lead can never push a live instrument out of the
+# ranks.
+MAX_FUTURE_SKEW_NS: int = 10_000_000_000
+
 # Instruments stale for less than this are listed in `stale_instrument_ids`; past it their whole
 # state is aged out (`age_out`), so an instrument that stopped being collected does not hold
 # memory (MEM-02) or keep writing its last values to metrics.db (DATA-01) forever.
@@ -87,6 +97,9 @@ class InstrumentMetrics:
 
     def __init__(self, last_seen_ns: int) -> None:
         self.last_seen_ns = last_seen_ns
+        # The newest ts_event `RankingBoard.ingest` accepted, of any snapshot (one-sided or not);
+        # None until the first. Every feed below sees ts_event strictly ascending past it.
+        self.last_event_ns: int | None = None
         self.last_fed_ns: int | None = None
         self.ofi_z = MultiLevelOFI(levels=10, window=50, zscore_window=3600)
         self.ofi_raw = {n: MultiLevelOFI(levels=n, window=300) for n in (3, 5, 10)}
@@ -280,17 +293,72 @@ class RankingBoard:
         """
         Stamp freshness (arrival time) and feed every tracker from one decoded snapshot.
 
-        A non-finite/non-positive close_price would poison every pct/volatility computation with
-        no error raised, so it is treated as "no trade this second" (AD-2). A one-sided book feeds
-        no book tracker (a thin book is legitimate); a mid <= 0 is not a market state, so it too
+        Invariant: per instrument, every feed (freshness, price series, OFI/OBI, rolling window,
+        volatility) sees strictly ascending ts_event. `snapshots:raw` is pub/sub, so it never
+        redelivers. A duplicate or older snapshot comes from a second publisher for the
+        instrument (two collectors overlapping during a cutover) or a restarted collector
+        re-publishing a second. It is dropped whole before freshness is stamped: re-feeding it
+        would double-count its book and trades, and an old snapshot is no evidence the market is
+        live (DATA-01). A snapshot stamped more than MAX_FUTURE_SKEW_NS after its arrival is dropped
+        the same way, before it can become the gate's last ts_event. A non-finite/non-positive
+        close_price would poison every pct/volatility computation with no error raised, so it is
+        treated as "no trade this second" (AD-2). A one-sided book feeds no book tracker (a thin
+        book is legitimate); a non-finite or non-positive mid is not a market state, so it too
         feeds none. Returns every such drop (and an out-of-order price point) as a detail for the
         engine to ledger (DATA-07); empty when the snapshot was used whole.
+
+        Known limit: the gate is a high-water mark, so a publisher whose ts_event steps backwards
+        (an NTP step on the collector host or the venue, a collector switching
+        `book_time_source`) has every snapshot dropped and ledgered until its ts_event passes the
+        old mark. A step past STALE_NS takes the instrument out of the ranks for that span. The
+        ledger entries make it visible. Upgrade path: reset `last_event_ns` once in-order arrivals
+        have been refused for longer than a bound, ledgering the reset.
         """
         iid = snap.instrument_id.value
+        refused = self._refused_by_gate(iid, snap.ts_event, received_ns)
+        if refused is not None:
+            return [refused]
         inst = self._instruments.get(iid)
         if inst is None:
             inst = self._instruments[iid] = InstrumentMetrics(received_ns)
+        inst.last_event_ns = snap.ts_event
         inst.last_seen_ns = received_ns
+        dropped = self._ingest_close_price(iid, snap)
+        # The indicator functions take the decoded float view; the wire's integers stay in `snap`.
+        row = snap.as_floats()
+        mid = calc_mid_price(row)
+        if mid is None:
+            return dropped
+        if not math.isfinite(mid) or mid <= 0:
+            dropped.append(
+                f"{iid}: non-finite/non-positive mid {mid!r} DROPPED from the book trackers"
+            )
+            return dropped
+        self._volatility.update(iid, snap.ts_event, mid)
+        inst.feed_book(snap)
+        inst.rolling.append(row)
+        return dropped
+
+    def _refused_by_gate(self, iid: str, ts_event: int, received_ns: int) -> str | None:
+        """
+        Return why the ingest gate refuses a snapshot, else None. Checked before the instrument is
+        created, so a refused first snapshot leaves no state behind (no fresh, empty rank row).
+        """
+        if ts_event > received_ns + MAX_FUTURE_SKEW_NS:
+            return (
+                f"{iid}: snapshot ts_event={ts_event} is more than "
+                f"{MAX_FUTURE_SKEW_NS // 1_000_000_000}s ahead of its arrival {received_ns}, DROPPED"
+            )
+        inst = self._instruments.get(iid)
+        if inst is not None and inst.last_event_ns is not None and ts_event <= inst.last_event_ns:
+            return (
+                f"{iid}: duplicate/out-of-order snapshot DROPPED "
+                f"(ts_event={ts_event} <= last ts_event={inst.last_event_ns})"
+            )
+        return None
+
+    def _ingest_close_price(self, iid: str, snap: DydxSecondSnapshot) -> list[str]:
+        """Feed the price series; return the close_price drop and/or its out-of-order detail."""
         dropped: list[str] = []
         close_price = snap.close_price
         if close_price is not None and (not math.isfinite(close_price) or close_price <= 0):
@@ -299,28 +367,18 @@ class RankingBoard:
         out_of_order = self._prices.ingest(iid, snap.ts_event, close_price)
         if out_of_order is not None:
             dropped.append(out_of_order)
-        # The indicator functions take the decoded float view; the wire's integers stay in `snap`.
-        row = snap.as_floats()
-        mid = calc_mid_price(row)
-        if mid is None:
-            return dropped
-        if mid <= 0:
-            dropped.append(f"{iid}: non-positive mid {mid!r} DROPPED from the book trackers")
-            return dropped
-        self._volatility.update(iid, snap.ts_event, mid)
-        inst.feed_book(snap)
-        inst.rolling.append(row)
         return dropped
 
-    def backfill(self, instrument_id: str, series: list[tuple[int, float]]) -> str | None:
+    def backfill(self, instrument_id: str, series: list[tuple[int, float]]) -> list[str]:
         """
         Seed an instrument's price series from the catalog, exactly once per instrument.
 
-        Returns a live/Parquet price disagreement for the engine to ledger (DATA-07), else None.
+        Returns every dropped catalog point and live/Parquet price disagreement as a detail for
+        the engine to ledger (DATA-07); empty when the series was used whole.
         """
         inst = self._instruments.get(instrument_id)
         if inst is None or inst.backfilled:
-            return None
+            return []
         return self._prices.backfill(instrument_id, series)
 
     def mark_backfilled(self, instrument_id: str) -> None:
@@ -406,10 +464,19 @@ class RankingBoard:
         price_1m: Mapping[str, float],
     ) -> list[dict]:
         """
-        One metrics.db row per instrument (price/pct/volatility from the price series, book metrics
-        from the live trackers), cached as each instrument's slow metrics for the rank entries.
+        One metrics.db row per fresh instrument (price/pct/volatility from the price series, book
+        metrics from the live trackers), cached as each instrument's slow metrics for the rank
+        entries.
+
+        A stale instrument gets no row: its last price and book metrics are not current, and a row
+        stamped `ts = now_ns` would present them as live (DATA-01). Its stale period is a gap in
+        metrics.db history instead; it stays listed in `stale_ids` until it returns or ages out.
         """
-        rows = [self._slow_row(iid, now_ns, price_1w, price_1m) for iid in self._instruments]
+        rows = [
+            self._slow_row(iid, now_ns, price_1w, price_1m)
+            for iid, inst in self._instruments.items()
+            if inst.is_fresh(now_ns)
+        ]
         for row in rows:
             self._instruments[row["instrument_id"]].slow = row
         return rows

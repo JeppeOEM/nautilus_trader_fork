@@ -27,6 +27,8 @@ close_price per instrument per second, so `PRICE_LOOKBACK_HOURS * 3600` slots pe
 the full lookback window regardless of arrival rate; `drop()` releases an aged-out instrument.
 """
 
+import math
+
 import numpy as np
 
 from ranking.domain.metrics import price_stats_from_series
@@ -131,29 +133,38 @@ class PriceSeriesStore:
         buf.append(ts_event_ns, close_price)
         return None
 
-    def backfill(self, instrument_id: str, series: list[tuple[int, float]]) -> str | None:
+    def backfill(self, instrument_id: str, series: list[tuple[int, float]]) -> list[str]:
         """
         Seed an instrument's buffer from a Parquet-read historical series.
+
+        The series is validated first (`_validated_series`): sorted by ts, with every
+        non-finite/non-positive price and every duplicate ts dropped -- the ring buffer's
+        ascending() and every stat derived from it assume strictly ascending, positive
+        points, the same invariant ingest() holds for live points.
 
         Handles the backfill/live-ingest race (Design Notes): live points may
         already be in the buffer (appended via ingest() while this series' Parquet
         read was in flight). Those live points are kept verbatim; only historical
         points strictly older than the earliest already-buffered live point are
         prepended -- no duplication, no clobbered live data. If the buffer is
-        empty/nonexistent, seed it directly from `series`.
+        empty/nonexistent, seed it directly from the validated series.
 
-        Returns a live/Parquet disagreement as a detail for the caller to ledger (DATA-07),
-        else None.
+        Returns each validation drop kind and a live/Parquet disagreement as a detail for the
+        caller to ledger (DATA-07); empty when neither occurred. Known limit: a valid catalog point
+        at or after the earliest live point with no live point at its ts (a `snapshots:raw`
+        message this process missed) is left out by the merge without a detail; upgrade path:
+        report those as a live-gap detail.
         """
+        series, details = _validated_series(instrument_id, series)
         if not series:
-            return None
+            return details
         existing = self._buffers.get(instrument_id)
         if existing is None or existing.count == 0:
             buf = _RingBuffer(self._capacity)
             for ts, price in series:
                 buf.append(ts, price)
             self._buffers[instrument_id] = buf
-            return None
+            return details
 
         live_ts, live_px = existing.ascending()
         earliest_live_ts = int(live_ts[0])
@@ -169,12 +180,12 @@ class PriceSeriesStore:
         for ts, price in zip(live_ts.tolist(), live_px.tolist(), strict=True):
             merged.append(ts, price)
         self._buffers[instrument_id] = merged
-        if not mismatched:
-            return None
-        return (
-            f"{instrument_id}: {len(mismatched)} live/Parquet price mismatches at the same ts "
-            f"(first ts={mismatched[0]}); kept live"
-        )
+        if mismatched:
+            details.append(
+                f"{instrument_id}: {len(mismatched)} live/Parquet price mismatches at the same ts "
+                f"(first ts={mismatched[0]}); kept live"
+            )
+        return details
 
     def stats(self, instrument_id: str, now_ns: int) -> dict:
         """
@@ -191,3 +202,43 @@ class PriceSeriesStore:
     def drop(self, instrument_id: str) -> None:
         """Release an aged-out instrument's buffer (MEM-02); a later return starts empty."""
         self._buffers.pop(instrument_id, None)
+
+
+def _validated_series(
+    instrument_id: str,
+    series: list[tuple[int, float]],
+) -> tuple[list[tuple[int, float]], list[str]]:
+    """
+    Return `series` sorted by ts, with non-finite/non-positive prices and duplicate ts removed,
+    plus one detail per drop kind (count and first ts) for the caller to ledger (DATA-07).
+
+    Bad prices go first, so a NaN never shadows a valid point at the same ts; of the remaining
+    duplicates the first in catalog order is kept (the sort is stable).
+    """
+    ordered = sorted(series, key=lambda point: point[0])
+    details: list[str] = []
+    bad_ts = [ts for ts, price in ordered if not math.isfinite(price) or price <= 0]
+    if bad_ts:
+        details.append(
+            f"{instrument_id}: {len(bad_ts)} non-finite/non-positive catalog prices DROPPED "
+            f"from the backfill (first ts={bad_ts[0]})"
+        )
+    valid = [(ts, price) for ts, price in ordered if math.isfinite(price) and price > 0]
+    kept: list[tuple[int, float]] = []
+    duplicate_ts: list[int] = []
+    conflicting = 0
+    for ts, price in valid:
+        if kept and kept[-1][0] == ts:
+            duplicate_ts.append(ts)
+            conflicting += price != kept[-1][1]
+            continue
+        kept.append((ts, price))
+    if duplicate_ts:
+        # A conflicting duplicate is two archived prices for one second -- a data-integrity fault,
+        # not file overlap -- so it is counted apart from the harmless identical ones (DATA-02).
+        details.append(
+            f"{instrument_id}: {len(duplicate_ts)} duplicate-ts catalog prices DROPPED from the "
+            f"backfill ({conflicting} with a different price), first kept "
+            f"(first ts={duplicate_ts[0]})"
+        )
+    return kept, details

@@ -201,6 +201,22 @@ def test_a_field_the_board_drops_from_a_usable_entry_is_ledgered() -> None:
     assert "close_price" in error_ledger.last_details()["ranking_engine.snapshot_entry"]
 
 
+def test_a_duplicate_entry_is_ledgered_once_and_leaves_the_ranks_unchanged() -> None:
+    """DW-218: a redelivered `snapshots:raw` entry is dropped whole by the board's ts_event gate."""
+    b = board()
+    b.record_volume_poll("dydx", {BTC: 1.0}, NOW_NS)
+    b.refresh_volumes(NOW_NS)
+    engine, _, _ = _engine(b)
+    engine.ingest_snapshot_batch([snap_dict(BTC, 100.0, 101.0, ts_event=NOW_NS - SEC_NS)])
+    before = b.current_ranks(NOW_NS)
+
+    engine.ingest_snapshot_batch([snap_dict(BTC, 100.0, 101.0, ts_event=NOW_NS - SEC_NS)])
+
+    assert error_ledger.counts() == {"ranking_engine.snapshot_entry": 1}
+    assert "duplicate/out-of-order" in error_ledger.last_details()["ranking_engine.snapshot_entry"]
+    assert b.current_ranks(NOW_NS) == before
+
+
 def test_a_non_list_snapshots_payload_is_one_failed_message() -> None:
     engine, _, _ = _engine()
 
@@ -521,6 +537,28 @@ def test_a_slow_row_is_stamped_when_the_board_is_read_not_when_the_cycle_began()
     row = history.nearest(BTC, NOW_NS)
     assert row is not None
     assert row["ts"] == NOW_NS + 7 * SEC_NS
+
+
+class _DirtyPrices(FakePrices):
+    """A catalog series with a duplicate ts and a non-positive price, unsorted."""
+
+    def series(self, instrument_id: str, start_ns: int) -> list[tuple[int, float]]:
+        super().series(instrument_id, start_ns)
+        return [(NOW_NS - SEC_NS, 101.0), (NOW_NS - 3 * SEC_NS, 0.0), (NOW_NS - SEC_NS, 101.0)]
+
+
+def test_every_backfill_drop_is_ledgered() -> None:
+    """DW-218: each drop kind the backfill validation reports is one `price_backfill` entry."""
+    b = board()
+    mark_fresh(b, BTC, NOW_NS)
+    engine, _, history = _engine(b, prices=_DirtyPrices())
+
+    asyncio.run(engine.slow_loop_once())
+
+    assert error_ledger.counts() == {"ranking_engine.price_backfill": 2}
+    row = history.nearest(BTC, NOW_NS)
+    assert row is not None
+    assert row["price"] == 101.0  # the valid point was still seeded
 
 
 def test_a_failed_backfill_is_ledgered_and_never_retried() -> None:

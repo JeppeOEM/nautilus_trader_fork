@@ -1728,14 +1728,18 @@ decision: 2026-10-05 Remove the deep-link key — Remove the `o` key and open_li
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-2-ranking-context-rankingboard-replaces-module-globals.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-2-ranking-context-rankingboard-replaces-module-globals.md` summary: The ranking slow loop writes a `metrics.db` row stamped with the current `ts` for an instrument that is stale (>30 s silent) but not yet aged out (<1 h), carrying its last price/pct/book metrics as if current. evidence: platform/ranking/domain/board.py `slow_rows` iterates every held instrument, as the pre-move `_slow_loop_once` iterated all of `_LAST_SEEN` (forever, before 25.2's age_out bounded it to 1 h). DATA-01: the rows should be skipped or null the live fields. This predates 25.2.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw2-ranking-board-ingest-guards
+resolution-undo: 501612be81209b39f912be5f86707e9a8fae0a2082d36ca5e084f5430ccfda9c 2026-10-06 7374617475733a206f70656e
 
 ### DW-218: Ranking ingest has no ordering/finiteness guard beyond the price series: a duplicate or out-of-order `snapshots:raw` entry is fed to OFI/OBI, the 300-snapshot …
 
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-2-ranking-context-rankingboard-replaces-module-globals.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-2-ranking-context-rankingboard-replaces-module-globals.md` summary: Ranking ingest has no ordering/finiteness guard beyond the price series: a duplicate or out-of-order `snapshots:raw` entry is fed to OFI/OBI, the 300-snapshot rolling window and `VolatilityTracker` again, a NaN top-of-book passes the `mid <= 0` check, and a catalog backfill series is not deduplicated or checked for non-positive prices. evidence: platform/ranking/domain/board.py `ingest`/`_feed_indicators`, domain/volatility.py `update`, domain/price_series.py `backfill`, infrastructure/catalog_prices.py; the same code paths in ranking_engine/engine.py:589-624 and price_series.py at baseline a046e0839a. This predates 25.2.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw2-ranking-board-ingest-guards
+resolution-undo: 501612be81209b39f912be5f86707e9a8fae0a2082d36ca5e084f5430ccfda9c 2026-10-06 7374617475733a206f70656e
 
 ### DW-219: The two UI preference TOMLs (`platform/data/{chart_indicators,screener_columns}.toml`) are tracked in git yet rewritten in place by data_api at runtime, so …
 

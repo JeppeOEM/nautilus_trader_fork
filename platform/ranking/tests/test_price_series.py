@@ -144,8 +144,9 @@ def test_backfill_on_empty_buffer_seeds_directly_from_series() -> None:
     store = PriceSeriesStore()
     series = [(1_000_000_000, 10.0), (2_000_000_000, 11.0)]
 
-    store.backfill(_IID, series)
+    details = store.backfill(_IID, series)
 
+    assert details == []  # a clean series: nothing dropped, nothing to ledger
     result = store.stats(_IID, now_ns=2_000_000_000)
     assert result == price_stats_from_series(series)
 
@@ -199,11 +200,114 @@ def test_backfill_returns_a_parquet_live_disagreement_at_the_same_ts() -> None:
     store = PriceSeriesStore()
     store.ingest("X", 2_000_000_000, 10.0)
 
-    mismatch = store.backfill("X", [(1_000_000_000, 5.0), (2_000_000_000, 11.0)])
+    details = store.backfill("X", [(1_000_000_000, 5.0), (2_000_000_000, 11.0)])
 
-    assert mismatch is not None
-    assert "1 live/Parquet price mismatches" in mismatch
-    assert store.backfill("Y", [(1_000_000_000, 5.0)]) is None
+    assert len(details) == 1
+    assert "1 live/Parquet price mismatches" in details[0]
+    assert store.backfill("Y", [(1_000_000_000, 5.0)]) == []
+
+
+# ---- backfill validation (DW-218): sorted, bad prices and duplicate ts dropped and reported ----
+
+
+def test_backfill_sorts_an_unsorted_series_without_reporting_anything() -> None:
+    store = PriceSeriesStore()
+    series = [(3_000_000_000, 12.0), (1_000_000_000, 10.0), (2_000_000_000, 11.0)]
+
+    details = store.backfill(_IID, series)
+
+    assert details == []  # an order the adapter did not guarantee is not a drop
+    assert store.stats(_IID, now_ns=3_000_000_000) == price_stats_from_series(sorted(series))
+
+
+@pytest.mark.parametrize("bad_price", [float("nan"), float("inf"), float("-inf"), 0.0, -1.0])
+def test_backfill_drops_a_nonfinite_or_nonpositive_price_and_reports_it(bad_price: float) -> None:
+    store = PriceSeriesStore()
+    good = [(1_000_000_000, 10.0), (2_000_000_000, 11.0), (4_000_000_000, 12.0)]
+
+    details = store.backfill(_IID, [*good[:2], (3_000_000_000, bad_price), good[2]])
+
+    assert len(details) == 1
+    assert "1 non-finite/non-positive catalog prices DROPPED" in details[0]
+    assert "first ts=3000000000" in details[0]
+    assert store.stats(_IID, now_ns=4_000_000_000) == price_stats_from_series(good)
+
+
+def test_backfill_drops_every_bad_price_in_one_detail_naming_the_first() -> None:
+    store = PriceSeriesStore()
+    series = [
+        (1_000_000_000, 10.0),
+        (5_000_000_000, -2.0),
+        (2_000_000_000, float("nan")),
+        (3_000_000_000, 11.0),
+    ]
+
+    details = store.backfill(_IID, series)
+
+    assert len(details) == 1  # one detail per drop kind, not per point
+    assert "2 non-finite/non-positive catalog prices DROPPED" in details[0]
+    assert "first ts=2000000000" in details[0]  # first in time, after the sort
+
+
+def test_backfill_drops_a_duplicate_ts_keeping_the_first_and_reports_it() -> None:
+    store = PriceSeriesStore()
+    series = [
+        (1_000_000_000, 10.0),
+        (2_000_000_000, 11.0),
+        (2_000_000_000, 11.0),
+        (3_000_000_000, 12.0),
+        (3_000_000_000, 99.0),  # disagrees: the first in catalog order is kept
+    ]
+
+    details = store.backfill(_IID, series)
+
+    assert len(details) == 1
+    assert "2 duplicate-ts catalog prices DROPPED" in details[0]
+    assert "(1 with a different price)" in details[0]
+    assert "first ts=2000000000" in details[0]
+    expected = [(1_000_000_000, 10.0), (2_000_000_000, 11.0), (3_000_000_000, 12.0)]
+    assert store.stats(_IID, now_ns=3_000_000_000) == price_stats_from_series(expected)
+
+
+def test_backfill_drops_a_bad_price_before_deduplicating_so_it_never_shadows_a_good_one() -> None:
+    store = PriceSeriesStore()
+    series = [(1_000_000_000, 10.0), (2_000_000_000, float("nan")), (2_000_000_000, 11.0)]
+
+    details = store.backfill(_IID, series)
+
+    assert len(details) == 1  # the NaN only: the good point at its ts is no duplicate
+    assert "non-finite/non-positive" in details[0]
+    expected = [(1_000_000_000, 10.0), (2_000_000_000, 11.0)]
+    assert store.stats(_IID, now_ns=2_000_000_000) == price_stats_from_series(expected)
+
+
+def test_backfill_reports_each_drop_kind_and_still_merges_with_live_points() -> None:
+    store = PriceSeriesStore()
+    store.ingest(_IID, 10_000_000_000, 200.0)
+    series = [
+        (8_000_000_000, 175.0),
+        (5_000_000_000, 150.0),
+        (6_000_000_000, 0.0),
+        (8_000_000_000, 175.0),
+    ]
+
+    details = store.backfill(_IID, series)
+
+    assert len(details) == 2
+    assert "1 non-finite/non-positive catalog prices DROPPED" in details[0]
+    assert "1 duplicate-ts catalog prices DROPPED" in details[1]
+    assert "(0 with a different price)" in details[1]
+    expected = [(5_000_000_000, 150.0), (8_000_000_000, 175.0), (10_000_000_000, 200.0)]
+    assert store.stats(_IID, now_ns=10_000_000_000) == price_stats_from_series(expected)
+
+
+def test_backfill_of_only_bad_points_seeds_nothing_and_reports_them() -> None:
+    store = PriceSeriesStore()
+
+    details = store.backfill(_IID, [(1_000_000_000, float("nan")), (2_000_000_000, -1.0)])
+
+    assert len(details) == 1
+    assert store.stats(_IID, now_ns=2_000_000_000) == price_stats_from_series([])
 
 
 def test_drop_releases_an_instrument_so_a_return_starts_empty() -> None:
