@@ -19,6 +19,12 @@ snapshot rows (read raw and decoded by the oracle's own book decoder,
 `verification.infrastructure.snapshot_book`) and the coverage record's reasons. Each source is a
 `Protocol` port wired only by the composition root (`verification.bot_parity`).
 
+A log's `start` record names its strategy (Story 33.14): none is a `DummyStrategy` bot, judged as
+above, unchanged; `liquidation_cascade` a cascade bot, paired and classified by
+`verification.domain.cascade_parity` (no book judge: it reads no book), with the same
+flushed-catalog probe; any other strategy is refused. Both kinds share the JSON and text renderers,
+each bot labelled with its strategy.
+
 A bot is the venue's when its log's `start` record's instrument id is (`kernel.venues.has_venue`),
 read leniently first so another venue's malformed log never refuses this venue's run; only the
 venue's logs are then parsed strictly. A venue bot without a replay log, a bot logging deeper
@@ -52,6 +58,12 @@ from verification.domain.bot_parity import GapReasons
 from verification.domain.bot_parity import Segment
 from verification.domain.bot_parity import compare_bot
 from verification.domain.bot_parity import latest_segment
+from verification.domain.cascade_parity import CLASSES as CASCADE_CLASSES
+from verification.domain.cascade_parity import FIELDS as CASCADE_FIELDS
+from verification.domain.cascade_parity import STRATEGY as CASCADE
+from verification.domain.cascade_parity import CascadeReport
+from verification.domain.cascade_parity import compare_cascade
+from verification.domain.cascade_parity import latest_segment as cascade_segment
 from verification.domain.conservation import NS_PER_S
 from verification.domain.conservation import SECONDS_PER_HOUR
 from verification.domain.conservation import CoverageEntry
@@ -119,7 +131,7 @@ class ParityReport:
     live_dir: str
     replay_dir: str
     coverage_file: str
-    bots: tuple[BotReport, ...]
+    bots: tuple[BotReport | CascadeReport, ...]
 
     @property
     def unexplained(self) -> int:
@@ -186,7 +198,24 @@ def gap_reasons(coverage: SecondsCoverage, instrument_id: str) -> GapReasons:
 FLUSH_PROBE_NS = 60 * NS_PER_S
 
 
-def require_flushed(catalog: BookRows, live: Segment, replay: Segment) -> None:
+class Window(Protocol):
+    """What the flushed-catalog probe reads of a segment (a dummy or a cascade bot's)."""
+
+    @property
+    def bot_id(self) -> str: ...
+
+    @property
+    def instrument_id(self) -> str: ...
+
+    @property
+    def last_ns(self) -> int: ...
+
+
+# The dummy bots' log carries no `strategy` key (its record format predates the key): its label.
+DUMMY = "dummy"
+
+
+def require_flushed(catalog: BookRows, live: Window, replay: Window) -> None:
     """
     Refuse a window the catalog has not been flushed past: without a stored row in
     `(end + 1 s, end + 61 s]`, the window's last seconds may be rows not written *yet* (a fleet
@@ -218,12 +247,12 @@ def require_depth(stored: HourRows, live: Segment) -> None:
         )
 
 
-def _venue_of_log(logs: SignalLogs, name: str) -> str | None:
+def _last_start(logs: SignalLogs, name: str) -> dict[str, Any] | None:
     """
-    Return the instrument id of a log's last `start` record, read leniently (a line that is not
-    one is passed over here), so the venue filter never parses another venue's log strictly.
+    Return a log's last `start` record, read leniently (a line that is not one is passed over
+    here), so the venue filter never parses another venue's log strictly.
     """
-    instrument_id = None
+    start = None
     for _, text in logs.lines(name):
         if '"start"' not in text:
             continue
@@ -232,9 +261,15 @@ def _venue_of_log(logs: SignalLogs, name: str) -> str | None:
         except ValueError:
             continue
         if isinstance(record, dict) and record.get("kind") == "start":
-            found = record.get("instrument_id")
-            instrument_id = found if isinstance(found, str) else instrument_id
-    return instrument_id
+            start = record
+    return start
+
+
+def _venue_of_log(logs: SignalLogs, name: str) -> str | None:
+    """Return the instrument id of a log's last `start` record (`_last_start`), if it names one."""
+    start = _last_start(logs, name)
+    found = None if start is None else start.get("instrument_id")
+    return found if isinstance(found, str) else None
 
 
 def _venue_names(inputs: ParityInputs, venue: str) -> list[str]:
@@ -252,10 +287,36 @@ def _venue_names(inputs: ParityInputs, venue: str) -> list[str]:
     return names
 
 
-def _compare(inputs: ParityInputs, name: str) -> BotReport:
-    live = latest_segment(inputs.live.lines(name))
+def _strategy_of_log(logs: SignalLogs, name: str) -> str:
+    """
+    Return the strategy a log's last `start` record names (`DUMMY` when it names none, or when the
+    log has no `start` record: the dummy parse refuses that log, as it did before cascade parity).
+    """
+    start = _last_start(logs, name)
+    strategy = DUMMY if start is None else start.get("strategy", DUMMY)
+    if strategy not in (DUMMY, CASCADE):
+        raise ParityRefused(f"{name}: no parity for strategy {strategy!r} ({DUMMY}, {CASCADE})")
+    return str(strategy)
+
+
+def _require_replay(inputs: ParityInputs, name: str) -> None:
     if name not in set(inputs.replay.names()):
         raise ParityRefused(f"{name}: no replay log in {inputs.replay.root}")
+
+
+def _compare_cascade(inputs: ParityInputs, name: str) -> CascadeReport:
+    live = cascade_segment(inputs.live.lines(name))
+    _require_replay(inputs, name)
+    replay = cascade_segment(inputs.replay.lines(name))
+    require_flushed(inputs.catalog, live, replay)
+    return compare_cascade(live, replay)
+
+
+def _compare(inputs: ParityInputs, name: str) -> BotReport | CascadeReport:
+    if _strategy_of_log(inputs.live, name) == CASCADE:
+        return _compare_cascade(inputs, name)
+    live = latest_segment(inputs.live.lines(name))
+    _require_replay(inputs, name)
     replay = latest_segment(inputs.replay.lines(name))
     require_flushed(inputs.catalog, live, replay)
     stored = HourRows(inputs.catalog, live.instrument_id)
@@ -288,9 +349,41 @@ def _counts(counter: Mapping[str, int]) -> dict[str, int]:
     return {key: counter[key] for key in sorted(counter)}
 
 
-def _bot_json(bot: BotReport) -> dict[str, Any]:
+def _cascade_json(bot: CascadeReport) -> dict[str, Any]:
     return {
         "bot_id": bot.bot_id,
+        "strategy": bot.strategy,
+        "instrument_id": bot.instrument_id,
+        "start_ns": bot.start_ns,
+        "end_ns": bot.end_ns,
+        "unexplained": bot.unexplained,
+        "truncated": bot.truncated,
+        "paired": {kind: bot.paired[kind] for kind in ("tick", "liquidation")},
+        "late_rows": bot.late_rows,
+        "beyond_window": {"live": bot.live_beyond, "replay": bot.replay_beyond},
+        "fields": {
+            name: {
+                "paired": stats.paired,
+                "equal": stats.equal,
+                "equal_share": stats.equal_share,
+                "max_abs_diff": _finite(stats.max_abs_diff),
+                "classes": _counts(stats.classes),
+            }
+            for name, stats in bot.fields.items()
+        },
+        "reason_disagreements": bot.reasons,
+        "cycle_classes": _counts(bot.cycle_classes),
+        "live_only": _counts(bot.live_only),
+        "replay_only": _counts(bot.replay_only),
+    }
+
+
+def _bot_json(bot: BotReport | CascadeReport) -> dict[str, Any]:
+    if isinstance(bot, CascadeReport):
+        return _cascade_json(bot)
+    return {
+        "bot_id": bot.bot_id,
+        "strategy": DUMMY,
         "instrument_id": bot.instrument_id,
         "start_ns": bot.start_ns,
         "end_ns": bot.end_ns,
@@ -329,6 +422,7 @@ def report_json(report: ParityReport) -> dict[str, Any]:
         "coverage_file": report.coverage_file,
         "unexplained": report.unexplained,
         "classes": list(CLASSES),
+        "cascade_classes": list(CASCADE_CLASSES),
         "bots": [_bot_json(bot) for bot in report.bots],
     }
 
@@ -347,10 +441,39 @@ def _signal_line(bot: BotReport, name: str) -> str:
     )
 
 
-def _bot_lines(bot: BotReport) -> list[str]:
-    verdict = "PASS" if bot.unexplained == 0 else f"FAIL ({bot.unexplained} {UNEXPLAINED})"
+def _verdict(bot: BotReport | CascadeReport) -> str:
+    return "PASS" if bot.unexplained == 0 else f"FAIL ({bot.unexplained} {UNEXPLAINED})"
+
+
+def _field_line(bot: CascadeReport, name: str) -> str:
+    stats = bot.fields[name]
+    share = "n/a" if stats.equal_share is None else f"{stats.equal_share:.2%}"
+    diff = "n/a" if stats.max_abs_diff is None else f"{stats.max_abs_diff:.6g}"
+    return (
+        f"    {name:<10} paired {stats.paired:>6}  equal {share:>8}  max|diff| {diff:>12}  "
+        f"{_pairs(stats.classes)}"
+    )
+
+
+def _cascade_lines(bot: CascadeReport) -> list[str]:
     return [
-        f"  {bot.bot_id} {bot.instrument_id}: {verdict}",
+        f"  {bot.bot_id} {bot.instrument_id} [{bot.strategy}]: {_verdict(bot)}",
+        f"    window ns [{bot.start_ns}, {bot.end_ns}]; paired {_pairs(bot.paired)}; late rows "
+        f"{bot.late_rows}; beyond window live {bot.live_beyond}, replay {bot.replay_beyond}",
+        *(_field_line(bot, name) for name in CASCADE_FIELDS),
+        f"    reasons    {bot.reasons} disagreements (informational: the decision agreed)",
+        f"    cycles     {_pairs(bot.cycle_classes)}",
+        f"    live_only  {_pairs(bot.live_only)}",
+        f"    replay_only {_pairs(bot.replay_only)}",
+        f"    truncated  {bot.truncated} (records past a side stopping over 1 s early)",
+    ]
+
+
+def _bot_lines(bot: BotReport | CascadeReport) -> list[str]:
+    if isinstance(bot, CascadeReport):
+        return _cascade_lines(bot)
+    return [
+        f"  {bot.bot_id} {bot.instrument_id} [{DUMMY}]: {_verdict(bot)}",
         f"    window ns [{bot.start_ns}, {bot.end_ns}]; paired book {bot.paired_book}, "
         f"bar {bot.paired_bar}; skipped both {bot.skipped_both}; beyond window live "
         f"{bot.live_beyond}, replay {bot.replay_beyond}",
@@ -372,7 +495,8 @@ def render_text(report: ParityReport) -> str:
         f"bot_parity {report.venue}: {'PASS' if report.passed else 'FAIL'} "
         f"({report.unexplained} {UNEXPLAINED})",
         f"live {report.live_dir}; replay {report.replay_dir}; coverage {report.coverage_file}",
-        f"classes, first match wins: {', '.join(CLASSES)}",
+        f"classes, first match wins: {', '.join(CLASSES)} (cascade bots: "
+        f"{', '.join(CASCADE_CLASSES)})",
         "",
     ]
     for bot in report.bots:

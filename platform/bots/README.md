@@ -3,7 +3,8 @@
 The bots context (`platform/bots/`, `python3 -m bots`, compose service `live-paper`; moved
 into its own context in Story 25.3) is a real
 `TradingNode` + one `Strategy` per bot (`DummyStrategy`, Story 3.2, by default; a bot may
-run `CandlePatternStrategy` instead, Story 27.8 — see "Choosing a bot's strategy") that
+run `CandlePatternStrategy`, Story 27.8, or `LiquidationCascadeStrategy`, Story 33.14, instead —
+see "Choosing a bot's strategy") that
 subscribes to live market data and trades against it. **Paper mode is always 100%
 simulated money** — it uses `SandboxExecutionClientConfig`, which has no wallet address
 or private key anywhere in the path, so real funds are structurally unreachable
@@ -89,6 +90,7 @@ Each `[[bots]]` entry may name its strategy and that strategy's parameters (Stor
 |---|---|---|
 | `"dummy"` (the default) | `bots/strategies/dummy.py`'s `DummyStrategy` | the `trend_buy_threshold`/`trend_sell_threshold`/`ofi_confirm_threshold` keys above; no `[bots.params]` |
 | `"candle_pattern"` | `research/strategies/candle_pattern_strategy.py`'s `CandlePatternStrategy` — the candlestick scanner's detector with its EMA trend filter, a bar-count exit, an opposite-pattern exit and a reduce-only ATR stop | any `CandlePatternStrategyConfig` field in `[bots.params]` (`long_patterns`, `short_patterns`, `trend_ema_period`, `trend_condition`, `exit_bars`, `atr_period`, `stop_atr_multiple`, `allow_short`, `bar_type`) |
+| `"liquidation_cascade"` | `research/strategies/liquidation_cascade_strategy.py`'s `LiquidationCascadeStrategy` — follows (or fades) Bybit liquidation cascades detected by `kernel.indicators.LiquidationCascade`; **Bybit LINEAR ids only, paper only** (below) | any `LiquidationCascadeStrategyConfig` field in `[bots.params]` (below) |
 
 ```toml
 [[bots]]
@@ -123,6 +125,83 @@ stop_atr_multiple = 2.0
   code; the image copies `research/` for it (`platform/bots.dockerfile`).
 - The non-Sandbox file below (`ExecConfig`) has no `strategy` key: `real_money`/`exchange_demo`
   always run `DummyStrategy` (a `Known limit:` in `bots/infrastructure/nautilus_host.py`).
+
+#### The liquidation cascade bot (`strategy = "liquidation_cascade"`, Story 33.14)
+
+It reads two live inputs: its instrument's quotes from the venue's data client, and its
+instrument's forced liquidations, which no Nautilus adapter delivers (the Rust Bybit handler drops
+`allLiquidation`). They come from the **Bybit collector**: it publishes every liquidation it
+archives on Redis `liquidations:raw`, and for a fleet holding a cascade bot the host adds one more
+data client, `LIQUIDATIONS` (`bots/infrastructure/liquidation_data_client.py`), that subscribes
+that channel on the bots' own `REDIS_URL` and hands the rows to the node. So:
+
+- **The `bybit_collector` must be running** (it is the feed), on the same Redis as `live-paper`,
+  and **collecting the bot's instrument** (`instruments` of `capture/venues/bybit/config.toml`):
+  the collector publishes liquidations of its own instruments only.
+- **A stopped collector reads as a quiet market.** With Redis up, a stopped or crashed collector
+  leaves the channel silent, which the bridge cannot tell from an hour without liquidations: the
+  bot stays fresh (its quotes come from the node's own Bybit client) and simply never enters. The
+  alarm is the collector's own: `docker ps --filter name=bybit-collector` (Up, not Restarting), its
+  Dozzle log, its `process_start` lines in `data/errors/bybit_collector.jsonl`, and the coverage
+  record's `liquidations_unrecoverable` windows (`data/coverage/bybit.jsonl`); bot_tui's collector
+  pane marks it stale only after an hour without `collector:status`.
+- **A warm-up hour after every start:** the detector is `initialized` only once `baseline_s`
+  (default 3600 s) has passed since its first update, so for that long no entry is taken and every
+  record's decision is `not_ready` (but an `exit`: an open position's exits still run). Expected
+  after each start or restart, not a fault.
+- **Bybit LINEAR ids only** (`kernel.liquidation.has_liquidation_feed`): a cascade bot on a spot,
+  Hyperliquid or dYdX id is refused at load, naming the bot — those have no liquidation feed.
+- **Paper first, paper only:** it runs on the Sandbox like every paper bot, and the exec path
+  cannot run it (`ExecConfig` has no `strategy` key). Backtest it first: `08_strategy_gallery`
+  (its four cascade runs) or `research.strategies.backtest_liquidation_cascade.run(...)`.
+- **A dropped feed reads stale, a quiet market never does:** while the bridge's Redis subscription
+  is down (each drop is an ERROR at `bots.liquidation_feed.connection`, reconnected with a 1-30 s
+  backoff) the bot's reported `last_data_ns` is capped at the disconnect, so `bots:status` shows it
+  `data_stale` after 30 s; an hour without liquidations changes nothing. A half-open socket (no
+  FIN, no answer) is caught by a PING after 30 s idle and counts as a drop when no PONG follows
+  within another 30 s, so a dead connection is seen within 60 s. An undecodable channel entry, or a
+  message the engine fails on, is recorded at `bots.liquidation_feed.entry` and the subscription
+  and the entry's siblings are kept; a subscription without an instrument at
+  `bots.liquidation_feed.subscribe`.
+  `Known limit:` Redis pub/sub keeps nothing, so a liquidation published while the bridge was down
+  is never delivered (the archive holds it; audit D-174).
+- **Its signal log:** with `BOT_SIGNAL_LOG_DIR` set the bot writes `<dir>/<bot_id>.jsonl`
+  (`docs/DATA_DICTIONARY.md` §1.22, the cascade records), which `python3 -m bots.signal_replay
+  --strategy liquidation_cascade` replays from the catalog and `python3 -m verification.bot_parity`
+  compares; `signal_log_path` is the host's, never a `[bots.params]` key. The variable is
+  process-wide: every dummy bot of the fleet writes its log too (~86 MB per bot-day). `Known
+  limit:` the cascade log grows unrotated for the whole run (one ~300-byte `tick` record a second
+  plus one per liquidation, about 25-30 MB a day); upgrade path hourly rotation, as the dummy's.
+- **Its quotes on a shared instrument (audit D-133):** the node has one Bybit data client, so when
+  another bot of the fleet (a `dummy` bot) subscribes the depth-50 book on the same Bybit
+  instrument, every quote the cascade bot receives is built from each book message's first entries,
+  not the best level. Its exit prices, OFI and ATR then read those quotes, and the Sandbox fills it
+  on them. Keep a cascade bot's instrument free of book-subscribing bots until D-133 is decided.
+  (D-134, the depth-1 stream replayed into the book, is spot only and cannot reach a cascade bot.)
+
+| Param | Default | Meaning |
+|---|---|---|
+| `window_s` / `baseline_s` | 30 / 3600 | the detector's rate window and its baseline's time constant (s) |
+| `intensity_threshold` / `decay_ratio` | 3.0 / 0.5 | `active` at rate >= threshold x baseline; `spent` below `decay_ratio` x the episode's peak |
+| `sides` | `["short"]` | the position sides allowed: `"short"` and/or `"long"` |
+| `mode` | `"follow"` | `follow` trades with the forced flow while it rises (long liquidations -> short); `fade` against it once spent |
+| `min_episode_notional` | `"0"` | quote-currency notional (decimal string) below which an episode is ignored, both modes. **The real guard against tiny episodes:** after a silence the baseline sinks toward `BASELINE_FLOOR` (1 notional unit/s, only a division-by-zero guard), so a handful of small liquidations reads as a high intensity; set this to the smallest cascade worth trading |
+| `entry_timeout_s` / `max_entries_per_episode` / `cooldown_s` | 60 / 1 / 300 | no follow entry later than this after the episode started; entries per episode (a denied or rejected entry gives its count back); seconds after an exit |
+| `stop_pct` / `stop_atr_multiple` | — | **exactly one is required** (neither or both is refused at build): the stop as a fraction of the entry price, in (0, 1), or in ATRs of `atr_period` one-minute mid bars. On the ATR path an entry is refused with reason `no_stop` until the ATR is warm (`atr_period` bars, 14 min by default) |
+| `atr_period` | 14 | the ATR's period in bars (`stop_atr_multiple` only) |
+| `bar_type` | `<iid>-1-MINUTE-MID-INTERNAL` | the ATR's bars; only a time bar of the instrument aggregated internally from its quotes' mid (`-MID-INTERNAL`) is accepted, since the backtest and the replay feed quotes only |
+| `take_profit_r` | none | take-profit distance in stop distances |
+| `exit_on_spent` / `max_hold_s` | true / 1800 | close a follow position when the episode is spent; the longest hold (s) |
+| `ofi_confirm` / `ofi_window` | false / 50 | require the top-of-book OFI over `ofi_window` quotes to agree with the side |
+| `max_daily_loss` | none | quote-currency loss (decimal string) after which no entry is taken for the rest of the UTC day |
+
+Exits are market orders judged at least once a second, never resting stops (`Known limit:` in the
+strategy, audit D-175). `Known limit:` on the ATR path, the stop distance of an entry is held in
+memory only, so a restart that finds a position open before the ATR is warm again judges it
+without a stop (logged at ERROR): for the rest of that position it is protected only by
+`max_hold_s` (and, for a follow position, the spent exit; upgrade path in the strategy: persist
+the entry's stop distance). A commented example sits at the end of
+`bots/config.toml`.
 
 This file must never contain a `mode` key — `load_paper_config()` hard-errors if it
 finds one (that's the point: non-Sandbox execution is a separate file/loader, never a

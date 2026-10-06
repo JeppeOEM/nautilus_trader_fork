@@ -18,17 +18,22 @@ The bot parity tool's composition root (Story 31.9):
     python3 -m verification.bot_parity --venue BYBIT|HYPERLIQUID --live-dir DIR --replay-dir DIR
         [--catalog DIR] [--json]
 
-For every dummy bot of the venue with a live signal log (`bots.strategies.signal_log`, one
-`<bot_id>.jsonl` per bot), its latest run segment is paired cycle by cycle (equal `ts_ns`) with its
-catalog replay's (`bots.signal_replay`, the same file name under `--replay-dir`). Per bot and signal
-it reports the exact-equal share, the largest absolute difference, the decision and action
+For every dummy or cascade bot of the venue with a live signal log (`bots.strategies.signal_log`,
+one `<bot_id>.jsonl` per bot), its latest run segment is paired cycle by cycle (equal `ts_ns`) with
+its catalog replay's (`bots.signal_replay`, the same file name under `--replay-dir`). Per bot and
+signal it reports the exact-equal share, the largest absolute difference, the decision and action
 disagreements and every divergence's class, judged against the catalog's stored snapshot rows (read
-raw) and the coverage record (`verification.domain.bot_parity`; `docs/DATA_DICTIONARY.md` §1.22).
+raw) and the coverage record (`verification.domain.bot_parity`; `docs/DATA_DICTIONARY.md` §1.22). A
+`liquidation_cascade` bot (Story 33.14; its `start` record names the strategy) is paired by `tick`
+second and `liquidation` event id instead, every float field judged within `signal_compare.REL_TOL`
+and the rest exactly, each difference `late_arrival`, `quote_cadence` or `unexplained`
+(`verification.domain.cascade_parity`); every bot is reported with its strategy label.
 
 Prints a report (or `--json`) and exits 0 when nothing is `unexplained`, 1 when something is (or
 the inputs are refused), 2 on a usage error. A refusal -- a missing log directory, catalog or
 coverage record, no log of a venue bot, a bot without its replay log or logging more levels a
-side than the stored rows hold, a log whose venue cannot be told, a catalog not yet flushed
+side than the stored rows hold, a log whose venue cannot be told or whose strategy has no parity,
+a cascade replay not starting at the live start, a catalog not yet flushed
 past a bot's window (no stored row in the minute after it), a malformed record, a replay whose
 `start` record differs from the live one (but for `ts_ns`) or starts off the live grid, a stored
 row the oracle's book decoder refuses (or a float-layout snapshot file), a file vanishing

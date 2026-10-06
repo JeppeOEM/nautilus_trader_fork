@@ -30,6 +30,8 @@ import pandas as pd
 import pytest
 from kernel.clocks import NS_PER_DAY
 from kernel.clocks import NS_PER_S
+from kernel.liquidation import LIQUIDATION_CLIENT_ID
+from kernel.liquidation import Liquidation
 from kernel.performance_metrics import all_metrics
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.tests.snapshot_factory import make_snapshot
@@ -257,6 +259,27 @@ def test_seconds_kind_streams_snapshots_and_derived_quotes(catalog: str) -> None
     assert config.data[0].catalog_path == "/quotes"
     # BacktestDataConfig bounds are inclusive: the spec's half-open end is passed as `end - 1`.
     assert all((d.start_time, d.end_time) == (_START, _END - 1) for d in config.data)
+
+
+def test_liquidations_kind_streams_derived_quotes_and_the_liquidation_rows(catalog: str) -> None:
+    # Story 33.14. `build_run_config` takes only the settlement currency from `instrument`.
+    spec = _spec(catalog, instrument_ids=("BTCUSDT-LINEAR.BYBIT",), data="liquidations")
+    instrument = ParquetDataCatalog(catalog).instruments(instrument_ids=[str(_IID)])
+    config = build_run_config(spec, instrument, dict(_PARAMS), "/quotes")
+    assert [d.data_type for d in config.data] == [QuoteTick, Liquidation]
+    assert [d.catalog_path for d in config.data] == ["/quotes", catalog]
+    assert config.data[1].client_id == LIQUIDATION_CLIENT_ID
+    assert str(config.data[1].instrument_id) == "BTCUSDT-LINEAR.BYBIT"
+    assert all((d.start_time, d.end_time) == (_START, _END - 1) for d in config.data)
+    assert config.engine is not None
+    assert "bar_type" not in config.engine.strategies[0].config
+
+
+def test_the_liquidations_kind_needs_a_liquidation_feed(catalog: str) -> None:
+    with pytest.raises(ValueError, match="needs ids with a liquidation feed"):
+        _spec(catalog, data="liquidations")  # a dYdX id
+    with pytest.raises(ValueError, match="needs ids with a liquidation feed"):
+        _spec(catalog, instrument_ids=("BTCUSDT-SPOT.BYBIT",), data="liquidations")
 
 
 def test_spec_invariants(catalog: str) -> None:

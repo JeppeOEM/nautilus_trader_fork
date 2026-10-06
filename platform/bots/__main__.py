@@ -34,10 +34,11 @@ from bots.application.history import HistoryPublisher
 from bots.application.supervise import Supervisor
 from bots.domain.config import ExecBot
 from bots.domain.config import PaperFleet
-from bots.infrastructure.cache_reader import StrategyCacheReader
 from bots.infrastructure.config import resolve_config
 from bots.infrastructure.fills_store import SqliteFillsStore
+from bots.infrastructure.liquidation_data_client import LiquidationFeedStatus
 from bots.infrastructure.nautilus_host import build_node
+from bots.infrastructure.nautilus_host import cache_reader_for
 from bots.infrastructure.redis import connect
 
 
@@ -95,7 +96,9 @@ def main() -> None:
 
 def _run(fleet: PaperFleet | ExecBot, settings: Settings, fills: SqliteFillsStore) -> None:
     """Host the fleet on one node until it stops; the node is disposed however this exits."""
-    node, hosted = build_node(fleet, settings.redis_url)
+    # One liquidation-feed status per node: the bridge writes it, the cascade bots' readers read it.
+    liquidation_status = LiquidationFeedStatus()
+    node, hosted = build_node(fleet, settings.redis_url, liquidation_status)
     # Held here: the loop keeps only weak references to its tasks.
     tasks: list[asyncio.Task] = []
     histories: list[HistoryPublisher] = []
@@ -107,7 +110,7 @@ def _run(fleet: PaperFleet | ExecBot, settings: Settings, fills: SqliteFillsStor
         control_bus = partial(connect, settings.redis_url, subscribe_control=True)
         bus = partial(connect, settings.redis_url)
         for bot, strategy in hosted:
-            runtime = StrategyCacheReader(strategy)
+            runtime = cache_reader_for(bot, strategy, liquidation_status)
             supervisor = Supervisor(bot.bot_id, fleet.mode_label, runtime, fills, control_bus)
             # The anchor of each bot's equity curve for the return-based history metrics.
             anchor = fleet.starting_balance_anchor(bot.bot_id)

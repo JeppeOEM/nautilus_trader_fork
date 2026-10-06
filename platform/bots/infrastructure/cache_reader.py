@@ -32,6 +32,7 @@ from collections.abc import Callable
 from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Protocol
 
 from bots.application.ports import PositionSnapshot
 from nautilus_trader.model.enums import OrderSide
@@ -130,14 +131,26 @@ def own_open_orders(strategy: Strategy) -> list[Order]:
     return list(orders.values())
 
 
+class FeedStatus(Protocol):
+    """
+    A data feed's connection state outside the strategy (Story 33.14: the liquidation bridge's
+    `LiquidationFeedStatus`): None while connected, else when it went down.
+    """
+
+    @property
+    def disconnected_since_ns(self) -> int | None: ...
+
+
 class StrategyCacheReader:
     """
     `BotRuntime` over one strategy. Invariant: reads `cache.positions_open/closed` filtered by
-    this strategy's id only, and hands `on_fill` handlers only this strategy's `OrderFilled`s.
+    this strategy's id only, and hands `on_fill` handlers only this strategy's `OrderFilled`s; with
+    a `feed_status`, `last_data_ns` never passes the moment that feed went down while it is down.
     """
 
-    def __init__(self, strategy: Strategy) -> None:
+    def __init__(self, strategy: Strategy, feed_status: FeedStatus | None = None) -> None:
         self._strategy = strategy
+        self._feed_status = feed_status
 
     @property
     def strategy_name(self) -> str:
@@ -155,8 +168,12 @@ class StrategyCacheReader:
     def last_data_ns(self) -> int:
         # The ts_event of the strategy's last market data, set from a market-data callback that
         # keeps firing whether or not the strategy runs (see `DummyStrategy`; every hosted
-        # strategy keeps one, e.g. research's `CandlePatternStrategy`).
-        return self._strategy.last_data_ns
+        # strategy keeps one, e.g. research's `CandlePatternStrategy`). A strategy fed by a second
+        # feed (the liquidation bridge) reads stale while that feed is down, even though its quotes
+        # keep arriving: a quiet market never reads as a dead feed, only the connection does.
+        last: int = self._strategy.last_data_ns
+        down_since = None if self._feed_status is None else self._feed_status.disconnected_since_ns
+        return last if down_since is None else min(last, down_since)
 
     def start(self) -> None:
         self._strategy.start()

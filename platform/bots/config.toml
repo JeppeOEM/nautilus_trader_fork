@@ -392,3 +392,34 @@ trend_buy_threshold = 0.55
 trend_sell_threshold = 0.38
 ofi_confirm_threshold = -0.5
 starting_balance = "10_000 USDC"
+
+# --- A liquidation cascade paper bot (Story 33.14): uncomment the block below to run one -------
+# Paper only (an exec bot always runs the dummy strategy). It trades Bybit LINEAR ids only (any
+# other is refused at load: no liquidation feed) and needs the Bybit collector publishing
+# `liquidations:raw` on this process's REDIS_URL -- the host adds the LIQUIDATIONS bridge client
+# for it. With BOT_SIGNAL_LOG_DIR set it writes the signal log `verification.bot_parity` reads.
+# Its venue pool is the [venues.BYBIT] table above (or its defaults). Every [bots.params] key is a
+# `LiquidationCascadeStrategyConfig` field (bots/README.md); exactly one of stop_pct and
+# stop_atr_multiple is required.
+# [[bots]]
+# bot_id = "cascade-btc-01"
+# instrument_id = "BTCUSDT-LINEAR.BYBIT"
+# trade_size = "0.001"
+# starting_balance = "10_000 USDT"
+# strategy = "liquidation_cascade"
+# [bots.params]
+# window_s = 30
+# baseline_s = 3600
+# intensity_threshold = 3.0
+# decay_ratio = 0.5
+# sides = ["short"]
+# mode = "follow"
+# min_episode_notional = "50000"
+# entry_timeout_s = 60
+# max_entries_per_episode = 1
+# cooldown_s = 300
+# stop_pct = 0.004
+# take_profit_r = 2.0
+# exit_on_spent = true
+# max_hold_s = 1800
+# max_daily_loss = "200"

@@ -19,8 +19,8 @@ a later bump can re-verify them.
 | `research.strategies.ma_cross_strategy:MACrossStrategy` | Two moving averages crossing; axes `ma_type` (every `MovingAverageType` name) and `exit` (`cross`, `atr_stop`, `trailing_atr`). |
 | `research.strategies.indicator_signal_strategy:IndicatorSignalStrategy` | One indicator turned into a +1/0/-1 rule; axes `signal` (one name per bar indicator) and `filter` (`none`, `vhf`, `volatility_ratio`). |
 | notebook `07_indicator_atlas` | Every indicator replayed over archive bars and drawn. |
-| notebook `08_strategy_gallery` | Upstream example strategies and the two family strategies run through `NodeRunner`, as a leaderboard. |
-| `RunSpec` | Fields `fill_model`, `fee_model`, `latency_ms` or `latency`, `exec_algorithms`, and the `data` kinds `seconds`, `trades`, `bars:<spec>`. |
+| notebook `08_strategy_gallery` | Upstream example strategies and the two family strategies run through `NodeRunner`, as a leaderboard, plus the four liquidation cascade runs (Story 33.14). |
+| `RunSpec` | Fields `fill_model`, `fee_model`, `latency_ms` or `latency`, `exec_algorithms`, and the `data` kinds `seconds`, `trades`, `bars:<spec>`, `liquidations` (Bybit LINEAR ids only: the derived quotes plus the archived `custom_liquidation` rows). |
 | `research.strategies.ofi_strategy:OFIStrategy` | Snapshot OFI/OBI strategy (platform indicators, section 2). |
 | `research.strategies.candle_pattern_strategy:CandlePatternStrategy` | The 22 candlestick patterns (section 2, notebook 06). |
 
@@ -182,21 +182,24 @@ Subclasses of the Nautilus `Indicator` in the `kernel` context, fed from the 1 s
 
 | Name | Constructor | Inputs and outputs | Reached here by |
 |------|-------------|--------------------|-----------------|
-| `OnlineLogisticTrend` (`:60`) | `(lookback=5, learning_rate=0.05)` | `update_raw(close)` or `handle_bar`; `value` = P(next return > 0), 0.5 until initialized | signal `logistic_trend` |
-| `Microprice` (`:135`) | `()` | `update_raw(bid_price, bid_size, ask_price, ask_size)` or quote tick; `value` | `OFIStrategy`, atlas snapshot section |
-| `OrderFlowImbalance` (`:176`) | `(window=50)` | `update_raw(bid_price, bid_size, ask_price, ask_size)`; `value` | atlas snapshot section |
-| `RollingZScore` (`:253`) | `(window)` | `update_raw(value)`; population z-score over the window, 0.0 while fewer than 2 readings | `MultiLevelOFI(zscore_window=...)`, research OBI z-score |
-| `MultiLevelOBI` (`:309`) | `(levels=10)` | `update_raw(bid_sizes, ask_sizes)`; `value` in 0..1 | `OFIStrategy`, atlas |
-| `MultiLevelOFI` (`:347`) | `(levels=10, window=50, usd_notional=False, zscore_window=None)` | `update_raw(bid_prices, bid_sizes, ask_prices, ask_sizes)`; `value`; `clear_prev_state()` | `OFIStrategy`, atlas |
+| `OnlineLogisticTrend` (`:69`) | `(lookback=5, learning_rate=0.05)` | `update_raw(close)` or `handle_bar`; `value` = P(next return > 0), 0.5 until initialized | signal `logistic_trend` |
+| `Microprice` (`:144`) | `()` | `update_raw(bid_price, bid_size, ask_price, ask_size)` or quote tick; `value` | `OFIStrategy`, atlas snapshot section |
+| `OrderFlowImbalance` (`:185`) | `(window=50)` | `update_raw(bid_price, bid_size, ask_price, ask_size)`; `value` | atlas snapshot section |
+| `RollingZScore` (`:262`) | `(window)` | `update_raw(value)`; population z-score over the window, 0.0 while fewer than 2 readings | `MultiLevelOFI(zscore_window=...)`, research OBI z-score |
+| `MultiLevelOBI` (`:318`) | `(levels=10)` | `update_raw(bid_sizes, ask_sizes)`; `value` in 0..1 | `OFIStrategy`, atlas |
+| `MultiLevelOFI` (`:356`) | `(levels=10, window=50, usd_notional=False, zscore_window=None)` | `update_raw(bid_prices, bid_sizes, ask_prices, ask_sizes)`; `value`; `clear_prev_state()` | `OFIStrategy`, atlas |
+| `LiquidationCascade` (`:504`, Story 33.14) | `(window_s, baseline_s, intensity_threshold, decay_ratio)` | `update_liquidation(side, notional_units, ts_ns)` (a `Liquidation`'s `ts_init` and integer notional) and `advance(ts_ns)`; `rate_long`/`rate_short` (units/s over `window_s`), `baseline` (the continuous-time EMA of the window rate, integrated analytically between breakpoints and bias-corrected by `1 - exp(-elapsed / baseline_s)` since the first update, so it is the weighted mean rate from the first second of the warm-up on; floored at `BASELINE_FLOOR` (`:501`) = 1 unit/s, a division-by-zero guard only), `intensity`, `active`, `direction` (-1: longs liquidated), `rising`, `peak_rate`, `spent`, `episode_*` | `LiquidationCascadeStrategy` (backtest and paper bot), `research.application.liquidations.replay_cascade`, notebook 08 |
 
-`OFI_GAP_NS = 3_000_000_000` (`:57`): a gap between two consecutive snapshots longer than 3 s
+`OFI_GAP_NS = 3_000_000_000` (`:66`): a gap between two consecutive snapshots longer than 3 s
 makes the OFI discard its previous book (`clear_prev_state`), so a hole in the archive never
 produces a fake flow spike.
 
-Stateless helpers (plain functions over a decoded snapshot dict): `microprice` (`:491`), `spread`
-(`:514`), `mid_price` (`:535`), `volume_delta` (`:544`), `trade_aggregates` (`:549`),
-`snapshot_depth` (`:591`, returns a `DepthProfile`), `cumulative_depth` (`:610`) and
-`depth_within_bps` (`:636`). `views/` calls them (SSOT-01); a notebook never re-implements them.
+Stateless helpers (plain functions over a decoded snapshot dict): `microprice` (`:727`), `spread`
+(`:750`), `mid_price` (`:771`), `volume_delta` (`:780`), `trade_aggregates` (`:785`),
+`snapshot_depth` (`:827`, returns a `DepthProfile` (`:808`)), `cumulative_depth` (`:846`),
+`depth_within_bps` (`:872`), `liquidity_distance` (`:923`, returns a `LiquidityDistance` (`:897`)),
+`basis_bps` (`:944`) and `funding_annualised` (`:957`). `views/` calls them (SSOT-01); a notebook
+never re-implements them.
 
 `kernel/candle_patterns.py`: `CandlePattern(pattern, *, body_ratio, shadow_ratio,
 doji_body_ratio, marubozu_shadow_ratio, tweezer_ratio, trend_bars, star_gap)` (`:521`) is one
@@ -204,6 +207,26 @@ doji_body_ratio, marubozu_shadow_ratio, tweezer_ratio, trend_bars, star_gap)` (`
 (`:129-131`). `PatternName` (`:136`) has 22 members. `CandlePatternSet(thresholds=None)` (`:617`)
 runs all 22 over one bar stream and `fired` lists the non-zero ones. `MAX_PATTERN_BARS = 3`.
 Reached by `CandlePatternStrategy` and notebook 06.
+
+`LiquidationCascade` has no Nautilus counterpart: no built-in indicator takes liquidations, an
+event stream rather than bars or quotes, and its value must not depend on how often it is updated:
+the EMA integrates every window expiry in order, analytically, so it is independent of the update
+frequency and a backtest's and a live bot's 1 s timer agree up to float rounding (bot parity
+compares floats with `REL_TOL`; audit D-176). Without the bias correction the EMA, started at 0,
+would hold ~63 % of the mean rate when `initialized` turns on after one `baseline_s`, inflating
+`intensity` ~1.6x and opening false episodes after every start or restart; with it a steady rate
+reads intensity ~1 right after the warm-up. `BASELINE_FLOOR` is one unit (`10^-(price_precision +
+size_precision)` of the quote) per second: it only keeps `intensity` finite after a long silence and
+is not below every real rate (one unit in a 30 s window is 1/30 unit/s), but it is negligible in
+quote terms; the guard against a tiny liquidation after silence opening an episode is the strategy's
+`min_episode_notional`. Its strategy, `research/strategies/liquidation_cascade_strategy.py`, takes
+every decision through the pure `cascade_rules.should_enter`/`should_exit` (a follow entry needs the
+current `direction` to be the episode's; a fade entry needs the episode spent and the rate not
+`rising` again), runs in a backtest through `RunSpec(data="liquidations")` (the derived quotes plus
+the archive's `custom_liquidation` rows, `BacktestDataConfig(client_id="LIQUIDATIONS")`;
+`research/strategies/backtest_liquidation_cascade.py`, the four gallery runs of notebook 08) and as
+a paper bot (`strategy = "liquidation_cascade"`, fed live by the bots' `LIQUIDATIONS` data client).
+Bybit LINEAR ids only.
 
 ---
 

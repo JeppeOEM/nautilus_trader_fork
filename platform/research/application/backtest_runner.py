@@ -49,6 +49,8 @@ import pandas as pd
 from kernel.catalog_files import query_top_of_book
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import NS_PER_MS
+from kernel.liquidation import LIQUIDATION_CLIENT_ID
+from kernel.liquidation import Liquidation
 from kernel.second_snapshot import DydxSecondSnapshot
 
 import nautilus_trader.analysis as nautilus_analysis
@@ -135,9 +137,10 @@ def settlement_currency(spec: RunSpec) -> str:
 
 def write_derived_quotes(spec: RunSpec, instruments: list[Instrument], directory: str) -> None:
     """
-    Write the `seconds` kind's quote catalog: each instrument and one `QuoteTick` per snapshot top
-    of book in the window (`kernel.catalog_files.query_top_of_book`, level 0 only, MEM-01) -- the
-    simulated exchange has no market to fill against otherwise. Written once per sweep.
+    Write the `seconds` and `liquidations` kinds' quote catalog: each instrument and one `QuoteTick`
+    per snapshot top of book in the window (`kernel.catalog_files.query_top_of_book`, level 0 only,
+    MEM-01) -- the simulated exchange has no market to fill against otherwise. Written once per
+    sweep.
     """
     start_ns, end_ns = window_ns(spec.start, spec.end)
     derived = ParquetDataCatalog(directory)
@@ -158,6 +161,9 @@ def write_derived_quotes(spec: RunSpec, instruments: list[Instrument], directory
 
 # A custom data type goes in by its import path: `BacktestDataConfig.data_cls` is typed `str`.
 _SNAPSHOT_CLS = f"{DydxSecondSnapshot.__module__}:{DydxSecondSnapshot.__qualname__}"
+LIQUIDATION_CLS = f"{Liquidation.__module__}:{Liquidation.__qualname__}"
+# The kinds that replay quotes derived from the snapshots' top of book (`write_derived_quotes`).
+_QUOTED_KINDS = ("seconds", "liquidations")
 
 
 def _data_configs(spec: RunSpec, quotes_dir: str) -> list[BacktestDataConfig]:
@@ -166,35 +172,52 @@ def _data_configs(spec: RunSpec, quotes_dir: str) -> list[BacktestDataConfig]:
     so `end` is passed as `end_ns - 1` to keep the spec's half-open `[start, end)`.
     """
     start_ns, end_ns = window_ns(spec.start, spec.end)
-    bounds = {"start_time": start_ns, "end_time": end_ns - 1}
+    bounds: dict[str, Any] = {"start_time": start_ns, "end_time": end_ns - 1}
     configs = []
     for iid in map(InstrumentId.from_str, spec.instrument_ids):
-        if spec.data == "seconds":
-            configs += [
+        if spec.data in _QUOTED_KINDS:
+            configs.append(
                 BacktestDataConfig(
-                    catalog_path=quotes_dir,
-                    data_cls=QuoteTick,
-                    instrument_id=iid,
-                    **bounds,
-                ),
+                    catalog_path=quotes_dir, data_cls=QuoteTick, instrument_id=iid, **bounds
+                )
+            )
+        if spec.data == "seconds":
+            configs.append(
                 BacktestDataConfig(
                     catalog_path=spec.catalog_path,
                     data_cls=_SNAPSHOT_CLS,
                     instrument_id=iid,
                     client_id=spec.venue,  # custom type: bookkeeping label only
                     **bounds,
-                ),
-            ]
-        else:  # "trades" and "bars:<spec>" both stream the raw trade archive
+                )
+            )
+        elif spec.data == "liquidations":
+            configs.append(_liquidation_config(spec.catalog_path, iid, bounds))
+        elif spec.data not in _QUOTED_KINDS:  # "trades" and "bars:<spec>": the raw trade archive
             configs.append(
                 BacktestDataConfig(
-                    catalog_path=spec.catalog_path,
-                    data_cls=TradeTick,
-                    instrument_id=iid,
-                    **bounds,
+                    catalog_path=spec.catalog_path, data_cls=TradeTick, instrument_id=iid, **bounds
                 )
             )
     return configs
+
+
+def _liquidation_config(
+    catalog_path: str, iid: InstrumentId, bounds: Mapping[str, Any]
+) -> BacktestDataConfig:
+    """
+    Return the data config of one id's archived `Liquidation` rows. Its client id is the one a
+    strategy subscribes with (`LIQUIDATION_CLIENT_ID`), a label here: the backtest engine publishes
+    every row on the custom-data topic of its type and instrument whichever client the command
+    names, so the one subscription line serves the backtest and the live bot alike.
+    """
+    return BacktestDataConfig(
+        catalog_path=catalog_path,
+        data_cls=LIQUIDATION_CLS,
+        instrument_id=iid,
+        client_id=LIQUIDATION_CLIENT_ID,
+        **bounds,
+    )
 
 
 def _latency_model(spec: RunSpec) -> ImportableLatencyModelConfig | None:
@@ -426,7 +449,7 @@ class NodeRunner:
             raise ValueError("a sweep needs at least one grid point")
         instruments = _instruments(spec)
         with tempfile.TemporaryDirectory() as quotes_dir:
-            if spec.data == "seconds":
+            if spec.data in _QUOTED_KINDS:
                 write_derived_quotes(spec, instruments, quotes_dir)
             planned: dict[str, tuple[BacktestRunConfig, dict[str, object]]] = {}
             positions: dict[str, int] = {}

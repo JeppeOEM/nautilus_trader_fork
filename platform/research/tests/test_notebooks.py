@@ -43,9 +43,14 @@ from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import TradeTick
 from research.application import inspection
 from research.application.frames import CatalogFrames
+from research.application.liquidations import read_liquidations
+from research.application.liquidations import replay_cascade
 from research.application.ports import window_ns
+from research.tests.fixture_catalog import CASCADE_INSTRUMENT
 from research.tests.fixture_catalog import DATA_END_NS
 from research.tests.fixture_catalog import DATA_START_NS
+from research.tests.fixture_catalog import LIQUIDATION_BACKGROUND
+from research.tests.fixture_catalog import LIQUIDATION_BURST
 from research.tests.fixture_catalog import FixturePaths
 from research.tests.source_tree import SOURCE_TREE
 
@@ -151,6 +156,19 @@ _FIXTURE_PERIODS = {
     "Signal.fuzzy_candle.period": 3,
     "Signal.fuzzy_candle.min_size": 1,
 }
+# The cascade detector sized to the fixture's ten minutes (Story 33.14): a 10 s window over a 120 s
+# baseline, so the background (one liquidation every 5 s, two in a window) warms it within the
+# window and reads under the threshold, while the 30 s burst at 400 s is the one episode
+# (`test_the_fixture_holds_one_cascade_episode`); exits and re-entries that fit in what is left.
+_FIXTURE_CASCADE = {
+    "window_s": 10,
+    "baseline_s": 120,
+    "intensity_threshold": 3.0,
+    "decay_ratio": 0.5,
+    "entry_timeout_s": 30,
+    "cooldown_s": 30,
+    "max_hold_s": 120,
+}
 NOTEBOOK_ENV.update(
     {
         # Every indicator of the catalog replayed over the ten 1 m bars (a venue-timed instrument
@@ -164,14 +182,17 @@ NOTEBOOK_ENV.update(
             "NOTEBOOK_OBI_LEVELS": json.dumps(5),
             "NOTEBOOK_OFI_WINDOW": json.dumps(5),
         },
-        # The thirteen gallery strategies on the same ten minute bars with the sizes above, then
-        # the first one across every execution model.
+        # The thirteen bar strategies on the same ten minute bars with the sizes above, the four
+        # cascade runs on the fixture's planted liquidation cascade (`_FIXTURE_CASCADE`), then the
+        # first one across every execution model.
         "08_strategy_gallery.py": {
             "START": _iso(DATA_START_NS),
             "END": _iso(DATA_END_NS),
             "NOTEBOOK_INSTRUMENT": json.dumps("BTC-USD-PERP.HYPERLIQUID"),
             "NOTEBOOK_PERIODS": json.dumps(_FIXTURE_PERIODS),
             "NOTEBOOK_DATA": json.dumps("bars:1-MINUTE"),
+            "NOTEBOOK_CASCADE_INSTRUMENT": json.dumps(CASCADE_INSTRUMENT),
+            "NOTEBOOK_CASCADE_PARAMS": json.dumps(_FIXTURE_CASCADE),
         },
     }
 )
@@ -371,3 +392,43 @@ def test_the_fixture_ledger_counts(fixture_archive: FixturePaths) -> None:
     assert counts == defects.ledger_counts
     restarts = dict(zip(ledger.restarts["service"], ledger.restarts["restarts"], strict=True))
     assert restarts == defects.ledger_restarts
+
+
+def test_the_fixture_holds_one_cascade_episode(fixture_archive: FixturePaths) -> None:
+    """The planted liquidations replay to one falling cascade inside the burst (Story 33.14)."""
+    rows = read_liquidations(
+        fixture_archive.catalog_path, CASCADE_INSTRUMENT, DATA_START_NS, DATA_END_NS
+    )
+    assert len(rows) == len(LIQUIDATION_BACKGROUND) + len(LIQUIDATION_BURST)
+    detector = {"window_s": 10, "baseline_s": 120, "intensity_threshold": 3.0, "decay_ratio": 0.5}
+    assert {key: _FIXTURE_CASCADE[key] for key in detector} == detector
+    episodes = replay_cascade(
+        rows, 10, 120, 3.0, 0.5, DATA_END_NS, start_ns=DATA_START_NS, precisions=(2, 3)
+    )
+    burst = range(
+        DATA_START_NS + LIQUIDATION_BURST.start * NS_PER_S,
+        DATA_START_NS + LIQUIDATION_BURST.stop * NS_PER_S,
+    )
+    assert [(e.direction, e.start_ns in burst, e.end_ns is not None) for e in episodes] == [
+        (-1, True, True)
+    ]
+
+
+def test_the_strategy_gallery_runs_the_cascades_and_shows_their_sample(
+    fixture_archive: FixturePaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the 08 notebook ran and printed (its namespace): four cascade runs and their sample."""
+    shown = _run(NOTEBOOKS_DIR / "08_strategy_gallery.py", fixture_archive, monkeypatch)
+    cascades = shown["cascades"]
+    assert [o.gallery.label for o in cascades] == [
+        f"Cascade follow short only ({CASCADE_INSTRUMENT}, liquidations)",
+        f"Cascade follow both sides ({CASCADE_INSTRUMENT}, liquidations)",
+        f"Cascade fade short only ({CASCADE_INSTRUMENT}, liquidations)",
+        f"Cascade fade both sides ({CASCADE_INSTRUMENT}, liquidations)",
+    ]
+    assert all(o.error is None for o in cascades)
+    sample = shown["sample"]
+    assert (sample.has_feed, sample.days, sample.episodes) == (True, 2, 1)
+    follow = cascades[0].result
+    assert follow is not None
+    assert len(follow.fills) >= 1  # the planted episode is traded

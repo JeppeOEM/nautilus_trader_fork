@@ -46,8 +46,19 @@ run as a paper bot. Upgrade path: the same two keys on `ExecConfig` and its load
 `check_strategy`, once a paper-proven strategy is promoted.
 
 `BOT_SIGNAL_LOG_DIR` (Story 31.9): when set, every `DummyStrategy` this host builds writes its
-per-cycle signal log to `<dir>/<bot_id>.jsonl` (`bots.strategies.signal_log`); other strategies
-have no such log. Unset, nothing is written.
+per-cycle signal log to `<dir>/<bot_id>.jsonl` (`bots.strategies.signal_log`), and so does every
+paper `liquidation_cascade` bot (Story 33.14, its own record kinds, `docs/DATA_DICTIONARY.md`
+§1.22); other strategies have no such log. Unset, nothing is written.
+
+**Liquidations (Story 33.14).** A strategy of `LIQUIDATION_STRATEGIES` subscribes `Liquidation` rows
+through the client id `LIQUIDATIONS` (`kernel.liquidation.LIQUIDATION_CLIENT_ID`). For a paper fleet
+holding one, `build_node` adds one more data client under that name, the Redis bridge of the Bybit
+collector's `liquidations:raw` (`bots.infrastructure.liquidation_data_client`), and its factory;
+a fleet without one gets no such client. The bridge's `LiquidationFeedStatus` is shared with those
+bots' cache readers (`cache_reader_for`), so a dropped feed reads as stale data. Such a bot is
+refused at config load on an instrument without the feed (`kernel.liquidation.has_liquidation_feed`:
+Bybit LINEAR only), and it is paper only: an `ExecBot` always runs `DummyStrategy` (the Known limit
+above), so the cascade strategy can never reach real signing.
 """
 
 import os
@@ -58,6 +69,8 @@ from types import MappingProxyType
 from urllib.parse import parse_qs
 from urllib.parse import urlparse
 
+from kernel.liquidation import LIQUIDATION_CLIENT_ID
+from kernel.liquidation import has_liquidation_feed
 from kernel.venues import market_suffix
 from kernel.venues import venue_of
 
@@ -66,6 +79,10 @@ from bots.domain.config import ExecBot
 from bots.domain.config import ExecConfig
 from bots.domain.config import PaperFleet
 from bots.domain.config import plain_params
+from bots.infrastructure.cache_reader import StrategyCacheReader
+from bots.infrastructure.liquidation_data_client import LiquidationDataClientConfig
+from bots.infrastructure.liquidation_data_client import LiquidationFeedStatus
+from bots.infrastructure.liquidation_data_client import liquidation_client_factory
 from bots.strategies.dummy import DummyStrategy
 from bots.strategies.dummy import DummyStrategyConfig
 from nautilus_trader.adapters.bybit.config import BybitDataClientConfig
@@ -121,12 +138,20 @@ STRATEGIES: MappingProxyType[str, tuple[str, str] | None] = MappingProxyType(
             "research.strategies.candle_pattern_strategy:CandlePatternStrategy",
             "research.strategies.candle_pattern_strategy:CandlePatternStrategyConfig",
         ),
+        "liquidation_cascade": (
+            "research.strategies.liquidation_cascade_strategy:LiquidationCascadeStrategy",
+            "research.strategies.liquidation_cascade_strategy:LiquidationCascadeStrategyConfig",
+        ),
     }
 )
+# The strategies fed `Liquidation` rows through the `LIQUIDATIONS` data client (the module
+# docstring): each writes its signal log under `BOT_SIGNAL_LOG_DIR` and needs the feed.
+LIQUIDATION_STRATEGIES = frozenset({"liquidation_cascade"})
 # Keys a bot's `params` may never set: `BotConfig` owns the identity (`order_id_tag` is the bot's
-# `bot_id`, AD-11; `strategy_id` would override it) and the sizing, and every other
-# `StrategyConfig` base field is the host's (e.g. `oms_type`, `manage_stop`).
-_RESERVED_PARAMS = frozenset({"instrument_id", "trade_size"}) | frozenset(
+# `bot_id`, AD-11; `strategy_id` would override it) and the sizing, the host the signal log's
+# location (`BOT_SIGNAL_LOG_DIR`), and every other `StrategyConfig` base field is the host's (e.g.
+# `oms_type`, `manage_stop`).
+_RESERVED_PARAMS = frozenset({"instrument_id", "trade_size", "signal_log_path"}) | frozenset(
     StrategyConfig.__struct_fields__
 )
 
@@ -277,19 +302,57 @@ def _cache_config(redis_url: str) -> CacheConfig:
     )
 
 
-def build_node(fleet: PaperFleet | ExecBot, redis_url: str) -> tuple[TradingNode, list[HostedBot]]:
-    """Build the process's one node and attach each bot's strategy (`STRATEGIES`) in order."""
-    # Every strategy first: a bad one fails the build before any node (Cache, Redis, loop) exists.
-    hosted: list[HostedBot] = [(bot, _strategy_for(bot)) for bot in fleet.bots]
+def _needs_liquidations(fleet: PaperFleet | ExecBot) -> bool:
+    """Whether a paper bot of `fleet` runs a `LIQUIDATION_STRATEGIES` strategy."""
+    return isinstance(fleet, PaperFleet) and any(
+        bot.strategy in LIQUIDATION_STRATEGIES for bot in fleet.bots
+    )
+
+
+def _liquidation_bridge(
+    fleet: PaperFleet | ExecBot, redis_url: str, status: LiquidationFeedStatus | None
+) -> tuple[LiquidationDataClientConfig, LiquidationFeedStatus] | None:
+    """
+    Return the `LIQUIDATIONS` bridge's config and the status it shares for a fleet with a
+    liquidation strategy, None for any other; `ValueError` for such a fleet without `status`.
+    """
+    if not _needs_liquidations(fleet):
+        return None
+    if status is None:
+        raise ValueError(
+            "a fleet with a liquidation strategy needs the LiquidationFeedStatus its cache readers "
+            "read (build_node(..., liquidation_status=))"
+        )
+    return LiquidationDataClientConfig(redis_url=redis_url), status
+
+
+def _venue_clients(fleet: PaperFleet | ExecBot) -> tuple[dict, dict, dict, type]:
+    """Return the fleet's data and exec client configs, its data factories and exec factory."""
     instrument_provider = InstrumentProviderConfig(load_all=True)
     if isinstance(fleet, ExecBot):
-        data_clients, exec_clients, data_factories = _exec_venue_clients(fleet, instrument_provider)
-        exec_factory = VENUES[venue_of(fleet.config.instrument_id)].exec_factory
-    else:
-        data_clients, exec_clients, data_factories = _paper_venue_clients(
-            fleet, instrument_provider
-        )
-        exec_factory = SandboxLiveExecClientFactory
+        clients = _exec_venue_clients(fleet, instrument_provider)
+        return (*clients, VENUES[venue_of(fleet.config.instrument_id)].exec_factory)
+    return (*_paper_venue_clients(fleet, instrument_provider), SandboxLiveExecClientFactory)
+
+
+def build_node(
+    fleet: PaperFleet | ExecBot,
+    redis_url: str,
+    liquidation_status: LiquidationFeedStatus | None = None,
+) -> tuple[TradingNode, list[HostedBot]]:
+    """
+    Build the process's one node and attach each bot's strategy (`STRATEGIES`) in order. A paper
+    fleet with a liquidation strategy also gets the `LIQUIDATIONS` bridge on `redis_url`, sharing
+    `liquidation_status` with the cascade bots' cache readers (`cache_reader_for`); such a fleet
+    without one is refused (`ValueError`): a status nobody reads would leave the bots' heartbeat
+    blind to a dropped feed.
+    """
+    bridge = _liquidation_bridge(fleet, redis_url, liquidation_status)
+    # Every strategy first: a bad one fails the build before any node (Cache, Redis, loop) exists.
+    hosted: list[HostedBot] = [(bot, _strategy_for(bot)) for bot in fleet.bots]
+    data_clients, exec_clients, data_factories, exec_factory = _venue_clients(fleet)
+    if bridge is not None:
+        data_clients[LIQUIDATION_CLIENT_ID] = bridge[0]
 
     node = TradingNode(
         config=TradingNodeConfig(
@@ -303,6 +366,8 @@ def build_node(fleet: PaperFleet | ExecBot, redis_url: str) -> tuple[TradingNode
     for venue, data_factory in data_factories.items():
         node.add_data_client_factory(venue, data_factory)
         node.add_exec_client_factory(venue, exec_factory)
+    if bridge is not None:
+        node.add_data_client_factory(LIQUIDATION_CLIENT_ID, liquidation_client_factory(bridge[1]))
 
     for _bot, strategy in hosted:
         node.trader.add_strategy(strategy)
@@ -311,12 +376,25 @@ def build_node(fleet: PaperFleet | ExecBot, redis_url: str) -> tuple[TradingNode
     return node, hosted
 
 
+def cache_reader_for(
+    bot: BotConfig | ExecConfig, strategy: Strategy, liquidation_status: LiquidationFeedStatus
+) -> StrategyCacheReader:
+    """
+    Return the bot's `BotRuntime`: a liquidation strategy's reader also reads the feed's status
+    (its `last_data_ns` is capped at the disconnect while the feed is down), every other's not.
+    """
+    if isinstance(bot, BotConfig) and bot.strategy in LIQUIDATION_STRATEGIES:
+        return StrategyCacheReader(strategy, liquidation_status)
+    return StrategyCacheReader(strategy)
+
+
 def check_strategy(bot: BotConfig) -> None:
     """
     Refuse a bot whose `strategy`/`params` cannot mean what they say (DATA-07: never a silent
     fallback to `dummy`): an unknown strategy, `params` on `dummy` (its tunables are `BotConfig`
-    keys), or a params key `BotConfig` or the host owns (`_RESERVED_PARAMS`). A params key the
-    strategy's config does not have fails at build, where its config class rejects it.
+    keys), a params key `BotConfig` or the host owns (`_RESERVED_PARAMS`), or a liquidation
+    strategy on an instrument without the liquidation feed. A params key the strategy's config
+    does not have fails at build, where its config class rejects it.
     """
     if bot.strategy not in STRATEGIES:
         raise ValueError(
@@ -332,6 +410,11 @@ def check_strategy(bot: BotConfig) -> None:
         raise ValueError(
             f"[[bots]] {bot.bot_id}: [bots.params] may not set {reserved}: the bot's own keys "
             "and the host set them"
+        )
+    if bot.strategy in LIQUIDATION_STRATEGIES and not has_liquidation_feed(bot.instrument_id):
+        raise ValueError(
+            f"[[bots]] {bot.bot_id}: strategy {bot.strategy!r} needs the liquidation feed, which "
+            f"{bot.instrument_id!r} has not (Bybit LINEAR ids only)"
         )
 
 
@@ -371,7 +454,8 @@ def _strategy_for(bot: BotConfig | ExecConfig) -> Strategy:
 def _signal_log_path(bot_id: str) -> str | None:
     """
     `<BOT_SIGNAL_LOG_DIR>/<bot_id>.jsonl` when the env var is set, else None (no log): the
-    `DummyStrategy` signal log is opt-in per process, never a `BotConfig`/TOML key (Story 31.9).
+    `DummyStrategy` and liquidation-strategy signal logs are opt-in per process, never a
+    `BotConfig`/TOML key (Stories 31.9, 33.14).
     """
     directory = os.environ.get(SIGNAL_LOG_DIR_ENV)
     if not directory:
@@ -379,13 +463,27 @@ def _signal_log_path(bot_id: str) -> str | None:
     return os.path.join(directory, f"{bot_id}.jsonl")
 
 
-def _importable_strategy(bot: BotConfig, strategy_path: str, config_path: str) -> Strategy:
-    config = {
+def strategy_params(bot: BotConfig, signal_log_path: str | None) -> dict[str, object]:
+    """
+    Return the config a string-path strategy is built from: the bot's `params`, its instrument,
+    sizing and `bot_id` as `order_id_tag`, and `signal_log_path` when not None (a
+    `LIQUIDATION_STRATEGIES` strategy's). The one builder of it: the catalog replay
+    (`bots.signal_replay`) builds the replayed strategy with exactly these fields.
+    """
+    config: dict[str, object] = {
         **plain_params(bot.params),
         "instrument_id": bot.instrument_id,
         "trade_size": str(bot.trade_size),
         "order_id_tag": bot.bot_id,
     }
+    if signal_log_path is not None:
+        config["signal_log_path"] = signal_log_path
+    return config
+
+
+def _importable_strategy(bot: BotConfig, strategy_path: str, config_path: str) -> Strategy:
+    log_path = _signal_log_path(bot.bot_id) if bot.strategy in LIQUIDATION_STRATEGIES else None
+    config = strategy_params(bot, log_path)
     try:
         strategy = StrategyFactory.create(
             ImportableStrategyConfig(

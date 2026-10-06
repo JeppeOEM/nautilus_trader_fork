@@ -1860,6 +1860,29 @@ microseconds and starts its 1 s timer at exactly that `ts_ns`; the few hundred n
 the first cycle and change nothing it computes. Known limit (size): one file per bot growing for
 the run, about 1 KB per cycle (~86 MB per bot-day); upgrade path hourly rotation.
 
+**1b. The liquidation cascade bot's signal log (Story 33.14).** A paper `liquidation_cascade` bot
+(`LiquidationCascadeStrategy`) writes its own log under the same `BOT_SIGNAL_LOG_DIR`, in the same
+line format (compact `json.dumps`, one flushed line per record; its writer lives in the research
+strategy, which may not import `bots`). The `start` record is told apart by its `strategy` key (the
+dummy's `start` has none and gains none):
+
+| Field | Meaning |
+|---|---|
+| `kind` | `start`, `tick` (the 1 s timer, on whole UTC seconds live and in the replay alike, so the grid needs no alignment) or `liquidation` (one fed row) |
+| `start` only | `strategy: "liquidation_cascade"`, and every `LiquidationCascadeStrategyConfig` field but `signal_log_path` (`Decimal`s as text, tuples as lists) |
+| `bot_id`, `instrument_id` | the bot (its `order_id_tag`) and its instrument |
+| `ts_ns` | `start`: the clock truncated to whole microseconds (as the dummy's); `liquidation`: the detector's clock after the update, the row's `ts_init` -- or the clock when the row arrived after it (placed late, audit D-176); `tick`: the timer's whole second, also when a row received after that second was fed before the timer's callback ran (live only: the indicator fields then hold that row, and parity classes the pair `late_arrival` as a late tick) |
+| `venue_event_id` | `liquidation` only: the row's dedup key (§1.26) |
+| `rate_long`, `rate_short`, `baseline`, `intensity` | the detector's floats after the update (§2.1) |
+| `direction`, `active`, `spent` | the detector's state (-1/0/+1, booleans) |
+| `decision` | `enter_short`, `enter_long`, `exit`, `none` or `not_ready` (the detector not initialized and nothing decided) |
+| `reason` | an entry's mode (`follow`/`fade`), an exit's reason (`stop`, `take_profit`, `spent`, `max_hold`), `no_stop` (an ATR stop not ready), else null |
+
+Known limit (size): the cascade log grows unrotated for the run too, one ~300-byte `tick` record a
+second plus one per liquidation (about 25-30 MB a day); upgrade path hourly rotation, as the
+dummy's. `BOT_SIGNAL_LOG_DIR` is process-wide: setting it for a cascade bot also starts every
+dummy bot's ~86 MB per bot-day log.
+
 **2. The verify fleet and its replay.** `bots/config.verify.toml`: one paper `dummy` bot per verify
 instrument (Bybit `BTCUSDT-LINEAR`, `ETHUSDT-LINEAR`, `BTCUSDT-SPOT`, `ETHUSDT-SPOT`; Hyperliquid
 `SOL-USD-PERP`), mainnet data, Sandbox execution only. `docker-compose.verify.yml`'s `live-paper`
@@ -1869,7 +1892,8 @@ reference recorders', DATA-02; `make verify-up` creates the directory first); it
 `Makefile`'s `VERIFY_SERVICES`.
 
 `python3 -m bots.signal_replay --config F --catalog P --live-log DIR --out DIR [--start ISO]
-[--end ISO] [--bot BOT_ID ...]` runs one `BacktestNode` per dummy bot of F (the strategy by string
+[--end ISO] [--bot BOT_ID ...] [--strategy dummy|liquidation_cascade]` runs one `BacktestNode` per
+dummy (and cascade, below) bot of F (the strategy by string
 path, the bot's thresholds, sizing and exits, `signal_log_path=<out>/<bot_id>.jsonl`):
 - **Clock and window.** `start` is the live log's latest `start` record's `ts_ns` exactly, so the
   replay's 1 s timer fires on the same `start + k s` nanoseconds and cycles pair by equal `ts_ns`,
@@ -1901,6 +1925,18 @@ path, the bot's thresholds, sizing and exits, `signal_log_path=<out>/<bot_id>.js
 - **Cold start.** No warm-up, as live; but the replay holds no book until the first stored row
   after `start` (about 1 + `hold_back` s), so its first cycles may be `book_skipped`, explained
   below (`cold_start`).
+- **Cascade bots (Story 33.14).** Replayed too (`--strategy dummy|liquidation_cascade` selects;
+  by default both), built with exactly the config the live host builds
+  (`nautilus_host.strategy_params`): a cascade bot has none of the dummy's thresholds or bracket
+  exits; its rules and stops are its `[bots.params]`. The live `start` record's instrument, sizing,
+  `strategy` and every `[bots.params]` key must equal F's (numbers compared as decimals, `3` as
+  `3.0` and `"0.004"` as `0.004`; a boolean only as a boolean; lists in order; other text exactly;
+  the refusal lists only the keys that differ). `--start` is refused up front when a cascade bot is
+  selected (its parity needs the replay to start at the live start; replay the dummies alone with
+  `--strategy dummy`). The data is the derived quotes alone (no deltas or trades: the strategy
+  reads neither), one per stored row and so one a second, plus the source catalog's
+  `custom_liquidation` rows of the instrument, streamed on `ts_init` with the client id
+  `LIQUIDATIONS` the strategy subscribes through.
 
 Exit 0 when every selected bot replayed, 1 on any refusal, 2 on usage. Each bot runs on its own: a
 refusal (a missing or malformed log, a mismatched config, no definition or rows, an engine error, a
@@ -1968,6 +2004,40 @@ stored row in the minute after it --, a malformed record of this venue's logs, `
 differing but for `ts_ns` or a replay start off the live grid); 2 on usage. Each live log's venue
 is read leniently from its `start` record first, so another venue's malformed log never refuses
 this venue's run.
+
+**The cascade comparison (Story 33.14, `verification/domain/cascade_parity.py`).** A live log whose
+`start` names `strategy: "liquidation_cascade"` is judged by its own rules (no strategy key: the
+dummy rules above, unchanged; any other strategy: refused). The two `start` records must agree but
+for `ts_ns` and the replay must start at the live start (the baseline's history cannot be replayed
+from a later one). `tick` records pair by `ts_ns` (a repeated time refused), `liquidation` records
+by `venue_event_id` and its occurrence in the segment (Bybit's ids are synthesized
+`{T}:{S}:{v}:{p}`, §1.26, and may repeat across frames: the n-th record of an id pairs with the
+other side's n-th), over `(start, min(last live, last replay)]` with the dummy's truncation rule.
+The floats are judged by `signal_compare.relative` (`REL_TOL`); `direction`, `active`, `spent`,
+`decision` and a liquidation pair's `ts_ns` exactly; a `reason` that differs with an equal decision
+is counted, informational. A live row is *late* when an earlier live record carries a later `ts_ns`
+than the row's replayed `ts_init` (the bridge delivered it after the 1 s timer passed it; the live
+detector places it at its clock). Each differing field gets one class:
+
+| Class | Meaning | Fails |
+|---|---|---|
+| `late_arrival` | With L the most recent late row's `ts_init` at or before the record (T): any field within `[L, L + window_s + 1 s]`. Past that window: `baseline` while its difference stays within the decaying bound `d0 * exp(-(T - t0) / baseline_s) * (1 + REL_TOL)`, `d0` the baseline difference at the first paired record after the window (`t0`), the exact decay of two runs fed equal rates (a larger one is a defect the late row must not mask); `intensity` when the rates are equal and the baseline differs as `late_arrival` (rate / baseline is no average, so it gets no bound of its own); `direction`/`active`/`spent` when every float of the record is equal or `late_arrival` (a threshold crossed by that drift); `decision` when every differing indicator field (the floats, `direction`, `active`, `spent`) is `late_arrival` | no |
+| `quote_cadence` | a `decision` difference on a record whose indicator fields all agree: the replay is fed one quote a second (each stored row's top) while the live bot gets every venue quote, so the OFI confirmation, the ATR, the stop/take-profit exits and the fills differ by construction (as the dummy rules' `quote_cadence`) | no |
+| `unexplained` | anything else, among it any difference with no late row before it | **yes** |
+
+A record's class is `unexplained` if any field is, else `late_arrival` if any is, else
+`quote_cadence`. A record on one side only (`live_only`/`replay_only`, by kind) fails: a
+liquidation the live bridge missed (pub/sub keeps nothing while it is down, audit D-174), one the
+archive lost. A row the live strategy refused as received at or before its clock minus
+`window_s` (`stale_rows`, a WARNING) is still written at the clock with reason `stale_row`, so it
+pairs with the replay's record of it as `late_arrival`, never one-sided. The JSON report labels
+every bot with its `strategy` and gives a cascade bot `paired` per kind, `late_rows`, per-field
+`paired`/`equal`/`equal_share`/`max_abs_diff`/`classes`, `reason_disagreements`, `cycle_classes`,
+`live_only`, `replay_only` and `truncated`; the text report names the strategy in brackets after
+each bot. Known limits (file-order lateness and a row at most 1 s late; `d0` measured, so a defect
+already present at `t0` decays with it; `quote_cadence` hides a defect of the entry/exit rules
+themselves, which are unit-tested on their own) are in the module docstring and audit
+D-176/D-179.
 
 **What the classes do not see (audit D-133, D-134).** A class names *where* two sides differ, not
 which side is right. On Bybit the live side's inputs are themselves wrong: the pinned adapter
@@ -2388,8 +2458,14 @@ neither, no feed ships]`.
   is ledgered `collector.liquidation_publish`; the rows are archived regardless. Consumers since
   Story 33.4: `ranking_engine` (the 1 h liquidation fields, §3.1) and `data_api`'s
   `LiveCandleBus`, which hands the rows it accepted to `LiveDerivsBus` for `/ws/live`'s
-  `liquidations:{iid}` channel (§2.16); Story 33.14's bot is next `[amended 2026-10-06: Story
-  33.4 -- was "No consumer yet"]`.
+  `liquidations:{iid}` channel (§2.16) `[amended 2026-10-06: Story 33.4 -- was "No consumer
+  yet"]`; and, for a paper fleet holding a `liquidation_cascade` bot, the bots' `LIQUIDATIONS` data
+  client (`bots/infrastructure/liquidation_data_client.py`), which decodes each entry with
+  `Liquidation.from_dict` (an undecodable one, a non-UTF-8 payload included, or a message the
+  engine fails on is ledgered `bots.liquidation_feed.entry`, its siblings delivered and the
+  subscription kept) and hands the rows of the bots' instruments to the node; a dead or half-open
+  connection is detected within 60 s (a PING after 30 s idle, no PONG within 30 s more) and ledgered
+  `bots.liquidation_feed.connection` `[amended 2026-10-06: Story 33.14]`.
 - **Liveness and status:** the socket's state, never row arrival (a quiet hour has none):
   `connected` (`is_active()`), `reconnecting`, `down` (no socket, closed or closing), on
   `collector:status`'s aggregate as its last key `liquidations` (§1.12); each transition to `down`
@@ -2607,6 +2683,32 @@ the chart, §2.7).
 class fed one tick at a time (`update_raw`/`handle_quote_tick`) — used where a class
 with `.initialized` semantics is more convenient (e.g. `chart_data.py` replay, §2.7),
 but produces the identical formula.
+
+**`LiquidationCascade` (stateful, Story 33.14).** Not a snapshot function: the one definition of
+a liquidation cascade, an `Indicator` fed `Liquidation` rows (§1.26) one at a time. Stored inputs
+read: `side`, `size_units` x `price_units` (`notional_units`, rescaled exactly to the instrument
+definition's `price_precision + size_precision`, `Liquidation.notional_units_at`; a row that
+cannot be is not fed, audit D-177) and `ts_init` (the clock it is placed at; never backwards: a
+row before the clock is placed at it). The strategy and `replay_cascade` skip such a row, count it
+and record it in the error ledger (`research.liquidation_cascade.unscalable_row` /
+`research.liquidations.unscalable_row`); the strategy also never feeds a row received at or before
+the clock minus `window_s` (it could not belong to the window: WARNING, counted in `stale_rows`,
+its record written with reason `stale_row`).
+Derived on read, never stored (SIGNAL-01):
+
+| Output | Meaning |
+|---|---|
+| `rate_long` / `rate_short` | notional units per second of `LONG` (a forced sell) / `SHORT` liquidations in the trailing `window_s` |
+| `baseline` | `max(ema / (1 - exp(-elapsed / baseline_s)), BASELINE_FLOOR)`: `ema` the continuous-time EMA (time constant `baseline_s`, started at 0 at the first update) of the total window rate, integrated analytically between breakpoints with every window expiry in order, so it is independent of how often `advance` is called (equal up to float rounding; bot parity compares with `REL_TOL`); `elapsed` the time since the first update. The division is the exact continuous-time bias correction (the EMA's weights since the first update sum to `1 - exp(-elapsed / baseline_s)`): without it the baseline holds ~63 % of the mean rate when `initialized` turns on and `intensity` reads ~1.6x too high. `BASELINE_FLOOR` is 1 unit (`10^-(price_precision + size_precision)` of the quote) per second, a division-by-zero guard only: not below every real rate (one unit over a 30 s window is 1/30 unit/s) but negligible in quote terms; a tiny liquidation after a silence can still read a huge intensity, and the strategy's `min_episode_notional` is the guard against acting on it |
+| `intensity` | total rate / `baseline` |
+| `initialized` / `active` | `baseline_s` has passed since the first update / initialized and `intensity >= intensity_threshold` |
+| `direction` | -1 longs are being liquidated (the price falling), +1 shorts, 0 when equal or not active (audit D-147, D-173) |
+| `rising`, `peak_rate`, `spent` | the total rate is the episode's peak or above the last update's; the episode's highest rate; latched below `peak_rate x decay_ratio` |
+| `episode_start_ns`, `episode_direction`, `episode_notional_units`, `episode_ended` | an episode starts at the first `active` update and ends at the first update both spent and not active (that update still shows it) |
+
+Floats are a reader's own computation (DATA-04); the notional sums stay integers. Consumers:
+`LiquidationCascadeStrategy` (backtest and paper bot), `research.application.liquidations.
+replay_cascade` (the episodes notebook 08 prints; 33.13's `cascade_episodes` extends it).
 
 ### 2.2 Order Flow Imbalance (OFI)
 
@@ -2998,6 +3100,28 @@ reaches research only over HTTP (§2.9).
   `research.application.patterns.ema_values`); the patterns
   (`kernel.candle_patterns.CandlePatternSet`); forward returns and the hit rate
   (`research.domain.events.forward_returns`/`hit_rate`).
+
+**`08_strategy_gallery`** (the liquidation cascade runs, Story 33.14)
+
+- *Stored, read:* `CASCADE_INSTRUMENT`'s instrument definition; its `DydxSecondSnapshot` rows'
+  top of book, turned into `QuoteTick`s (`research.application.backtest_runner.
+  write_derived_quotes`, the `seconds` kind's); its `Liquidation` rows (§1.26: `side`,
+  `size_units`, `price_units`, both precisions, `venue_event_id`, `ts_init`) through
+  `BacktestDataConfig(data_cls="kernel.liquidation:Liquidation", client_id="LIQUIDATIONS")` for
+  the runs and `research.application.liquidations.read_liquidations` (one UTC day at a time over
+  `kernel.catalog_files.query_liquidations`, widened by `MAX_TS_INIT_SKEW_NS` and selected on
+  `ts_init` in `[START, END)`, the backtest's own selection) for the sample line. An id without a
+  liquidation feed (anything but Bybit LINEAR) is stated and runs nothing; one whose catalog holds
+  no instrument definition is stated too (a definition stored twice is one).
+- *Derived on read:* the four runs' cascade state (`kernel.indicators.LiquidationCascade`, §2.1)
+  and decisions (`research.strategies.cascade_rules`: follow needs the current direction to be the
+  episode's, fade the episode spent and not rising again); the sample printed once in §1's summary
+  line and once beside the cascade figure of §3: its days, liquidations, episodes and the rows
+  skipped as unscalable (`research.application.gallery.cascade_sample` over `replay_cascade`, the
+  strategy's own detector); the leaderboard metrics (`MetricReport`), as for the other runs. Each
+  cascade row's label names its instrument and data kind (`Cascade follow short only
+  (BTCUSDT-LINEAR.BYBIT, liquidations)`), in the leaderboard and the equity chart alike. A run
+  whose params name no stop uses `DEFAULT_STOP_PCT` (1 %), the strategy module's one default.
 
 **Known limits pinned by Story 31.3** (each held by a test in
 `verification/tests/test_reference_series.py` or the named one, against the reference of §2.13):

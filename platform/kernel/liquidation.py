@@ -63,6 +63,13 @@ from nautilus_trader.serialization.arrow.serializer import make_dict_serializer
 from nautilus_trader.serialization.arrow.serializer import register_arrow
 
 
+# The data-client id a strategy subscribes `Liquidation` through (Story 33.14), shared by research
+# and bots: live, the bots' Redis bridge (`liquidations:raw`) registers under it, so a custom-data
+# subscription is not routed by the instrument's venue to the venue adapter, which has none; in a
+# backtest it is the `BacktestDataConfig.client_id` label of the archived rows.
+LIQUIDATION_CLIENT_ID = "LIQUIDATIONS"
+
+
 def _exact() -> Context:
     """
     Return a context wide enough for any wire text an int64 unit count can hold, trapping `Inexact`, so
@@ -194,6 +201,26 @@ class Liquidation(Data):
         the bankruptcy price (audit D-148).
         """
         return self.size_units * self.price_units
+
+    def notional_units_at(self, price_precision: int, size_precision: int) -> int:
+        """
+        Return `notional_units()` rescaled exactly to units of `10^-(price_precision +
+        size_precision)` (Story 33.14: a consumer feeding one instrument's rows into one sum takes
+        the definition's precisions, never each row's). `SnapshotEncodingError` when a coarser
+        target cannot hold the value exactly: the caller logs and counts it, never rounds it.
+        """
+        shift = (price_precision + size_precision) - (self.price_precision + self.size_precision)
+        notional = self.notional_units()
+        if shift >= 0:
+            return notional * 10**shift
+        quotient, remainder = divmod(notional, 10**-shift)
+        if remainder:
+            raise SnapshotEncodingError(
+                f"{self.venue_event_id}: notional {notional} at 10^-"
+                f"{self.price_precision + self.size_precision} is not exact at 10^-"
+                f"{price_precision + size_precision}"
+            )
+        return quotient
 
     @classmethod
     def schema(cls) -> pa.Schema:

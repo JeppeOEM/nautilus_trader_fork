@@ -41,7 +41,8 @@ the contexts of both ends:
   pct-change/volatility formula `price_stats_from_series` (Story 25.2);
 - `bots/` holds no module-level mutable runtime state either, and no module in `platform/` but
   `bots/infrastructure/nautilus_host.py` imports `TradingNode` or `nautilus_trader.live`
-  (Story 25.3);
+  (Story 25.3), and `bots/infrastructure/liquidation_data_client.py` its live data-client base
+  (Story 33.14);
 - `collection_control/` holds no module-level mutable runtime state, and capture reaches it only
   from its composition roots and the one venue loader, `capture.infrastructure.config` (Story
   25.4);
@@ -1864,8 +1865,11 @@ def test_the_research_import_rule_catches_each_form(tmp_path: Path) -> None:
 
 # --- bots: Nautilus's live runtime behind one module (spine AD-D2, AD-8, Story 25.3) -------------
 
-# The one module in `platform/` -- tests included -- that may import the live runtime.
-TRADING_NODE_HOSTS = frozenset({"bots.infrastructure.nautilus_host"})
+# The modules in `platform/` -- tests included -- that may import the live runtime: the host, and
+# the liquidation bridge (Story 33.14), a `LiveMarketDataClient` subclass that never builds a node.
+TRADING_NODE_HOSTS = frozenset(
+    {"bots.infrastructure.nautilus_host", "bots.infrastructure.liquidation_data_client"}
+)
 _TRADING_NODE_NAMES = frozenset({"TradingNode", "TradingNodeConfig"})
 
 
@@ -1910,7 +1914,7 @@ def test_only_the_nautilus_host_imports_trading_node() -> None:
     strays = sorted(
         ref for module, refs in found.items() if module not in TRADING_NODE_HOSTS for ref in refs
     )
-    assert strays == [], "only bots/infrastructure/nautilus_host.py builds a TradingNode (AD-8)"
+    assert strays == [], "only the bots' host and liquidation bridge reach the live runtime (AD-8)"
     assert set(found) == TRADING_NODE_HOSTS, "the host no longer imports TradingNode: update this"
 
 

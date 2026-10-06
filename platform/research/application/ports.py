@@ -29,6 +29,7 @@ from types import MappingProxyType
 from typing import Protocol
 
 import pandas as pd
+from kernel.liquidation import has_liquidation_feed
 from kernel.venues import venue_of
 
 from nautilus_trader.core.datetime import dt_to_unix_nanos
@@ -40,6 +41,8 @@ from research.domain.trades import TradeLedger
 
 # `bars:<step>-<aggregation>`, a Nautilus bar spec without the price type (`bars:1-MINUTE`).
 _BARS_DATA = re.compile(r"bars:[1-9][0-9]*-(MILLISECOND|SECOND|MINUTE|HOUR|DAY|WEEK|MONTH)")
+# The tick data kinds (`RunSpec.data`), besides `bars:<spec>`.
+DATA_KINDS = ("seconds", "trades", "liquidations")
 # Keys the runner sets on every strategy config itself.
 RESERVED_PARAMS = frozenset({"instrument_id", "order_id_tag", "bar_type"})
 # The fixed time from a strategy's decision to the simulated exchange receiving the command, for
@@ -127,8 +130,10 @@ class RunSpec:
     Invariant: at least one instrument, no id twice, all on one venue (Known limit: one simulated venue per
     run -- upgrade path: one `BacktestVenueConfig` per venue with its own starting balance); a
     `data` kind of `"seconds"` (`DydxSecondSnapshot` + quotes derived from their top of book),
-    `"trades"` (`TradeTick`) or `"bars:<step>-<aggregation>"` (`TradeTick` aggregated by Nautilus
-    into `<iid>-<step>-<aggregation>-LAST-INTERNAL` bars, injected as the strategy's `bar_type`);
+    `"trades"` (`TradeTick`), `"liquidations"` (the `seconds` kind's derived quotes plus the
+    archived `kernel.liquidation.Liquidation` rows, only for ids with `has_liquidation_feed`, Story
+    33.14) or `"bars:<step>-<aggregation>"` (`TradeTick` aggregated by Nautilus into
+    `<iid>-<step>-<aggregation>-LAST-INTERNAL` bars, injected as the strategy's `bar_type`);
     a positive int starting balance; a non-negative int `latency_ms`; a window whose end is after
     its start; `params` never sets a key the runner owns (`RESERVED_PARAMS`).
     Execution models (all optional, None = the venue's defaults): `fill_model`
@@ -180,10 +185,7 @@ class RunSpec:
             raise ValueError(
                 f"one venue per run (Known limit), got {sorted(venues)} for {self.instrument_ids}"
             )
-        if self.data not in ("seconds", "trades") and not _BARS_DATA.fullmatch(self.data):
-            raise ValueError(
-                f"data must be 'seconds', 'trades' or 'bars:<step>-<aggregation>', got {self.data!r}"
-            )
+        _check_data(self.data, self.instrument_ids)
         balance = self.starting_balance
         if isinstance(balance, bool) or not isinstance(balance, int) or balance <= 0:
             raise ValueError(f"starting_balance must be a positive int, got {balance!r}")
@@ -209,6 +211,21 @@ class RunSpec:
     def bar_spec(self) -> str | None:
         """`1-MINUTE` for `data="bars:1-MINUTE"`, None for the tick kinds."""
         return self.data.removeprefix("bars:") if self.data.startswith("bars:") else None
+
+
+def _check_data(data: str, instrument_ids: Sequence[str]) -> None:
+    """Refuse an unknown data kind, and a `liquidations` run on an id with no liquidation feed."""
+    if data not in DATA_KINDS and not _BARS_DATA.fullmatch(data):
+        raise ValueError(
+            f"data must be one of {DATA_KINDS} or 'bars:<step>-<aggregation>', got {data!r}"
+        )
+    if data != "liquidations":
+        return
+    without = [iid for iid in instrument_ids if not has_liquidation_feed(iid)]
+    if without:
+        raise ValueError(
+            f"data='liquidations' needs ids with a liquidation feed (Bybit LINEAR), got {without}"
+        )
 
 
 def check_params(params: Mapping[str, object]) -> None:

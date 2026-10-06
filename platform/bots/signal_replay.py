@@ -13,32 +13,43 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-The catalog replay of a live paper fleet's `DummyStrategy` bots (Story 31.9): the backtest side of
-the live/backtest signal parity `verification.bot_parity` measures.
+The catalog replay of a live paper fleet's `DummyStrategy` and `liquidation_cascade` bots (Stories
+31.9, 33.14): the backtest side of the live/backtest signal parity `verification.bot_parity`
+measures.
 
     python3 -m bots.signal_replay --config F --catalog P --live-log DIR --out DIR
-        [--start ISO] [--end ISO] [--bot BOT_ID ...]
+        [--start ISO] [--end ISO] [--bot BOT_ID ...] [--strategy dummy|liquidation_cascade]
 
-For each dummy bot of the paper file F (`bots.infrastructure.config.load_paper_config`), one
-`BacktestNode` run (NAUT-03) of the same strategy, loaded by string path with the bot's own
-thresholds, sizing and exits, writing its signal log to `<out>/<bot_id>.jsonl`:
+For each replayable bot of the paper file F (`bots.infrastructure.config.load_paper_config`) --
+every dummy and cascade bot, or those of `--strategy` --, one `BacktestNode` run (NAUT-03) of the
+same strategy, loaded by string path with the bot's own thresholds, sizing and exits (a dummy bot)
+or exactly the config the live host builds (a cascade bot: `nautilus_host.strategy_params`),
+writing its signal log to `<out>/<bot_id>.jsonl`:
 
 - **Window.** The live log `<live-log>/<bot_id>.jsonl`'s latest run segment (from its last `start`
-  record): `start` is that record's `ts_ns` exactly and `end` the segment's last record's. The
-  run's start is the engine clock at `on_start`, and the strategy starts its 1 s timer at that very
-  nanosecond (`DummyStrategy._open_signal_log`), so every replay cycle lands on the same
-  `start + k s` as a live one and `verification.bot_parity` pairs cycles by equal `ts_ns`, never by
-  nearest match. `--start` is snapped up onto that grid (the next live cycle at or after it), so an
-  override keeps the pairing; `--end` is taken as given. The live `start` record's instrument,
-  thresholds and sizing must equal the file's (else refused): a replay of other parameters would
-  compare nothing.
+  record): `start` is that record's `ts_ns` exactly and `end` the segment's last record's. The run's
+  start is the engine clock at `on_start`, and the strategy starts its 1 s timer at that very
+  nanosecond (`DummyStrategy._open_signal_log`), so every replay cycle lands on the same `start + k
+  s` as a live one and `verification.bot_parity` pairs cycles by equal `ts_ns`, never by nearest
+  match. `--start` is snapped up onto that grid (the next live cycle at or after it), so an override
+  keeps the pairing; `--end` is taken as given. `--start` is refused up front when a cascade bot is
+  selected: its parity needs the replay to start at the live start. The live `start` record's
+  instrument, thresholds and sizing must equal the file's (else refused): a replay of other
+  parameters would compare nothing. A cascade bot's is checked per strategy: its instrument, sizing
+  and every `[bots.params]` key must equal the `start` record's field (numbers compared as
+  decimals); the parity tool then compares the two `start` records whole. A cascade replay ticks on
+  whole UTC seconds from the same start, as the live bot does, so its grid needs no alignment.
 - **Market data.** The source catalog's instrument definition and `TradeTick`s (so the
   `LAST-INTERNAL` trend bars aggregate from the same trades the live bot saw), plus, derived per
   stored `DydxSecondSnapshot` row, one `OrderBookDeltas` (the whole stored book) and one
   `QuoteTick` (its top of book) by `kernel.snapshot_book`, stamped at the row's `ts_init`, the
   clock a backtest replays on (`docs/DATA_DICTIONARY.md` §1.7). The derived data goes into a
   throwaway catalog (a temporary directory, removed after the run); the source catalog is only read,
-  one hour of rows at a time, bounded on `ts_init` (MEM-01).
+  one hour of rows at a time, bounded on `ts_init` (MEM-01). A cascade bot is replayed on the
+  derived quotes alone (it reads no book or trade) plus the source catalog's `custom_liquidation`
+  rows of its instrument (`kernel.liquidation.Liquidation`, data client id `LIQUIDATIONS`, the one
+  its strategy subscribes through), streamed by `BacktestDataConfig` on `ts_init`, the order the
+  live bridge delivered them in.
 - **Venue.** Configured like the fleet's Sandbox execution client -- the venue's `[venues.<VENUE>]`
   account type and starting balances (`PaperFleet.venue_config`), NETTING, an `L1_MBP` book and
   leverage 1, `SandboxExecutionClientConfig`'s defaults, which the host leaves unset -- but it does
@@ -84,11 +95,14 @@ import tempfile
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 from kernel.clocks import NS_PER_S
+from kernel.liquidation import LIQUIDATION_CLIENT_ID
+from kernel.liquidation import Liquidation
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.snapshot_book import snapshot_deltas
 from kernel.snapshot_book import snapshot_quote
@@ -99,6 +113,9 @@ from bots.domain.config import BotConfig
 from bots.domain.config import PaperFleet
 from bots.domain.config import VenuePaperConfig
 from bots.infrastructure.config import load_paper_config
+from bots.infrastructure.nautilus_host import LIQUIDATION_STRATEGIES
+from bots.infrastructure.nautilus_host import STRATEGIES
+from bots.infrastructure.nautilus_host import strategy_params
 from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.backtest.node import BacktestDataConfig
 from nautilus_trader.backtest.node import BacktestNode
@@ -117,6 +134,11 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 _STRATEGY_PATH = "bots.strategies.dummy:DummyStrategy"
 _CONFIG_PATH = "bots.strategies.dummy:DummyStrategyConfig"
 _DUMMY = "dummy"
+# The strategies this tool replays (`--strategy`): the dummy and every liquidation strategy, whose
+# signal logs `verification.bot_parity` pairs.
+REPLAYED = (_DUMMY, *sorted(LIQUIDATION_STRATEGIES))
+# A custom data type goes in by its import path: `BacktestDataConfig.data_cls` is typed `str`.
+_LIQUIDATION_CLS = f"{Liquidation.__module__}:{Liquidation.__qualname__}"
 # The source catalog is read one hour of rows at a time (MEM-01).
 _CHUNK_NS = 3_600 * NS_PER_S
 # The live `start` record's fields that must equal the paper file's bot (see the docstring).
@@ -241,8 +263,51 @@ def replay_window(
     return start, end
 
 
+def _same_value(live: object, configured: object) -> bool:
+    """
+    Judge a `start` record field against a paper-file value: numbers as decimals (`3` is `3.0`,
+    `"0.004"` is `0.004`), lists in order, any other text exactly.
+    """
+    if isinstance(live, list) and isinstance(configured, list | tuple):
+        return len(live) == len(configured) and all(
+            _same_value(a, b) for a, b in zip(live, configured, strict=True)
+        )
+    if isinstance(live, bool) or isinstance(configured, bool):  # `True == 1` in Python: not here
+        return type(live) is type(configured) and live == configured
+    if live == configured:
+        return True
+    numeric = (int, float, str)
+    if not (isinstance(live, numeric) and isinstance(configured, numeric)):
+        return False
+    try:
+        return Decimal(str(live)) == Decimal(str(configured))
+    except ArithmeticError:  # decimal.InvalidOperation: text that is no number
+        return False
+
+
+def _check_params_config(bot: BotConfig, start_record: dict[str, Any]) -> None:
+    """Refuse a string-path bot's live run whose `start` record differs from the paper file."""
+    expected = {
+        key: value
+        for key, value in strategy_params(bot, None).items()
+        if key != "order_id_tag"  # the record's `bot_id`, checked by the parity tool
+    }
+    differing = {
+        name: (start_record.get(name), value)
+        for name, value in expected.items()
+        if not _same_value(start_record.get(name), value)
+    }
+    if start_record.get("strategy") != bot.strategy:
+        differing["strategy"] = (start_record.get("strategy"), bot.strategy)
+    if differing:
+        raise ReplayRefused(f"{bot.bot_id}: live run vs config (live, file): {differing}")
+
+
 def check_same_config(bot: BotConfig, start_record: dict[str, Any]) -> None:
     """Refuse a live run whose `start` record names other parameters than the paper file."""
+    if bot.strategy != _DUMMY:
+        _check_params_config(bot, start_record)
+        return
     expected = {
         "instrument_id": bot.instrument_id,
         "trade_size": str(bot.trade_size),
@@ -299,15 +364,20 @@ def write_derived(
     instrument: Instrument,
     start_ns: int,
     end_ns: int,
+    with_book: bool = True,
 ) -> DerivedCounts:
-    """Write the instrument and every row's deltas and quote in `[start, end]` to `derived`."""
+    """
+    Write the instrument and every row's quote in `[start, end]` to `derived`, and its deltas
+    unless `with_book` is False (a cascade bot reads no book).
+    """
     derived.write_data([instrument])
     rows = deltas = quotes = 0
     for chunk in _snapshot_chunks(source, str(instrument.id), start_ns, end_ns):
         book: list[OrderBookDelta] = []
         tops: list[QuoteTick] = []
         for row in chunk:
-            book.extend(snapshot_deltas(instrument, row).deltas)
+            if with_book:
+                book.extend(snapshot_deltas(instrument, row).deltas)
             quote = snapshot_quote(instrument, row)
             if quote is not None:
                 tops.append(quote)
@@ -322,10 +392,28 @@ def write_derived(
 
 
 def _data_configs(
-    source_path: str, derived_path: str, instrument_id: InstrumentId, start_ns: int, end_ns: int
+    source_path: str,
+    derived_path: str,
+    instrument_id: InstrumentId,
+    window: tuple[int, int],
+    strategy: str = _DUMMY,
 ) -> list[BacktestDataConfig]:
-    """Stream the derived deltas and quotes and the source's trades; bounds inclusive, on `ts_init`."""
+    """
+    Stream a dummy bot's derived deltas and quotes and the source's trades, or a cascade bot's
+    derived quotes and the source's liquidations; bounds inclusive, on `ts_init`.
+    """
+    start_ns, end_ns = window
     bounds = {"instrument_id": instrument_id, "start_time": start_ns, "end_time": end_ns}
+    if strategy in LIQUIDATION_STRATEGIES:
+        return [
+            BacktestDataConfig(catalog_path=derived_path, data_cls=QuoteTick, **bounds),
+            BacktestDataConfig(
+                catalog_path=source_path,
+                data_cls=_LIQUIDATION_CLS,
+                client_id=LIQUIDATION_CLIENT_ID,
+                **bounds,
+            ),
+        ]
     return [
         BacktestDataConfig(catalog_path=derived_path, data_cls=OrderBookDelta, **bounds),
         BacktestDataConfig(catalog_path=derived_path, data_cls=QuoteTick, **bounds),
@@ -334,7 +422,15 @@ def _data_configs(
 
 
 def strategy_config(bot: BotConfig, signal_log_path: Path) -> ImportableStrategyConfig:
-    """Build the bot's `DummyStrategy` with exactly the fields the live host sets (`_strategy_for`)."""
+    """Build the bot's strategy with exactly the fields the live host sets (`_strategy_for`)."""
+    paths = STRATEGIES[bot.strategy]
+    if paths is not None:
+        strategy_path, config_path = paths
+        return ImportableStrategyConfig(
+            strategy_path=strategy_path,
+            config_path=config_path,
+            config=strategy_params(bot, str(signal_log_path)),
+        )
     return ImportableStrategyConfig(
         strategy_path=_STRATEGY_PATH,
         config_path=_CONFIG_PATH,
@@ -382,7 +478,7 @@ def run_config(
             strategies=[strategy_config(bot, signal_log_path)],
         ),
         venues=[venue_config(venue, fleet.venue_config(venue))],
-        data=_data_configs(source_path, derived_path, instrument_id, start_ns, end_ns),
+        data=_data_configs(source_path, derived_path, instrument_id, window, bot.strategy),
         start=start_ns,
         end=end_ns,
         raise_exception=True,
@@ -434,7 +530,9 @@ def replay_bot(
     log_path = out_dir / f"{bot.bot_id}.jsonl"
     offset = log_path.stat().st_size if log_path.exists() else 0
     with tempfile.TemporaryDirectory(prefix="signal_replay_") as derived_path:
-        counts = write_derived(source, ParquetDataCatalog(derived_path), instrument, *window)
+        with_book = bot.strategy == _DUMMY
+        derived = ParquetDataCatalog(derived_path)
+        counts = write_derived(source, derived, instrument, *window, with_book=with_book)
         config = run_config(bot, fleet, (catalog_path, derived_path), window, log_path)
         iterations = _run_node(config)
     records = _check_replay_log(log_path, window, offset)
@@ -458,17 +556,22 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--start", type=_iso_ns, help="override (snapped onto the live grid)")
     parser.add_argument("--end", type=_iso_ns, help="override the window's end")
     parser.add_argument("--bot", action="append", help="replay only this bot_id (repeatable)")
+    parser.add_argument("--strategy", choices=REPLAYED, help="replay only this strategy's bots")
     return parser
 
 
-def _selected_bots(fleet: PaperFleet, wanted: list[str] | None) -> list[BotConfig]:
-    dummies = [bot for bot in fleet.bots if bot.strategy == _DUMMY]
+def _selected_bots(
+    fleet: PaperFleet, wanted: list[str] | None, strategy: str | None = None
+) -> list[BotConfig]:
+    """Return the replayable bots (`REPLAYED`, or `strategy`'s), or the `wanted` ids of them."""
+    kinds = REPLAYED if strategy is None else (strategy,)
+    replayable = [bot for bot in fleet.bots if bot.strategy in kinds]
     if wanted is None:
-        return dummies
-    unknown = sorted(set(wanted) - {bot.bot_id for bot in dummies})
+        return replayable
+    unknown = sorted(set(wanted) - {bot.bot_id for bot in replayable})
     if unknown:
-        raise ReplayRefused(f"no dummy bot {unknown} in the config")
-    return [bot for bot in dummies if bot.bot_id in wanted]
+        raise ReplayRefused(f"no replayable bot {unknown} of {list(kinds)} in the config")
+    return [bot for bot in replayable if bot.bot_id in wanted]
 
 
 def _report(outcome: ReplayOutcome) -> str:
@@ -493,14 +596,32 @@ def _refuse(detail: str, exc: BaseException) -> None:
     print(f"refused: {detail}", file=sys.stderr, flush=True)
 
 
+def _refuse_cascade_start(bots: list[BotConfig], start_ns: int | None) -> None:
+    """
+    Refuse `--start` when a cascade bot is selected: its parity needs the replay to start at the
+    live start (the detector's baseline remembers `baseline_s` of history a later start never had,
+    `verification.domain.cascade_parity`), so a later start could only be refused there, after a
+    whole replay.
+    """
+    cascade = [bot.bot_id for bot in bots if bot.strategy in LIQUIDATION_STRATEGIES]
+    if start_ns is not None and cascade:
+        raise ReplayRefused(
+            f"--start cannot be set for {cascade}: a cascade replay starts at the live start "
+            "(replay the other bots with --strategy dummy)"
+        )
+
+
 def run(args: argparse.Namespace) -> tuple[list[ReplayOutcome], list[str]]:
     """
-    Replay every selected dummy bot of the paper file (see the module docstring); return the
-    outcomes and the refused bots' ids. One bot's refusal is ledgered and the next bot still runs.
+    Replay every selected bot of the paper file (see the module docstring); return the
+    outcomes and the refused bots' ids. One bot's refusal is ledgered and the next bot still runs;
+    `--start` with a cascade bot selected refuses the whole run up front.
     """
     fleet = load_paper_config(args.config)
+    bots = _selected_bots(fleet, args.bot, args.strategy)
+    _refuse_cascade_start(bots, args.start)
     outcomes, refused = [], []
-    for bot in _selected_bots(fleet, args.bot):
+    for bot in bots:
         try:
             outcome = _replay_one(args, fleet, bot)
         except _REFUSALS as exc:

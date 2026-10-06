@@ -1550,6 +1550,104 @@ compose service or bind mount changed.
       `w=new WebSocket(`ws://${location.host}/ws/live`);w.onmessage=e=>{const m=JSON.parse(e.data);if(m.channel?.startsWith('derivs:'))console.log(m)};w.onopen=()=>w.send(JSON.stringify({subscribe:'derivs:BTCUSDT-LINEAR.BYBIT'}))`
       logs `derivs:BTCUSDT-LINEAR.BYBIT` frames about once a second, and only that id's.
 
+### 33-14-liquidation-cascade-bot-shorts-into-a-long-liquidation-cascade-backtested-and-paper-run (commit: this story's)
+
+A new paper strategy, `liquidation_cascade` (`research/strategies/liquidation_cascade_strategy.py`,
+`bots/README.md`), trades Bybit LINEAR liquidation cascades. A fleet holding one gets a second data
+client in the `live-paper` node, `LIQUIDATIONS`, which subscribes the Bybit collector's
+`liquidations:raw` on the bots' own `REDIS_URL`; a fleet without one is unchanged (no new client,
+no new subscription). `live-paper` gains one env var, `BOT_SIGNAL_LOG_DIR` (empty by default: no
+signal log, as before), and `bot_tui` one read-only source mount. Nothing is migrated. Paper only:
+an exec bot still always runs the dummy strategy.
+
+- [ ] Check the feed covers the bot's instrument: `cd ~/nautilus_trader_fork/platform && grep -A1
+      '^instruments' capture/venues/bybit/config.toml` lists `BTCUSDT-LINEAR.BYBIT` (and no
+      `exclude` line names it). The collector publishes liquidations of its own instruments only, so
+      a cascade bot on an uncollected id would never see one -- and read as a quiet market.
+- [ ] On the VPS, add one cascade bot to `platform/bots/config.toml`: uncomment the commented
+      `[[bots]]` block at its end (`cascade-btc-01` on `BTCUSDT-LINEAR.BYBIT`, `strategy =
+      "liquidation_cascade"`, its `[bots.params]`), adjusting the params if wanted; a
+      non-Bybit-LINEAR id is refused at start, naming the bot. Keep or add `[venues.BYBIT]` for its
+      pool.
+- [ ] Decide on the signal log first: `BOT_SIGNAL_LOG_DIR` is process-wide, so it turns on the log
+      of **every** paper bot of the fleet, not only the cascade bot's. A `dummy` bot writes ~86 MB
+      per bot-day, unrotated (the repo's `bots/config.toml` holds 40 dYdX dummy bots: ~3.4 GB a
+      day), the cascade bot ~25-30 MB a day. Check `df -h ~/nautilus_trader_fork/platform/data`
+      first; either keep it on only for the parity window below (a few hours, then unset it and run
+      `make up-live-paper` again) or plan the pruning of `data/live_paper/bot_signals/*.jsonl`. To
+      turn it on: `cd ~/nautilus_trader_fork/platform && mkdir -p data/live_paper/bot_signals &&
+      sudo chown 1000:1000 data/live_paper/bot_signals` (the container runs as uid 1000), then set
+      `BOT_SIGNAL_LOG_DIR=/app/data/live_paper/bot_signals` in `platform/.env` (it lands under
+      `./data/live_paper`, already mounted).
+- [ ] Record the deploy time, then rebuild and restart the paper node (`make up-live-paper` builds
+      the image itself: no separate `docker compose build live-paper` first): `cd
+      ~/nautilus_trader_fork/platform && date -u +%s%N > /tmp/cascade_deploy_ns && make
+      up-live-paper`. Rebuild the TUI image for the `v` key's new source mount with `docker compose
+      --profile tui build bot_tui` -- not `make tui`, which also runs the TUI interactively. The
+      `bybit_collector` must be running: it is the feed.
+- [ ] Check the start: `docker logs dydx-live-paper 2>&1 | grep -E "LIQUIDATIONS|liquidations:raw"`
+      shows the `LIQUIDATIONS` data client registered and connected and `Subscribed
+      liquidations:raw`. Then the ledger lines since this deploy only (older lines are earlier
+      runs'), which must print nothing: any `bots.liquidation_feed.connection`/`.entry`/`.subscribe`
+      or `research.liquidation_cascade.unscalable_row` line is a DATA-07 finding, not noise.
+      ```bash
+      awk -v s="$(cat /tmp/cascade_deploy_ns)" -F'"ts_ns":' \
+        '{split($2, a, ","); if (a[1] + 0 > s + 0) print}' data/errors/live-paper.jsonl \
+        | grep -E 'bots\.liquidation_feed|research\.liquidation'
+      ```
+- [ ] Check `bots:status`: `docker exec dydx-redis redis-cli SUBSCRIBE bots:status` shows
+      `cascade-btc-01` with `strategy` `LiquidationCascadeStrategy`, running and not `data_stale`
+      (its quotes keep it fresh; a dropped liquidation feed, or a half-open one that answers no PING
+      within 60 s, makes it read stale 30 s later, never a quiet market), and the `bot_tui` `v` key
+      shows its source. For the first `baseline_s` (default 1 h) after this and every later start
+      the detector warms up: every record's decision is `not_ready` and no entry is taken.
+      Expected, not a fault.
+- [ ] Know what this check cannot see: a stopped or crashed `bybit_collector` with Redis up leaves
+      `liquidations:raw` silent, which the bot reads as a quiet market (it stays fresh and never
+      enters). The alarm is the collector's own: `docker ps --filter name=bybit-collector` (Up, not
+      Restarting), its Dozzle log, its `process_start` lines in `data/errors/bybit_collector.jsonl`,
+      and `liquidations_unrecoverable` windows in `data/coverage/bybit.jsonl` (bot_tui's collector
+      pane marks it stale only after an hour without `collector:status`).
+- [ ] Check the signal log (if turned on): `grep '"kind":"start"'
+      data/live_paper/bot_signals/cascade-btc-01.jsonl | tail -1` is this run's `start` record, with
+      `"strategy":"liquidation_cascade"` and every config field; `grep '"kind":"tick"'
+      data/live_paper/bot_signals/cascade-btc-01.jsonl | tail -3` shows `ts_ns` on whole seconds
+      (ending in `000000000`; `liquidation` records carry the row's receipt time instead, and a
+      `venue_event_id`, whenever `docker exec dydx-redis redis-cli SUBSCRIBE liquidations:raw` shows
+      a `BTCUSDT-LINEAR.BYBIT` row).
+- [ ] After a few hours, run the parity check on the VPS from `~/nautilus_trader_fork/platform`
+      (the bots image has no `verification` package and the collector images no `bots`, so the
+      replay runs in the `live-paper` image and the comparator in the `archive` one; on a box with
+      this repo's Python environment, the dev box as in 31-9, the same two module commands run from
+      `platform/` directly). Take a copy of the cascade bot's log alone: `bots.signal_replay
+      --strategy liquidation_cascade` replays only cascade bots, and `verification.bot_parity
+      --venue BYBIT` judges every Bybit log of its live directory, so a Bybit dummy bot's log beside
+      it would be refused for want of a replay (to judge those too, replay without `--strategy`).
+      ```bash
+      rm -rf /tmp/replay /tmp/live-cascade && mkdir /tmp/replay /tmp/live-cascade
+      cp data/live_paper/bot_signals/cascade-btc-01.jsonl /tmp/live-cascade/
+      sudo chown -R 1000:1000 /tmp/replay /tmp/live-cascade
+      sleep 180  # the collector's 60 s flush past the copied log's last record
+      docker compose --profile live-paper run --rm --no-deps \
+        -v "$PWD/data/catalog:/app/catalog:ro" -v /tmp/live-cascade:/app/live:ro \
+        -v /tmp/replay:/app/replay live-paper \
+        python3 -m bots.signal_replay --config bots/config.toml --catalog /app/catalog \
+        --live-log /app/live --out /app/replay --strategy liquidation_cascade
+      docker compose run --rm --no-deps -v "$PWD/data/coverage:/app/coverage:ro" \
+        -v /tmp/live-cascade:/app/live:ro -v /tmp/replay:/app/replay:ro archive \
+        python3 -m verification.bot_parity --venue BYBIT --catalog /app/catalog \
+        --live-dir /app/live --replay-dir /app/replay
+      ```
+      Exit 0 is nothing `unexplained`. Record here the `late_arrival` and `quote_cadence` counts
+      (both explained: a row the bridge delivered after the 1 s timer passed it, and a decision over
+      agreeing indicators that the replay's one quote a second cannot reproduce) and any
+      `live_only`/`replay_only` liquidation (a row the bridge missed while down, audit D-174/D-176).
+- [ ] Rollback, if wanted: comment the `[[bots]]` block out again, remove `BOT_SIGNAL_LOG_DIR` from
+      `platform/.env` (unless the dummy logs are wanted), and `make up-live-paper`; the node then
+      gets no `LIQUIDATIONS` client. Archive or remove
+      `data/live_paper/bot_signals/cascade-btc-01.jsonl` (a later bot of the same id would append
+      its segments to it).
+
 ### DW-182 archive-gap markers decode under the strict reader (Story 23.2; commit: 3f8328d048)
 
 Story 23.2 made `kernel.archive_markers.decode` refuse an inverted span (`from_ns > to_ns`), and the

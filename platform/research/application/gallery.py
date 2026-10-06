@@ -14,7 +14,8 @@
 # -------------------------------------------------------------------------------------------------
 """
 The strategy gallery service, behind `research/notebooks/08_strategy_gallery`: a fixed list of
-`RunSpec`s (upstream example strategies by string path, plus the two family strategies), each run
+`RunSpec`s (upstream example strategies by string path, plus the two family strategies, plus the
+four liquidation cascade runs of Story 33.14 on a liquidation-feed id), each run
 through the `BacktestRunner` port, as a leaderboard, an equity overlay and the same spec repeated
 across the execution models (fill, fee, latency). It runs nothing itself and computes no statistic:
 the numbers are `RunResult`'s, and a notebook copies a row's spec into `04_backtest_evaluation`.
@@ -29,6 +30,7 @@ leaderboard orders strategies by what they did on that window, not by what they 
 path: `04_backtest_evaluation`'s sweep and walk-forward on the row that interests you.
 """
 
+import json
 import logging
 import math
 import time
@@ -39,17 +41,27 @@ from dataclasses import dataclass
 from dataclasses import replace
 
 import pandas as pd
+from kernel.clocks import NS_PER_DAY
+from kernel.clocks import NS_PER_MS
+from kernel.liquidation import has_liquidation_feed
 
+from nautilus_trader.model.instruments import Instrument
+from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from research.application.backtest_runner import settlement_currency
 from research.application.evaluation import equity_frame as equity_frame_of
 from research.application.evaluation import fills_frame
 from research.application.indicator_atlas import Sizer
+from research.application.liquidations import read_liquidations
+from research.application.liquidations import replay_cascade
 from research.application.ports import FEE_MODELS
 from research.application.ports import FILL_MODELS
 from research.application.ports import BacktestRunner
 from research.application.ports import RunResult
 from research.application.ports import RunSpec
+from research.application.ports import window_ns
 from research.domain.report import MetricReport
+from research.strategies.liquidation_cascade_strategy import DEFAULT_STOP_PCT
+from research.strategies.liquidation_cascade_strategy import LiquidationCascadeStrategyConfig
 
 
 logger = logging.getLogger(__name__)
@@ -58,8 +70,17 @@ _EXAMPLES = "nautilus_trader.examples.strategies"
 _TWAP = "nautilus_trader.examples.algorithms.twap:TWAPExecAlgorithm"
 _MA_CROSS = "research.strategies.ma_cross_strategy"
 _SIGNAL = "research.strategies.indicator_signal_strategy"
+_CASCADE = "research.strategies.liquidation_cascade_strategy:LiquidationCascadeStrategy"
+# The four cascade runs: (mode, position sides allowed, label suffix).
+CASCADE_RUNS = (
+    ("follow", ("short",), "short only"),
+    ("follow", ("short", "long"), "both sides"),
+    ("fade", ("short",), "short only"),
+    ("fade", ("short", "long"), "both sides"),
+)
+# The data kind every cascade run uses, also named in its label.
+CASCADE_DATA = "liquidations"
 TRADE_SIZE = "0.01"
-NS_PER_MS = 1_000_000
 BPS = 10_000.0
 LEADERBOARD_COUNTS = ("trades", "orders", "fills")
 SLIPPAGE_COLUMNS = ("client_order_id", "side", "price", "baseline_price", "difference_bps")
@@ -254,6 +275,141 @@ def default_specs(
     }
     rows = [*_upstream(base, periods), *_ma_cross(base, periods), *_signals(base, periods)]
     return [GallerySpec(label, spec) for label, spec in rows]
+
+
+def cascade_specs(
+    catalog_path: str,
+    instrument: str,
+    start: str | int,
+    end: str | int,
+    params: Mapping[str, object],
+    starting_balance: int = 10_000,
+) -> list[GallerySpec]:
+    """
+    Return the four `LiquidationCascadeStrategy` runs (`CASCADE_RUNS`: follow and fade, each short
+    only and both sides) on `instrument` with `data="liquidations"`, `params` (any
+    `LiquidationCascadeStrategyConfig` field) over every run's own mode and sides, and
+    `stop_pct=DEFAULT_STOP_PCT` (the strategy module's one default, the CLI's too) unless `params`
+    names a stop. Each label names the run, the instrument and the data kind, e.g. `Cascade follow
+    short only (BTCUSDT-LINEAR.BYBIT, liquidations)`, so a cascade row is told apart from a bar
+    strategy's in the shared leaderboard and equity chart.
+
+    Invariant: `[]` for an id without a liquidation feed (`has_liquidation_feed`) -- the caller
+    states it (`cascade_sample`), nothing is run or faked; labels are distinct; nothing is run here.
+    """
+    if not has_liquidation_feed(instrument):
+        return []
+    base = {
+        "catalog_path": catalog_path,
+        "instrument_ids": (instrument,),
+        "start": start,
+        "end": end,
+        "starting_balance": starting_balance,
+        "data": CASCADE_DATA,
+    }
+    stop = {} if {"stop_pct", "stop_atr_multiple"} & set(params) else {"stop_pct": DEFAULT_STOP_PCT}
+    return [
+        GallerySpec(
+            f"Cascade {mode} {suffix} ({instrument}, {CASCADE_DATA})",
+            _spec(base, _CASCADE, {**stop, **params, "mode": mode, "sides": list(sides)}),
+        )
+        for mode, sides, suffix in CASCADE_RUNS
+    ]
+
+
+@dataclass(frozen=True)
+class CascadeSample:
+    """
+    The sample behind the cascade runs: the window's UTC days, its archived liquidations, the
+    episodes `replay_cascade` finds in them with the runs' detector parameters and the rows it
+    skipped because the definition's precisions cannot hold their notional.
+
+    Invariant: `has_feed` is False exactly for an id without a liquidation feed, and
+    `has_definition` False for one whose catalog holds no instrument definition; the counts are
+    then 0 and the text says which -- a missing feed or definition is stated, never read as a quiet
+    market.
+    """
+
+    instrument: str
+    has_feed: bool
+    days: int
+    liquidations: int
+    episodes: int
+    unscalable_rows: int = 0
+    has_definition: bool = True
+
+    def __str__(self) -> str:
+        if not self.has_feed:
+            return f"{self.instrument} has no liquidation feed (Bybit LINEAR only): no cascade runs"
+        if not self.has_definition:
+            return f"{self.instrument} has no instrument definition in the catalog: no sample"
+        return (
+            f"{self.instrument} cascade sample: {self.days} UTC day(s), {self.liquidations} "
+            f"liquidations, {self.episodes} episode(s), {self.unscalable_rows} unscalable row(s) "
+            "skipped"
+        )
+
+
+def _detector(instrument: str, params: Mapping[str, object]) -> LiquidationCascadeStrategyConfig:
+    """Return a strategy config holding `params`' detector fields, the defaults elsewhere."""
+    keys = ("window_s", "baseline_s", "intensity_threshold", "decay_ratio")
+    chosen = {key: params[key] for key in keys if key in params}
+    # Parsed, not keyword-built: the config validates each value's type (as a run's build does).
+    return LiquidationCascadeStrategyConfig.parse(
+        json.dumps({"instrument_id": instrument, **chosen})
+    )
+
+
+def _definition(catalog_path: str, instrument: str) -> Instrument | None:
+    """
+    Return the catalog's definition of `instrument`, or None. Duplicate-tolerant, as
+    `backtest_runner._instruments`: one definition stored twice is one id, never an unpack error.
+    """
+    found = {
+        str(i.id): i
+        for i in ParquetDataCatalog(catalog_path).instruments(instrument_ids=[instrument])
+    }
+    return found.get(instrument)
+
+
+def cascade_sample(
+    catalog_path: str,
+    instrument: str,
+    start: str | int,
+    end: str | int,
+    params: Mapping[str, object],
+) -> CascadeSample:
+    """
+    Return the `CascadeSample` of `instrument` over `[start, end)`: the window's UTC days, the
+    liquidations read day by day (`read_liquidations`) and the episodes of `replay_cascade` from
+    the window's start, at the instrument definition's precisions and with the detector fields of
+    `params` (else the strategy config's defaults) -- the strategy's own detector.
+    """
+    if not has_liquidation_feed(instrument):
+        return CascadeSample(instrument, False, 0, 0, 0)
+    definition = _definition(catalog_path, instrument)
+    if definition is None:
+        return CascadeSample(instrument, True, 0, 0, 0, has_definition=False)
+    start_ns, end_ns = window_ns(start, end)
+    rows = read_liquidations(catalog_path, instrument, start_ns, end_ns)
+    detector = _detector(instrument, params)
+    episodes = replay_cascade(
+        rows,
+        detector.window_s,
+        detector.baseline_s,
+        detector.intensity_threshold,
+        detector.decay_ratio,
+        end_ns,
+        start_ns=start_ns,
+        precisions=(definition.price_precision, definition.size_precision),
+    )
+    days = (end_ns - 1) // NS_PER_DAY - start_ns // NS_PER_DAY + 1
+    return CascadeSample(instrument, True, days, len(rows), len(episodes), episodes.unscalable_rows)
+
+
+def cascade_outcomes(outcomes: Sequence[Outcome]) -> list[Outcome]:
+    """Return the outcomes of cascade runs (`data="liquidations"`), in order."""
+    return [o for o in outcomes if o.gallery.spec.data == CASCADE_DATA]
 
 
 def run_specs(runner: BacktestRunner, specs: Sequence[GallerySpec]) -> list[Outcome]:
