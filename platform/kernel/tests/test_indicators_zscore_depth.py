@@ -28,6 +28,7 @@ from kernel.indicators import MultiLevelOFI
 from kernel.indicators import RollingZScore
 from kernel.indicators import cumulative_depth
 from kernel.indicators import depth_within_bps
+from kernel.indicators import liquidity_distance
 from kernel.indicators import snapshot_depth
 
 
@@ -210,3 +211,34 @@ def test_depth_profile_is_immutable() -> None:
     profile = DepthProfile([99.0], [1.0], [101.0], [2.0])
     with pytest.raises(AttributeError):
         profile.bid_prices = [98.0]  # type: ignore[misc]
+
+
+# ---- liquidity_distance (Story 33.4: moved here from views/tests/test_book_features.py) ----
+
+
+def test_liquidity_distance_first_level_covers_threshold() -> None:
+    # 80% threshold, only 1 level → distance = 0
+    dist = liquidity_distance(DepthProfile([100.0], [10.0], [101.0], [10.0]), pct_threshold=0.8)
+    assert dist.bid_distance == 0.0
+    assert dist.ask_distance == 0.0
+
+
+def test_liquidity_distance_crosses_at_second_level() -> None:
+    # bid: 100 (size=1), 99 (size=9); 80%=8 → need level 99 → distance=1
+    dist = liquidity_distance(DepthProfile([100.0, 99.0], [1.0, 9.0], [101.0, 102.0], [1.0, 9.0]))
+    assert dist.bid_distance == 1.0
+    assert dist.ask_distance == 1.0
+
+
+def test_liquidity_distance_exact_threshold_at_first_level() -> None:
+    # 50% threshold, equal sizes → first level covers exactly 50%
+    dist = liquidity_distance(
+        DepthProfile([100.0, 99.0], [5.0, 5.0], [101.0, 102.0], [5.0, 5.0]), pct_threshold=0.5
+    )
+    assert dist.bid_distance == 0.0
+    assert dist.ask_distance == 0.0
+
+
+def test_liquidity_distance_of_an_empty_side_is_zero() -> None:
+    dist = liquidity_distance(DepthProfile([100.0], [0.0], [101.0], [2.0]))
+    assert (dist.bid_distance, dist.ask_distance) == (0.0, 0.0)

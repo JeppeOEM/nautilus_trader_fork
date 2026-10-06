@@ -39,6 +39,7 @@ from ranking.application.ports import MARKETS_CHANNEL
 from ranking.application.ports import VolumeSource
 from ranking.domain.board import RankingBoard
 from ranking.domain.board import RankingsPublisher
+from ranking.infrastructure.catalog_derivs import CatalogDerivsHistory
 from ranking.infrastructure.catalog_prices import CatalogPriceHistory
 from ranking.infrastructure.metrics_store import SqliteMetricsStore
 from ranking.infrastructure.redis import RedisLivePublisher
@@ -131,6 +132,7 @@ async def run(settings: Settings) -> None:
                 build_board(settings, config),
                 volume_sources=sources,
                 prices=CatalogPriceHistory(settings.catalog_path),
+                derivs=CatalogDerivsHistory(settings.catalog_path),
                 history=history,
                 live=RedisLivePublisher(client),
                 markets=RedisLivePublisher(client, MARKETS_CHANNEL),

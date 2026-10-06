@@ -1637,6 +1637,9 @@ class _HotpathStream:
             raise ConnectionError("redis down")
         self.records.append((venue, report))
 
+    async def publish_derivs(self, rows: list[dict]) -> None:
+        return None
+
     async def close(self) -> None:
         return None
 

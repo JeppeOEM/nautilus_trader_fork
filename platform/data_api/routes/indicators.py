@@ -324,7 +324,7 @@ class IndicatorValuesItem(BaseModel):
     t: int
     # Keyed by f"{indicator_id(name, params, source)}.{output_attr}" -- a gap-marker row (AD-F6) is
     # represented as an item with an empty `values` dict, the same "row present, no data"
-    # shape candles.py/indicator_series.py use for their own gap markers.
+    # shape candles.py uses for its own gap markers.
     values: dict[str, float | None] = {}
 
 
@@ -374,9 +374,9 @@ def get_indicator_values(
 
     Re-derives its own bounded window server-side rather than accepting client-supplied
     candles in the request body (Design Notes: DESIGN-01) -- always a bounded *historical*
-    replay of `[start_ns, before_ns)`, mirroring `indicator_series.py`'s own purely-historical
-    scroll-back model; the candlestick's live edge has its own sanctioned path (AD-F7) that
-    this route does not duplicate.
+    replay of `[start_ns, before_ns)`, the purely-historical scroll-back model the deleted
+    OFI/OBI series route (Story 33.4) had; the candlestick's live edge has its own sanctioned
+    path (AD-F7) that this route does not duplicate.
 
     A custom indicator whose instrument never opted into raw-delta capture returns `None` for
     every point (pre-existing custom-indicator behavior, reused unchanged) -- not an

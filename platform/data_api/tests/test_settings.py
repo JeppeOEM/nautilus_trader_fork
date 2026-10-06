@@ -4,9 +4,9 @@ import sys
 
 _CHECK = """
 import data_api.app as app, data_api.settings as s
-from data_api.routes import candles, snapshots, indicators, indicator_series, rankings, metrics
-assert all(m.CATALOG_PATH == s.CATALOG_PATH for m in (app, candles, snapshots, indicator_series, rankings))  # indicators reads candles via candles.candle_page
-assert candles.CANDLES_DB_DIR == s.CANDLES_DB_DIR
+from data_api.routes import candles, derivatives, snapshots, indicators, rankings, metrics
+assert all(m.CATALOG_PATH == s.CATALOG_PATH for m in (app, candles, derivatives, snapshots, rankings))  # indicators reads candles via candles.candle_page
+assert candles.CANDLES_DB_DIR == derivatives.CANDLES_DB_DIR == s.CANDLES_DB_DIR
 assert app.METRICS_DB_PATH == metrics.METRICS_DB_PATH == s.METRICS_DB_PATH
 """
 

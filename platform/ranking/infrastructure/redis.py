@@ -15,7 +15,7 @@
 """
 Ranking's Redis adapters: the `rankings:live` publisher (also `markets:live`'s, Story 29.5, on the
 same client) and the `snapshots:raw`/`ranking:control` listener (one connection, reconnecting on
-any non-cancellation error).
+any non-cancellation error), which since Story 33.4 also takes `derivs:raw` and `liquidations:raw`.
 """
 
 import asyncio
@@ -27,6 +27,8 @@ import redis.asyncio as aioredis
 from observability import error_ledger
 
 from ranking.application.ports import CONTROL_CHANNEL
+from ranking.application.ports import DERIVS_CHANNEL
+from ranking.application.ports import LIQUIDATIONS_CHANNEL
 from ranking.application.ports import RANKINGS_CHANNEL
 from ranking.application.ports import SNAPSHOTS_CHANNEL
 
@@ -35,6 +37,9 @@ logger = logging.getLogger(__name__)
 
 # Pause before reconnecting a dropped subscriber connection.
 RECONNECT_SECONDS = 2
+
+# Every channel the engine handles, on the one connection.
+SUBSCRIBED_CHANNELS = (SNAPSHOTS_CHANNEL, CONTROL_CHANNEL, DERIVS_CHANNEL, LIQUIDATIONS_CHANNEL)
 
 
 class RedisLivePublisher:
@@ -49,14 +54,14 @@ class RedisLivePublisher:
 
 
 async def listen(redis_url: str, on_message: Callable[[str, str], Awaitable[None]]) -> None:
-    """Subscribe to snapshots:raw and ranking:control and hand every message to `on_message`."""
+    """Subscribe to `SUBSCRIBED_CHANNELS` and hand every message to `on_message`."""
     logger.info("Ranking engine Redis listener starting, url=%s", redis_url)
     while True:
         try:
             async with aioredis.Redis.from_url(redis_url, decode_responses=True) as client:
                 pubsub = client.pubsub()
-                await pubsub.subscribe(SNAPSHOTS_CHANNEL, CONTROL_CHANNEL)
-                logger.info("Subscribed to %s, %s", SNAPSHOTS_CHANNEL, CONTROL_CHANNEL)
+                await pubsub.subscribe(*SUBSCRIBED_CHANNELS)
+                logger.info("Subscribed to %s", ", ".join(SUBSCRIBED_CHANNELS))
                 async for message in pubsub.listen():
                     if message["type"] == "message":
                         await on_message(message["channel"], message["data"])

@@ -1,12 +1,7 @@
 import type { CandlestickData, Time, UTCTimestamp } from "lightweight-charts";
 import { useEffect, useRef, useState } from "react";
 
-// Reconnect-with-backoff constants -- deliberately duplicated from useLiveChannel.ts
-// rather than imported: this hook is a sibling implementation with its own dedicated
-// socket, not a shared/rewritten version of useLiveChannel (see spec-15-5's Design
-// Notes for why one hook per connection type, not one hook multiplexing both).
-const RECONNECT_BASE_MS = 1000;
-const RECONNECT_MAX_MS = 10_000;
+import { openLiveSubscription } from "./liveSubscription";
 
 /**
  * `{"channel": "candles:{iid}:{bar_seconds}", "bar": {...}}` -- the live-candle WS
@@ -21,9 +16,7 @@ interface LiveCandleMessage {
   bar: { t: number; o: number; h: number; l: number; c: number; v: number };
 }
 
-function isLiveCandleMessage(value: unknown): value is LiveCandleMessage {
-  if (typeof value !== "object" || value === null) return false;
-  const message = value as Record<string, unknown>;
+function isLiveCandleMessage(message: Record<string, unknown>): message is Record<string, unknown> & LiveCandleMessage {
   if (typeof message.channel !== "string" || typeof message.bar !== "object" || message.bar === null) {
     return false;
   }
@@ -47,8 +40,8 @@ export interface LiveCandleHandlers {
 }
 
 /**
- * Opens its own dedicated `/ws/live` WebSocket (sibling to `useLiveChannel`, never
- * shared -- see spec-15-5's Design Notes) and tracks the currently-forming
+ * Opens its own dedicated `/ws/live` WebSocket (`openLiveSubscription`, sibling to
+ * `useLiveChannel`, never shared -- see spec-15-5's Design Notes) and tracks the currently-forming
  * `(instrumentId, barSeconds)` bar. Sends `{"subscribe": "candles:{iid}:{bar_seconds}"}`
  * on every open (initial connect and every reconnect) and `{"unsubscribe": ...}` for the
  * previous channel whenever `instrumentId`/`barSeconds` changes or the hook unmounts.
@@ -82,70 +75,19 @@ export function useLiveCandle(
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLiveBar(null);
 
-    const channel = `candles:${instrumentId}:${barSeconds}`;
-    let socket: WebSocket | null = null;
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let cancelled = false;
-    let attempt = 0;
-
-    function connect(): void {
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      socket = new WebSocket(`${protocol}//${window.location.host}/ws/live`);
-
-      socket.onopen = () => {
-        const reconnected = attempt > 0; // onclose counted at least one drop before this open
-        attempt = 0;
-        socket?.send(JSON.stringify({ subscribe: channel }));
-        if (reconnected) handlersRef.current.onReconnect?.();
-      };
-
-      socket.onmessage = (event: MessageEvent<string>) => {
-        // A message arriving on a socket this effect has already torn down (e.g. a
-        // stray frame racing in on the old socket right after instrumentId/barSeconds
-        // changes) must never update state -- `channel` alone isn't enough to guard
-        // this, since a message for that same old channel can legitimately still be in
-        // flight on the wire at teardown time.
-        if (cancelled) return;
-        try {
-          const parsed: unknown = JSON.parse(event.data);
-          // Filtered to this hook's current channel -- ignores every other relayed
-          // message (rankings:live, another instrument/bar_seconds' candle channel, or
-          // a stray old-channel message racing in during a resubscribe).
-          if (isLiveCandleMessage(parsed) && parsed.channel === channel) {
-            const bar = toChartDatum(parsed.bar);
-            if (currentBar && bar.time > currentBar.time) handlersRef.current.onBarClosed?.(currentBar);
-            currentBar = bar;
-            setLiveBar(bar);
-          }
-        } catch {
-          // Malformed frame -- ignore, keep previous state (mirrors useLiveChannel.ts).
-        }
-      };
-
-      socket.onclose = () => {
-        if (cancelled) return;
-        attempt += 1;
-        const delay = Math.min(RECONNECT_BASE_MS * attempt, RECONNECT_MAX_MS);
-        reconnectTimer = setTimeout(connect, delay);
-      };
-
-      socket.onerror = () => {
-        // Let onclose (which always fires after onerror for a WebSocket) own the
-        // reconnect scheduling -- just make sure the socket actually closes.
-        socket?.close();
-      };
-    }
-
-    connect();
-
-    return () => {
-      cancelled = true;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ unsubscribe: channel }));
-      }
-      socket?.close();
-    };
+    // The subscription drops every frame of another channel (rankings:live, another
+    // instrument/bar_seconds) and every frame racing in after teardown, so a stale bar from the
+    // old channel can never render as the current one.
+    return openLiveSubscription(`candles:${instrumentId}:${barSeconds}`, {
+      onMessage: (message) => {
+        if (!isLiveCandleMessage(message)) return;
+        const bar = toChartDatum(message.bar);
+        if (currentBar && bar.time > currentBar.time) handlersRef.current.onBarClosed?.(currentBar);
+        currentBar = bar;
+        setLiveBar(bar);
+      },
+      onReconnect: () => handlersRef.current.onReconnect?.(),
+    });
   }, [instrumentId, barSeconds]);
 
   return liveBar;

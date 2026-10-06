@@ -22,6 +22,12 @@ slow-loop metrics and the per-venue USD volumes are all state of one board insta
 
 Pure: no clock (every command takes `now_ns`/`received_ns`), no I/O, no ledger -- a command that
 must be ledgered returns what to ledger and the engine records it.
+
+Story 33.4 added the derivatives, liquidation and flow fields (`ranking.domain.derivs`): one
+`DerivsState` per instrument, fed by `ingest` (traded volume, last close), `ingest_derivs`
+(`derivs:raw`), `ingest_liquidation` (`liquidations:raw`) and the one-time backfill, read into the
+slow row and from there into the rank row (`DERIVS_FIELDS`, after every pre-33.4 key, before
+`rank`).
 """
 
 import math
@@ -30,6 +36,7 @@ from collections import deque
 from collections.abc import Callable
 from collections.abc import Mapping
 
+from kernel.derivs_wire import DerivsTick
 from kernel.indicators import OFI_GAP_NS
 from kernel.indicators import MultiLevelOBI
 from kernel.indicators import MultiLevelOFI
@@ -37,6 +44,9 @@ from kernel.indicators import microprice as calc_microprice
 from kernel.indicators import mid_price as calc_mid_price
 from kernel.indicators import spread as calc_spread
 from kernel.indicators import trade_aggregates
+from kernel.liquidation import Liquidation
+from kernel.liquidation import has_liquidation_feed
+from kernel.open_interest import OpenInterest
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.venues import MalformedInstrumentId
 from kernel.venues import base_symbol
@@ -44,7 +54,12 @@ from kernel.venues import market_kind
 from kernel.venues import venue_kind
 from kernel.venues import venue_of
 
+from ranking.domain.derivs import DERIVS_FIELDS
+from ranking.domain.derivs import DerivsState
+from ranking.domain.derivs import has_open_interest
+from ranking.domain.derivs import units_decimal
 from ranking.domain.metrics import pct_change_from
+from ranking.domain.price_series import PricePoint
 from ranking.domain.price_series import PriceSeriesStore
 from ranking.domain.values import RankingMode
 from ranking.domain.values import VolumeReading
@@ -259,6 +274,7 @@ class RankingBoard:
         self._volume_max_age_ns = volume_max_age_ns
         self._venue_volumes: dict[str, tuple[int, dict[str, float]]] = {}
         self._volume_24h: dict[str, VolumeReading] = {}
+        self._derivs: dict[str, DerivsState] = {}
 
     @property
     def mode(self) -> RankingMode:
@@ -299,6 +315,9 @@ class RankingBoard:
         out_of_order = self._prices.ingest(iid, snap.ts_event, close_price)
         if out_of_order is not None:
             dropped.append(out_of_order)
+        refused = self._ingest_flow(snap, close_price is not None, received_ns)
+        if refused is not None and out_of_order is None:  # one second, one ledger entry
+            dropped.append(refused)
         # The indicator functions take the decoded float view; the wire's integers stay in `snap`.
         row = snap.as_floats()
         mid = calc_mid_price(row)
@@ -312,16 +331,92 @@ class RankingBoard:
         inst.rolling.append(row)
         return dropped
 
-    def backfill(self, instrument_id: str, series: list[tuple[int, float]]) -> str | None:
+    def _derivs_state(self, instrument_id: str, received_ns: int) -> DerivsState:
         """
-        Seed an instrument's price series from the catalog, exactly once per instrument.
+        Return the instrument's derivatives state, its `last_seen_ns` raised to `received_ns`
+        (never lowered: a backfill passes the snapshot's older arrival, which must not age out a
+        state a newer derivs tick or liquidation kept fresh).
+        """
+        state = self._derivs.get(instrument_id)
+        if state is None:
+            state = self._derivs[instrument_id] = DerivsState(received_ns)
+        state.last_seen_ns = max(state.last_seen_ns, received_ns)
+        return state
+
+    def _ingest_flow(
+        self, snap: DydxSecondSnapshot, close_usable: bool, received_ns: int
+    ) -> str | None:
+        """
+        Count the second's exact traded volume and keep its exact close (the mark-last basis's
+        reference); a repeated or older second is refused whole and returned for the ledger.
+        """
+        iid = snap.instrument_id.value
+        state = self._derivs_state(iid, received_ns)
+        volume_units = snap.buy_volume_units + snap.sell_volume_units
+        refused = state.volume.add_live(
+            snap.ts_event, units_decimal(volume_units, snap.size_precision)
+        )
+        if refused is not None:
+            return f"{iid}: {refused}"
+        if close_usable and snap.close_price_units is not None:
+            state.note_close(
+                snap.ts_event, units_decimal(snap.close_price_units, snap.price_precision)
+            )
+        return None
+
+    def ingest_derivs(self, tick: DerivsTick, now_ns: int) -> list[str]:
+        """Apply one decoded `derivs:raw` row; return what to ledger (a refused tick)."""
+        refused = self._derivs_state(tick.instrument_id, now_ns).ingest(tick)
+        return [] if refused is None else [f"{tick.instrument_id}: {refused}"]
+
+    def ingest_liquidation(self, liquidation: Liquidation, now_ns: int) -> list[str]:
+        """
+        Count one liquidation once (by its venue event id). One for an instrument without the feed
+        (`has_liquidation_feed`) is not counted -- its fields stay None, never a partial sum -- and
+        returned for the ledger: a row the platform says cannot exist is a fault upstream.
+        """
+        iid = liquidation.instrument_id.value
+        if not has_liquidation_feed(iid):
+            return [f"{iid}: liquidation for an instrument with no liquidation feed NOT counted"]
+        self._derivs_state(iid, now_ns).liquidations.add(liquidation)
+        return []
+
+    def backfill(self, instrument_id: str, series: list[PricePoint]) -> str | None:
+        """
+        Seed an instrument's price series, hourly traded volume and last close from the catalog,
+        exactly once per instrument (one read: the price backfill's seconds carry the volume).
 
         Returns a live/Parquet price disagreement for the engine to ledger (DATA-07), else None.
         """
         inst = self._instruments.get(instrument_id)
         if inst is None or inst.backfilled:
             return None
-        return self._prices.backfill(instrument_id, series)
+        state = self._derivs_state(instrument_id, inst.last_seen_ns)
+        state.volume.backfill([(point.ts_event, point.volume) for point in series])
+        if state.last_close is None and series:
+            state.note_close(series[-1].ts_event, series[-1].close)
+        pairs = [(point.ts_event, point.price) for point in series]
+        return self._prices.backfill(instrument_id, pairs)
+
+    def derivs_backfill_needs(self, instrument_id: str) -> tuple[bool, bool]:
+        """Whether the instrument has (open interest, a liquidation feed) to backfill at all."""
+        return has_open_interest(instrument_id), has_liquidation_feed(instrument_id)
+
+    def backfill_open_interest(self, instrument_id: str, rows: list[OpenInterest]) -> list[str]:
+        """Seed the open-interest series from the archive; return every disagreement to ledger."""
+        state = self._derivs_state(instrument_id, self._last_seen(instrument_id))
+        refused = (state.open_interest.add(row.ts_event, row.open_interest) for row in rows)
+        return [f"{instrument_id}: {detail}" for detail in refused if detail is not None]
+
+    def backfill_liquidations(self, instrument_id: str, rows: list[Liquidation]) -> list[str]:
+        """Seed the liquidation window from the archive (each event once, live or archived)."""
+        last_seen = self._last_seen(instrument_id)
+        return [detail for row in rows for detail in self.ingest_liquidation(row, last_seen)]
+
+    def _last_seen(self, instrument_id: str) -> int:
+        """Return the newest arrival recorded for the instrument (a backfill is no arrival)."""
+        state = self._derivs.get(instrument_id)
+        return 0 if state is None else state.last_seen_ns
 
     def mark_backfilled(self, instrument_id: str) -> None:
         """Never retried, even after a failed read: a recurring catalog read is the OOM path."""
@@ -351,6 +446,16 @@ class RankingBoard:
             del self._instruments[iid]
             self._prices.drop(iid)
             self._volatility.drop(iid)
+        # Derivatives state goes with its instrument, and on its own after the same silence when
+        # no snapshot ever made it one (a derivs-only id must not hold memory forever, MEM-02).
+        silent = [
+            iid
+            for iid, state in self._derivs.items()
+            if iid not in self._instruments
+            and (iid in dead or now_ns - state.last_seen_ns > RECENTLY_STALE_WINDOW_NS)
+        ]
+        for iid in silent:
+            del self._derivs[iid]
         return dead
 
     def record_volume_poll(self, source: str, volumes: Mapping[str, float], at_ns: int) -> None:
@@ -409,6 +514,8 @@ class RankingBoard:
         One metrics.db row per instrument (price/pct/volatility from the price series, book metrics
         from the live trackers), cached as each instrument's slow metrics for the rank entries.
         """
+        for state in self._derivs.values():
+            state.liquidations.expire(now_ns)
         rows = [self._slow_row(iid, now_ns, price_1w, price_1m) for iid in self._instruments]
         for row in rows:
             self._instruments[row["instrument_id"]].slow = row
@@ -422,6 +529,10 @@ class RankingBoard:
         price_1m: Mapping[str, float],
     ) -> dict:
         stats = self._prices.stats(iid, now_ns)
+        derivs = self._derivs.get(iid) or DerivsState(now_ns)  # no input yet: every field None
+        derivs_fields = derivs.fields(
+            now_ns, has_liquidation_feed(iid), self._prices.range_24h(iid, now_ns)
+        )
         return {
             "ts": now_ns,
             "instrument_id": iid,
@@ -432,6 +543,7 @@ class RankingBoard:
             "pct_1m": pct_change_from(stats.get("price"), price_1m.get(iid)),
             "volatility": stats.get("volatility"),
             **self._instruments[iid].book_metrics(),
+            **derivs_fields,
         }
 
     # --- reads -----------------------------------------------------------------------------
@@ -475,6 +587,8 @@ class RankingBoard:
             "pct_1w": slow.get("pct_1w"),
             "pct_1m": slow.get("pct_1m"),
             "volatility": slow.get("volatility"),
+            # Story 33.4's fields, from the same slow row (AD-D12: appended; `rank` stays last).
+            **{name: slow.get(name) for name in DERIVS_FIELDS},
         }
         # `price` is the live mid or None: a trade close from the slow loop is a different quantity
         # (§3.3), so it never stands in for a missing mid (Story 31.3 deleted that fallback).

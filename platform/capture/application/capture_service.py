@@ -90,6 +90,14 @@ processed, sample-loop wakes and wake lag (max, nearest-rank p99) and catalog wr
 (`capture.application.hotpath_metrics`, `docs/DATA_DICTIONARY.md` §1.25). The final flush of a
 stop or a crash reports its partial window too.
 
+Live derivatives (Story 33.4): every mark, index, funding and open-interest row the archive buffer
+takes (the WS ones in `_process_data`, the REST open interest in `ingest_rows`) is also appended to
+a bounded pending list while a `LiveStream` is wired; the sample loop drains it once per tick,
+encodes it through `kernel.derivs_wire.to_wire` and publishes one `derivs:raw` array
+(`LiveStream.publish_derivs`). The hot path only appends -- encoding is the sample loop's. A failed
+publish or rows past the cap are ledgered `collector.derivs_publish` with their count; the archive
+is never affected (the live push is at most once).
+
 `on_data(data, feed)` is O(1): it only enqueues, `_ingest_loop` does the real work, tagging each
 message with the connection (`Feed`) it came on (a one-connection client may omit it: `MAIN_FEED`).
 
@@ -159,8 +167,10 @@ from kernel.catalog_files import query_second_ohlc
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import NS_PER_S
 from kernel.clocks import READ_SPAN_MARGIN_NS
+from kernel.derivs_wire import to_wire
 from kernel.liquidation import Liquidation
 from kernel.liquidation import has_liquidation_feed
+from kernel.open_interest import OpenInterest
 from kernel.second_snapshot import BOOK_DEPTH
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import ohlc_outside_book
@@ -232,6 +242,9 @@ from capture.domain.verdicts import Stale
 from capture.domain.verdicts import Unencodable
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.book import OrderBook
+from nautilus_trader.model.data import FundingRateUpdate
+from nautilus_trader.model.data import IndexPriceUpdate
+from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.data import TradeTick
@@ -253,6 +266,14 @@ _INGEST_STOP = object()
 # Coverage lines kept for the next flush after a failed append. Beyond it the oldest are dropped
 # and the loss is ledgered: a disk that refuses writes for hours must not grow memory (MEM-02).
 _COVERAGE_PENDING_MAX = 10_000
+# Derivatives rows waiting for the next sample tick's `derivs:raw` publish (MEM-02). A tick drains
+# them all, so only a stalled sample loop reaches it: ~20 rows/s per Bybit linear ticker at 100 ms
+# pushes, so 20 000 is ~1000 instrument-seconds. Beyond it a row is not pushed live (counted and
+# ledgered at the next drain) -- it is still archived.
+_DERIVS_PENDING_MAX = 20_000
+# The `derivs:raw` row types (`kernel.derivs_wire`): only these are queued for the live push, so
+# another type reaching the archive's catch-all branch never takes a pending slot.
+_DERIVS_TYPES = (MarkPriceUpdate, IndexPriceUpdate, FundingRateUpdate, OpenInterest)
 # A poll round's malformed rows named in its one ledger line (the count is always the total): a
 # venue-wide payload change must not write one line of every market.
 _MALFORMED_SHOWN = 10
@@ -617,6 +638,10 @@ class CaptureService:
         self._queue_depth_max = 0
         self._processed = itertools.count()
         self._hotpath = HotPathWindow()
+        # The live derivatives push (Story 33.4): rows since the last sample tick, appended only
+        # while a live stream is wired, and how many the cap turned away since the last drain.
+        self._derivs_pending: list[Any] = []
+        self._derivs_overflow = 0
         self._hotpath_since_ns = perf_counter_ns()
         self._stop = asyncio.Event()
         self._ingest_stop_queued = False  # `_INGEST_STOP` waits in the queue (never a backlog)
@@ -893,6 +918,22 @@ class CaptureService:
             pass  # derivable from the snapshots; not persisted
         else:  # mark/index price, funding rate, open interest, ... -> catalog as-is
             self._buffer[(type(data), str(data.instrument_id))].append(data)
+            self._pend_derivs(data)
+
+    def _pend_derivs(self, data: Any) -> None:
+        """
+        Queue one row for the next tick's `derivs:raw` push; past the cap, count it instead. Only a
+        `derivs:raw` type is queued (`_DERIVS_TYPES`): any other row the archive's catch-all takes
+        is not this channel's. Nothing accumulates without a live stream (a capture test, or a
+        stream-less wiring). No `_is_collected` gate: the archive path takes these rows ungated
+        too, and the live push mirrors what is archived.
+        """
+        if self._live_stream is None or not isinstance(data, _DERIVS_TYPES):
+            return
+        if len(self._derivs_pending) < _DERIVS_PENDING_MAX:
+            self._derivs_pending.append(data)
+        else:
+            self._derivs_overflow += 1
 
     def _accept_live_trade(
         self, iid: str, data: TradeTick, feed: Feed, now_ns: int, arrival_ns: int
@@ -1738,6 +1779,72 @@ class CaptureService:
                 e,
             )
 
+    async def _publish_derivs(self) -> None:
+        """
+        Drain the pending derivatives rows and publish them as one `derivs:raw` array. The
+        encoding happens here, once per tick, never per message, row by row (`_encode_derivs`:
+        one bad row never costs the others their push). A failed encode or publish and any rows
+        the cap turned away lose the live push only (the archive buffer holds every row) and are
+        ledgered with their count, never silently. A cancellation landing mid-publish is a stop,
+        not a failure: it propagates, and the rows it left unpublished are logged at INFO with
+        their count, not ledgered (`collector.derivs_publish` is a DATA-07 finding, and a normal
+        stop is none). `run()` calls it once more at shutdown for the rows left since the last
+        tick.
+        """
+        pending, self._derivs_pending = self._derivs_pending, []
+        overflow, self._derivs_overflow = self._derivs_overflow, 0
+        if overflow:
+            self._ledger(
+                sites.DERIVS_PUBLISH,
+                f"{overflow} derivs rows past the {_DERIVS_PENDING_MAX}-row pending cap were not "
+                "pushed live (Parquet unaffected)",
+            )
+        if self._live_stream is None or not pending:
+            return
+        rows = self._encode_derivs(pending)
+        if not rows:
+            return
+        try:
+            await self._live_stream.publish_derivs(rows)
+        except asyncio.CancelledError:
+            logger.info(
+                f"derivs: {len(rows)} rows left unpublished live at shutdown (cancelled "
+                "mid-publish; Parquet unaffected)"
+            )
+            raise
+        except Exception as e:
+            self._ledger(
+                sites.DERIVS_PUBLISH,
+                f"live publish of {len(rows)} derivs rows failed (Parquet unaffected)",
+                e,
+            )
+
+    def _encode_derivs(self, pending: list[Any]) -> list[dict[str, Any]]:
+        """
+        Return each pending row's `derivs:raw` row; a row whose encode raises is skipped and
+        counted, in one ledger line per drain with the count and the first error.
+        """
+        rows: list[dict[str, Any]] = []
+        failed = 0
+        first: Exception | None = None
+        for data in pending:
+            try:
+                row = to_wire(data)
+            except Exception as e:
+                failed += 1
+                first = first or e
+                continue
+            if row is not None:
+                rows.append(row)
+        if failed:
+            self._ledger(
+                sites.DERIVS_PUBLISH,
+                f"{failed} of {len(pending)} derivs rows could not be encoded, not pushed live "
+                f"(Parquet unaffected); first: {first!r}",
+                first,
+            )
+        return rows
+
     async def _second_loop(self) -> None:
         """
         Sample on a drift-free wall-clock schedule (`_next_sample_at`): one sample per interval
@@ -1763,6 +1870,7 @@ class CaptureService:
             self._warn_if_late(now_ns)
             self._note_wake(now_ns, round(sample_at * NS_PER_S))
             await self._publish(await self._sample_tick(now_ns))
+            await self._publish_derivs()
 
     def _note_missed_ticks(self, first_s: int, last_s: int) -> None:
         """Arrival mode: floor seconds between two ticks that no tick sampled (`missed_tick`)."""
@@ -1798,6 +1906,7 @@ class CaptureService:
                 )
             for second in due:
                 await self._publish(await self._sample_tick(now_ns, second))
+            await self._publish_derivs()
             self._check_pending_overflow(now_ns)
 
     def _warn_if_late(self, now_ns: int) -> None:
@@ -2599,6 +2708,8 @@ class CaptureService:
             if wanted is None or iid in wanted:
                 self._buffer[(type(item), iid)].append(item)
                 kept.append(item)
+                if isinstance(item, OpenInterest):  # the REST polls' live push
+                    self._pend_derivs(item)
         self._report_malformed(list(malformed), wanted, site)
         return kept
 
@@ -2687,9 +2798,14 @@ class CaptureService:
                     # explained by.
                     await self._report_hotpath()
             finally:
-                # Even when a second cancellation lands in the report's publish.
-                if self._live_stream is not None:
-                    await self._live_stream.close()
+                try:
+                    # The rows pending since the last tick (the loops are gone, nothing adds to
+                    # them now): pushed once, or ledgered with their count, never dropped silently.
+                    await self._publish_derivs()
+                finally:
+                    # Even when a second cancellation lands in the report's or this publish.
+                    if self._live_stream is not None:
+                        await self._live_stream.close()
 
     async def _connect(self, instruments: list) -> None:
         """

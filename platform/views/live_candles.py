@@ -52,6 +52,11 @@ until a rebuild lowers the store's start to the archive's, known where the store
 bound never makes a false 0 (every source is a liquidation the feed actually delivered); a
 liquidation the bus never received can -- see `LiveCandleBus`'s Known limits (Story 33.3 review
 loop 2 and the follow-up review).
+
+Story 33.4: the bus is still the process's one `liquidations:raw` subscriber, and hands every row
+of a frame it accepted (an instrument with the feed) to each attached `LiquidationListener`
+(`data_api`'s composition root attaches `views.live_derivs.LiveDerivsBus`), which relays them on
+`/ws/live`'s `liquidations:{iid}` channels -- one decode, one subscription.
 """
 
 import asyncio
@@ -143,6 +148,18 @@ class BarObserver(Protocol):
     def on_bar(self, instrument_id: str, bar_seconds: int, bar: dict, ts_ns: int) -> None:
         """Receive the forming bar just published for one watched pair."""
         ...
+
+
+class LiquidationListener(Protocol):
+    """
+    A consumer of the liquidations `liquidations:raw` delivered, decoded once by this bus.
+
+    Invariant: the bus stays the process's only `liquidations:raw` subscriber (`data_api.buses`);
+    a listener gets the rows of each frame the bus accepted, in frame order, once. A listener that
+    raises is ledgered (`live_candles.liquidation_listener`) and never stops the candle fold.
+    """
+
+    def publish_liquidations(self, rows: list[Liquidation]) -> None: ...
 
 
 def _bucket_of(ts_ns: int, bar_seconds: int) -> int:
@@ -352,20 +369,25 @@ class LiveCandleBus:
         self._archive_feed_read_at: dict[str, float] = {}
         self._feed_refresh_tasks: dict[str, asyncio.Task[None]] = {}
         self._live_feed_since: dict[str, int] = {}
+        # Story 33.4: who else sees each accepted frame's rows (keyed by id(), like `_observers`).
+        self._liquidation_listeners: dict[int, LiquidationListener] = {}
 
     def recent_rows(self, instrument_id: str, start_ns: int, end_ns: int) -> list[SecondOHLC]:
         """Traded seconds seen live in [start_ns, end_ns], oldest first (see RECENT_SECONDS)."""
-        return [r for r in self._recent.get(instrument_id, ()) if start_ns <= r.ts_event <= end_ns]
+        # Snapshot first: see `recent_liquidations`.
+        rows = tuple(self._recent.get(instrument_id, ()))
+        return [r for r in rows if start_ns <= r.ts_event <= end_ns]
 
     def recent_liquidations(
         self, instrument_id: str, start_ns: int, end_ns: int
     ) -> list[Liquidation]:
         """Liquidations seen live with `ts_event` in [start_ns, end_ns] (see RECENT_SECONDS)."""
-        return [
-            row
-            for row in self._recent_liquidations.get(instrument_id, ())
-            if start_ns <= row.ts_event <= end_ns
-        ]
+        # The sync routes call this from the threadpool while the event loop appends to and pops
+        # from the deque: a Python-level loop over it can be interrupted by a thread switch and
+        # raise "deque mutated during iteration". `tuple()` copies it in one C call under the GIL
+        # (no bytecode runs in between, so no switch), and the filter then walks the copy.
+        rows = tuple(self._recent_liquidations.get(instrument_id, ()))
+        return [row for row in rows if start_ns <= row.ts_event <= end_ns]
 
     def _remember(self, snapshot: DydxSecondSnapshot) -> None:
         if snapshot.close_price is None:
@@ -383,6 +405,24 @@ class LiveCandleBus:
         first asked at the next batch. Attaching an already-attached observer is a no-op.
         """
         self._observers.setdefault(id(observer), (observer, frozenset()))
+
+    def attach_liquidations(self, listener: LiquidationListener) -> None:
+        """Hand `listener` every accepted `liquidations:raw` row from the next frame on."""
+        self._liquidation_listeners[id(listener)] = listener
+
+    def detach_liquidations(self, listener: LiquidationListener) -> None:
+        self._liquidation_listeners.pop(id(listener), None)
+
+    def _forward_liquidations(self, rows: list[Liquidation]) -> None:
+        for listener in list(self._liquidation_listeners.values()):
+            try:
+                listener.publish_liquidations(rows)
+            except Exception as exc:
+                error_ledger.record(
+                    "live_candles.liquidation_listener",
+                    f"a liquidation listener failed on {len(rows)} rows, not relayed",
+                    exc,
+                )
 
     def detach(self, observer: BarObserver) -> None:
         """Stop calling `observer`; buffers only it watched are dropped at the next batch."""
@@ -715,9 +755,11 @@ class LiveCandleBus:
         once for the whole frame -- a cascade of N rows is one fold per pair, not N -- to its
         listeners (not its observers: `BarObserver`), each pair isolated (`_safe_publish`). A row
         of an instrument without the feed is not folded (its bar's `liq_*` stay null) -- capture
-        publishes none, so one arriving is ledgered, never silently dropped.
+        publishes none, so one arriving is ledgered, never silently dropped. The accepted rows go to
+        every attached `LiquidationListener` too (Story 33.4).
         """
         changed: set[_BufferKey] = set()
+        accepted: list[Liquidation] = []
         for row in _liquidation_rows(payload):
             instrument_id = row.instrument_id.value
             if not has_liquidation_feed(instrument_id):
@@ -727,21 +769,26 @@ class LiveCandleBus:
                     "SKIPPED",
                 )
                 continue
-            self._remember_liquidation(row)
+            if self._remember_liquidation(row):  # a replayed venue event is forwarded once
+                accepted.append(row)
             for key in [k for k in self._buffers if k[0] == instrument_id]:
                 if self._apply_liquidation(key, row):
                     changed.add(key)
+        if accepted:
+            self._forward_liquidations(accepted)
         for key in sorted(changed):
             buffer = self._buffers.get(key)
             if buffer:
                 self._safe_publish(key, buffer)
 
-    def _remember_liquidation(self, row: Liquidation) -> None:
+    def _remember_liquidation(self, row: Liquidation) -> bool:
         """
         Add a row to its instrument's recent tail, once per `venue_event_id`, and lower the live
         feed start to it. The tail's newest `ts_event` and ids are kept incrementally: O(1) per
         row. A row already older than the tail's horizon is not kept (the tail serves the
-        unflushed recent seconds only), though it still lowers the feed start.
+        unflushed recent seconds only), though it still lowers the feed start. Return False only
+        for a venue event the tail already holds (a replayed frame), so the attached listeners
+        relay each event once.
         """
         instrument_id = row.instrument_id.value
         since = self._live_feed_since.get(instrument_id)
@@ -749,17 +796,18 @@ class LiveCandleBus:
             self._live_feed_since[instrument_id] = row.ts_event
         ids = self._recent_liquidation_ids[instrument_id]
         if row.venue_event_id in ids:
-            return  # a replayed frame: the tail holds it once
+            return False  # a replayed frame: the tail holds it once
         newest = max(self._newest_liquidation_ns.get(instrument_id, row.ts_event), row.ts_event)
         self._newest_liquidation_ns[instrument_id] = newest
         horizon = newest - RECENT_SECONDS * 1_000_000_000
         if row.ts_event < horizon:
-            return
+            return True
         tail = self._recent_liquidations[instrument_id]
         tail.append(row)
         ids.add(row.venue_event_id)
         while tail and tail[0].ts_event < horizon:
             ids.discard(tail.popleft().venue_event_id)
+        return True
 
     def _apply_liquidation(self, key: _BufferKey, row: Liquidation) -> bool:
         """

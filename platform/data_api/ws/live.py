@@ -33,15 +33,25 @@ drains `outbox` into the socket, and a `_reader` task that turns inbound control
 messages into subscribe/unsubscribe calls against `LiveCandleBus`. Whichever of
 `_sender`/`_reader` notices the disconnect first (a `WebSocketDisconnect` from
 `receive_text()`, or a send failure) tears down everything else.
+
+Story 33.4 adds the `derivs:{iid}` and `liquidations:{iid}` channels (`views.live_derivs`,
+relayed from `buses.live_derivs_bus`) on the same control messages; one `_Subscriptions` per
+connection holds every kind, so `_MAX_SUBSCRIPTIONS` caps candles, derivs and liquidations
+together. An unparseable channel or a non-JSON frame is ignored, never fatal: the first one per
+connection is logged at WARNING, the rest only counted, and the count logged once at close (a
+client looping on a bad subscribe cannot flood the log).
 """
 
 import asyncio
 import json
 import logging
+from typing import NamedTuple
 
 from fastapi import APIRouter
 from fastapi import WebSocket
 from fastapi import WebSocketDisconnect
+from views.live_derivs import derivs_channel
+from views.live_derivs import liquidations_channel
 from views.rankings_bus import QUEUE_MAX
 from views.rankings_bus import put_drop_oldest
 
@@ -53,7 +63,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Per connection, every kind together (candles, derivs, liquidations).
 _MAX_SUBSCRIPTIONS = 32
+
+CANDLES = "candles"
+DERIVS = "derivs"
+LIQUIDATIONS = "liquidations"
 
 # Same bound `routes/candles.py` clamps `/api/candles` to (1w, the timeframe selector's widest
 # bar), enforced here because a subscribe channel is client-written text: an unbounded
@@ -82,6 +97,38 @@ def _parse_candle_channel(channel: str) -> tuple[str, int] | None:
     return iid, bar_seconds
 
 
+class _Channel(NamedTuple):
+    """One parsed subscribe channel; `bar_seconds` only for candles."""
+
+    kind: str
+    iid: str
+    bar_seconds: int | None = None
+
+    @property
+    def name(self) -> str:
+        """The canonical channel name, the one its frames carry."""
+        if self.kind == CANDLES:
+            return f"candles:{self.iid}:{self.bar_seconds}"
+        if self.kind == DERIVS:
+            return derivs_channel(self.iid)
+        return liquidations_channel(self.iid)
+
+
+def _parse_channel(channel: str) -> _Channel | None:
+    """
+    Parse `candles:{iid}:{bar_seconds}`, `derivs:{iid}` or `liquidations:{iid}`; None for anything
+    else. A derivs/liquidations iid must be non-empty and hold no `:` (so a channel name maps back
+    to one instrument).
+    """
+    kind, _, iid = channel.partition(":")
+    if kind == CANDLES:
+        parsed = _parse_candle_channel(channel)
+        return None if parsed is None else _Channel(CANDLES, *parsed)
+    if kind in (DERIVS, LIQUIDATIONS) and iid and ":" not in iid:
+        return _Channel(kind, iid)
+    return None
+
+
 async def _forward(source: "asyncio.Queue[dict]", outbox: "asyncio.Queue[dict]") -> None:
     """
     Relay every message from one source queue into the shared per-connection outbox,
@@ -93,10 +140,10 @@ async def _forward(source: "asyncio.Queue[dict]", outbox: "asyncio.Queue[dict]")
 
 def _log_forward_error(task: "asyncio.Task[None]") -> None:
     """
-    A per-channel `_forward` task isn't in `ws_live`'s monitored `asyncio.wait()` set
-    (there can be any number of them, created/cancelled dynamically) -- without this, an
-    unexpected failure would silently stop that channel's stream and only surface as an
-    "exception was never retrieved" warning from asyncio's default handler.
+    Log a failed per-channel `_forward` task. It isn't in `ws_live`'s monitored
+    `asyncio.wait()` set (there can be any number of them, created/cancelled dynamically) --
+    without this, an unexpected failure would silently stop that channel's stream and only
+    surface as an "exception was never retrieved" warning from asyncio's default handler.
     """
     if task.cancelled():
         return
@@ -105,51 +152,86 @@ def _log_forward_error(task: "asyncio.Task[None]") -> None:
         logger.warning("/ws/live forward task failed: %s", exc)
 
 
-class _CandleSubscriptions:
+def _open(channel: _Channel) -> "asyncio.Queue[dict]":
+    """Register a listener queue on the channel's bus (candles: also start the pair's seed)."""
+    if channel.kind == CANDLES:
+        assert channel.bar_seconds is not None  # set for every parsed candles channel
+        queue = buses.live_candle_bus.subscribe(channel.iid, channel.bar_seconds)
+        buses.live_candle_bus.start_seed(channel.iid, channel.bar_seconds)
+        return queue
+    return buses.live_derivs_bus.subscribe(channel.name)
+
+
+def _close(channel: _Channel, queue: "asyncio.Queue[dict]") -> None:
+    if channel.kind == CANDLES:
+        assert channel.bar_seconds is not None
+        buses.live_candle_bus.unsubscribe(channel.iid, channel.bar_seconds, queue)
+    else:
+        buses.live_derivs_bus.unsubscribe(channel.name, queue)
+
+
+class _Subscriptions:
     """
-    Per-connection bookkeeping for this connection's active live-candle
-    subscriptions: one forwarder task + `LiveCandleBus` queue per subscribed channel.
+    Per-connection bookkeeping of every active subscription, of any kind: one forwarder task and
+    one bus queue per channel. Invariant: at most `_MAX_SUBSCRIPTIONS` of them, all kinds counted
+    together, each channel once -- so a buggy or hostile client cannot grow per-channel state.
     """
 
     def __init__(self, outbox: "asyncio.Queue[dict]") -> None:
         self._outbox = outbox
-        self._entries: dict[str, tuple[str, int, asyncio.Queue[dict], asyncio.Task[None]]] = {}
+        self._entries: dict[str, tuple[_Channel, asyncio.Queue[dict], asyncio.Task[None]]] = {}
+        self.ignored = 0  # unparseable control frames of this connection
 
-    def subscribe(self, channel: str, iid: str, bar_seconds: int) -> None:
-        if channel in self._entries or len(self._entries) >= _MAX_SUBSCRIPTIONS:
-            return  # idempotent; the cap stops a buggy client growing per-channel state forever
-        queue = buses.live_candle_bus.subscribe(iid, bar_seconds)
+    def note_ignored(self, what: str, text: str) -> None:
+        """
+        Count one ignored inbound frame; only the connection's first is logged (WARNING), so a
+        client repeating a bad one cannot flood the log. `log_ignored` reports the total at close.
+        """
+        self.ignored += 1
+        if self.ignored == 1:
+            logger.warning(
+                "/ws/live ignored %s: %r (further ones on this connection are counted, "
+                "logged at close)",
+                what,
+                text[:200],
+            )
+
+    def log_ignored(self) -> None:
+        if self.ignored > 1:
+            logger.info("/ws/live connection closed after ignoring %d control frames", self.ignored)
+
+    def subscribe(self, channel: _Channel) -> None:
+        name = channel.name
+        if name in self._entries or len(self._entries) >= _MAX_SUBSCRIPTIONS:
+            return  # idempotent, and capped
+        queue = _open(channel)
         task = asyncio.create_task(_forward(queue, self._outbox))
         task.add_done_callback(_log_forward_error)
-        self._entries[channel] = (iid, bar_seconds, queue, task)
-        buses.live_candle_bus.start_seed(iid, bar_seconds)
+        self._entries[name] = (channel, queue, task)
 
-    def unsubscribe(self, channel: str) -> None:
-        entry = self._entries.pop(channel, None)
+    def unsubscribe(self, channel: _Channel) -> None:
+        entry = self._entries.pop(channel.name, None)
         if entry is None:
             return
-        iid, bar_seconds, queue, task = entry
+        _, queue, task = entry
         task.cancel()
-        buses.live_candle_bus.unsubscribe(iid, bar_seconds, queue)
+        _close(channel, queue)
 
     def teardown_all(self) -> None:
-        for channel in list(self._entries):
+        for channel, _, _ in list(self._entries.values()):
             self.unsubscribe(channel)
 
 
-def _handle_control_message(message: dict, subs: _CandleSubscriptions) -> None:
+def _handle_control_message(message: dict, subs: _Subscriptions) -> None:
     for key in ("subscribe", "unsubscribe"):
-        channel = message.get(key)
-        if not isinstance(channel, str):
+        text = message.get(key)
+        if not isinstance(text, str):
             continue
-        parsed = _parse_candle_channel(channel)
-        if parsed is None:
+        channel = _parse_channel(text)
+        if channel is None:
+            subs.note_ignored(f"an unparseable {key} channel", text)
             continue  # this key didn't parse -- still check the other key, don't give up
-        iid, bar_seconds = parsed
-        channel = f"candles:{iid}:{bar_seconds}"
-        subs.subscribe(channel, iid, bar_seconds) if key == "subscribe" else subs.unsubscribe(
-            channel
-        )
+        subs.subscribe(channel) if key == "subscribe" else subs.unsubscribe(channel)
         return
 
 
@@ -159,9 +241,9 @@ async def _sender(websocket: WebSocket, outbox: "asyncio.Queue[dict]") -> None:
         await websocket.send_json(message)
 
 
-async def _reader(websocket: WebSocket, subs: _CandleSubscriptions) -> None:
+async def _reader(websocket: WebSocket, subs: _Subscriptions) -> None:
     """
-    Reads inbound control frames forever. A malformed (non-JSON or non-dict) frame is
+    Read inbound control frames forever. A malformed (non-JSON or non-dict) frame is
     logged and skipped, never fatal -- only `WebSocketDisconnect` (raised by
     `receive_text()` once the client closes) ends this loop.
     """
@@ -170,7 +252,7 @@ async def _reader(websocket: WebSocket, subs: _CandleSubscriptions) -> None:
         try:
             message = json.loads(text)
         except Exception:
-            logger.warning("/ws/live received a non-JSON frame, ignoring: %r", text)
+            subs.note_ignored("a non-JSON frame", text)
             continue
         if isinstance(message, dict):
             _handle_control_message(message, subs)
@@ -188,7 +270,7 @@ async def ws_live(websocket: WebSocket) -> None:
     # full-snapshot relay, unlike a silent drop. Unchanged from before Story 15.5.
     rankings_queue = buses.bus.subscribe()
     alerts_queue = alert_wiring.engine.subscribe()
-    subs = _CandleSubscriptions(outbox)
+    subs = _Subscriptions(outbox)
     alerts_forward_task = asyncio.create_task(_forward(alerts_queue, outbox))
     rankings_forward_task = asyncio.create_task(_forward(rankings_queue, outbox))
     sender_task = asyncio.create_task(_sender(websocket, outbox))
@@ -225,4 +307,5 @@ async def ws_live(websocket: WebSocket) -> None:
         alerts_forward_task.cancel()
         alert_wiring.engine.unsubscribe(alerts_queue)
         subs.teardown_all()
+        subs.log_ignored()
         buses.bus.unsubscribe(rankings_queue)

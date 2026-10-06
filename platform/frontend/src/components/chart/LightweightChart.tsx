@@ -19,10 +19,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { ChartDatum, VolumeDatum } from "../../hooks/useCandles";
 import type { LiveBar } from "../../hooks/useLiveCandle";
-import type { IndicatorDatum } from "../../hooks/useIndicatorSeries";
 import type { SnapshotLinesData } from "../../hooks/useSnapshotSeries";
 import { type GapRun, MAX_GAP_ROWS_PER_GAP, findGapRuns, gapRunsBySlot } from "../../lib/gaps";
-import { type GapLookup, type LegendAction, type LegendSeries, renderLegends } from "./legend";
+import {
+  type GapLookup,
+  type IndicatorDatum,
+  type LegendAction,
+  type LegendSeries,
+  renderLegends,
+} from "./legend";
 import { DEFAULT_LINE_STYLE, DEFAULT_LINE_WIDTH, type LineStyleName } from "../../lib/indicatorStyle";
 import { chartVar, fibLevelColor } from "./chartTheme";
 import { assignPaneColor, cssVar } from "./paneColors";

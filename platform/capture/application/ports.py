@@ -229,11 +229,18 @@ class LiveStream(Protocol):
     `publish_hotpath(venue, report)` sends one flush window's `HotPathReport.to_dict()` (queue
     depth, messages, sample-loop lag, write time; `docs/DATA_DICTIONARY.md` §1.25). It raises on
     failure too; the service ledgers it (`collector.hotpath_publish`), never touching Parquet.
+
+    Since Story 33.4 `publish_derivs(rows)` sends one sample tick's mark, index, funding and
+    open-interest rows on `derivs:raw`, each already a `kernel.derivs_wire.to_wire` row (the
+    archive buffer holds the same objects). It raises on failure; the service ledgers it
+    (`collector.derivs_publish`) with the row count, never touching Parquet.
     """
 
     async def publish(self, snapshots: list[DydxSecondSnapshot]) -> None: ...
 
     async def publish_hotpath(self, venue: str, report: dict[str, Any]) -> None: ...
+
+    async def publish_derivs(self, rows: list[dict[str, Any]]) -> None: ...
 
     async def close(self) -> None: ...
 

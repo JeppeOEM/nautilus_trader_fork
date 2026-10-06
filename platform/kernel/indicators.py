@@ -33,12 +33,15 @@ MultiLevelOBI/MultiLevelOFI were then consumed only by the web dashboard's live 
 the snapshot/OFI strategies consume them. This is an honest note, not a gap to close here.
 Story 27.3 added `RollingZScore` (the one z-score formula, which `MultiLevelOFI` delegates to)
 and moved `DepthProfile` here with the snapshot depth functions, for views and research alike.
+Story 33.4 added `basis_bps` and `funding_annualised`, the one derivatives formulas behind both the
+`views.derivatives` read model and the ranking row, and moved `liquidity_distance` here.
 """
 
 import math
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 
 import numpy as np
 
@@ -655,3 +658,76 @@ def depth_within_bps(
         [_within(bid_distance, bid_sizes, edge) for edge in bps_edges],
         [_within(ask_distance, ask_sizes, edge) for edge in bps_edges],
     )
+
+
+@dataclass(frozen=True)
+class LiquidityDistance:
+    """
+    How far from the best price the meaningful liquidity sits, per side: the absolute price
+    distance from the touch to the level at which the cumulative size first reaches
+    `pct_threshold` of that side's stored depth. Small: dense support/resistance close by; large:
+    a vacuum price can move through fast.
+    """
+
+    bid_distance: float
+    ask_distance: float
+
+
+def _distance_to_share(prices: list[float], sizes: list[float], pct_threshold: float) -> float:
+    total = sum(sizes)
+    if total == 0:
+        return 0.0
+    target = total * pct_threshold
+    cumulative = 0.0
+    for price, size in zip(prices, sizes, strict=False):
+        cumulative += size
+        if cumulative >= target:
+            return abs(price - prices[0])
+    # Float rounding can leave the last cumulative a hair under the target: the deepest level.
+    return abs(prices[-1] - prices[0])
+
+
+def liquidity_distance(profile: DepthProfile, pct_threshold: float = 0.8) -> LiquidityDistance:
+    """
+    Return each side's `LiquidityDistance` over the profile's stored levels (Story 33.4 moved it
+    here from `views.chart_series`, where nothing called it any more, so the screener and research
+    have one copy to reach for).
+    """
+    return LiquidityDistance(
+        bid_distance=_distance_to_share(profile.bid_prices, profile.bid_sizes, pct_threshold),
+        ask_distance=_distance_to_share(profile.ask_prices, profile.ask_sizes, pct_threshold),
+    )
+
+
+# -----------------------------------------------------------------------------------
+# Derivatives (Story 33.4, SSOT-02: the one basis and annualised-funding formulas, called by
+# `views.derivatives` and `ranking` alike; exact `Decimal` in and out, a float only at the edge).
+# -----------------------------------------------------------------------------------
+
+_BPS = 10_000  # an int: Decimal arithmetic with it stays exact
+_SECONDS_PER_YEAR = 31_536_000  # 365 days: the simple (non-compounded) annualisation convention
+
+
+def basis_bps(mark: Decimal, ref: Decimal) -> Decimal | None:
+    """
+    Return `(mark - ref) / ref` in basis points as a `Decimal` division at the default
+    28-significant-digit context (the quotient is rounded there, never through a `float`; not
+    exact for a non-terminating ratio); None when `ref <= 0` (no meaningful basis against a
+    non-positive reference, never a division error or an infinity).
+    `ref` is the index (mark-index basis) or the last traded close (mark-last basis).
+    """
+    if ref <= 0:
+        return None
+    return (mark - ref) / ref * _BPS
+
+
+def funding_annualised(rate: Decimal, interval_s: int | None) -> Decimal | None:
+    """
+    Return the per-interval funding `rate` scaled to a 365-day year (`rate * 31_536_000 /
+    interval_s`), simple, not compounded; None when the interval is unknown or not positive -- an
+    annualised rate is never guessed from a default interval. `interval_s` is in seconds
+    (`kernel.derivs_wire` converts `FundingRateUpdate.interval`'s minutes).
+    """
+    if interval_s is None or interval_s <= 0:
+        return None
+    return rate * _SECONDS_PER_YEAR / interval_s

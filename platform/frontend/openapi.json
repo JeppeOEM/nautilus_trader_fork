@@ -118,75 +118,6 @@
         }
       }
     },
-    "/catalog/chart-series/{symbol}": {
-      "get": {
-        "summary": "Catalog Chart Series",
-        "operationId": "catalog_chart_series_catalog_chart_series__symbol__get",
-        "parameters": [
-          {
-            "name": "symbol",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Symbol"
-            }
-          },
-          {
-            "name": "start_ns",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "maximum": 9223371976854775807,
-              "minimum": 0,
-              "title": "Start Ns"
-            }
-          },
-          {
-            "name": "end_ns",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "maximum": 9223371976854775807,
-              "minimum": 0,
-              "title": "End Ns"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "additionalProperties": true
-                    }
-                  },
-                  "title": "Response Catalog Chart Series Catalog Chart Series  Symbol  Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/catalog/snapshots/{iid}": {
       "get": {
         "summary": "Catalog Snapshots",
@@ -698,6 +629,331 @@
         }
       }
     },
+    "/api/coin/{instrument_id}/funding": {
+      "get": {
+        "summary": "Get Funding",
+        "operationId": "get_funding_api_coin__instrument_id__funding_get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          },
+          {
+            "name": "before_ns",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Before Ns"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 120,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FundingResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/coin/{instrument_id}/open-interest": {
+      "get": {
+        "summary": "Get Open Interest",
+        "operationId": "get_open_interest_api_coin__instrument_id__open_interest_get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          },
+          {
+            "name": "before_ns",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Before Ns"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 120,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "bar_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 60,
+              "title": "Bar Seconds"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenInterestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/coin/{instrument_id}/mark-index": {
+      "get": {
+        "summary": "Get Mark Index",
+        "description": "Mark, index and basis per bucket, at every `bar_seconds`. `basis_ml_bps` is against the candle\nstore's traded close: a stored width's own, a width its buckets tile composed (1W from 1D), and\nnull for a width none tiles (1..59 s, 90 s).",
+        "operationId": "get_mark_index_api_coin__instrument_id__mark_index_get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          },
+          {
+            "name": "before_ns",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Before Ns"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 120,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "bar_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 60,
+              "title": "Bar Seconds"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarkIndexResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/coin/{instrument_id}/liquidations": {
+      "get": {
+        "summary": "Get Liquidations",
+        "operationId": "get_liquidations_api_coin__instrument_id__liquidations_get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          },
+          {
+            "name": "before_ns",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Before Ns"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 120,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiquidationsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/coin/{instrument_id}/liquidation-bars": {
+      "get": {
+        "summary": "Get Liquidation Bars",
+        "description": "Liquidation sums per candle-store bucket. A width the store does not fold is composed from\nthe widest stored one that tiles it (1W from 1D: sums, null when a constituent is missing or\nnull, or the week straddles the feed start); a width none tiles (1..59 s, 90 s) is a 400.\n`notional_units` is summed from the archived rows, null unless the archive holds exactly `n`.",
+        "operationId": "get_liquidation_bars_api_coin__instrument_id__liquidation_bars_get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          },
+          {
+            "name": "before_ns",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Before Ns"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 120,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "bar_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 60,
+              "title": "Bar Seconds"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiquidationBarsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`bar_seconds` is not composable from the candle store's widths"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/coin/{instrument_id}/footprint": {
       "get": {
         "summary": "Get Footprint",
@@ -759,74 +1015,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/FootprintResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/indicator-series/{instrument_id}": {
-      "get": {
-        "summary": "Get Indicator Series",
-        "operationId": "get_indicator_series_api_indicator_series__instrument_id__get",
-        "parameters": [
-          {
-            "name": "instrument_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Instrument Id"
-            }
-          },
-          {
-            "name": "before_ns",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "title": "Before Ns"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "default": 120,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "bar_seconds",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "default": 60,
-              "title": "Bar Seconds"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/IndicatorSeriesResponse"
                 }
               }
             }
@@ -1050,7 +1238,7 @@
     "/api/coin/{instrument_id}/indicator-values": {
       "get": {
         "summary": "Get Indicator Values",
-        "description": "Bounded candle window (mirrors `candles.py`'s window/limit/bar_seconds contract), then\nper-requested-name `indicator_picker.replay_entry` dispatch, results keyed by\n`indicator_picker.indicator_id(name, params, source)` (AD-F2/AD-F3).\n\nRe-derives its own bounded window server-side rather than accepting client-supplied\ncandles in the request body (Design Notes: DESIGN-01) -- always a bounded *historical*\nreplay of `[start_ns, before_ns)`, mirroring `indicator_series.py`'s own purely-historical\nscroll-back model; the candlestick's live edge has its own sanctioned path (AD-F7) that\nthis route does not duplicate.\n\nA custom indicator whose instrument never opted into raw-delta capture returns `None` for\nevery point (pre-existing custom-indicator behavior, reused unchanged) -- not an\nerror (I/O matrix: \"Values route returns None per-point for an uncaptured custom\nindicator, not an error\").",
+        "description": "Bounded candle window (mirrors `candles.py`'s window/limit/bar_seconds contract), then\nper-requested-name `indicator_picker.replay_entry` dispatch, results keyed by\n`indicator_picker.indicator_id(name, params, source)` (AD-F2/AD-F3).\n\nRe-derives its own bounded window server-side rather than accepting client-supplied\ncandles in the request body (Design Notes: DESIGN-01) -- always a bounded *historical*\nreplay of `[start_ns, before_ns)`, the purely-historical scroll-back model the deleted\nOFI/OBI series route (Story 33.4) had; the candlestick's live edge has its own sanctioned\npath (AD-F7) that this route does not duplicate.\n\nA custom indicator whose instrument never opted into raw-delta capture returns `None` for\nevery point (pre-existing custom-indicator behavior, reused unchanged) -- not an\nerror (I/O matrix: \"Values route returns None per-point for an uncaptured custom\nindicator, not an error\").",
         "operationId": "get_indicator_values_api_coin__instrument_id__indicator_values_get",
         "parameters": [
           {
@@ -2257,6 +2445,91 @@
         ],
         "title": "FootprintRow"
       },
+      "FundingItem": {
+        "properties": {
+          "t": {
+            "type": "integer",
+            "title": "T"
+          },
+          "rate": {
+            "type": "string",
+            "title": "Rate"
+          },
+          "interval": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interval"
+          },
+          "next_funding_ns": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Funding Ns"
+          },
+          "annualised": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annualised"
+          }
+        },
+        "type": "object",
+        "required": [
+          "t",
+          "rate",
+          "interval",
+          "next_funding_ns",
+          "annualised"
+        ],
+        "title": "FundingItem"
+      },
+      "FundingResponse": {
+        "properties": {
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "venue": {
+            "type": "string",
+            "title": "Venue"
+          },
+          "market": {
+            "type": "string",
+            "title": "Market"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/FundingItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "has_more",
+          "venue",
+          "market",
+          "items"
+        ],
+        "title": "FundingResponse"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -2366,94 +2639,6 @@
         ],
         "title": "IndicatorConfigEntry"
       },
-      "IndicatorSeriesPoint": {
-        "properties": {
-          "t": {
-            "type": "integer",
-            "title": "T"
-          },
-          "ofi": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Ofi"
-          },
-          "obi": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Obi"
-          },
-          "microprice": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Microprice"
-          },
-          "spread": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Spread"
-          }
-        },
-        "type": "object",
-        "required": [
-          "t"
-        ],
-        "title": "IndicatorSeriesPoint"
-      },
-      "IndicatorSeriesResponse": {
-        "properties": {
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/IndicatorSeriesPoint"
-            },
-            "type": "array",
-            "title": "Items"
-          },
-          "has_more": {
-            "type": "boolean",
-            "title": "Has More"
-          },
-          "venue": {
-            "type": "string",
-            "title": "Venue"
-          },
-          "market": {
-            "type": "string",
-            "title": "Market"
-          }
-        },
-        "type": "object",
-        "required": [
-          "items",
-          "has_more",
-          "venue",
-          "market"
-        ],
-        "title": "IndicatorSeriesResponse"
-      },
       "IndicatorValuesItem": {
         "properties": {
           "t": {
@@ -2520,6 +2705,336 @@
           "market"
         ],
         "title": "IndicatorValuesResponse"
+      },
+      "LiquidationBarItem": {
+        "properties": {
+          "t": {
+            "type": "integer",
+            "title": "T"
+          },
+          "long_v": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Long V"
+          },
+          "short_v": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Short V"
+          },
+          "n": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "N"
+          },
+          "size_precision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Precision"
+          },
+          "notional_units": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notional Units"
+          },
+          "notional_precision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notional Precision"
+          }
+        },
+        "type": "object",
+        "required": [
+          "t"
+        ],
+        "title": "LiquidationBarItem"
+      },
+      "LiquidationBarsResponse": {
+        "properties": {
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "venue": {
+            "type": "string",
+            "title": "Venue"
+          },
+          "market": {
+            "type": "string",
+            "title": "Market"
+          },
+          "price_precision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Precision"
+          },
+          "size_precision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Precision"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/LiquidationBarItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "has_more",
+          "venue",
+          "market",
+          "price_precision",
+          "size_precision",
+          "items"
+        ],
+        "title": "LiquidationBarsResponse"
+      },
+      "LiquidationItem": {
+        "properties": {
+          "side": {
+            "type": "string",
+            "title": "Side"
+          },
+          "size_units": {
+            "type": "integer",
+            "title": "Size Units"
+          },
+          "price_units": {
+            "type": "integer",
+            "title": "Price Units"
+          },
+          "price_precision": {
+            "type": "integer",
+            "title": "Price Precision"
+          },
+          "size_precision": {
+            "type": "integer",
+            "title": "Size Precision"
+          },
+          "venue_event_id": {
+            "type": "string",
+            "title": "Venue Event Id"
+          },
+          "ts_event": {
+            "type": "integer",
+            "title": "Ts Event"
+          },
+          "ts_init": {
+            "type": "integer",
+            "title": "Ts Init"
+          },
+          "price_kind": {
+            "type": "string",
+            "title": "Price Kind"
+          }
+        },
+        "type": "object",
+        "required": [
+          "side",
+          "size_units",
+          "price_units",
+          "price_precision",
+          "size_precision",
+          "venue_event_id",
+          "ts_event",
+          "ts_init",
+          "price_kind"
+        ],
+        "title": "LiquidationItem"
+      },
+      "LiquidationsResponse": {
+        "properties": {
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "venue": {
+            "type": "string",
+            "title": "Venue"
+          },
+          "market": {
+            "type": "string",
+            "title": "Market"
+          },
+          "price_precision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Precision"
+          },
+          "size_precision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Precision"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/LiquidationItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "has_more",
+          "venue",
+          "market",
+          "price_precision",
+          "size_precision",
+          "items"
+        ],
+        "title": "LiquidationsResponse"
+      },
+      "MarkIndexItem": {
+        "properties": {
+          "t": {
+            "type": "integer",
+            "title": "T"
+          },
+          "mark": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mark"
+          },
+          "index": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Index"
+          },
+          "basis_mi_bps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Basis Mi Bps"
+          },
+          "basis_ml_bps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Basis Ml Bps"
+          }
+        },
+        "type": "object",
+        "required": [
+          "t"
+        ],
+        "title": "MarkIndexItem"
+      },
+      "MarkIndexResponse": {
+        "properties": {
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "venue": {
+            "type": "string",
+            "title": "Venue"
+          },
+          "market": {
+            "type": "string",
+            "title": "Market"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MarkIndexItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "has_more",
+          "venue",
+          "market",
+          "items"
+        ],
+        "title": "MarkIndexResponse"
       },
       "MetricHistoryItem": {
         "properties": {
@@ -2647,6 +3162,182 @@
               }
             ],
             "title": "Volume24H"
+          },
+          "funding_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Funding Rate"
+          },
+          "funding_annualised": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Funding Annualised"
+          },
+          "open_interest": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Open Interest"
+          },
+          "oi_change_1h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oi Change 1H"
+          },
+          "oi_change_24h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oi Change 24H"
+          },
+          "basis_mi_bps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Basis Mi Bps"
+          },
+          "basis_ml_bps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Basis Ml Bps"
+          },
+          "liq_long_1h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Liq Long 1H"
+          },
+          "liq_short_1h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Liq Short 1H"
+          },
+          "liq_notional_1h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Liq Notional 1H"
+          },
+          "liq_ratio_1h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Liq Ratio 1H"
+          },
+          "forced_share_1h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Forced Share 1H"
+          },
+          "relative_volume": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Relative Volume"
+          },
+          "high_24h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "High 24H"
+          },
+          "low_24h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Low 24H"
+          },
+          "range_position_24h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Position 24H"
           }
         },
         "type": "object",
@@ -2671,6 +3362,72 @@
           "items"
         ],
         "title": "MetricsHistoryResponse"
+      },
+      "OpenInterestItem": {
+        "properties": {
+          "t": {
+            "type": "integer",
+            "title": "T"
+          },
+          "oi": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oi"
+          },
+          "oi_change": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oi Change"
+          }
+        },
+        "type": "object",
+        "required": [
+          "t"
+        ],
+        "title": "OpenInterestItem"
+      },
+      "OpenInterestResponse": {
+        "properties": {
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "venue": {
+            "type": "string",
+            "title": "Venue"
+          },
+          "market": {
+            "type": "string",
+            "title": "Market"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/OpenInterestItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "has_more",
+          "venue",
+          "market",
+          "items"
+        ],
+        "title": "OpenInterestResponse"
       },
       "RankingModeRequest": {
         "properties": {

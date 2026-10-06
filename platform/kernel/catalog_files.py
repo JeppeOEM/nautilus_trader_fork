@@ -17,7 +17,9 @@ Read-only catalog file helpers (DDD spine AD-D3): the read twin of `venue_http` 
 leaf listing plus column-projected Parquet reads of the second-snapshot rows over the catalog root,
 and of the raw trade archive's integer columns (`query_trade_columns`, Story 32.8), and of the
 archived liquidations (`query_liquidations`, and their archive-side start,
-`liquidation_feed_since_ns`, Story 33.3).
+`liquidation_feed_since_ns`, Story 33.3), and of the archived open interest
+(`query_open_interest`, Story 33.4) and mark and index price columns (`query_price_columns`, with
+`newest_ts_event_before` for a sparse page's gap jump, Story 33.4 review).
 
 Invariant: reading only. Nothing here writes, renames or deletes a catalog file, or constructs a
 `ParquetDataCatalog` (the catalog object's decoder turns every row's 20-level book into Python
@@ -26,7 +28,8 @@ from Nautilus's own `class_to_filename`, so they can never drift from what `writ
 Files are selected by their name's `ts_init` span (`kernel.clocks.CatalogFileSpan`) and rows by
 their exact `ts_event` (MEM-01: callers read one instrument, and the rebuilds one day, at a time).
 Only `query_second_ohlc` and `query_top_of_book` widen the span by `READ_SPAN_MARGIN_NS`
-(`query_index_prices`, `query_trade_columns` and `query_liquidations` by `MAX_TS_INIT_SKEW_NS`);
+(`query_index_prices`, `query_price_columns`, `query_trade_columns`, `query_liquidations`,
+`query_open_interest` and `newest_ts_event_before` by `MAX_TS_INIT_SKEW_NS`);
 `files_by_day` and `data_file_ranges` take the span as written, as their pre-kernel originals did --
 the rebuild re-reads a whole day, so a row whose `ts_init` lands in the neighbouring file is picked
 up there.
@@ -39,6 +42,8 @@ read.
 
 import glob
 import os
+from collections.abc import Callable
+from decimal import Decimal
 from types import MappingProxyType
 from typing import NamedTuple
 
@@ -53,6 +58,7 @@ from kernel.clocks import NS_PER_MS
 from kernel.clocks import READ_SPAN_MARGIN_NS
 from kernel.clocks import CatalogFileSpan
 from kernel.liquidation import Liquidation
+from kernel.open_interest import OpenInterest
 from kernel.second_snapshot import OHLC_UNIT_COLUMNS
 from kernel.second_snapshot import PRECISION_COLUMNS
 from kernel.second_snapshot import TOP_OF_BOOK_COLUMNS
@@ -64,7 +70,9 @@ from kernel.second_snapshot import quantity_of
 from kernel.second_snapshot import require_integer_layout
 from kernel.second_snapshot import top_of_book_units
 from kernel.second_snapshot import trade_float_columns
+from nautilus_trader.model.data import FundingRateUpdate
 from nautilus_trader.model.data import IndexPriceUpdate
+from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.objects import FIXED_PRECISION
@@ -85,6 +93,9 @@ _TRADE_READ_COLUMNS = (
 )
 INDEX_PRICE_DIRNAME = class_to_filename(IndexPriceUpdate)  # "index_price_update"
 LIQUIDATION_DIRNAME = class_to_filename(Liquidation)  # "custom_liquidation"
+OPEN_INTEREST_DIRNAME = class_to_filename(OpenInterest)  # "custom_open_interest"
+MARK_PRICE_DIRNAME = class_to_filename(MarkPriceUpdate)  # "mark_price_update"
+FUNDING_RATE_DIRNAME = class_to_filename(FundingRateUpdate)  # "funding_rate_update"
 
 
 def snapshot_files(catalog_path: str, instrument_id: str) -> list[str]:
@@ -94,17 +105,20 @@ def snapshot_files(catalog_path: str, instrument_id: str) -> list[str]:
     )
 
 
-def data_file_ranges(catalog_path: str, instrument_id: str) -> list[tuple[int, int]]:
+def data_file_ranges(
+    catalog_path: str, instrument_id: str, dirname: str = SNAPSHOT_DIRNAME
+) -> list[tuple[int, int]]:
     """
-    Return ascending (start_ns, end_ns) of every second-snapshot Parquet file for the instrument.
+    Return ascending (start_ns, end_ns) of every Parquet file of the instrument in the catalog's
+    `dirname` data directory (default: the second snapshots; Story 33.4's derivatives pages pass
+    their own type's, e.g. `FUNDING_RATE_DIRNAME`). `[]` when the directory does not exist.
 
     Read from the catalog's filenames -- a directory listing, no Parquet I/O. Lets paging routes know
     where data actually exists instead of guessing with fixed-size probe windows (a data gap wider
     than the window otherwise reads as "no more history").
     """
-    spans = (
-        CatalogFileSpan.from_path(path) for path in snapshot_files(catalog_path, instrument_id)
-    )
+    paths = glob.glob(os.path.join(catalog_path, "data", dirname, instrument_id, "*.parquet"))
+    spans = (CatalogFileSpan.from_path(path) for path in paths)
     return sorted((span.start_ns, span.end_ns) for span in spans)
 
 
@@ -287,14 +301,7 @@ def _index_rows(path: str, start_ns: int, end_ns: int) -> list[IndexPrice]:
         columns=["value", "ts_event", "ts_init"],
         filters=[("ts_event", ">=", start_ns), ("ts_event", "<=", end_ns)],
     )
-    metadata = table.schema.metadata or {}
-    if b"price_precision" not in metadata:
-        raise ValueError(f"{path}: no price_precision metadata, the raw values cannot be read")
-    precision = int(metadata[b"price_precision"])
-    if not 0 <= precision <= FIXED_PRECISION:
-        raise ValueError(
-            f"{path}: price_precision {precision} is outside this build's 0..{FIXED_PRECISION}"
-        )
+    precision = _price_precision_label(path, table)
     step = 10 ** (FIXED_PRECISION - precision)
     rows = []
     for raw, ts_event, ts_init in zip(
@@ -319,6 +326,23 @@ def _index_rows(path: str, start_ns: int, end_ns: int) -> list[IndexPrice]:
         price = Price.from_raw(value, precision)
         rows.append(IndexPrice(ts_event, ts_init, price))
     return rows
+
+
+def _price_precision_label(path: str, table: pa.Table) -> int:
+    """
+    Return the `price_precision` label the Rust writer stores in a fixed-point price file's
+    metadata (`IndexPriceUpdate`, `MarkPriceUpdate`); a file without one, or with one this build
+    cannot hold, raises `ValueError` naming it -- never a guessed precision.
+    """
+    metadata = table.schema.metadata or {}
+    if b"price_precision" not in metadata:
+        raise ValueError(f"{path}: no price_precision metadata, the raw values cannot be read")
+    precision = int(metadata[b"price_precision"])
+    if not 0 <= precision <= FIXED_PRECISION:
+        raise ValueError(
+            f"{path}: price_precision {precision} is outside this build's 0..{FIXED_PRECISION}"
+        )
+    return precision
 
 
 class PrecisionLabel(NamedTuple):
@@ -450,6 +474,25 @@ _DECIMAL128_BYTES = 16
 # merged day file first and only then removes its minute sources. The read lists again this many
 # times; a listing that keeps losing files is refused (`TradeDecodeError`, ledgered by the caller).
 _TRADE_LISTING_ATTEMPTS = 2
+
+
+def _relisting[T](label: str, read: Callable[[], T]) -> T:
+    """
+    Run one whole listing-and-read, again from a fresh listing when a listed file vanished before
+    it was opened (the consolidation's merge-then-remove, as `query_trade_columns` does), up to
+    `_TRADE_LISTING_ATTEMPTS` times; a listing that keeps losing files is refused with a
+    `ValueError` naming `label` (the caller ledgers it), never read as fewer rows.
+    """
+    for attempt in range(1, _TRADE_LISTING_ATTEMPTS + 1):
+        try:
+            return read()
+        except FileNotFoundError as exc:
+            if attempt == _TRADE_LISTING_ATTEMPTS:
+                raise ValueError(
+                    f"{label}: files kept disappearing during the read "
+                    f"({_TRADE_LISTING_ATTEMPTS} listings): {exc}"
+                ) from exc
+    raise AssertionError("unreachable: the last attempt returns or raises")
 
 
 class TradeDecodeError(ValueError):
@@ -663,8 +706,20 @@ def query_liquidations(
     picks one (DATA-07). No liquidation directory (an instrument without the feed, or none yet):
     `[]`.
 
+    A file removed between the listing and its read (the consolidation) makes the read list again
+    (`_relisting`).
+
     MEM-01: the caller bounds the window (a day at most); this reads all of it at once.
     """
+    return _relisting(
+        f"{instrument_id} liquidations",
+        lambda: _read_liquidations(catalog_path, instrument_id, start_ns, end_ns),
+    )
+
+
+def _read_liquidations(
+    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int
+) -> list[Liquidation]:
     directory = os.path.join(catalog_path, "data", LIQUIDATION_DIRNAME, instrument_id)
     kept: dict[str, Liquidation] = {}
     for path in sorted(glob.glob(os.path.join(directory, "*.parquet"))):
@@ -733,3 +788,211 @@ def liquidation_feed_since_ns(catalog_path: str, instrument_id: str) -> int | No
             first = int(column.to_numpy().min())
             earliest = first if earliest is None else min(earliest, first)
     return earliest
+
+
+# -- open interest (Story 33.4) ------------------------------------------------------------------------
+
+
+def query_open_interest(
+    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int
+) -> list[OpenInterest]:
+    """
+    Every archived `OpenInterest` row of the instrument with `ts_event` in the inclusive
+    `[start_ns, end_ns]`, sorted by `ts_event`: the derivatives read model's and the ranking
+    backfill's open-interest input (`ranking` may import only `kernel`).
+
+    Files are chosen by their `ts_init` span widened by `MAX_TS_INIT_SKEW_NS`, as the liquidation
+    read does, and only the row's four columns are read. One row stored twice (a minute file and
+    its consolidated day file) is kept once, keyed on its `(ts_event, ts_init)`; two copies with
+    that key but different values raise `ValueError` naming them -- the caller ledgers it, never
+    picks one (DATA-07). No open-interest directory (a spot id, or none archived yet): `[]`.
+
+    A file removed between the listing and its read (the consolidation) makes the read list again
+    (`_relisting`).
+
+    MEM-01: the caller bounds the window (25 h at most); this reads all of it at once.
+    """
+    return _relisting(
+        f"{instrument_id} open interest",
+        lambda: _read_open_interest(catalog_path, instrument_id, start_ns, end_ns),
+    )
+
+
+def _read_open_interest(
+    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int
+) -> list[OpenInterest]:
+    directory = os.path.join(catalog_path, "data", OPEN_INTEREST_DIRNAME, instrument_id)
+    kept: dict[tuple[int, int], OpenInterest] = {}
+    for path in sorted(glob.glob(os.path.join(directory, "*.parquet"))):
+        if not CatalogFileSpan.from_path(path).overlaps(start_ns, end_ns, MAX_TS_INIT_SKEW_NS):
+            continue
+        table = pq.read_table(
+            path,
+            columns=list(OpenInterest.schema().names),
+            filters=[("ts_event", ">=", start_ns), ("ts_event", "<=", end_ns)],
+        )
+        for values in table.to_pylist():
+            row = OpenInterest.from_dict(values)
+            first = kept.setdefault((row.ts_event, row.ts_init), row)
+            if first.open_interest != row.open_interest:
+                raise ValueError(
+                    f"{instrument_id}: open interest at ts_event {row.ts_event} is stored twice "
+                    f"with different values ({first.open_interest} vs {row.open_interest}), refused"
+                )
+    return sorted(kept.values(), key=lambda row: (row.ts_event, row.ts_init))
+
+
+# -- mark and index price columns (Story 33.4 review) -----------------------------------------------
+
+_PRICE_DIRNAMES = frozenset({MARK_PRICE_DIRNAME, INDEX_PRICE_DIRNAME})
+
+
+class PriceColumns(NamedTuple):
+    """
+    Fixed-point price rows (`MarkPriceUpdate`, `IndexPriceUpdate`) as int64 arrays, each stored row
+    once, sorted by (`ts_event`, `ts_init`). `units` counts `10^-precision`, `precision` is the
+    row's own file label, so `Decimal(units).scaleb(-precision)` is the stored price exactly (no
+    float step, NAUT-01).
+    """
+
+    ts_event: np.ndarray
+    ts_init: np.ndarray
+    units: np.ndarray
+    precision: np.ndarray
+
+
+def query_price_columns(
+    catalog_path: str, dirname: str, instrument_id: str, start_ns: int, end_ns: int
+) -> PriceColumns:
+    """
+    Every mark (`MARK_PRICE_DIRNAME`) or index (`INDEX_PRICE_DIRNAME`) price row of the instrument
+    with `ts_event` in the inclusive `[start_ns, end_ns]`, column-projected: the three stored
+    columns as numpy arrays, never one Python object per row (MEM-01: a Bybit linear id stores about
+    ten mark ticks a second, 864k a day). `query_index_prices`' file selection (the `ts_init` span
+    widened by `MAX_TS_INIT_SKEW_NS`), precision label and exact raw decode (`_raw_units`: a raw
+    finer than its label, or not 16 bytes wide, is refused, never rounded).
+
+    One row stored twice (a minute file and its consolidated day file) is kept once, keyed on its
+    `(ts_event, ts_init)`; two copies with that key but a different price raise `ValueError` naming
+    them -- the caller ledgers it, never picks one (DATA-07). Copies compare by value, so the same
+    price under two precision labels is one row. No directory: empty arrays. A file removed between
+    the listing and its read (the consolidation) makes the read list again (`_relisting`).
+
+    Known limit: the window's columns are held at once (about 32 bytes a row: a day of a Bybit
+    linear id's marks is ~28 MB of arrays), so the caller bounds the window (`views.derivatives`
+    reads one UTC day at a time and keeps only each bucket's last value). Upgrade path: stream each
+    file with `pq.ParquetFile.iter_batches` and check copies across files by a per-file reduction.
+    """
+    if dirname not in _PRICE_DIRNAMES:
+        raise ValueError(f"{dirname!r} is not a fixed-point price directory")
+    return _relisting(
+        f"{instrument_id} {dirname}",
+        lambda: _read_price_columns(catalog_path, dirname, instrument_id, start_ns, end_ns),
+    )
+
+
+def _read_price_columns(
+    catalog_path: str, dirname: str, instrument_id: str, start_ns: int, end_ns: int
+) -> PriceColumns:
+    directory = os.path.join(catalog_path, "data", dirname, instrument_id)
+    parts: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+    for path in sorted(glob.glob(os.path.join(directory, "*.parquet"))):
+        if not CatalogFileSpan.from_path(path).overlaps(start_ns, end_ns, MAX_TS_INIT_SKEW_NS):
+            continue
+        part = _price_part(path, start_ns, end_ns)
+        if part is not None:
+            parts.append(part)
+    if not parts:
+        empty = np.empty(0, dtype=np.int64)
+        return PriceColumns(empty, empty, empty, empty)
+    return _unique_price_rows(f"{instrument_id} {dirname}", parts)
+
+
+def _price_part(
+    path: str, start_ns: int, end_ns: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    table = pq.read_table(
+        path,
+        columns=["value", "ts_event", "ts_init"],
+        filters=[("ts_event", ">=", start_ns), ("ts_event", "<=", end_ns)],
+    )
+    if table.num_rows == 0:
+        return None
+    precision = _price_precision_label(path, table)
+    units = _raw_units(path, "value", table.column("value"), precision)
+    return (
+        table.column("ts_event").to_numpy().astype(np.int64),
+        table.column("ts_init").to_numpy().astype(np.int64),
+        units,
+        np.full(table.num_rows, precision, dtype=np.int64),
+    )
+
+
+def _unique_price_rows(
+    label: str, parts: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]
+) -> PriceColumns:
+    """Concatenate, sort by (`ts_event`, `ts_init`), keep each key once, refuse a disagreeing copy."""
+    ts_event, ts_init, units, precision = (
+        np.concatenate([part[i] for part in parts]) for i in range(4)
+    )
+    order = np.lexsort((ts_init, ts_event))  # stable: the first copy in file order stays first
+    ts_event, ts_init, units, precision = (a[order] for a in (ts_event, ts_init, units, precision))
+    first = np.ones(len(order), dtype=bool)
+    first[1:] = (ts_event[1:] != ts_event[:-1]) | (ts_init[1:] != ts_init[:-1])
+    kept = np.maximum.accumulate(np.where(first, np.arange(len(order)), 0))
+    # Only a copy whose stored units or label differ from its first is compared as a `Decimal`: a
+    # day held twice (a minute file beside its day file) is ~864k identical copies, never a loop.
+    differs = ~first & ((units != units[kept]) | (precision != precision[kept]))
+    for copy in np.flatnonzero(differs):
+        a, b = kept[copy], copy
+        price_a = Decimal(int(units[a])).scaleb(-int(precision[a]))
+        price_b = Decimal(int(units[b])).scaleb(-int(precision[b]))
+        if price_a != price_b:
+            raise ValueError(
+                f"{label}: price at ts_event {int(ts_event[b])} is stored twice with different "
+                f"values ({price_a} vs {price_b}), refused"
+            )
+    return PriceColumns(ts_event[first], ts_init[first], units[first], precision[first])
+
+
+def newest_ts_event_before(
+    catalog_path: str, instrument_id: str, dirnames: tuple[str, ...], before_ns: int
+) -> int | None:
+    """
+    Return the newest stored `ts_event < before_ns` of the instrument across the `dirnames` data
+    directories, None when there is none: where a sparse page's walk back jumps an empty window
+    to, in one bounded pass instead of stepping window by window (Story 33.4 review).
+
+    Reads only the `ts_event` column, newest file (by its name's `ts_init` span) first, and stops
+    once no file left can hold a newer row: a row's `ts_event` is at most its `ts_init` plus
+    `MAX_TS_INIT_SKEW_NS`, so a file whose span ends that far below the best found is never opened.
+    Each file is read at most once per listing; a file removed between the listing and its read (the
+    consolidation) makes the scan list again (`_relisting`).
+    """
+    return _relisting(
+        f"{instrument_id} {'/'.join(dirnames)}",
+        lambda: _newest_ts_event_before(catalog_path, instrument_id, dirnames, before_ns),
+    )
+
+
+def _newest_ts_event_before(
+    catalog_path: str, instrument_id: str, dirnames: tuple[str, ...], before_ns: int
+) -> int | None:
+    candidates: list[tuple[int, str]] = []
+    for dirname in dirnames:
+        directory = os.path.join(catalog_path, "data", dirname, instrument_id)
+        for path in glob.glob(os.path.join(directory, "*.parquet")):
+            span = CatalogFileSpan.from_path(path)
+            if span.start_ns - MAX_TS_INIT_SKEW_NS < before_ns:
+                candidates.append((span.end_ns, path))
+    best: int | None = None
+    for end_ns, path in sorted(candidates, reverse=True):
+        if best is not None and end_ns + MAX_TS_INIT_SKEW_NS <= best:
+            break
+        column = pq.read_table(
+            path, columns=["ts_event"], filters=[("ts_event", "<", before_ns)]
+        ).column("ts_event")
+        if len(column):
+            newest = int(pc.max(column).as_py())
+            best = newest if best is None else max(best, newest)
+    return best

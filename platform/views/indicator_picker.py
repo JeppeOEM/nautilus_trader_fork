@@ -61,7 +61,6 @@ from typing import Literal
 from typing import Protocol
 
 from candles.application import queries
-from candles.domain.fold import BAR_SECONDS
 from candles.domain.fold import bucket_start_ms
 from kernel.candle_patterns import CandlePattern
 from kernel.candle_patterns import PatternName
@@ -73,6 +72,7 @@ from nautilus_trader.indicators import MovingAverageType
 from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.enums import PriceType
 from views.chart_series import CancellationTracker
+from views.chart_series import stored_bar
 
 
 # =============================================================================================
@@ -647,19 +647,15 @@ def _cvd_prefix(candles: list[dict], window: ReplayWindow) -> tuple[int, int] | 
         raise ValueError("CVD anchor 'all' needs the candle store (no candles_dir given)")
     if not candles:
         return None
-    width = _widest_stored_divisor(window.bar_seconds)
+    width = stored_bar(window.bar_seconds)
+    if width is None:
+        raise ValueError(
+            f"no stored bar width divides {window.bar_seconds} s: CVD 'all' cannot anchor"
+        )
     with queries.open_store(window.candles_dir, venue_of(window.instrument_id)) as db:
         if db is None:
             return None
         return queries.flow_delta_before(db, window.instrument_id, width, candles[0]["t"])
-
-
-def _widest_stored_divisor(bar_seconds: int) -> int:
-    """Return the widest stored width whose bars tile `bar_seconds` (10m -> 5m, 1W -> 1D)."""
-    widths = [w for w in BAR_SECONDS if bar_seconds % w == 0]
-    if not widths:
-        raise ValueError(f"no stored bar width divides {bar_seconds} s: CVD 'all' cannot anchor")
-    return max(widths)
 
 
 def _check_cvd_params(params: dict[str, Any]) -> None:

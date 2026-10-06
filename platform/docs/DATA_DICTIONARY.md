@@ -9,7 +9,7 @@ Every "error ledger" site named below (`collector.late_trade`, `collector.trade_
 (Story 23.1; formerly `ml_signals.error_ledger`, whose shim Story 24.1 deleted). The sites, their
 names and what they count are unchanged `[re-cited 2026-09-21: Story 23.1]`, with one addition:
 `archive_gaps.inverted_span` counts a gap marker whose `from_ns > to_ns` — a backward wall-clock
-step between a lost trade's arrival and the flush. Since Story 26.1 every capture site is a constant in `capture/application/sites.py` and `CaptureService._ledger` is capture's only `record` call; it added `collector.empty_top` (a book with no best bid or ask: seconds skipped, one WARNING and one ledger line per instrument per minute) `[amended 2026-09-26: Story 26.1]`, and Story 30.2 `collector.unencodable` (a second whose row cannot be stored exactly at the instrument definition's precisions: skipped, one ERROR and one ledger line per instrument per minute). Story 31.2 ledgered every site that only logged or skipped before. Per flush: `collector.stale_trade` (§1.1) and `collector.second_rejected` (gate rejections per instrument and reason, `not_collected` excluded). Per event: `collector.skipped_seconds`, `collector.restart_gap` and `collector.coverage_write` (§1.16), `collector.ohlc_outside_book` (every occurrence, the row kept), `collector.snapshot_publish` (a failed `snapshots:raw` publish, Parquet unaffected), `collector.crash` (`run()` raised; restarted with backoff), `collector.unknown_message` (a client message no branch decodes, repr bounded to 300 chars; dYdX's `block_height` and `new_instrument_discovered` dicts are ignored by name), `collector.candle_store_behind` and `collector.book_crosscheck_unconfirmed`. A REST poll's unparseable rows (a missing symbol or `openInterest`, a non-decimal value) go to its own poll site, `collector.open_interest_poll` `[amended 2026-09-29: Story 31.2]`. Story 28.1 added one per-flush site, `collector.hotpath_publish` (a failed `capture:hotpath` publish of the flush's hot-path figures, §1.25: once per failed publish, after a periodic flush or the final flush of a stop or crash, Parquet unaffected) `[amended 2026-09-30: Story 28.1]`. Story 33.1 added two Bybit liquidation sites (§1.26): `collector.liquidation_feed` (a liquidation subscribe that failed or Bybit refused, the liquidation socket that did not open, went `down`, or whose monitor round raised) and `collector.liquidation_publish` (a failed `liquidations:raw` publish, the rows archived regardless); an inexact liquidation entry is `collector.unencodable` and a malformed liquidation frame `collector.unknown_message` `[amended 2026-10-05: Story 33.1]`. The marker is written as the ordered span and
+step between a lost trade's arrival and the flush. Since Story 26.1 every capture site is a constant in `capture/application/sites.py` and `CaptureService._ledger` is capture's only `record` call; it added `collector.empty_top` (a book with no best bid or ask: seconds skipped, one WARNING and one ledger line per instrument per minute) `[amended 2026-09-26: Story 26.1]`, and Story 30.2 `collector.unencodable` (a second whose row cannot be stored exactly at the instrument definition's precisions: skipped, one ERROR and one ledger line per instrument per minute). Story 31.2 ledgered every site that only logged or skipped before. Per flush: `collector.stale_trade` (§1.1) and `collector.second_rejected` (gate rejections per instrument and reason, `not_collected` excluded). Per event: `collector.skipped_seconds`, `collector.restart_gap` and `collector.coverage_write` (§1.16), `collector.ohlc_outside_book` (every occurrence, the row kept), `collector.snapshot_publish` (a failed `snapshots:raw` publish, Parquet unaffected), `collector.crash` (`run()` raised; restarted with backoff), `collector.unknown_message` (a client message no branch decodes, repr bounded to 300 chars; dYdX's `block_height` and `new_instrument_discovered` dicts are ignored by name), `collector.candle_store_behind` and `collector.book_crosscheck_unconfirmed`. A REST poll's unparseable rows (a missing symbol or `openInterest`, a non-decimal value) go to its own poll site, `collector.open_interest_poll` `[amended 2026-09-29: Story 31.2]`. Story 28.1 added one per-flush site, `collector.hotpath_publish` (a failed `capture:hotpath` publish of the flush's hot-path figures, §1.25: once per failed publish, after a periodic flush or the final flush of a stop or crash, Parquet unaffected) `[amended 2026-09-30: Story 28.1]`. Story 33.1 added two Bybit liquidation sites (§1.26): `collector.liquidation_feed` (a liquidation subscribe that failed or Bybit refused, the liquidation socket that did not open, went `down`, or whose monitor round raised) and `collector.liquidation_publish` (a failed `liquidations:raw` publish, the rows archived regardless); an inexact liquidation entry is `collector.unencodable` and a malformed liquidation frame `collector.unknown_message` `[amended 2026-10-05: Story 33.1]`. Story 33.4 added `collector.derivs_publish` (a failed `derivs:raw` publish, with its row count, or the rows the 20,000-row pending cap turned away, counted at the next drain; Parquet unaffected, §1.27) `[amended 2026-10-06: Story 33.4]`. The marker is written as the ordered span and
 still protects its rows, so the count is the only signal that the clock stepped back
 `[added 2026-09-22: Story 23.2]`.
 
@@ -2385,8 +2385,11 @@ neither, no feed ships]`.
   frame (`instrument_id`, `side`, `size_units`, `price_units`, `price_precision`,
   `size_precision`, `venue_event_id`, `ts_event`, `ts_init` -- integers and precisions, never
   floats), the rows the archive buffer took, on the collector's `RedisLiveStream`. A failed publish
-  is ledgered `collector.liquidation_publish`; the rows are archived regardless. No consumer yet
-  (Stories 33.4 and 33.14).
+  is ledgered `collector.liquidation_publish`; the rows are archived regardless. Consumers since
+  Story 33.4: `ranking_engine` (the 1 h liquidation fields, §3.1) and `data_api`'s
+  `LiveCandleBus`, which hands the rows it accepted to `LiveDerivsBus` for `/ws/live`'s
+  `liquidations:{iid}` channel (§2.16); Story 33.14's bot is next `[amended 2026-10-06: Story
+  33.4 -- was "No consumer yet"]`.
 - **Liveness and status:** the socket's state, never row arrival (a quiet hour has none):
   `connected` (`is_active()`), `reconnecting`, `down` (no socket, closed or closing), on
   `collector:status`'s aggregate as its last key `liquidations` (§1.12); each transition to `down`
@@ -2513,6 +2516,58 @@ Hyperliquid socket, poll or row; a cross-venue reader treats Hyperliquid's liqui
 null, never 0 (audit D-151). Upgrade path: a non-validator node's fill stream, which carries every
 fill with its marker (DDD spine, Deferred; declined by the operator on cost, 2026-10-05).
 
+### 1.27 `derivs:raw` (live mark, index, funding and open interest, `kernel/derivs_wire.py`, Story 33.4)
+
+Not a stored type: a live push of the rows the archive already takes (§1.4, §1.5, §1.6, §1.8)
+`[added 2026-10-06: Story 33.4 -- new channel]`.
+
+- **Row format.** `kernel.derivs_wire` is the one definition (SSOT-02): `to_wire` builds a row,
+  `from_wire` decodes one into a `DerivsTick`; capture, `views` and `ranking` all import it. A row
+  is `{instrument_id, kind, t, ts_init, value}`, and a funding row also carries `interval` and
+  `next_funding_ns`:
+  - `kind`: `mark` (`MarkPriceUpdate`), `index` (`IndexPriceUpdate`), `funding`
+    (`FundingRateUpdate`) or `oi` (`OpenInterest`);
+  - `t`: the update's `ts_event`, ns; `ts_init`: ns;
+  - `value`: exact decimal **text** in plain positional notation (`kernel.derivs_wire.exact_text`,
+    `format(d, "f")`) of the stored `Price` or of the `Decimal` rate or open interest: `0.00000012`,
+    never `str()`'s `1.2E-7` (the stored funding text is `rust_decimal`'s exponent form, D-108)
+    `[amended 2026-10-06: Story 33.4 review]`. Never a JSON number: `from_wire` refuses a number (it would have passed through
+    a float), text that is not a decimal and a non-finite value (DATA-04);
+  - `interval`: the funding interval in **seconds**, null when the venue sent none (an absent or
+    0 `FundingRateUpdate.interval`; a funding interval is never 0, and the decoder refuses one).
+    `FundingRateUpdate.interval` is in minutes (Bybit `fundingIntervalHour * 60`, Hyperliquid a
+    fixed 60; `kernel/tests/test_derivs_wire.py` pins the unit on a real object), so the wire
+    multiplies by 60. A zero interval is refused. `next_funding_ns`: ns, or null.
+  - A reader ignores keys it does not know (AD-D12: payloads only gain keys); a known key with a
+    wrong type or value raises `ValueError`.
+- **Producer: every collector.** `CaptureService` appends each mark, index, funding and WS
+  open-interest row `_process_data` buffers, and each REST open-interest row `ingest_rows` keeps,
+  to a pending list, only while a `LiveStream` is wired. The sample loop drains the list once per
+  tick, after that tick's `snapshots:raw` publish (`_second_loop` in arrival mode,
+  `_venue_second_loop` in venue mode), encodes it through `to_wire` and publishes one JSON array
+  (`RedisLiveStream.publish_derivs`). A tick with no rows publishes nothing. The hot path only
+  appends; the encoding is the sample loop's.
+- **Bounds and failures (MEM-02, DATA-07).** The pending list holds at most 20,000 rows
+  (`_DERIVS_PENDING_MAX`, about 1,000 instrument-seconds of Bybit linear tickers); only a stalled
+  sample loop reaches it. A row past the cap is counted, not pushed, and the count is ledgered
+  `collector.derivs_publish` at the next drain. A failed encode or publish is ledgered at the same
+  site with its row count. A stop cancelling a publish mid-flight is no failure: the cancellation
+  propagates and the rows it left unpublished are logged at INFO with their count, never ledgered
+  `[amended 2026-10-06: Story 33.4 review]`. The archive is never affected: every row is in the flush buffer.
+- **Delivery.** Redis pub/sub, at most once (audit D-163): a row a subscriber missed is never
+  resent. Stored history is read through §2.16's routes.
+- **Spot.** No venue publishes mark, index, funding or open interest for a spot id (§1.8), so no
+  row is ever expected for one.
+- **Consumers.**
+  - `data_api`'s `LiveDerivsBus` (`views/live_derivs.py`), the process's one `derivs:raw`
+    subscriber, relays each row to `/ws/live`'s `derivs:{iid}` channel (§2.16). A frame that is
+    not JSON or not a list, or a row `from_wire` refuses, is ledgered `live_derivs.parse` and
+    skipped; the frame's other rows are still relayed.
+  - `ranking_engine` (§3.1). A malformed entry, or one the board refuses, is ledgered
+    `ranking_engine.derivs_entry`.
+- **Watch it:** `redis-cli SUBSCRIBE derivs:raw` shows one array per collector per second while
+  a perp is collected.
+
 ---
 
 ## 2. Computed signals / ML features (`platform/kernel/`, `platform/views/`, `platform/ranking/`)
@@ -2520,7 +2575,9 @@ fill with its marker (DDD spine, Deferred; declined by the operator on cost, 202
 Everything here is computed **on read** from the raw types in §1 — nothing in this
 section is stored back to Parquet. Since Story 24.2 every value a UI shows is computed in the
 `views/` read-model context (§2.4, §2.6, §2.7, §2.10 moved there from `ml_signals/`; the old
-module paths' re-exports were deleted in Story 24.4); `data_api` only formats and transports it
+module paths' re-exports were deleted in Story 24.4; Story 33.4 deleted the §2.4 builder, most of
+§2.6 and the legacy half of §2.7, none of which had a caller, and added the derivatives read
+model, §2.16); `data_api` only formats and transports it
 (`bot_tui` shows no market value at all since Story 25.1a: rankings are web-only). Per SSOT-01/02 (`platform/CLAUDE.md`), stateless
 single-snapshot formulas live as plain functions in `kernel/indicators.py` (the shared kernel,
 Story 23.2; the `ml_signals.indicators` re-export was deleted in Story 24.2); stateful/rolling
@@ -2622,17 +2679,13 @@ the ranking's `obi_N`, the chart's per-bar OBI -- publishes the last defined OBI
 Pinned by `verification/tests/test_reference_signals.py::test_multilevel_obi_keeps_its_previous_value_on_a_zero_total_known_limit`;
 upgrade path: publish None there.
 
-### 2.4 Footprint / order-book flow (`views/chart_series.py`'s `build_footprint`, was `ml_signals/footprint.py`)
+### 2.4 Footprint / order-book flow (removed in Story 33.4)
 
-`build_footprint` buckets **resting order-book size changes** (not executed trades —
-dYdX L2 deltas have no order IDs, so a shrinking level can't be told apart from a
-cancel vs. a fill; see the module's own caveat, `footprint.py`) into
-per-candle, per-price-band cells (`bands_per_candle`, default 4). Each cell tracks
-gross `bid_added`/`bid_removed`/`ask_added`/`ask_removed` size (not just net, so a
-churning level is visible). Input: `OrderBookDelta`s + `Candle`s (§2.5). No consumer since
-Story 15.10 retired the aiohttp dashboard, whose footprint chart was not ported to the React UI;
-kept as a tested `views` function — no ranking/live-tick consumer either.
-The chart's *volume* footprint of executed trades (Story 32.8) is a different read model, §2.14.
+**Removed** `[amended 2026-10-06: Story 33.4]`. `views/chart_series.py`'s `build_footprint` (and
+`FootprintCell`) bucketed resting order-book size changes, not executed trades, into per-candle,
+per-price-band cells. Nothing had called it since Story 15.10 retired the aiohttp dashboard, so
+Story 33.4 deleted it with its tests. The chart's footprint is the volume footprint of executed
+trades, §2.14.
 
 ### 2.5 Candles (the `candles/` context, Story 24.1)
 
@@ -2697,13 +2750,13 @@ starts at UTC midnight (epoch-aligned); **1W (604800 s) starts on Monday 00:00 U
 venues' weekly klines and the frontend's week (the epoch, 1970-01-01, was a Thursday, which is
 where 1W buckets started before). Known limit: any other width that does not divide a day would be
 epoch-aligned; none is offered (`TIMEFRAMES` holds day divisors and 1W only). The indicator panes
-(`/api/indicator-series`, `/api/coin/{id}/indicator-values`) accept `bar_seconds` up to 604800, so a
-1W pane is computed on 1W buckets -- before, both routes clamped it silently to 86400. Every raw
-read stays capped at 7 days (`chart_series.MAX_QUERY_SPAN_SECONDS`). **Known limit:** so a 1W
-OFI/OBI pane page holds at most two buckets (the older one computed from only the days inside the
-read -- the OFI/OBI replay, `indicator_series_page`, still queries unaligned windows: audit D-122,
-OPEN), and the picker's raw-delta custom indicators (cancel pressure, delta OFI) carry a value only
-on the last 7 1D bars or the last 1W bar of a page (§2.7); upgrade path: stored per-bar aggregates,
+(`/api/coin/{id}/indicator-values`) accept `bar_seconds` up to 604800, so a 1W pane is computed on
+1W buckets -- before, the routes clamped it silently to 86400. Every raw read stays capped at 7
+days (`chart_series.MAX_QUERY_SPAN_SECONDS`). **Known limit:** so the picker's raw-delta custom
+indicators (cancel pressure, delta OFI) carry a value only
+on the last 7 1D bars or the last 1W bar of a page (§2.7). (The separate OFI/OBI pane replay
+with its unaligned windows, audit D-122, was deleted in Story 33.4 `[amended 2026-10-06: Story
+33.4]`.) Upgrade path: stored per-bar aggregates,
 paged like the candle store, instead of raw-row replays -- which is what CVD now reads (§2.15,
 Story 33.3). Known limit (research):
 `ReturnSeries.resample` keys buckets by `ts // period` (its invariant: every stamp a multiple of the
@@ -2723,16 +2776,17 @@ definition precisions after a venue changed them), and every key of a gap marker
 
 ### 2.6 Book features (`views/chart_series.py`, was `ml_signals/book_features.py`)
 
-A second, independent set of L2-derived features, computed by replaying raw
-`OrderBookDelta`s (not `DydxSecondSnapshot`) — used by the chart page (§2.7), not by
-`ranking_engine`.
+Story 33.4 deleted the read-time book replay that served most of this section to the retired
+dashboard's chart page (`depth_profile`, `book_imbalance`, `top_of_book_series`, with the §2.7
+legacy series). What is left `[amended 2026-10-06: Story 33.4]`:
 
 | Feature | Formula | Notes |
 |---|---|---|
-| `depth_profile` | top-N bid/ask prices+sizes from a live `OrderBook` | levels 1-10 default |
-| `book_imbalance` | per-level `bid/(bid+ask)`, plus an aggregate across all levels | same imbalance formula as OBI, computed from a live book object instead of stored list fields |
-| `liquidity_distance` | price distance from best to where cumulative depth reaches `pct_threshold` (default 80%) of one side's total | small = dense support/resistance nearby; large = a liquidity vacuum |
-| `CancellationTracker` / `cancel_pressure` | `(deleted_size - added_size) / (deleted_size + added_size)` at the best bid/ask, over a rolling event window (default 200) | +1 = all cancellations, -1 = all additions; only tracks ADD/DELETE at the *current* best price, UPDATE is ambiguous-direction and skipped |
+| `CancellationTracker` / `cancel_pressure` (`views/chart_series.py`) | `(deleted_size - added_size) / (deleted_size + added_size)` at the best bid/ask, over a rolling event window (default 200) | Replays raw `OrderBookDelta`s. +1 = all cancellations, -1 = all additions; only tracks ADD/DELETE at the *current* best price, UPDATE is ambiguous-direction and skipped. Served as the picker's `CancelPressure` (`views.indicator_picker`, §2.7) |
+| `liquidity_distance` (`kernel/indicators.py`, moved from `views` in Story 33.4) | per side, `abs(price - best)` at the level where the cumulative size first reaches `pct_threshold` (default 80%) of the side's stored depth | Reads a `DepthProfile` of the snapshot's stored levels. Small = dense support/resistance nearby; large = a liquidity vacuum. No caller yet; kept in the kernel so the screener and research share one copy |
+
+The snapshot depth functions (`snapshot_depth`, `cumulative_depth`, `depth_within_bps`) are in
+`kernel/indicators.py` too, read by research (§2.12).
 
 ### 2.7 Chart series (`views/chart_series.py`, was `ml_signals/chart_data.py` and the `data_api` routes)
 
@@ -2742,9 +2796,7 @@ candle store, then the archive's seconds -> bars fold), `snapshot_series_page`/`
 (Story 31.3) -- and the CVD-weighted price
 `mid + ((buy_volume - sell_volume) / (buy_volume + sell_volume)) * (ask - bid) / 2`, the mid when
 nothing traded),
-`indicator_series_page` (per-bar OFI/OBI replay, microprice, spread: `replay_bucket_samples`,
-the last value per bucket, the §2.2 gap rule and §2.5 bucket rule, OBI's zero-total Known limit of
-§2.3) and `indicator_values_page` (whose raw-delta custom indicators -- cancel pressure, delta
+and `indicator_values_page` (whose raw-delta custom indicators -- cancel pressure, delta
 OFI -- replay raw deltas over a window capped at `MAX_QUERY_SPAN_SECONDS`, 7 days, back from the
 page's end: an older bar of a long 1W/1D page carries None for them, MEM-01; CVD reads the bars'
 own stored `buy_v - sell_v` instead, so every bar of every width has a value, with an `anchor`
@@ -2758,14 +2810,11 @@ fails the request (500) and counts `views.snapshot_without_top`. Gap rows are th
 `SNAPSHOT_GAP_THRESHOLD_MS` (2500 ms) in Lines mode, one bar in the bar-spaced panes
 (`with_gap_markers`).
 
-`compute_chart_series` (the legacy `/catalog/chart-series` endpoint's backend) reads the window's
-archived 1s snapshots (`views.catalog_reads.query_second_snapshots`, `DydxSecondSnapshot` rows)
-and emits one point per second for `microprice` (`kernel.indicators.microprice`), `spread`
-(`kernel.indicators.spread`: best ask - best bid as written, rounded at the row's precision, §2.1), `imbalance` (aggregate top-10-level book imbalance),
-`mid_imbalance` (mean of levels 2-3), and `bid_depth`/`ask_depth` (top-10-level size sums).
-It does not replay `OrderBookDelta`s or `TradeTick`s. An empty-top second raises
-`EmptyTopOfBook` like the pages above. Entirely a read-time computation — nothing here is
-persisted or fed into ranking.
+**Removed in Story 33.4** `[amended 2026-10-06: Story 33.4]`: `compute_chart_series` (the legacy
+`/catalog/chart-series` endpoint's per-second microprice, spread, imbalance and depth series),
+`compute_features`, `indicator_series_page` (the `/api/indicator-series` per-bar OFI/OBI replay)
+and the frontend hook that called it. No view used any of them. The pages above, `replay_bucket_samples`
+and `with_gap_markers` stay.
 
 ### 2.8 Price stats — moved to the ranking context (§3)
 
@@ -3293,6 +3342,114 @@ page whose bars are older than the store's first bar of that width (`raw_1s` his
 There is no raw-second replay and no 7-day window for CVD any more: every bar of every width,
 historical or live, has a value from its stored flow.
 
+### 2.16 Derivatives and liquidations read models (`views/derivatives.py`, Story 33.4)
+
+Not stored data: the one reader (SSOT-02) of the archived funding (§1.6), open interest (§1.8),
+mark (§1.4), index (§1.5) and liquidations (§1.26), plus the candle store's per-bar liquidation
+columns (§2.15), behind five routes `[added 2026-10-06: Story 33.4]`.
+`data_api/routes/derivatives.py` only clamps the parameters, builds the response models and maps
+errors; the live half is `views/live_derivs.py`.
+
+**Contract, all five routes.** `GET /api/coin/{iid}/<route>?before_ns=<ns>&limit=120`, plus
+`&bar_seconds=60` on the bucketed ones: the `/api/candles` cursor contract.
+- `limit` is clamped to 1..500 and `bar_seconds` to 1..604800, silently, as `/api/candles` does.
+- The response is `{items, has_more, venue, market}`, items oldest first. `has_more` is true when
+  older rows exist, either dropped from this page or in an older data file.
+- An event page keeps every row sharing its oldest row's time, so it may exceed `limit` by that
+  group: the next page's cursor is that time (`ts_event < before_ns`), and a cut inside the group
+  would lose its older rows for good (a Bybit liquidation cascade stamps many entries alike)
+  `[amended 2026-10-06: Story 33.4 review]`.
+- `/liquidations` and `/liquidation-bars` also carry `price_precision`/`size_precision`, the
+  instrument definition's own (never derived from a value); null for a spot id.
+- Known limit (ns cursor in JSON, audit D-170): `/funding`'s `t` and `/liquidations`' `ts_event`
+  are ns integers near 1.8e18, which a browser's `JSON.parse` rounds to a multiple of 256 ns (at
+  most 128 ns off). Rounded up, the next page re-serves the oldest tie group (dedupe by
+  `venue_event_id`, or `t` for funding), never skips one; rounded down, it skips only rows less
+  than 128 ns older than that group, and Bybit stamps both in whole ms, so none exists (Hyperliquid
+  funding is stamped at receipt, one row per `activeAssetCtx` frame). Python clients get the exact
+  int. Upgrade path: a string cursor on the two event pages `[amended 2026-10-06: Story 33.4 review]`.
+- Errors: a malformed id is a 400. A non-spot id without an instrument definition is a 404 on the
+  two liquidation routes (no precision to label units at). A failed archive or store read is
+  ledgered `derivatives.read` and is a 500 (`DerivativesReadError`): a file, a row stored twice
+  with different values, the candle store (`sqlite3.Error`), a value's arithmetic or a collection
+  changed under the read.
+- `/mark-index` and `/liquidation-bars` read the candle store, which folds only 1m 5m 15m 1h 4h 1d
+  (`candles.domain.fold.BAR_SECONDS`). A wider width is composed from the widest stored one that
+  tiles it exactly (`views.chart_series.stored_bar`, the one rule, also the CVD `all` anchor's: it
+  divides the width and the width's anchor lies on its boundaries; 1W from 1D). For a width no
+  stored one tiles (1..59 s, 90 s), `/mark-index` serves every bucket with a null `basis_ml_bps`
+  (no close: a missing input), and `/liquidation-bars` is a **400** naming the widths
+  (`UnsupportedBarSeconds`), never an empty or null page read as "no liquidations"
+  `[amended 2026-10-06: Story 33.4 review]`.
+
+**Bounds (MEM-01).** A page reads at most `MAX_QUERY_SPAN_SECONDS` (7 days) of archive, and never
+at or after `before_ns`. The event pages and the open-interest and mark/index pages walk back in
+windows (one UTC day for events; for buckets, `limit` whole buckets, at most a day of them and at
+least one, aligned to bucket boundaries, so a 1 s page of 120 never decodes a day of ticks), each
+read one UTC day at a time. An empty window jumps straight to the window holding the newest older
+row (`kernel.catalog_files.newest_ts_event_before`: one read of the type's `ts_event` column, each
+file at most once), so a sparse series (open interest polled every 300 s) costs two reads and one
+scan per window, never one read of the same file per empty window (`views.catalog_reads.fetch_page`
+steps back window by window inside a file; the candle pages keep it) `[amended 2026-10-06: Story 33.4 review]`. Mark and index are
+read column-projected (`kernel.catalog_files.query_price_columns`: `value`, `ts_event`, `ts_init` as
+numpy arrays, about 32 bytes a row) and cut to each bucket's last value, never one Python object
+per tick (a Bybit linear id stores about ten mark ticks a second) `[amended 2026-10-06: Story 33.4 review]`. Known limits: a 1W
+bucket is one whole window and the span cap is one week, so a 1W page holds one bar per request,
+as the candles' Parquet page does; the cap counts windows, so a page of many sparse rows reads up
+to `7 days / span` windows (at most about 780 at 1 s), each a small file read (upgrade path: one
+`ts_event` scan per request, then only the windows holding rows); a day of mark columns is held at
+once (~28 MB for a Bybit linear id; upgrade path: per-file batch streaming).
+
+**Units of `t`.** Event items carry `t` (or `ts_event`) in **ns**, the unit of the live frames.
+Bucketed items carry `t` as the bucket start in **ms**, `candles.domain.fold.bucket_start_ms`
+(§2.5), like the candles. Between two known buckets, `with_gap_markers` inserts gap rows `{t}`
+whose other keys are null; a bucket without data is never filled or interpolated.
+
+**Spot.** A spot id (`kernel.venues.market_kind == "spot"`) gets `200`, `items: []`,
+`has_more: false`, `market: "spot"` on every route, and nothing is read. Never a 404.
+
+**Exact values (DATA-04).** Prices, rates and open interest stay `Decimal` through the arithmetic
+and are served as exact strings in plain positional notation (`kernel.derivs_wire.exact_text`,
+`format(d, "f")`): `0.00000012`, never `1.2E-7`, and a zero `oi_change` `0.00000000`, never `0E-8`
+`[amended 2026-10-06: Story 33.4 review]`. Liquidation sizes, prices and notionals are integers in units of
+`10^-precision`. Basis and annualised funding are floats made from the `Decimal` result at this
+edge only. A missing input is `null`, never 0.
+
+| Route | Item fields | Rules |
+|---|---|---|
+| `/funding` | `t` (ns), `rate` (exact text, per interval), `interval` (s, null when the venue sent none), `next_funding_ns` (ns or null), `annualised` (float or null) | Every stored `FundingRateUpdate` with `ts_event < before_ns`, each once: a row stored twice (a minute file and its day file) is kept once by its `(ts_event, ts_init)`, and two copies that disagree fail the read (500), as for open interest; the mark and index reads do the same. The stored rate is `rust_decimal`'s text (`"1.2E-7"`, D-108), served positional (`0.00000012`). `annualised = rate x 31,536,000 / interval` (`kernel.indicators.funding_annualised`: a simple 365-day rate, not compounded), null without an interval, never guessed from a default. Read through `ParquetDataCatalog.query`, widened by `MAX_TS_INIT_SKEW_NS` on both sides because the catalog bounds by `ts_init`; `ts_event` decides. Known limit: this decodes each row into an object, unlike mark and index; funding is change-deduped upstream (about a hundred rows a day for BTCUSDT), so a day window is small; upgrade path: a `catalog_files` column reader of the stored rate text. Values go through `kernel.derivs_wire.to_tick`, the live frames' conversion, so a page and a frame carry the same value and interval unit. |
+| `/open-interest` | `t` (ms), `oi`, `oi_change` (exact text) | `oi` is the bucket's last open interest (`kernel.catalog_files.query_open_interest`). `oi_change = oi - ` the previous *known* bucket's `oi`: a gap does not reset it. The page's first bucket is compared with the newest older bucket the walk already read, else with the newest known bucket before it, found by one more bounded walk back that jumps gaps, so a bucket's change never depends on where the page was cut; null only when no older open interest exists. |
+| `/mark-index` | `t` (ms), `mark`, `index` (exact text, null when the bucket has none), `basis_mi_bps`, `basis_ml_bps` (floats or null) | `mark` and `index` are the bucket's last, both read column-projected through `kernel.catalog_files.query_price_columns` (the file's `price_precision` label and the 16-byte raw decoded to exact integer units, served as `Decimal(units).scaleb(-precision)`, so `100.50` keeps its zero), each stored row once by `(ts_event, ts_init)` and two disagreeing copies a 500, as for funding and open interest (the index read deduplicated nothing before the review) `[amended 2026-10-06: Story 33.4 review]`. `basis_mi_bps = (mark - index) / index x 10^4`. `basis_ml_bps` is the mark against the candle store's traded close of the bucket (`queries.window`; a composed width's close is its newest traded stored constituent's; null at a width no stored one tiles), recovered exactly as `Decimal(str(c))` quantized at the row's `price_precision`. Both are `kernel.indicators.basis_bps`, null when an input is missing or the reference is not positive. Known limit: a bucket the store does not hold (outside its coverage, pruned, untraded) or a pre-33.3 row without `price_precision` has a null `basis_ml_bps`, not one folded from the archive; upgrade path: the operator's history rebuild (`DEPLOY_CHECKLIST.md` 33-3) stamps the precisions, and an archive close read would serve the store's gaps. |
+| `/liquidations` | `side` (`long`/`short`, the liquidated position), `size_units`, `price_units`, `price_precision`, `size_precision`, `venue_event_id`, `ts_event` (ns), `ts_init`, `price_kind` | The stored row (`Liquidation.to_dict`) without `instrument_id`, from the archive plus the live bus's unflushed tail (`RECENT_SECONDS`, 600 s), each venue event once (`liquidations_plus_recent`). `price_kind` is the constant `"bankruptcy"` of this read model, never a stored column: Bybit is the only feed and its price is the bankruptcy price, not the fill (audit D-148). An id without the feed (`has_liquidation_feed` false: Hyperliquid, dYdX, spot) gets an empty page. |
+| `/liquidation-bars` | `t` (ms), `long_v`, `short_v` (units of `10^-size_precision`), `n`, `size_precision`, `notional_units`, `notional_precision` | One row per stored candle-store bucket, **untraded buckets included** (`candles.application.queries.liquidation_window`, no `o IS NOT NULL` filter: audit D-162). `long_v`, `short_v`, `n` and their null-ness are the store's own (D-160): null for an id without the feed and for a bucket before or straddling its feed start, 0 for a known bucket none landed in. `notional_units` is `Σ Liquidation.notional_units()` of the bucket's **archived** rows, each rescaled to the finest `price_precision + size_precision`, which is `notional_precision`: size x **bankruptcy** price (audit D-164). It is served only when the archive holds exactly `n` rows of the bucket (0 when `n` is 0 and it holds none), and null when `n` is null. Exact because capture writes a flush to the archive before applying it to the store, so every counted row is archived; the live bus's unflushed tail is never counted by the store and is not summed `[amended 2026-10-06: Story 33.4 review]`. Known limit (live-edge lag, audit D-172): between a flush's archive write and its store apply, or after a failed apply, the archive holds more rows than `n`, and the notional is null for that bucket, never a partial sum (`n` 0 beside archived rows included); upgrade path: a folded per-bucket notional column. A stored row whose `liq_*` are partly null is refused, ledgered `derivatives.read` (500). The same sum as the ranking's `liq_notional_1h` (§3.3). The read is one window of `min(limit x bar_seconds, 7 days)` of whole buckets back from `before_ns`; an empty window jumps once to the newest older stored row. A width the store does not fold (1W) is composed per bucket from the stored rows of `views.chart_series.stored_bar` (1D): `long_v`/`short_v` summed at the finest `size_precision`, `n` summed, all three null when any constituent's are, when a constituent row is **missing** (every constituent bucket up to the store's newest stored one must be present: the store keeps a row for every observed bucket, traded or not, so a missing one is an outage, never a 0; audit D-171) `[amended 2026-10-06: Story 33.4 review]`, or when the bucket starts before the first bucket at or after the store's `liquidation_feed_since` (D-160 at the composed width); the bucket exists when any constituent row does. A constituent pruned from the store (1m/5m retention) is missing the same way, so a composed bucket straddling the retention edge is null; every offered width is stored or composes from 1D, which is never pruned. Known limit: an outage running up to the store's live edge is no missing row yet, so the forming composed bucket sums what was observed until a later row lands (upgrade path: completeness from the coverage record, §1.16). Known limit (JSON range): a notional over 2^53 units is rounded by a browser's `JSON.parse` (audit D-168); Python consumers get the exact int; upgrade path: a string encoding, as for the candles' `pv`. |
+
+**Live channels on `/ws/live`.** Subscribed with the same control messages as candles
+(`views/live_derivs.py`'s `LiveDerivsBus`, built once in `data_api.buses`):
+- `{"subscribe": "derivs:{iid}"}` relays each `derivs:raw` row of that instrument (§1.27) as
+  `{"channel": "derivs:{iid}", "kind", "t" (ns), "ts_init", "value"}`, plus `"interval"` and
+  `"next_funding_ns"` on a funding row: the wire row without `instrument_id`, the value still
+  exact text. `LiveDerivsBus` is the process's one `derivs:raw` subscriber.
+- `{"subscribe": "liquidations:{iid}"}` relays each liquidation as
+  `{"channel": "liquidations:{iid}", "liq": <Liquidation.to_dict row>}`. `LiveCandleBus` stays the
+  process's one `liquidations:raw` subscriber and hands the rows of every frame it accepted to
+  `LiveDerivsBus` through `attach_liquidations`; a listener that raises is ledgered
+  `live_candles.liquidation_listener` and the candle fold goes on.
+- A channel's iid must be non-empty and hold no `:`; an unparseable channel (or a non-JSON frame)
+  is ignored: the first per connection is logged at WARNING, the rest counted and the count logged
+  at INFO when the connection closes, so a looping client cannot flood the log. The frontend hooks
+  open no socket for an empty instrument id (never a `derivs:` subscribe) `[amended 2026-10-06: Story 33.4 review]`.
+  One connection holds at most `_MAX_SUBSCRIPTIONS` (32) subscriptions, candles, derivs and
+  liquidations counted together.
+- Each listener has a bounded queue (`QUEUE_MAX`, 1,000) that drops its oldest frame when full
+  (`put_drop_oldest`). Known limit: both channels are pub/sub, at most once, so a live frame can be
+  lost but never altered (audit D-165); a chart reads the stored history through the routes.
+  Upgrade path: a per-frame sequence number so a client detects the gap and refetches.
+- Frontend: `hooks/useLiveDerivs.ts` and `hooks/useLiveLiquidations.ts` (subscribe on open, ignore
+  foreign or malformed frames, unsubscribe on cleanup, resubscribe on reconnect).
+
+**Ledger sites.** `derivatives.read` (a failed page read), `live_derivs.parse` (an undecodable
+`derivs:raw` frame or row), `live_candles.liquidation_listener` (a listener that raised).
+
 ---
 
 ## 3. Ranking engine (`platform/ranking/`, the `ranking_engine` service)
@@ -3335,7 +3492,24 @@ time / window contents / float accumulation order.
   price series of trade closes, `ranking/infrastructure/catalog_prices.py` over
   `kernel.catalog_files`; a window with no trade is an empty series -- Story 31.3 deleted the
   mark-price fallback), never re-read; `price`/`pct_1h`/`pct_24h`/
-  `volatility` come from that series every minute.
+  `volatility` come from that series every minute. Since Story 33.4 each backfilled second
+  (`PricePoint`) also carries its exact close and traded volume (buy + sell size, from the stored
+  integer units), which seed the hourly volume and the mark-last basis's close from the same read.
+  The same one-time backfill reads 25 h of open interest (`query_open_interest`, perps only) and
+  1 h of liquidations (`query_liquidations`, ids with the feed only) through
+  `ranking/infrastructure/catalog_derivs.py`'s `CatalogDerivsHistory`. Each of the three reads
+  fails alone; a failed or disagreeing derivatives read is ledgered
+  `ranking_engine.derivs_backfill` and never retried `[amended 2026-10-06: Story 33.4]`.
+- **`derivs:raw`** (Story 33.4, §1.27) — decoded only by `kernel.derivs_wire.from_wire`. A
+  malformed entry, or one the board refuses (a mark, index or funding tick older than the one
+  held; one open-interest `ts_event` delivered with two values), is ledgered
+  `ranking_engine.derivs_entry` and skipped, never the rest of the batch. It feeds the funding,
+  open-interest and basis fields, and never triggers a publish decision of its own: it reaches the
+  rank row through the next slow-loop row.
+- **`liquidations:raw`** (Story 33.4, §1.26) — decoded only by `Liquidation.from_dict`, each
+  `venue_event_id` counted once (the 1 h backfill and the live feed overlap). A malformed entry, or
+  a row for an id without the feed (not counted: its fields stay null), is ledgered
+  `ranking_engine.liquidation_entry`.
 - **`ranking:control`** — a Redis control channel that switches the active ranking
   mode between `"volume"` (default) and `"volatility"`. Global and last-write-wins.
   - Publisher: `data_api`'s `PUT /api/rankings/mode` (body `{"mode": "volume" | "volatility"}`,
@@ -3374,6 +3548,15 @@ instrument's `InstrumentMetrics` -- long-lived per-instrument indicator instance
   mids, ddof=1.
 - The reconnect-gap guard is the one rule of §2.2 (`kernel.indicators.OFI_GAP_NS` = 3 s, strict `>`
   on `ts_event`), so a stale pre-gap price never gets diffed against a fresh one.
+- **`DerivsState`** (`ranking/domain/derivs.py`, Story 33.4), one per instrument: each snapshot
+  second adds its exact traded volume (`buy_volume_units + sell_volume_units` at the row's size
+  precision) to minute buckets kept 25 h (`TradedVolume`), and its exact close becomes the
+  mark-last basis's reference. A repeated or older second is refused whole and ledgered
+  `ranking_engine.snapshot_entry` (one entry per second). The same state holds the newest mark,
+  index and funding tick, the open-interest series and the 1 h liquidation window, fed by
+  `derivs:raw` and `liquidations:raw` (§3.1). Every value is an exact `Decimal`; a field becomes a
+  float only in the slow row. A derivs-only id (no snapshot) ages out after the same silence as a
+  ranked one (MEM-02) `[amended 2026-10-06: Story 33.4]`.
 
 ### 3.3 The published `rankings:live` message
 
@@ -3418,6 +3601,45 @@ dropped, `RankingBoard.age_out`, Story 25.2). Each row combines:
     of consecutive close pct returns over the closes within 24 h of the latest (the series is
     kept 25 h as a backfill margin; Story 31.3 cut the stdev to the 24 h its label names); None
     under two returns.
+- **Derivatives, liquidation and flow fields** (Story 33.4, `ranking.domain.derivs.DERIVS_FIELDS`),
+  appended after `volatility` and before `rank`, every earlier key keeping its bytes and order
+  (AD-D12; `ranking/tests/test_replay.py` strips them and re-hashes against the recording). They
+  come from the same slow-loop row as the fields above (computed every 60 s, null when that row is
+  over 3 minutes old). Every value is computed in `Decimal` and published as a float; a missing
+  input is null, never 0 `[amended 2026-10-06: Story 33.4]`:
+  - `funding_rate` — the newest funding tick's per-interval rate; `funding_annualised` — `rate x
+    31,536,000 / interval_s` (`kernel.indicators.funding_annualised`, simple, not compounded), null
+    without an interval; `next_funding_ns` — int ns, as the venue sent it.
+  - `open_interest` — the newest point at or before now, null when it is over 900 s old
+    (`OI_MAX_AGE_NS`: three of the 300 s REST polls), so a stalled poll never reads as current.
+    `oi_change_1h`, `oi_change_24h` — the **absolute** change (`latest - base`, in the venue's own
+    open-interest unit as stored, §1.8, not a percentage), the base being the newest point at or
+    before `now - 1 h` / `24 h`, itself within 900 s of that time; null when the series (kept 25 h,
+    one point per minute) does not reach back to it. Perps only.
+  - `basis_mi_bps` — `(mark - index) / index x 10^4`; `basis_ml_bps` — the mark against the last
+    traded close (`kernel.indicators.basis_bps`); null without either input, and `basis_ml_bps`
+    null once that close is more than 900 s old (`LAST_CLOSE_MAX_AGE_NS`: an untraded
+    instrument's close is not today's price).
+  - `liq_long_1h`, `liq_short_1h` — the liquidated long and short size (base asset) of the last
+    hour; `liq_notional_1h` — `Σ` size x **bankruptcy** price in the quote currency
+    (`Liquidation.notional_units()`, the same sum as §2.16's `liquidation_bars`); `liq_ratio_1h` —
+    `long / (long + short)`; `forced_share_1h` — `(long + short) /` the hour's traded volume. All
+    null for an id without the feed; the sums are 0 and the ratios null when nothing was
+    liquidated, `forced_share_1h` null when nothing traded.
+  - `relative_volume` — the last hour's traded volume over the mean hourly volume of the trailing
+    24 h (or of the span held, when shorter); null under 2 h of traded history or with no volume.
+  - `high_24h`, `low_24h` — the highest and lowest trade close of the last 24 h, as stored;
+    `range_position_24h` — `(last - low) / (high - low)` in `Decimal`, null on a flat range.
+  - Known limits (in `ranking/domain/derivs.py` and `price_series.py`): funding, mark and index
+    carry no staleness bound (their venue cadence was never measured), so a stopped feed keeps its
+    last value until the instrument ages out; upgrade path: capture's per-feed status, or a bound
+    measured per venue (audit D-167). The liquidation window does not apply D-160's feed-start rule: an hour
+    straddling the capture's start, or a liquidation-socket outage, reads 0 for the part it did not
+    see, not null (audit D-166); upgrade path: read the candle store's `liquidation_feed_since`
+    once at backfill. The hourly volume windows are whole minutes, so a window can be up to one
+    minute short, and a capture outage inside one reads as no trading. A price series younger
+    than 24 h gives the high and low of the hours it holds, not null; upgrade path: null until the
+    series reaches the window's start, as `pct_24h` does (audit D-169).
 - `volume24h` and `volatility_score` — always both present regardless of active mode.
   `volume24h` is the venue's own USD 24 h volume (Story 22.10) and is `null` when that
   venue has no current volume for the instrument; such a row is left out of volume mode
@@ -3446,8 +3668,16 @@ Every `db_write_interval_seconds` (60s), `RankingEngine.slow_loop_once` merges t
 `volume24h` into that pass's snapshots and writes them to a SQLite table through
 `SqliteMetricsStore`, the store's only writer; other processes read it through
 `ranking.application.queries` (`history`/`nearest`, read-only connections), columns: `price`, `pct_1h`, `pct_24h`, `pct_1w`, `pct_1m`,
-`volatility`, `ofi`, `microprice`, `spread`, `rank`, `volume24h` — a 31-day rolling
-history used by the web UI's per-coin history page. Its `price` column is the slow loop's
+`volatility`, `ofi`, `microprice`, `spread`, `rank`, `volume24h`, and since Story 33.4
+`funding_rate`, `funding_annualised`, `open_interest`, `oi_change_1h`, `oi_change_24h`,
+`basis_mi_bps`, `basis_ml_bps`, `liq_long_1h`, `liq_short_1h`, `liq_notional_1h`, `liq_ratio_1h`,
+`forced_share_1h`, `relative_volume`, `high_24h`, `low_24h`, `range_position_24h` (the §3.3
+fields of the slow row, same meaning and nulls; `next_funding_ns` is not stored: an epoch-ns
+timestamp a REAL column would round, and a schedule rather than a metric) — a 31-day rolling
+history used by the web UI's per-coin history page. `COLS` is append-only (AD-D12): on
+the writer's first connection (`SqliteMetricsStore._conn`, in the ranking process), `_migrate` adds each missing column in place as a nullable REAL, so
+every row written before the migration reads null in it, never 0; `/api/metrics/history` serves
+the new columns (`MetricHistoryItem`) `[amended 2026-10-06: Story 33.4]`. Its `price` column is the slow loop's
 latest trade close (the `pct_1w`/`pct_1m` base), not the rank entry's live mid. `nearest(ts)`
 (`/api/metrics/nearest/{symbol}`) returns the row closest to `ts` only within
 `NEAREST_TOLERANCE_S` = 120 s (two write intervals); a farther row is another time, so the answer is
@@ -3517,11 +3747,12 @@ can find and add a coin without looking its id up elsewhere.
 | dYdX indexer `volume24H`, Bybit v5 tickers `turnover24h` (linear; spot USDT/USDC-quoted only), Hyperliquid `metaAndAssetCtxs` `dayNtlVlm` (independent polls in `ranking/infrastructure/volume_*`) | — (used as-is, USD) | `volume24h` | **this is the sort key when mode = `"volume"` (default)**; an instrument with no volume is absent from that mode and counted at `ranking_engine.volume24h` |
 | `DydxSecondSnapshot.buy_volume`/`sell_volume`/`buy_count`/`sell_count`/`close_price` units (§1.7) | the candle store's `buy_v`, `sell_v`, `buy_n`, `sell_n`, `pv` (§2.15, folded once by `candles.domain.fold`) → CVD (`anchor` session/visible/all), Story 33.6's flow indicators | *not present* | per bar, exact integers at the bar's precisions; `/api/candles` and `/ws/live` serve them (Story 33.3) |
 | `Liquidation.side`/`size_units` (§1.26, Bybit linear only) | the candle store's `liq_long_v`, `liq_short_v`, `liq_n` (§2.15) | *not present* | each `venue_event_id` once (`liquidations_applied`); null for an instrument without the feed, 0 for a quiet bucket of one with it (Story 33.3) |
-| `OrderBookDeltas` | `book_features.py`, `chart_data.py`, `footprint.py` | *not present* | chart-page-only; never reaches `ranking_engine` |
-| `MarkPriceUpdate` / `IndexPriceUpdate` | — | *not present* | research notebook frames only (`CatalogFrames.mark_index`, Story 27.1); `ranking` no longer backfills prices from marks (Story 31.3) |
-| `FundingRateUpdate` | — | *not present* | research notebook frames only (`CatalogFrames.funding`, Story 27.1) |
+| `OrderBookDeltas` | `views.chart_series.CancellationTracker`, the picker's delta OFI (§2.6, §2.7) | *not present* | chart-picker-only; never reaches `ranking_engine` |
+| `MarkPriceUpdate` / `IndexPriceUpdate` | `kernel.indicators.basis_bps` (live over `derivs:raw`, §1.27; on read in `views.derivatives`, §2.16) | `basis_mi_bps`, `basis_ml_bps` (Story 33.4) | also research notebook frames (`CatalogFrames.mark_index`, Story 27.1); `ranking` does not backfill prices from marks (Story 31.3) and has no mark/index backfill |
+| `FundingRateUpdate` | `kernel.indicators.funding_annualised` | `funding_rate`, `funding_annualised`, `next_funding_ns` (Story 33.4) | live over `derivs:raw`; `/api/coin/{id}/funding` (§2.16); research notebook frames (`CatalogFrames.funding`) |
+| `Liquidation` (§1.26) | `ranking.domain.derivs.LiquidationWindow` (1 h, each `venue_event_id` once) | `liq_long_1h`, `liq_short_1h`, `liq_notional_1h`, `liq_ratio_1h`, `forced_share_1h` (Story 33.4) | live over `liquidations:raw`, backfilled 1 h once; null for an id without the feed |
 | `InstrumentStatus` | — | *not present* | stored, no downstream reader found |
-| `OpenInterest` (stored) | — | *not present* | research notebook frames only (`CatalogFrames.open_interest`, Story 27.1) — only the *parallel* `volume24H`-based liquidity classification (not this field) affects anything live |
+| `OpenInterest` (stored) | `ranking.domain.derivs.OpenInterestSeries` (25 h, one point per minute) | `open_interest`, `oi_change_1h`, `oi_change_24h` (Story 33.4) | live over `derivs:raw`, backfilled 25 h once; `/api/coin/{id}/open-interest` (§2.16); research notebook frames. No sort key: the ranking order is unchanged |
 
 **Bottom line:** the live ranking table's actual sort key is either raw 24h USD
 volume or a 1-hour cross-sectional volatility stdev — both computed from data outside

@@ -1,6 +1,13 @@
-import type { IChartApi, IPaneApi, ISeriesApi, MouseEventParams, Time } from "lightweight-charts";
+import type {
+  IChartApi,
+  IPaneApi,
+  ISeriesApi,
+  LineData,
+  MouseEventParams,
+  Time,
+  WhitespaceData,
+} from "lightweight-charts";
 
-import type { IndicatorDatum } from "../../hooks/useIndicatorSeries";
 import { type GapRun, gapLabel } from "../../lib/gaps";
 
 // Spec §A4.1's chart legend: a text strip at the top-left of whichever pane an indicator
@@ -12,6 +19,10 @@ import { type GapRun, gapLabel } from "../../lib/gaps";
 // (settings modal; not for Volume) and an x (remove), inline SVG, wired by one delegated click
 // handler per legend. A hidden indicator keeps its row, dimmed and crossed, reading its latest
 // value (it does not follow the crosshair).
+
+/** One point of an indicator line: a value, or whitespace (a gap or a not-yet-defined value),
+ * passed straight through to lightweight-charts, never filtered or reshaped. */
+export type IndicatorDatum = LineData<Time> | WhitespaceData<Time>;
 
 /** Slot time (chart seconds) -> the gap run it belongs to, from the price series. */
 export type GapLookup = ReadonlyMap<number, GapRun>;

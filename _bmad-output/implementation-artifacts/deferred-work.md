@@ -2264,3 +2264,6 @@ status: open
 - source_spec: `_bmad-output/implementation-artifacts/spec-quick-volume-overlays-modal-and-grouped-tool-rail.md`
   summary: The rail's last-used tool per group (`ChartPage`'s `toolMemory`) is not persisted, so a page reload shows each group's first tool again (Known limit in `ChartPage.tsx`).
   evidence: TradingView keeps the last-used tool across sessions; persisting it needs a per-viewer UI preference beside the coin layout, since the layout table's shape (`lib/chartLayout.ts`, `views/preferences.py`) was out of scope for this change.
+- source_spec: `_bmad-output/implementation-artifacts/spec-33-4-derivatives-and-liquidations-read-models-api-and-live-channel.md`
+  summary: Every `/ws/live` connection is subscribed to the full `rankings:live` and alerts relay unconditionally, and the frontend opens one socket per live hook (`liveSubscription.ts`), so a chart with candles, derivs and liquidations hooks holds 3 sockets that each receive and discard every rankings snapshot.
+  evidence: `data_api/ws/live.py`'s `ws_live` adds the rankings/alerts listeners before any control message (pre-existing with `useLiveCandle`); Story 33.4's two new hooks multiply it. Upgrade path: one shared multiplexed socket per page, or opt-in rankings relay. Raised by the 33.4 Blind Hunter review (finding 5).

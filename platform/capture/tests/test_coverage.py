@@ -905,6 +905,9 @@ class _FailingStream:
     async def publish_hotpath(self, venue: str, report: dict) -> None:
         raise ConnectionError("redis down")
 
+    async def publish_derivs(self, rows: list[dict]) -> None:
+        raise ConnectionError("redis down")
+
     async def close(self) -> None:
         return None
 

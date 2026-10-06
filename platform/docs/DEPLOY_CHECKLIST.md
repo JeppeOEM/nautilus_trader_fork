@@ -1498,6 +1498,58 @@ env var, compose service or bind mount changed.
       shows the ten keys after `partial`; and the next nightly's `verify_day` keeps `candles` and
       `catalog` at 0 failing for the rebuilt days.
 
+### 33-4-derivatives-and-liquidations-read-models-api-and-live-channel (commit: this story's)
+
+Every collector publishes a new Redis channel, `derivs:raw`: one JSON array per sample tick of its
+mark, index, funding and open-interest rows, values as exact text (`docs/DATA_DICTIONARY.md`
+§1.27); nothing is published for a tick without rows, so a spot-only collector stays silent. The
+data_api gains five routes, `/api/coin/{id}/funding|open-interest|mark-index|liquidations|liquidation-bars`
+(§2.16), and the `/ws/live` channels `derivs:{id}` and `liquidations:{id}`; `/catalog/chart-series`
+and `/api/indicator-series` are gone (no page called them). The ranking subscribes to `derivs:raw`
+and `liquidations:raw`, backfills 25 h of open interest and 1 h of liquidations once per
+instrument, and appends 17 keys to every `rankings:live` row (§3.3). `metrics.db` gains 16
+nullable REAL columns, added in place by the ranking's own `_migrate` on its first connection: no
+manual migration, and every pre-deploy row reads null in them, never 0. No config key, env var,
+compose service or bind mount changed.
+
+- [ ] On the VPS, pull this commit and rebuild/restart the collectors, the data_api and the
+      ranking: `cd ~/nautilus_trader_fork/platform && make up` (or `docker compose up -d --build
+      bybit_collector hyperliquid_collector data_api ranking_engine`; add `collector` only on a
+      `make up-dydx` deployment).
+- [ ] Confirm the live push: `redis-cli SUBSCRIBE derivs:raw` shows about one message per second
+      per collector (Bybit and Hyperliquid), each a JSON array of rows like
+      `{"instrument_id":"BTCUSDT-LINEAR.BYBIT","kind":"mark","t":...,"ts_init":...,"value":"..."}`
+      with `value` a quoted string, and `kind` `funding` rows carrying `interval` (seconds, e.g.
+      28800) and `next_funding_ns`. An `oi` row shows up for Bybit only every open-interest poll
+      (300 s).
+- [ ] Curl the five routes for a Bybit linear id and a spot id (`N=$(date +%s%N)`):
+      `for r in funding open-interest mark-index liquidations liquidation-bars; do curl -s
+      "localhost:9100/api/coin/BTCUSDT-LINEAR.BYBIT/$r?before_ns=$N&limit=3" | head -c 600; echo; done`
+      returns `200` pages with `"market":"perp"`, funding `rate` and `oi`/`mark`/`index` as
+      strings, `t` in ns on `funding`/`liquidations` and in ms on the bucketed routes, and
+      `price_kind":"bankruptcy"` on every liquidation. The same loop with `BTCUSDT-SPOT.BYBIT`
+      returns `{"has_more":false,"venue":"BYBIT","market":"spot",...,"items":[]}` on every route,
+      never a 404. On the collected Hyperliquid perp (`SOL-USD-PERP.HYPERLIQUID`) `liquidation-bars` rows carry
+      `null` `long_v`/`short_v`/`n`/`notional_units`, never 0.
+- [ ] Confirm the metrics migration ran: `sqlite3 data/metrics/metrics.db "PRAGMA
+      table_info(snapshots)"` lists `funding_rate` .. `range_position_24h` (16 columns) after
+      `volume24h`; a minute after the restart `sqlite3 data/metrics/metrics.db "SELECT
+      instrument_id, funding_rate, open_interest, oi_change_1h, relative_volume FROM snapshots
+      ORDER BY ts DESC LIMIT 5"` shows values for Bybit linear ids (`oi_change_1h` stays null for
+      the first hour, `relative_volume` until 2 h of traded seconds exist, spot ids null throughout).
+- [ ] Confirm the ranking rows: `curl -s localhost:9100/api/rankings | python3 -c "import json,sys;
+      r=json.load(sys.stdin)['items'][0]; print({k: r.get(k) for k in ('funding_rate','open_interest',
+      'basis_mi_bps','liq_long_1h','relative_volume','high_24h','rank')})"` prints the new keys
+      (null where the inputs are missing), with `rank` still the row's last key.
+- [ ] Check the ledger shows no `collector.derivs_publish`, `derivatives.read`,
+      `live_derivs.parse`, `live_candles.liquidation_listener`, `ranking_engine.derivs_entry`,
+      `ranking_engine.liquidation_entry` or `ranking_engine.derivs_backfill` line since the restart
+      (`GET /api/errors`, or `platform/data/errors/*.jsonl`); any one is a DATA-07 finding to
+      explain, not noise.
+- [ ] Optional, in the browser's devtools console on the web UI:
+      `w=new WebSocket(`ws://${location.host}/ws/live`);w.onmessage=e=>{const m=JSON.parse(e.data);if(m.channel?.startsWith('derivs:'))console.log(m)};w.onopen=()=>w.send(JSON.stringify({subscribe:'derivs:BTCUSDT-LINEAR.BYBIT'}))`
+      logs `derivs:BTCUSDT-LINEAR.BYBIT` frames about once a second, and only that id's.
+
 ### DW-182 archive-gap markers decode under the strict reader (Story 23.2; commit: 3f8328d048)
 
 Story 23.2 made `kernel.archive_markers.decode` refuse an inverted span (`from_ns > to_ns`), and the

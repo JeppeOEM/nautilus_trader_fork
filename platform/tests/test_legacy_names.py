@@ -53,10 +53,11 @@ _LEGACY = re.compile(LEGACY_NAMES)
 
 # The ranking process's error-ledger sites (`ranking/`): published language, read by
 # `GET /api/errors`, `archive.crosscheck_errors --expect` and the durable `.jsonl` history. A site
-# added later keeps the process's one prefix (Story 29.5's `markets`, the `markets:live` publish).
+# added later keeps the process's one prefix (Story 29.5's `markets`, the `markets:live` publish;
+# Story 33.4's `derivs_entry`, `liquidation_entry` and `derivs_backfill`).
 _RANKING_SITES = (
     "volume24h|message|snapshot_entry|publish|price_backfill|metrics_history|slow_loop|redis"
-    "|markets"
+    "|markets|derivs_entry|liquidation_entry|derivs_backfill"
 )
 
 

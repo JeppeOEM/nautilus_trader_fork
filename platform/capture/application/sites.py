@@ -77,3 +77,5 @@ OPEN_INTEREST_POLL = "collector.open_interest_poll"
 # `down`; and a failed `liquidations:raw` publish
 LIQUIDATION_FEED = "collector.liquidation_feed"
 LIQUIDATION_PUBLISH = "collector.liquidation_publish"
+# a failed `derivs:raw` publish, or rows the pending cap turned away (Story 33.4)
+DERIVS_PUBLISH = "collector.derivs_publish"

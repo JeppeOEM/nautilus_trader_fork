@@ -26,6 +26,9 @@ pull-readable with `redis-cli GET`; `docs/DATA_DICTIONARY.md` §1.25).
 Since Story 33.1 it also publishes `liquidations:raw`: one JSON array of `Liquidation.to_dict`
 rows per decoded liquidation frame (integer units, both precisions, the side as `"long"`/`"short"`,
 `docs/DATA_DICTIONARY.md` §1.26), the rows the archive buffer took, never floats.
+
+Since Story 33.4 it also publishes `derivs:raw`: one JSON array per sample tick of
+`kernel.derivs_wire.to_wire` rows (mark, index, funding, open interest; every value exact text).
 """
 
 import json
@@ -41,6 +44,7 @@ from kernel.second_snapshot import DydxSecondSnapshot
 CHANNEL = "snapshots:raw"
 HOTPATH_CHANNEL = "capture:hotpath"
 LIQUIDATIONS_CHANNEL = "liquidations:raw"
+DERIVS_CHANNEL = "derivs:raw"
 
 
 def redis_url_from_env() -> str:
@@ -72,6 +76,18 @@ async def publish_liquidation_batch(redis_client: aioredis.Redis, rows: list[Liq
         return
     payload = json.dumps([Liquidation.to_dict(row) for row in rows])
     await redis_client.publish(LIQUIDATIONS_CHANNEL, payload)
+
+
+async def publish_derivs_batch(redis_client: aioredis.Redis, rows: list[dict[str, Any]]) -> None:
+    """
+    Publish one tick's `kernel.derivs_wire` rows to `derivs:raw` as one JSON array.
+
+    An empty batch publishes nothing. A failure raises: the `CaptureService` ledgers it at
+    `collector.derivs_publish` with the row count and carries on -- the archive buffer has them.
+    """
+    if not rows:
+        return
+    await redis_client.publish(DERIVS_CHANNEL, json.dumps(rows))
 
 
 def hotpath_key(venue: str) -> str:
@@ -111,6 +127,10 @@ class RedisLiveStream:
     async def publish_liquidations(self, rows: list[Liquidation]) -> None:
         """Publish one frame's archived liquidation rows on `liquidations:raw`; raises on failure."""
         await publish_liquidation_batch(self._redis(), rows)
+
+    async def publish_derivs(self, rows: list[dict[str, Any]]) -> None:
+        """Publish one tick's derivatives rows on `derivs:raw`; raises on failure."""
+        await publish_derivs_batch(self._redis(), rows)
 
     async def publish_hotpath(self, venue: str, report: dict[str, Any]) -> None:
         """

@@ -785,3 +785,41 @@ def test_the_feed_start_query_reads_the_persisted_row_and_none_without_one(
     assert queries.liquidation_feed_since(db, "ETHUSDT-LINEAR.BYBIT") is None
     unmigrated = sqlite_store.sqlite3.connect(":memory:")
     assert queries.liquidation_feed_since(unmigrated, _LINEAR) is None
+
+
+# -- the liquidation read (Story 33.4) -------------------------------------------------------------
+
+
+def test_liquidation_window_serves_untraded_buckets_and_newest_row_t_sees_them(
+    tmp_path: Path,
+) -> None:
+    """
+    The feed starts at minute 0 (a liquidation at 0 s): minute 0 traded and had a liquidation,
+    minute 1 only a liquidation (no trade, `o` null: `window` never serves it, D-162), minute 2 only
+    a trade (a known 0). All three are served, oldest first, inside `[start_ms, end_ms)`.
+    """
+    db = _db(tmp_path)
+    sqlite_store.apply_liquidations(db, _LINEAR, [_liq("a", 0, 4)])
+    sqlite_store.apply_seconds(db, _LINEAR, [_sec(1, 10, 2, 0, 1, 0)])
+    sqlite_store.apply_liquidations(db, _LINEAR, [_liq("b", 70, 6, LiquidatedSide.SHORT)])
+    sqlite_store.apply_seconds(db, _LINEAR, [_sec(121, 10, 2, 0, 1, 0)])
+    rows = queries.liquidation_window(db, _LINEAR, 60, _DAY0_MS, _DAY0_MS + 180_000)
+    assert [(r["t"] - _DAY0_MS, r["liq_long_v"], r["liq_short_v"], r["liq_n"]) for r in rows] == [
+        (0, 4, 0, 1),
+        (60_000, 0, 6, 1),
+        (120_000, 0, 0, 0),
+    ]
+    assert [r["size_precision"] for r in rows] == [3, 3, 3]
+    assert [b["t"] - _DAY0_MS for b in _stored(db, _LINEAR)] == [0, 120_000]  # traded only
+    assert queries.liquidation_window(db, _LINEAR, 60, _DAY0_MS + 60_000, _DAY0_MS + 120_000)[0][
+        "t"
+    ] == (_DAY0_MS + 60_000)
+    assert queries.newest_row_t(db, _LINEAR, 60, _DAY0_MS + 120_000) == _DAY0_MS + 60_000
+    assert queries.newest_row_t(db, _LINEAR, 60, _DAY0_MS) is None
+
+
+def test_liquidation_window_of_an_instrument_without_the_feed_reads_null(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    sqlite_store.apply_seconds(db, _SPOT, [_sec(0, 10, 2, 0, 1, 0)])
+    (row,) = queries.liquidation_window(db, _SPOT, 60, _DAY0_MS, _DAY0_MS + 60_000)
+    assert (row["liq_long_v"], row["liq_short_v"], row["liq_n"]) == (None, None, None)

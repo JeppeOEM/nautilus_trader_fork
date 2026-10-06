@@ -58,6 +58,8 @@ from data_api import buses
 from fastapi.testclient import TestClient
 from kernel.indicators import OFI_GAP_NS
 from kernel.indicators import mid_price
+from kernel.liquidation import Liquidation
+from kernel.open_interest import OpenInterest
 from kernel.second_snapshot import DydxSecondSnapshot
 from observability import error_ledger
 from ranking.application.engine import RankingConfig
@@ -69,6 +71,7 @@ from ranking.domain.board import RankingBoard
 from ranking.domain.board import RankingsPublisher
 from ranking.domain.metrics import PCT_MAX_SHORTFALL_NS
 from ranking.domain.metrics import VOLATILITY_WINDOW_NS
+from ranking.domain.price_series import PricePoint
 from ranking.infrastructure import metrics_store
 from ranking.infrastructure.metrics_store import COLS
 from ranking.infrastructure.metrics_store import SqliteMetricsStore
@@ -200,8 +203,10 @@ ACCOUNTED: tuple[Accounted, ...] = (
     Accounted(
         "slow_fields_from_the_last_slow_loop",
         "metrics.db -> rankings:live",
-        "pct_1h/pct_24h/pct_1w/pct_1m/volatility",
-        "copied from the last slow-loop row (None before the first, or when older than 3 cycles)",
+        "pct_1h/pct_24h/pct_1w/pct_1m/volatility and Story 33.4's derivatives/flow/range fields",
+        "copied from the last slow-loop row (None before the first, or when older than 3 cycles). "
+        "The 33.4 fields have no reference here: the trace feeds no derivs:raw/liquidations:raw "
+        "and spans under 2 h; each is hand-computed in ranking/tests/test_derivs.py",
     ),
     Accounted(
         "in_flight_publish",
@@ -257,6 +262,23 @@ RANK_KEYS: dict[str, str] = {
     "pct_1w": "accounted:slow_fields_from_the_last_slow_loop",
     "pct_1m": "accounted:slow_fields_from_the_last_slow_loop",
     "volatility": "accounted:slow_fields_from_the_last_slow_loop",
+    "funding_rate": "accounted:slow_fields_from_the_last_slow_loop",
+    "funding_annualised": "accounted:slow_fields_from_the_last_slow_loop",
+    "next_funding_ns": "accounted:slow_fields_from_the_last_slow_loop",
+    "open_interest": "accounted:slow_fields_from_the_last_slow_loop",
+    "oi_change_1h": "accounted:slow_fields_from_the_last_slow_loop",
+    "oi_change_24h": "accounted:slow_fields_from_the_last_slow_loop",
+    "basis_mi_bps": "accounted:slow_fields_from_the_last_slow_loop",
+    "basis_ml_bps": "accounted:slow_fields_from_the_last_slow_loop",
+    "liq_long_1h": "accounted:slow_fields_from_the_last_slow_loop",
+    "liq_short_1h": "accounted:slow_fields_from_the_last_slow_loop",
+    "liq_notional_1h": "accounted:slow_fields_from_the_last_slow_loop",
+    "liq_ratio_1h": "accounted:slow_fields_from_the_last_slow_loop",
+    "forced_share_1h": "accounted:slow_fields_from_the_last_slow_loop",
+    "relative_volume": "accounted:slow_fields_from_the_last_slow_loop",
+    "high_24h": "accounted:slow_fields_from_the_last_slow_loop",
+    "low_24h": "accounted:slow_fields_from_the_last_slow_loop",
+    "range_position_24h": "accounted:slow_fields_from_the_last_slow_loop",
 }
 MESSAGE_KEYS: dict[str, str] = {
     "mode": "identity",
@@ -278,6 +300,22 @@ DB_KEYS: dict[str, str] = {
     "spread": "hop",
     "rank": "accounted:metrics_rank_is_real",
     "volume24h": "hop",
+    "funding_rate": "hop",
+    "funding_annualised": "hop",
+    "open_interest": "hop",
+    "oi_change_1h": "hop",
+    "oi_change_24h": "hop",
+    "basis_mi_bps": "hop",
+    "basis_ml_bps": "hop",
+    "liq_long_1h": "hop",
+    "liq_short_1h": "hop",
+    "liq_notional_1h": "hop",
+    "liq_ratio_1h": "hop",
+    "forced_share_1h": "hop",
+    "relative_volume": "hop",
+    "high_24h": "hop",
+    "low_24h": "hop",
+    "range_position_24h": "hop",
 }
 SNAPSHOT_KEYS: dict[str, str] = {
     "t": "accounted:snapshots_t_is_milliseconds",
@@ -300,6 +338,26 @@ _DB_FROM_RANK = {
     "pct_1w": "pct_1w",
     "pct_1m": "pct_1m",
     "volatility": "volatility",
+}
+# Story 33.4's metrics.db columns -> the rank entry fields holding them (the same slow row); checked
+# at write time only -- the live-stack judge's column groups predate them.
+_DB_33_4_FROM_RANK = {
+    "funding_rate": "funding_rate",
+    "funding_annualised": "funding_annualised",
+    "open_interest": "open_interest",
+    "oi_change_1h": "oi_change_1h",
+    "oi_change_24h": "oi_change_24h",
+    "basis_mi_bps": "basis_mi_bps",
+    "basis_ml_bps": "basis_ml_bps",
+    "liq_long_1h": "liq_long_1h",
+    "liq_short_1h": "liq_short_1h",
+    "liq_notional_1h": "liq_notional_1h",
+    "liq_ratio_1h": "liq_ratio_1h",
+    "forced_share_1h": "forced_share_1h",
+    "relative_volume": "relative_volume",
+    "high_24h": "high_24h",
+    "low_24h": "low_24h",
+    "range_position_24h": "range_position_24h",
 }
 
 # --- the fixture trace ------------------------------------------------------------------------
@@ -339,7 +397,17 @@ class _Volumes:
 class _NoBackfill:
     """A `PriceHistory` with an empty archive: the price series is only what the trace fed."""
 
-    def series(self, instrument_id: str, start_ns: int) -> list[tuple[int, float]]:
+    def series(self, instrument_id: str, start_ns: int) -> list[PricePoint]:
+        return []
+
+
+class _NoDerivs:
+    """A `DerivsHistory` with an empty archive: no open interest or liquidation to backfill."""
+
+    def open_interest(self, instrument_id: str, start_ns: int, end_ns: int) -> list[OpenInterest]:
+        return []
+
+    def liquidations(self, instrument_id: str, start_ns: int, end_ns: int) -> list[Liquidation]:
         return []
 
 
@@ -376,6 +444,7 @@ def _engine(
         board,
         volume_sources=[_Volumes(iid)],
         prices=_NoBackfill(),
+        derivs=_NoDerivs(),
         history=store,
         live=live,
         markets=_Recorder(),
@@ -642,8 +711,9 @@ def test_every_emitted_key_is_compared_or_accounted(trace: _Trace) -> None:
 def test_the_metrics_row_is_the_board_state_at_write_time(trace: _Trace) -> None:
     """Every column equals the rank entry published from the same board state (no ingest since)."""
     entry, row = trace.rank(), trace.db_row
-    assert {col: row[col] for col in _DB_FROM_RANK} == {
-        col: entry[field] for col, field in _DB_FROM_RANK.items()
+    from_rank = _DB_FROM_RANK | _DB_33_4_FROM_RANK
+    assert {col: row[col] for col in from_rank} == {
+        col: entry[field] for col, field in from_rank.items()
     }
     assert (row["instrument_id"], row["ts"]) == (trace.iid, trace.slow_ns)
     assert set(row) == {"ts", "instrument_id", *COLS}

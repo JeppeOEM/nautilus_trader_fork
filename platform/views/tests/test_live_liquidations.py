@@ -446,3 +446,26 @@ async def test_a_failed_seed_publish_is_ledgered_and_the_pair_reseeds(
     await bus.seed(_LINEAR, _BAR)
     assert (_LINEAR, _BAR) in bus._seeded
     assert queue.get_nowait()["bar"]["liq_n"] == 1  # type: ignore[attr-defined]
+
+
+def test_the_recent_tail_read_survives_the_loop_appending_while_it_filters() -> None:
+    """
+    The sync routes read the tail from the threadpool while the event loop appends to it: a bound
+    whose comparison appends a row mid-filter stands in for that thread switch. The read filters
+    its own snapshot (the two rows present when it started), never raising "deque mutated during
+    iteration".
+    """
+    bus = LiveCandleBus(_NO_CATALOG)
+    bus.handle_liquidations(_frame(_liq("a", _BASE_NS, 1), _liq("b", _BASE_NS + _S, 1)))
+    added = iter(range(10))
+
+    class _AppendingBound(int):
+        def __le__(self, other: object) -> bool:
+            bus.handle_liquidations(_frame(_liq(f"new{next(added)}", _BASE_NS + 2 * _S, 1)))
+            return int(self) <= other  # type: ignore[operator]
+
+    rows = bus.recent_liquidations(_LINEAR, _AppendingBound(0), 1 << 62)
+    assert [r.venue_event_id for r in rows] == ["a", "b"]
+    # The race really ran: the bound appended while the read filtered (else this test is vacuous).
+    after = bus.recent_liquidations(_LINEAR, 0, 1 << 62)
+    assert any(r.venue_event_id.startswith("new") for r in after)

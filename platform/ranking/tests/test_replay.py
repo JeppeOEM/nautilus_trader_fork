@@ -43,6 +43,12 @@ other ranking changes (`cvd` None on an empty window, `price` never the slow-loo
 pct bound, the 24 h volatility window, the bounded nearest row) do not arise in this burst: every
 row is two-sided and fed, its 30 s spacing never shortens a pct base past 300 s, and it spans
 under 2 h.
+
+Story 33.4 appended the derivatives, liquidation and flow keys (`ADDED_33_4`) to each rank entry,
+after `volatility` and before `rank`, and the matching numeric columns to `metrics.db`. They are
+stripped from each message with `symbol` (`_without_added_keys`) and the stored rows are projected
+onto the recorded columns (`_project`), so every pre-33.4 byte, publish decision and stored value is
+still proven unchanged; `_assert_added_keys_placed` pins where the new keys sit.
 """
 
 import asyncio
@@ -62,6 +68,7 @@ from ranking.application.ports import SNAPSHOTS_CHANNEL
 from ranking.domain import board as board_module
 from ranking.domain.board import RankingBoard
 from ranking.domain.board import RankingsPublisher
+from ranking.infrastructure.catalog_derivs import CatalogDerivsHistory
 from ranking.infrastructure.catalog_prices import CatalogPriceHistory
 from ranking.infrastructure.metrics_store import SqliteMetricsStore
 from ranking.tests.support import FakeClock
@@ -221,6 +228,38 @@ EXPECTED_SYMBOLS = {
 }
 
 
+# Story 33.4's appended rank-entry keys, spelled out in their published order (not imported from
+# `ranking.domain.derivs`, which would make the placement check circular).
+ADDED_33_4 = (
+    "funding_rate",
+    "funding_annualised",
+    "next_funding_ns",
+    "open_interest",
+    "oi_change_1h",
+    "oi_change_24h",
+    "basis_mi_bps",
+    "basis_ml_bps",
+    "liq_long_1h",
+    "liq_short_1h",
+    "liq_notional_1h",
+    "liq_ratio_1h",
+    "forced_share_1h",
+    "relative_volume",
+    "high_24h",
+    "low_24h",
+    "range_position_24h",
+)
+
+
+def _assert_added_keys_placed(message: dict) -> None:
+    """Assert the 33.4 keys sit together right after `volatility` and `rank` stays last."""
+    for rank in message["ranks"]:
+        keys = list(rank)
+        start = keys.index("volatility") + 1
+        assert tuple(keys[start : start + len(ADDED_33_4)]) == ADDED_33_4
+        assert keys[-1] == "rank"
+
+
 def _assert_symbol_right_after_venue(message: dict) -> None:
     """Every rank carries its base symbol, placed right after `venue`."""
     for rank in message["ranks"]:
@@ -229,17 +268,26 @@ def _assert_symbol_right_after_venue(message: dict) -> None:
         assert rank["symbol"] == EXPECTED_SYMBOLS[rank["instrument_id"]]
 
 
-def _without_symbol(message: str) -> str:
+def _without_added_keys(message: str) -> str:
     """
-    Return the message as a pre-29.1 producer published it: `symbol` stripped from each rank and
-    the rest re-serialized exactly as the engine does (`json.dumps`, insertion order kept). Matching the
-    recorded hashes proves every existing field, byte and order is unchanged; the fixture is not
-    re-recorded, which would prove nothing about the existing bytes.
+    Return the message as the recording's producer published it: `symbol` (29.1) and every
+    `ADDED_33_4` key stripped from each rank and the rest re-serialized exactly as the engine does
+    (`json.dumps`, insertion order kept). Matching the recorded hashes proves every existing field,
+    byte and order is unchanged; the fixture is not re-recorded, which would prove nothing about the
+    existing bytes.
     """
     decoded = json.loads(message)
     for rank in decoded["ranks"]:
-        del rank["symbol"]
+        for key in ("symbol", *ADDED_33_4):
+            del rank[key]
     return json.dumps(decoded)
+
+
+def _project(stored: tuple[list[str], list[list]], columns: list[str]) -> tuple[list[str], list]:
+    """Return the stored rows restricted to `columns` (the recording's), in that order."""
+    names, rows = stored
+    indexes = [names.index(column) for column in columns]
+    return columns, [[row[i] for i in indexes] for row in rows]
 
 
 def _pre_31_3_spread(snapshot: dict) -> float | None:
@@ -272,6 +320,7 @@ def _run_burst(db_path: Path, catalog_path: Path) -> list[str]:
         board,
         volume_sources=[_Source(name, volumes) for name, volumes in VOLUMES.items()],
         prices=CatalogPriceHistory(str(catalog_path)),
+        derivs=CatalogDerivsHistory(str(catalog_path)),
         history=history,
         live=live,
         markets=_Live(),  # its own channel: nothing it publishes reaches rankings:live
@@ -299,10 +348,14 @@ def test_rankings_live_bytes_and_metrics_rows_match_the_pre_move_engine(
         # `_without_symbol` cannot hide a change to the engine's serialization.
         assert json.dumps(json.loads(message)) == message
         _assert_symbol_right_after_venue(json.loads(message))
-    pre_29_1 = [_without_symbol(m) for m in messages]
-    assert pre_29_1[-1] == fixture["final_message"]
-    assert [hashlib.sha256(m.encode()).hexdigest() for m in pre_29_1] == fixture["publish_sha256"]
-    assert _stored_rows(tmp_path / "pre.db") == (
+        _assert_added_keys_placed(json.loads(message))
+    recorded = [_without_added_keys(m) for m in messages]
+    assert recorded[-1] == fixture["final_message"]
+    assert [hashlib.sha256(m.encode()).hexdigest() for m in recorded] == fixture["publish_sha256"]
+    stored = _stored_rows(tmp_path / "pre.db")
+    # Story 33.4's columns are appended after every recorded one (AD-D12), never between.
+    assert stored[0][: len(fixture["metrics_columns"])] == fixture["metrics_columns"]
+    assert _project(stored, fixture["metrics_columns"]) == (
         fixture["metrics_columns"],
         fixture["metrics_rows"],
     )

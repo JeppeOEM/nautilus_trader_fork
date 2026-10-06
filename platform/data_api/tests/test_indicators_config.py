@@ -17,7 +17,7 @@ Story 15.6: `GET /api/indicators/catalog`, `GET`/`PUT /api/coin/{instrument_id}/
 `GET /api/coin/{instrument_id}/indicator-values` -- real `IndicatorEntry`/`save_config`/
 `load_config` objects against a temp TOML file (no mocking of persisted-resource internals,
 platform/CLAUDE.md TEST-03), real `ParquetDataCatalog`/`DydxSecondSnapshot` for the values route,
-mirrors `test_candles.py`/`test_indicator_series.py`'s fixture pattern.
+mirrors `test_candles.py`'s fixture pattern.
 """
 
 import json
@@ -33,7 +33,6 @@ from views.preferences import save_chart_indicators as save_config
 
 import data_api.app as app_module
 import data_api.routes.candles as candles_routes
-import data_api.routes.indicator_series as indicator_series_routes
 import data_api.routes.indicators as indicators_routes
 from nautilus_trader.model.currencies import BTC
 from nautilus_trader.model.currencies import USDT
@@ -472,7 +471,7 @@ def test_indicator_values_at_1w_are_computed_on_monday_anchored_weekly_candles(
     assert [item["t"] for item in older["items"]] == [(monday_ns - week_ns) // 1_000_000]
 
 
-def test_candles_indicator_series_and_indicator_values_break_at_identical_gap_times(
+def test_candles_and_indicator_values_break_at_identical_gap_times(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -485,19 +484,16 @@ def test_candles_indicator_series_and_indicator_values_break_at_identical_gap_ti
     _write_snapshots(catalog_path, [(_BASE_NS + m * 60_000_000_000, 100.0 - m) for m in minutes])
     _define_instrument(catalog_path)  # the candles route labels at the definition's precision
     client = _client(tmp_path, monkeypatch, catalog_path=catalog_path)
-    monkeypatch.setattr(indicator_series_routes, "CATALOG_PATH", catalog_path)
     page = {"before_ns": _BASE_NS, "limit": 20, "bar_seconds": 60}
     spec = json.dumps([{"name": "RelativeStrengthIndex", "params": {"period": 2}}])
 
     candles = client.get(f"/api/candles/{_IID}", params=page).json()["items"]
-    series = client.get(f"/api/indicator-series/{_IID}", params=page).json()["items"]
     values = client.get(
         f"/api/coin/{_IID}/indicator-values", params={**page, "entries": spec}
     ).json()["items"]
 
     expected = [(_BASE_NS // 1_000_000) + m * 60_000 for m in (-6, -5, -4)]
     assert [c["t"] for c in candles if c["c"] is None] == expected
-    assert [r["t"] for r in series if r["obi"] is None] == expected
     assert [v["t"] for v in values if not v["values"]] == expected
 
 

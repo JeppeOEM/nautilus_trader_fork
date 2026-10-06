@@ -126,6 +126,46 @@ def window(
     return [_candle(r) for r in reversed(rows)]
 
 
+_LIQUIDATION_COLUMNS = ("liq_long_v", "liq_short_v", "liq_n", "price_precision", "size_precision")
+
+
+def liquidation_window(
+    db: sqlite3.Connection, iid: str, bar_seconds: int, start_ms: int, end_ms: int
+) -> list[dict]:
+    """
+    Every stored bucket with `start_ms <= t < end_ms`, oldest first, *traded or not*: `{t,
+    liq_long_v, liq_short_v, liq_n, price_precision, size_precision}`. Unlike `window` there is no
+    `o IS NOT NULL` filter, so a bucket holding only a liquidation (no trade, or no observed second
+    at all) is served -- audit D-162's upgrade path, read by `views.derivatives.liquidation_bars`
+    (Story 33.4). The `liq_*` are the store's own: null for an instrument without the feed and for
+    a bucket before or straddling its feed start (D-160), 0 for a known bucket none landed in. A
+    file the collector has not migrated yet lacks the columns: they read null (unknown), never 0.
+
+    MEM-01: the caller bounds `[start_ms, end_ms)` (`views.chart_series.MAX_QUERY_SPAN_SECONDS`).
+    """
+    present = table_columns(db)
+    columns = ", ".join(c if c in present else f"NULL AS {c}" for c in _LIQUIDATION_COLUMNS)
+    rows = db.execute(
+        f"SELECT t, {columns} FROM candles WHERE instrument_id = ? AND bar_seconds = ? "  # noqa: S608 -- constant column list, values are bound
+        "AND t >= ? AND t < ? ORDER BY t",
+        (iid, bar_seconds, start_ms, end_ms),
+    ).fetchall()
+    return [dict(zip(("t", *_LIQUIDATION_COLUMNS), row, strict=True)) for row in rows]
+
+
+def newest_row_t(db: sqlite3.Connection, iid: str, bar_seconds: int, before_ms: int) -> int | None:
+    """
+    Start (ms) of the newest stored bucket with `t < before_ms` of *any* kind (traded, observed only,
+    or liquidation-only), None when there is none: where `liquidation_window`'s pages jump a gap to,
+    and whether one has older rows (`has_more`). One indexed MAX over the primary key.
+    """
+    row = db.execute(
+        "SELECT MAX(t) FROM candles WHERE instrument_id = ? AND bar_seconds = ? AND t < ?",
+        (iid, bar_seconds, before_ms),
+    ).fetchone()
+    return row[0]
+
+
 def oldest_t(
     db: sqlite3.Connection, iid: str, bar_seconds: int, traded_only: bool = True
 ) -> int | None:

@@ -29,7 +29,11 @@ from contextlib import closing
 from pathlib import Path
 
 
-# Metric columns stored per snapshot (frozen: AD-D12). Extend here and in the writer's rows.
+# Metric columns stored per snapshot (AD-D12: append-only -- a column is never renamed, moved or
+# removed). Extend here and in the writer's rows; `_migrate` adds a new column, nullable, to a
+# deployed table. Story 33.4 appended the numeric derivatives, liquidation and flow fields of the
+# slow row (`ranking.domain.derivs.DERIVS_FIELDS` minus `next_funding_ns`: an epoch-ns timestamp
+# that a REAL column would round, and a schedule rather than a metric).
 COLS = (
     "price",
     "pct_1h",
@@ -42,6 +46,22 @@ COLS = (
     "spread",
     "rank",
     "volume24h",
+    "funding_rate",
+    "funding_annualised",
+    "open_interest",
+    "oi_change_1h",
+    "oi_change_24h",
+    "basis_mi_bps",
+    "basis_ml_bps",
+    "liq_long_1h",
+    "liq_short_1h",
+    "liq_notional_1h",
+    "liq_ratio_1h",
+    "forced_share_1h",
+    "relative_volume",
+    "high_24h",
+    "low_24h",
+    "range_position_24h",
 )
 
 _SCHEMA = f"""
@@ -66,6 +86,8 @@ def _migrate(db: sqlite3.Connection) -> None:
     """
     Add any COLS missing from an already-existing table (CREATE TABLE IF NOT EXISTS is a no-op
     against a pre-existing db, so extending COLS alone would otherwise break on deployed data).
+    Each is added in place as a nullable REAL, so every row written before it reads None for it --
+    a gap, never a fabricated 0 (Story 33.4's columns on a pre-33.4 metrics.db).
     """
     existing = {row[1] for row in db.execute("PRAGMA table_info(snapshots)")}
     for col in COLS:

@@ -24,10 +24,12 @@ import redis.asyncio as aioredis
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.tests.snapshot_factory import make_snapshot
 
+from capture.infrastructure.redis_stream import DERIVS_CHANNEL
 from capture.infrastructure.redis_stream import HOTPATH_CHANNEL
 from capture.infrastructure.redis_stream import RedisLiveStream
 from capture.infrastructure.redis_stream import hotpath_key
 from capture.infrastructure.redis_stream import hotpath_payload
+from capture.infrastructure.redis_stream import publish_derivs_batch
 from capture.infrastructure.redis_stream import publish_snapshot_batch
 from nautilus_trader.model.identifiers import InstrumentId
 
@@ -167,3 +169,20 @@ def test_publish_hotpath_publishes_and_sets_the_same_record_in_one_pipeline() ->
 def test_a_failed_hotpath_round_trip_reaches_the_caller_to_ledger() -> None:
     with pytest.raises(ConnectionError, match="Redis down"):
         asyncio.run(_stream(_FakeRedis(failing=True)).publish_hotpath("BYBIT", _REPORT))
+
+
+# -- the derivatives rows (Story 33.4) ------------------------------------------------------------
+
+
+def test_derivs_rows_are_published_as_one_json_array_on_derivs_raw() -> None:
+    redis_client = AsyncMock()
+    rows = [{"instrument_id": _IID.value, "kind": "mark", "t": 1, "ts_init": 2, "value": "100.5"}]
+    asyncio.run(publish_derivs_batch(redis_client, rows))
+    redis_client.publish.assert_called_once_with(DERIVS_CHANNEL, json.dumps(rows))
+    assert DERIVS_CHANNEL == "derivs:raw"
+
+
+def test_an_empty_derivs_batch_publishes_nothing() -> None:
+    redis_client = AsyncMock()
+    asyncio.run(publish_derivs_batch(redis_client, []))
+    redis_client.publish.assert_not_called()

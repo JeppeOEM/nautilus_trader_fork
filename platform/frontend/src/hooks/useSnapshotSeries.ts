@@ -41,8 +41,8 @@ const EMPTY_LINES: SnapshotLinesData = { bid: [], ask: [], mid: [], micro: [], p
 function toDatum(timeMs: number, value: number | null | undefined): LineDatum {
   const time = (timeMs / 1000) as UTCTimestamp; // wire is ms, lightweight-charts wants seconds
   // A `null` value (gap marker, AC #4/AD-F6) is passed straight through as native
-  // whitespace data -- never filtered or reshaped, same discipline as useCandles/
-  // useIndicatorSeries' own toChartDatum/toDatum.
+  // whitespace data -- never filtered or reshaped, same discipline as useCandles' own
+  // toChartDatum.
   return value == null ? { time } : { time, value };
 }
 
@@ -74,7 +74,7 @@ function toLines(items: SnapshotSeriesPoint[]): SnapshotLinesData {
  *
  * Both hooks independently subscribe to the same `chart.timeScale().subscribeVisibleLogicalRangeChange`
  * event -- the identical "single event source, multiple gated subscribers" pattern Story
- * 15.4's `useIndicatorSeries` already established alongside `useCandles`, extended here to
+ * 15.4 established alongside `useCandles` (for an OFI/OBI hook since deleted), extended here to
  * a third, mutually-exclusive data source rather than a new, parallel trigger mechanism.
  */
 export function useSnapshotSeries(
@@ -103,7 +103,7 @@ export function useSnapshotSeries(
           const mapped = toLines(response.items);
           setLines((prev) => {
             if (!prepend || prev.bid.length === 0) return mapped;
-            // Same page-boundary seam run useCandles'/useIndicatorSeries' loadPage already
+            // Same page-boundary seam run useCandles' loadPage already
             // build: a gap can straddle exactly the page cursor, which each page's own gap
             // rows (inside `price_series_rows`) can't see -- they only fill inside its own
             // queried range. Past the threshold, one whitespace slot per missing second, as

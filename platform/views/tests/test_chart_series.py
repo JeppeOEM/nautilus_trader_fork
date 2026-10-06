@@ -120,6 +120,18 @@ def test_the_replay_clears_the_previous_ofi_book_after_a_gap() -> None:
     assert [row["ofi"] for row in continued.values()] == [0.0]  # unchanged book: no flow
 
 
+def test_a_thin_book_second_replays_to_a_null_microprice_and_spread() -> None:
+    """
+    An empty-sided second is not an error in the per-bar replay: its microprice and spread are
+    honestly None (moved here in Story 33.4 from the deleted OFI/OBI series route's test).
+    """
+    thin = _snapshot(_BASE_NS, [], [])
+
+    (row,) = chart_series.replay_bucket_samples([thin], 60).values()
+
+    assert (row["microprice"], row["spread"]) == (None, None)
+
+
 def test_a_touched_second_is_priced_too() -> None:
     (row,) = price_series_rows([_snapshot(_BASE_NS, [100.0], [100.0])])
     assert (row["bid_units"], row["ask_units"]) == (1_000_000, 1_000_000)
@@ -296,10 +308,10 @@ def test_the_archive_window_is_whole_buckets_within_the_cap(bar_seconds: int, li
 def test_a_window_end_rounds_up_to_the_bucket_boundary_and_keeps_a_boundary() -> None:
     monday_ns = 4 * 86_400 * 1_000_000_000  # 1970-01-05, a 1W bucket start
     week_ns = 7 * 86_400 * 1_000_000_000
-    assert chart_series._bucket_end_ns(monday_ns, 604_800) == monday_ns
-    assert chart_series._bucket_end_ns(monday_ns + 1, 604_800) == monday_ns + week_ns
-    assert chart_series._bucket_end_ns(monday_ns - 1, 604_800) == monday_ns
-    assert chart_series._bucket_end_ns(2700_000_000_001, 2700) == 5400_000_000_000
+    assert chart_series.bucket_end_ns(monday_ns, 604_800) == monday_ns
+    assert chart_series.bucket_end_ns(monday_ns + 1, 604_800) == monday_ns + week_ns
+    assert chart_series.bucket_end_ns(monday_ns - 1, 604_800) == monday_ns
+    assert chart_series.bucket_end_ns(2700_000_000_001, 2700) == 5400_000_000_000
 
 
 def test_the_custom_indicator_replay_window_is_capped_at_the_query_span(
@@ -341,24 +353,3 @@ def test_the_custom_indicator_replay_window_is_capped_at_the_query_span(
     (window,) = seen
     assert window.end_ms == 500 * week_ms
     assert window.end_ms - window.start_ms == chart_series.MAX_QUERY_SPAN_SECONDS * 1000
-
-
-def test_compute_chart_series_spread_is_the_kernel_spread(tmp_path: Path) -> None:
-    """Review P3: the one-tick spread at 8.578755 is 1e-06 exactly, not the cancelled difference."""
-    catalog_path = str(tmp_path / "catalog")
-    row = make_snapshot(
-        instrument_id=InstrumentId.from_str(_IID),
-        bid_prices=["8.578755"],
-        bid_sizes=[1],
-        ask_prices=["8.578756"],
-        ask_sizes=[1],
-        ts_event=_BASE_NS,
-        price_precision=6,
-        size_precision=0,
-    )
-    ParquetDataCatalog(catalog_path).write_data([row])
-
-    series = chart_series.compute_chart_series(catalog_path, _IID, _BASE_NS - 1, _BASE_NS + 1)
-
-    assert row.ask_prices[0] - row.bid_prices[0] != 1e-06  # the cancellation
-    assert [p["value"] for p in series["spread"]] == [1e-06]

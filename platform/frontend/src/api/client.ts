@@ -18,7 +18,6 @@ import type {
   HealthResponse,
   IndicatorCatalogEntry,
   IndicatorConfigEntry,
-  IndicatorSeriesResponse,
   IndicatorValuesResponse,
   MetricsHistoryResponse,
   RankingModeResponse,
@@ -42,7 +41,6 @@ export type {
   HealthResponse,
   IndicatorCatalogEntry,
   IndicatorConfigEntry,
-  IndicatorSeriesResponse,
   IndicatorValuesResponse,
   MetricsHistoryResponse,
   RankingsResponse,
@@ -144,25 +142,6 @@ export async function fetchFootprint(
   return (await res.json()) as FootprintResponse;
 }
 
-// Story 15.4: cursor-paginated OFI/OBI/microprice/spread history (AD-F3) -- mirrors
-// fetchCandles()'s exact shape, so `useIndicatorSeries` can co-page with `useCandles`
-// using the identical before_ns/limit/bar_seconds tuple.
-export async function fetchIndicatorSeries(
-  instrumentId: string,
-  beforeNs: number,
-  limit: number,
-  barSeconds: number,
-): Promise<IndicatorSeriesResponse> {
-  const params = new URLSearchParams({
-    before_ns: String(beforeNs),
-    limit: String(limit),
-    bar_seconds: String(barSeconds),
-  });
-  const res = await fetch(`/api/indicator-series/${encodeURIComponent(instrumentId)}?${params}`);
-  if (!res.ok) throw new Error(`GET /api/indicator-series/${instrumentId} failed: ${res.status}`);
-  return (await res.json()) as IndicatorSeriesResponse;
-}
-
 // Story 15.7: cursor-paginated bid/ask/mid/micro/price history (AD-F3) for Lines mode --
 // no `bar_seconds` (snapshots are per-second rows, no bar/aggregation concept). `useSnapshotSeries`
 // calls this once for the initial window and once per scroll-back refill, mirroring
@@ -224,7 +203,7 @@ export async function saveCoinIndicatorConfig(
 }
 
 // Story 15.6: cursor-paginated indicator-values history (AD-F3) -- mirrors
-// fetchCandles()/fetchIndicatorSeries()'s before_ns/limit/bar_seconds contract, plus the
+// fetchCandles()'s before_ns/limit/bar_seconds contract, plus the
 // caller-supplied `entries` (name+params) list of which picker-configured indicators to
 // replay over the same bounded window.
 export async function fetchIndicatorValues(

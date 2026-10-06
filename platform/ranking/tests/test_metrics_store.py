@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from ranking.infrastructure.metrics_store import COLS
 from ranking.infrastructure.metrics_store import NEAREST_TOLERANCE_S
 from ranking.infrastructure.metrics_store import SqliteMetricsStore
 from ranking.infrastructure.metrics_store import _read_only
@@ -373,3 +374,71 @@ def test_a_failed_write_rolls_back_and_leaves_no_open_transaction(tmp_path: Path
     assert store.history("BTC-USD-PERP.DYDX", days=60) != []  # the prune was rolled back too
     assert store._db is not None
     assert not store._db.in_transaction
+
+
+# The columns metrics.db had before Story 33.4, in their deployed order.
+_PRE_33_4_COLS = (
+    "price",
+    "pct_1h",
+    "pct_24h",
+    "pct_1w",
+    "pct_1m",
+    "volatility",
+    "ofi",
+    "microprice",
+    "spread",
+    "rank",
+    "volume24h",
+)
+
+
+def test_story_33_4_columns_are_appended_after_every_existing_one() -> None:
+    assert COLS[: len(_PRE_33_4_COLS)] == _PRE_33_4_COLS
+    assert COLS[len(_PRE_33_4_COLS) :] == (
+        "funding_rate",
+        "funding_annualised",
+        "open_interest",
+        "oi_change_1h",
+        "oi_change_24h",
+        "basis_mi_bps",
+        "basis_ml_bps",
+        "liq_long_1h",
+        "liq_short_1h",
+        "liq_notional_1h",
+        "liq_ratio_1h",
+        "forced_share_1h",
+        "relative_volume",
+        "high_24h",
+        "low_24h",
+        "range_position_24h",
+    )
+
+
+def test_migration_adds_the_story_33_4_columns_nullable_to_a_pre_33_4_table(
+    tmp_path: Path,
+) -> None:
+    path = str(tmp_path / "metrics.db")
+    db = sqlite3.connect(path)
+    db.executescript(f"""
+        CREATE TABLE snapshots (
+            ts INTEGER NOT NULL, instrument_id TEXT NOT NULL,
+            {", ".join(f"{c} REAL" for c in _PRE_33_4_COLS)},
+            PRIMARY KEY (ts, instrument_id)
+        );
+    """)
+    old_ts = _NOW - 1_000_000_000
+    db.execute(
+        "INSERT INTO snapshots(ts, instrument_id, price) VALUES (?, ?, ?)",
+        (old_ts, "BTC-USD-PERP.DYDX", 9.0),
+    )
+    db.commit()
+    db.close()
+
+    _store(path).write([_row(_NOW, funding_rate=0.0001, range_position_24h=0.25)])
+
+    with closing(sqlite3.connect(path)) as check:
+        columns = [r[1] for r in check.execute("PRAGMA table_info(snapshots)")]
+    assert columns == ["ts", "instrument_id", *COLS]
+    old, new = _store(path).history("BTC-USD-PERP.DYDX", days=1)
+    assert (old["price"], old["funding_rate"], old["range_position_24h"]) == (9.0, None, None)
+    assert (new["funding_rate"], new["range_position_24h"]) == (0.0001, 0.25)

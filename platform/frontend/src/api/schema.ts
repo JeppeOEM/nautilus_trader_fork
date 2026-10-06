@@ -121,6 +121,21 @@ export interface FootprintRow {
   s: number;
 }
 
+export interface FundingItem {
+  t: number;
+  rate: string;
+  interval: number | null;
+  next_funding_ns: number | null;
+  annualised: number | null;
+}
+
+export interface FundingResponse {
+  has_more: boolean;
+  venue: string;
+  market: string;
+  items: FundingItem[];
+}
+
 export interface HealthResponse {
   status: string;
 }
@@ -142,21 +157,6 @@ export interface IndicatorConfigEntry {
   style?: Record<string, Record<string, unknown>>;
 }
 
-export interface IndicatorSeriesPoint {
-  t: number;
-  ofi?: number | null;
-  obi?: number | null;
-  microprice?: number | null;
-  spread?: number | null;
-}
-
-export interface IndicatorSeriesResponse {
-  items: IndicatorSeriesPoint[];
-  has_more: boolean;
-  venue: string;
-  market: string;
-}
-
 export interface IndicatorValuesItem {
   t: number;
   values?: Record<string, number | null>;
@@ -168,6 +168,61 @@ export interface IndicatorValuesResponse {
   errors?: Record<string, string>;
   venue: string;
   market: string;
+}
+
+export interface LiquidationBarItem {
+  t: number;
+  long_v?: number | null;
+  short_v?: number | null;
+  n?: number | null;
+  size_precision?: number | null;
+  notional_units?: number | null;
+  notional_precision?: number | null;
+}
+
+export interface LiquidationBarsResponse {
+  has_more: boolean;
+  venue: string;
+  market: string;
+  price_precision: number | null;
+  size_precision: number | null;
+  items: LiquidationBarItem[];
+}
+
+export interface LiquidationItem {
+  side: string;
+  size_units: number;
+  price_units: number;
+  price_precision: number;
+  size_precision: number;
+  venue_event_id: string;
+  ts_event: number;
+  ts_init: number;
+  price_kind: string;
+}
+
+export interface LiquidationsResponse {
+  has_more: boolean;
+  venue: string;
+  market: string;
+  price_precision: number | null;
+  size_precision: number | null;
+  items: LiquidationItem[];
+}
+
+export interface MarkIndexItem {
+  t: number;
+  mark?: string | null;
+  index?: string | null;
+  basis_mi_bps?: number | null;
+  basis_ml_bps?: number | null;
+}
+
+export interface MarkIndexResponse {
+  has_more: boolean;
+  venue: string;
+  market: string;
+  items: MarkIndexItem[];
 }
 
 export interface MetricHistoryItem {
@@ -183,10 +238,39 @@ export interface MetricHistoryItem {
   spread?: number | null;
   rank?: number | null;
   volume24h?: number | null;
+  funding_rate?: number | null;
+  funding_annualised?: number | null;
+  open_interest?: number | null;
+  oi_change_1h?: number | null;
+  oi_change_24h?: number | null;
+  basis_mi_bps?: number | null;
+  basis_ml_bps?: number | null;
+  liq_long_1h?: number | null;
+  liq_short_1h?: number | null;
+  liq_notional_1h?: number | null;
+  liq_ratio_1h?: number | null;
+  forced_share_1h?: number | null;
+  relative_volume?: number | null;
+  high_24h?: number | null;
+  low_24h?: number | null;
+  range_position_24h?: number | null;
 }
 
 export interface MetricsHistoryResponse {
   items: MetricHistoryItem[];
+}
+
+export interface OpenInterestItem {
+  t: number;
+  oi?: string | null;
+  oi_change?: string | null;
+}
+
+export interface OpenInterestResponse {
+  has_more: boolean;
+  venue: string;
+  market: string;
+  items: OpenInterestItem[];
 }
 
 export interface RankingModeRequest {

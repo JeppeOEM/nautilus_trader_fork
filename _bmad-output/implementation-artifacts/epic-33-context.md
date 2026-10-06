@@ -4,13 +4,13 @@
 
 ## Goal
 
-The backend captures far more than the frontend shows. Mark, index, funding and open interest are archived and verified every night, but no route, pane, screener column or alert reads them. The 1 s snapshot holds buy/sell volume and counts, but the candle store keeps only `v`. This epic adds liquidation capture, which ships for Bybit linear only. It folds per-bar order-flow and liquidation aggregates into the candle store once, and serves derivatives and liquidations as read models over the API and `/ws/live`. From there the numbers reach the chart (panes, markers, order-flow indicators), the screener (sortable columns, presets), richer alerts, research and a liquidation-cascade paper bot. The epic also adds the TradingView chart features the chart still lacks (scale modes, chart types, compare, more drawings, missing indicators, symbol search, multi-chart, shortcuts) and deletes dead code that pretends to be a feature.
+The backend captures far more than the frontend shows. Mark, index, funding and open interest are archived and verified every night, but no route, pane, screener column or alert reads them. The 1 s snapshot holds buy/sell volume and counts, but the candle store keeps only `v`. This epic adds liquidation capture, which ships for Bybit linear only. It folds per-bar order-flow and liquidation aggregates into the candle store once, and serves derivatives and liquidations as read models over the API and `/ws/live`. From there the numbers reach the chart (panes, markers, order-flow indicators), the screener (sortable columns, presets), richer alerts, research and a liquidation-cascade paper bot. The epic also adds the TradingView chart features the chart still lacks (scale modes, chart types, compare, more drawings, missing indicators, symbol search, fullscreen, shortcuts) and deletes dead code that pretends to be a feature.
 
 ## Stories
 
 - Story 33.1: Bybit liquidations captured over a second socket into one shared `Liquidation` type (done)
 - Story 33.2: Hyperliquid liquidations: the wire investigation first, then the feed that holds (done: refuted, no feed)
-- Story 33.3: Per-bar order flow and liquidation aggregates in the candle store, folded once
+- Story 33.3: Per-bar order flow and liquidation aggregates in the candle store, folded once (done)
 - Story 33.4: Derivatives and liquidations as read models: API routes, live push, ranking fields
 - Story 33.14: The liquidation cascade bot (backtested and run as a paper bot)
 - Story 33.5: Chart panes for open interest, funding, basis and liquidations, and the mark/index overlay
@@ -20,7 +20,7 @@ The backend captures far more than the frontend shows. Mark, index, funding and 
 - Story 33.9: Price-scale modes, chart types, and a compare symbol on the percent scale
 - Story 33.10: Drawing tools II, with magnet snapping, undo/redo, lock and hide-all
 - Story 33.11: Missing indicators, candle patterns as markers, dead code removed
-- Story 33.12: Symbol search, watchlist, multi-chart layouts, shortcuts, export, time zone and chart conveniences
+- Story 33.12: Symbol search, watchlist, fullscreen chart with its panes, shortcuts, time zone, session breaks, countdown and last-price label
 - Story 33.13: Liquidation and forced-flow research and the strategy filter
 
 ## Requirements & Constraints
@@ -39,8 +39,8 @@ The backend captures far more than the frontend shows. Mark, index, funding and 
   - Never touch `nautilus_trader/` or `crates/` (FORK-01).
   - Check `nautilus_trader.indicators` before writing a custom indicator.
 - **Every story (MR4, OPS-01, DESIGN-03):**
-  - Add risks to `docs/DATA_INTEGRITY_AUDIT.md`. Rows run to D-153, so the next is D-154.
-  - Register types and read models in `docs/DATA_DICTIONARY.md`: §1.26 for liquidations, new **§2.15** for per-bar aggregates and derivatives read models (§2.14 is 32.8's footprint), and amendments to §3.2/§3.3.
+  - Add risks to `docs/DATA_INTEGRITY_AUDIT.md`. Rows run to D-162, so the next is D-163.
+  - Register types and read models in `docs/DATA_DICTIONARY.md`: §1.26 for liquidations, §2.15 for per-bar aggregates (added by 33.3) and the derivatives read models (§2.14 is 32.8's footprint), and amendments to §3.2/§3.3.
   - Put VPS steps in `docs/DEPLOY_CHECKLIST.md` as deferred operator actions.
   - Keep the Docs page truthful.
 - **Verification per story:**
@@ -87,12 +87,15 @@ The backend captures far more than the frontend shows. Mark, index, funding and 
 - Liquidation and candle-pattern markers use lightweight-charts 5's series-markers plugin, merged per bar above a named count.
 - Per-viewer conveniences (sort key, venue chips) go in `localStorage`. Durable preferences (filter presets, watchlist, layouts) go server-side in `views/preferences.py`'s one preferences directory.
 - Dialogs and keyboard shortcuts are hand-rolled inline, with no library, and listed on the Docs page.
+- The left tool rail is grouped like TradingView and declared as data in `lib/chartTools.ts` (Cursor, Lines, Fibonacci, Projection, Measure, Volume-based; a group button arms its last-used tool, an arrow opens an ARIA flyout). New drawing tools are appended to a group, never added as flat rail buttons: ray, extended, vline and channel under Lines; fib extension under Fibonacci; rect, text and arrow in a new Shapes/Annotation group; price/date ranges under Measure. Magnet, undo/redo, lock and hide-all are rail toggles/actions, not group members.
+- Volume overlays (VRVP, session presets, FRVP) live in their own modal next to Indicators, built on `SettingsDialogShell`. Reuse that shell rather than adding a second dialog system.
+- 33.12 adds no multi-chart layouts, synced crosshair or CSV export. Fullscreen uses the browser Fullscreen API on the one element holding the chart, every connected pane, the legends and the tool rail. Pane heights are kept, the chart resizes through the existing observer, a refused request is reported inline, and fullscreen is view state that is never persisted.
 
 ## Cross-Story Dependencies
 
-- **Order:** 33.3 → 33.4 → 33.14 → 33.5 → 33.6 → 33.7 → 33.8 → 33.9 → 33.10 → 33.11 → 33.12 → 33.13. Stories 33.1 and 33.2 are done.
+- **Order:** 33.4 → 33.14 → 33.5 → 33.6 → 33.7 → 33.8 → 33.9 → 33.10 → 33.11 → 33.12 → 33.13. Stories 33.1 to 33.3 are done.
 - **What feeds what:**
-  - 33.3's columns feed 33.4's `liquidation_bars`, 33.6 and 33.12's CSV export.
+  - 33.3's columns feed 33.4's `liquidation_bars` and 33.6.
   - 33.4's routes, live channels and ranking fields feed 33.5, 33.7 and 33.8, plus the History tiles.
   - 33.14's `LiquidationCascade` is reused by 33.13.
 - **Epic 32 is merged into `epic-33`.** The frontend stories (33.5 onward) are released and extend:
@@ -101,4 +104,5 @@ The backend captures far more than the frontend shows. Mark, index, funding and 
   - 32.6: pane heights and layouts
   - 32.7: anchored VWAP
   - 32.8: trade footprint
+  - the volume-overlays modal and grouped tool rail (quick-dev, merged): 33.10 extends `lib/chartTools.ts`
 - 33.9's compare uses 33.12's symbol search if it has landed, otherwise a text field.

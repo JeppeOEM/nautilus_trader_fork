@@ -919,6 +919,7 @@ KERNEL_MODULES = frozenset(
         "candle_patterns",
         "catalog_files",
         "clocks",
+        "derivs_wire",
         "dydx_http",
         "fold",
         "indicators",
@@ -1449,16 +1450,25 @@ VIEWS_QUERY_SERVICES: dict[str, frozenset[str]] = {
             # Story 33.3 review: the archive-side folds' feed start, one indexed SELECT of the
             # store's persisted `liquidation_feed_since` before any archive scan.
             "liquidation_feed_since",
+            # Story 33.4: `views.derivatives.liquidation_bars` reads every stored bucket, traded or
+            # not (D-162's upgrade path), and jumps a gap to the newest older row.
+            "liquidation_window",
+            "newest_row_t",
         }
     ),
     "candles.application.forming": frozenset({"forming_bar", "bars_from_rows"}),
-    "candles.domain.candle": frozenset({"Candle", "is_valid_candle"}),
+    # `Candle` left with the resting-order footprint Story 33.4 deleted.
+    "candles.domain.candle": frozenset({"is_valid_candle"}),
     # The one bucket rule (Story 31.3): the chart's forming bar, per-bar replay and picker buckets
     # use the fold's own `bucket_start_ms`, so a 1W pane starts on Monday like its candles.
     # `BAR_SECONDS`: CVD's `all` anchor reads the widest stored width tiling a chart width
     # (Story 33.3). `archive_liquidations`: the one archive-side liquidation feed-start rule, so the
     # technicals fallback bounds `liq_*` exactly as the store and the `raw_1s` page do (loop 2).
-    "candles.domain.fold": frozenset({"bucket_start_ms", "BAR_SECONDS", "archive_liquidations"}),
+    # `first_bucket_at_or_after`: the feed-start boundary of a 1W liquidation bar composed from
+    # stored 1D rows (`views.derivatives`, Story 33.4 review), D-160's rule at the composed width.
+    "candles.domain.fold": frozenset(
+        {"bucket_start_ms", "BAR_SECONDS", "archive_liquidations", "first_bucket_at_or_after"}
+    ),
     "ranking.application.queries": frozenset({"history", "nearest", "HISTORY_MAX_DAYS"}),
 }
 # Packages views never imports (AD-D2): the interfaces and capture.

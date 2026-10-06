@@ -15,6 +15,7 @@
 """`kernel.catalog_files`: read-only helpers over the catalog's second-snapshot files."""
 
 import ast
+import glob
 import math
 import shutil
 from pathlib import Path
@@ -382,6 +383,109 @@ def test_query_index_prices_refuses_a_precision_label_this_build_cannot_hold(
     pq.write_table(table.replace_schema_metadata({b"price_precision": b"99"}), path)
     with pytest.raises(ValueError, match="outside this build"):
         catalog_files.query_index_prices(catalog, _IID, 0, 1 << 62)
+
+
+def test_query_price_columns_reads_the_exact_units_at_each_files_label(tmp_path: Path) -> None:
+    """
+    The two files carry labels 2 and 5: 100.25 is 10 025 units of 0.01 and 61090.59855 is
+    6 109 059 855 units of 0.00001 (the value `Price(Decimal, 16)` mis-stamps), inclusive bounds.
+    """
+    catalog = _index_catalog(tmp_path)
+    rows = catalog_files.query_price_columns(
+        catalog, catalog_files.INDEX_PRICE_DIRNAME, _IID, _DAY0 + NS_PER_S, _DAY0 + 2 * NS_PER_S
+    )
+    assert (rows.ts_event - _DAY0).tolist() == [NS_PER_S, 2 * NS_PER_S]
+    assert rows.units.tolist() == [10_025, 6_109_059_855]
+    assert rows.precision.tolist() == [2, 5]
+
+
+def test_query_price_columns_keeps_a_copy_once_and_refuses_a_disagreeing_one(
+    tmp_path: Path,
+) -> None:
+    """A row in two files: one row when the copies agree (100.25 and 100.250 agree), else refused."""
+    iid = InstrumentId.from_str(_IID)
+    writer = ParquetDataCatalog(str(tmp_path))
+    writer.write_data([IndexPriceUpdate(iid, Price.from_str("100.25"), _DAY0, _DAY0)])
+    writer.write_data(
+        [
+            IndexPriceUpdate(iid, Price.from_str("100.250"), _DAY0, _DAY0),
+            IndexPriceUpdate(iid, Price.from_str("100.300"), _DAY0 + NS_PER_S, _DAY0 + NS_PER_S),
+        ],
+        skip_disjoint_check=True,
+    )
+    dirname = catalog_files.INDEX_PRICE_DIRNAME
+    rows = catalog_files.query_price_columns(str(tmp_path), dirname, _IID, 0, 1 << 62)
+    assert (rows.units.tolist(), rows.precision.tolist()) == ([10_025, 100_300], [2, 3])
+    late = _DAY0 + 2 * NS_PER_S  # a third file name, so the write is not skipped
+    writer.write_data(
+        [
+            IndexPriceUpdate(iid, Price.from_str("100.26"), _DAY0, _DAY0),
+            IndexPriceUpdate(iid, Price.from_str("100.30"), late, late),
+        ],
+        skip_disjoint_check=True,
+    )
+    with pytest.raises(ValueError, match="stored twice with different values"):
+        catalog_files.query_price_columns(str(tmp_path), dirname, _IID, 0, 1 << 62)
+
+
+def test_query_price_columns_of_a_missing_directory_is_empty(tmp_path: Path) -> None:
+    rows = catalog_files.query_price_columns(
+        str(tmp_path), catalog_files.MARK_PRICE_DIRNAME, _IID, 0, 1 << 62
+    )
+    assert [len(column) for column in rows] == [0, 0, 0, 0]
+
+
+def test_newest_ts_event_before_is_the_newest_row_strictly_before_the_bound(
+    tmp_path: Path,
+) -> None:
+    """Rows at seconds 0..3 over two files: before second 3 -> 2, before 0 -> None."""
+    catalog = _index_catalog(tmp_path)
+    dirnames = (catalog_files.INDEX_PRICE_DIRNAME, catalog_files.MARK_PRICE_DIRNAME)
+    newest = catalog_files.newest_ts_event_before(catalog, _IID, dirnames, _DAY0 + 3 * NS_PER_S)
+    assert newest == _DAY0 + 2 * NS_PER_S
+    assert catalog_files.newest_ts_event_before(catalog, _IID, dirnames, _DAY0) is None
+
+
+def _losing_listing(monkeypatch: pytest.MonkeyPatch, losing: int) -> None:
+    """Make the first `losing` listings also name a file the consolidation already removed."""
+    real = glob.glob
+    calls = {"n": 0}
+
+    def listing(pattern: str) -> list[str]:
+        paths = real(pattern)
+        calls["n"] += 1
+        if calls["n"] > losing or not paths:
+            return paths
+        return [str(Path(paths[0]).parent / "removed" / Path(paths[0]).name), *paths]
+
+    monkeypatch.setattr(catalog_files.glob, "glob", listing)
+
+
+def test_the_derivatives_readers_list_again_after_a_consolidation_removed_a_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One listing names a file gone by the read: the read lists again and returns every row."""
+    catalog = _index_catalog(tmp_path)
+    dirname = catalog_files.INDEX_PRICE_DIRNAME
+    whole = catalog_files.query_price_columns(catalog, dirname, _IID, 0, 1 << 62)
+    _losing_listing(monkeypatch, 1)
+    rows = catalog_files.query_price_columns(catalog, dirname, _IID, 0, 1 << 62)
+    assert rows.units.tolist() == whole.units.tolist()
+    assert rows.ts_event.tolist() == whole.ts_event.tolist()
+    _losing_listing(monkeypatch, 1)
+    newest = catalog_files.newest_ts_event_before(catalog, _IID, (dirname,), _DAY0 + 3 * NS_PER_S)
+    assert newest == _DAY0 + 2 * NS_PER_S
+
+
+def test_a_derivatives_listing_that_keeps_losing_files_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _index_catalog(tmp_path)
+    _losing_listing(monkeypatch, 1 << 30)
+    with pytest.raises(ValueError, match="kept disappearing"):
+        catalog_files.query_price_columns(
+            catalog, catalog_files.INDEX_PRICE_DIRNAME, _IID, 0, 1 << 62
+        )
 
 
 def test_price_precision_labels_read_each_overlapping_files_label(tmp_path: Path) -> None:

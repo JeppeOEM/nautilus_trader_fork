@@ -21,6 +21,10 @@ Story 29.5: every volume cycle also publishes each venue's market names on `mark
 (`publish_markets`, `markets_message`) -- the full market list the volume poll already fetched,
 names only, so `bot_tui`'s market browser can offer every coin a venue lists without a venue REST
 call of its own. It carries no volume, price or other metric (operator decision 2026-09-26).
+
+Story 33.4: the handler also takes `derivs:raw` (decoded only by `kernel.derivs_wire.from_wire`)
+and `liquidations:raw` (`Liquidation.from_dict`) into the board, and the one-time backfill also
+reads 25 h of open interest and 1 h of liquidations for the instruments that have them.
 """
 
 import asyncio
@@ -30,19 +34,27 @@ import time
 from collections.abc import Callable
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
+from kernel.derivs_wire import from_wire
+from kernel.liquidation import Liquidation
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.venues import MalformedInstrumentId
 from kernel.venues import base_symbol
 from observability import error_ledger
 
 from ranking.application.ports import CONTROL_CHANNEL
+from ranking.application.ports import DERIVS_CHANNEL
+from ranking.application.ports import LIQUIDATIONS_CHANNEL
 from ranking.application.ports import SNAPSHOTS_CHANNEL
+from ranking.application.ports import DerivsHistory
 from ranking.application.ports import LivePublisher
 from ranking.application.ports import PriceHistory
 from ranking.application.ports import RankingHistory
 from ranking.application.ports import VolumeSource
 from ranking.domain.board import RankingBoard
+from ranking.domain.derivs import LIQUIDATION_WINDOW_NS
+from ranking.domain.derivs import OI_LOOKBACK_NS
 from ranking.domain.values import RankingMode
 
 
@@ -51,6 +63,22 @@ logger = logging.getLogger(__name__)
 VOLUME_SITE = "ranking_engine.volume24h"  # ledger site names are published language: kept
 # Story 29.5: a `markets:live` message not published, or an id left out of one.
 MARKETS_SITE = "ranking_engine.markets"
+# Story 33.4: an undecodable `derivs:raw`/`liquidations:raw` entry, or one the board refused; and a
+# failed or disagreeing derivatives backfill read.
+DERIVS_SITE = "ranking_engine.derivs_entry"
+LIQUIDATION_SITE = "ranking_engine.liquidation_entry"
+DERIVS_BACKFILL_SITE = "ranking_engine.derivs_backfill"
+# A message's bad entries itemised on the ledger (each line's entry repr cut at `_REPR_MAX` chars),
+# then one summary line with the total: a venue-wide payload change must not write one line per
+# entry of every message (capture's `_MALFORMED_SHOWN` rule).
+_ENTRIES_SHOWN = 3
+_REPR_MAX = 200
+
+
+def short_repr(value: object) -> str:
+    """Return `repr(value)`, cut at `_REPR_MAX` characters with the full length named."""
+    text = repr(value)
+    return text if len(text) <= _REPR_MAX else f"{text[:_REPR_MAX]}... ({len(text)} chars)"
 
 
 def markets_message(venue: str, ts: int, ids: Sequence[str]) -> str:
@@ -101,6 +129,7 @@ class RankingEngine:
         *,
         volume_sources: Sequence[VolumeSource],
         prices: PriceHistory,
+        derivs: DerivsHistory,
         history: RankingHistory,
         live: LivePublisher,
         markets: LivePublisher,
@@ -110,6 +139,7 @@ class RankingEngine:
         self._board = board
         self._volume_sources = tuple(volume_sources)
         self._prices = prices
+        self._derivs = derivs
         self._history = history
         self._live = live
         self._markets = markets
@@ -122,18 +152,32 @@ class RankingEngine:
     async def handle(self, channel: str, data: str) -> None:
         """One Redis message: decode, apply to the board, then publish if the publisher says so."""
         try:
-            payload = json.loads(data)
-            if channel == SNAPSHOTS_CHANNEL:
-                self.ingest_snapshot_batch(payload)
-            elif channel == CONTROL_CHANNEL:
-                self.switch_mode(payload)
-            await self.maybe_publish()
+            if self._apply(channel, json.loads(data)):
+                await self.maybe_publish()
         except Exception as exc:
             # A failed decode or publish is not market data lost here (the next message or
             # heartbeat republishes the whole state), but it must be counted, never only logged.
             error_ledger.record("ranking_engine.message", f"{channel} message not handled", exc)
 
-    def ingest_snapshot_batch(self, batch: list) -> None:
+    def _apply(self, channel: str, payload: object) -> bool:
+        """
+        Apply one decoded message to the board; return whether a rank row may have changed. A
+        derivatives or liquidation row reaches the rank row only through the next slow-loop row,
+        so neither triggers a publish decision of its own.
+        """
+        if channel == SNAPSHOTS_CHANNEL:
+            self.ingest_snapshot_batch(payload)
+        elif channel == CONTROL_CHANNEL:
+            self.switch_mode(payload)
+        elif channel == DERIVS_CHANNEL:
+            self.ingest_derivs_batch(payload)
+            return False
+        elif channel == LIQUIDATIONS_CHANNEL:
+            self.ingest_liquidation_batch(payload)
+            return False
+        return True
+
+    def ingest_snapshot_batch(self, batch: object) -> None:
         """
         Decode each entry with `DydxSecondSnapshot.from_dict` (the one `snapshots:raw` parser of the
         integer layout, Story 30.2; the floats it computes are this process's own) and
@@ -141,21 +185,63 @@ class RankingEngine:
         field the board drops from an otherwise usable entry is ledgered at the same site. A payload
         that is not a list is one failed message, never one ledger entry per key or character.
         """
+        self._ingest_batch(
+            SNAPSHOTS_CHANNEL,
+            batch,
+            lambda entry: self._board.ingest(DydxSecondSnapshot.from_dict(entry), self._clock()),
+            "ranking_engine.snapshot_entry",
+        )
+
+    def ingest_derivs_batch(self, batch: object) -> None:
+        """Decode each `derivs:raw` entry with `kernel.derivs_wire.from_wire`, the one parser."""
+        self._ingest_batch(
+            DERIVS_CHANNEL,
+            batch,
+            lambda entry: self._board.ingest_derivs(from_wire(entry), self._clock()),
+            DERIVS_SITE,
+        )
+
+    def ingest_liquidation_batch(self, batch: object) -> None:
+        """Decode each `liquidations:raw` entry with `Liquidation.from_dict`, the one parser."""
+        self._ingest_batch(
+            LIQUIDATIONS_CHANNEL,
+            batch,
+            lambda entry: self._board.ingest_liquidation(
+                Liquidation.from_dict(entry), self._clock()
+            ),
+            LIQUIDATION_SITE,
+        )
+
+    @staticmethod
+    def _ingest_batch(
+        channel: str, batch: object, apply: Callable[[Any], list[str]], site: str
+    ) -> None:
+        """
+        Apply every entry of one message's JSON array: a malformed entry is skipped, never the rest
+        of the batch, and every detail the board returns for a usable entry (the rest of the entry
+        was used; only the named field was not) is a problem too (DATA-07). The first
+        `_ENTRIES_SHOWN` problems of the message are ledgered at `site` one line each, the entry's
+        repr cut short; past them one summary line names the total. A payload that is not a list is
+        one failed message.
+        """
         if not isinstance(batch, list):
-            raise ValueError(f"snapshots:raw payload is a {type(batch).__name__}, not a list")
+            raise ValueError(f"{channel} payload is a {type(batch).__name__}, not a list")
+        problems = 0
         for entry in batch:
             try:
-                dropped = self._board.ingest(DydxSecondSnapshot.from_dict(entry), self._clock())
+                lines: list[tuple[str, Exception | None]] = [(d, None) for d in apply(entry)]
             except Exception as exc:
-                error_ledger.record(
-                    "ranking_engine.snapshot_entry",
-                    f"malformed snapshots:raw entry SKIPPED: {entry!r}",
-                    exc,
-                )
-                continue
-            for detail in dropped:
-                # The rest of the entry was used; only the named field was not (DATA-07).
-                error_ledger.record("ranking_engine.snapshot_entry", detail)
+                lines = [(f"malformed {channel} entry SKIPPED: {short_repr(entry)}", exc)]
+            for detail, cause in lines:
+                problems += 1
+                if problems <= _ENTRIES_SHOWN:
+                    error_ledger.record(site, detail, cause)
+        if problems > _ENTRIES_SHOWN:
+            error_ledger.record(
+                site,
+                f"{problems} {channel} entries of one message were malformed or refused, "
+                f"{problems - _ENTRIES_SHOWN} beyond the first {_ENTRIES_SHOWN} not itemised",
+            )
 
     def switch_mode(self, message: object) -> None:
         """Apply a ranking:control request; an unrecognised mode is logged and ignored (AD-2)."""
@@ -278,24 +364,56 @@ class RankingEngine:
 
     async def _backfill_new_instruments(self, now_ns: int) -> None:
         """
-        One-time catalog backfill per instrument, marked done even when the read fails: a failing
+        One-time catalog backfill per instrument, marked done even when a read fails: a failing
         instrument must not be retried every cycle -- that is the recurring read Story 13.2 removed.
+        Each of the three reads (prices with volume, open interest, liquidations) fails alone.
         """
         for iid in self._board.unbackfilled_ids():
             try:
-                start_ns = now_ns - self._board.price_lookback_ns
-                series = await asyncio.to_thread(self._prices.series, iid, start_ns)
-                mismatch = self._board.backfill(iid, series)
-                if mismatch is not None:
-                    error_ledger.record("ranking_engine.price_backfill", mismatch)
-            except Exception as exc:
-                error_ledger.record(
-                    "ranking_engine.price_backfill",
-                    f"price-series backfill failed for {iid}, NOT retried",
-                    exc,
-                )
+                await self._backfill_prices(iid, now_ns)
+                wants_open_interest, wants_liquidations = self._board.derivs_backfill_needs(iid)
+                if wants_open_interest:
+                    await self._backfill_open_interest(iid, now_ns)
+                if wants_liquidations:
+                    await self._backfill_liquidations(iid, now_ns)
             finally:
                 self._board.mark_backfilled(iid)
+
+    async def _backfill_prices(self, iid: str, now_ns: int) -> None:
+        try:
+            start_ns = now_ns - self._board.price_lookback_ns
+            series = await asyncio.to_thread(self._prices.series, iid, start_ns)
+            mismatch = self._board.backfill(iid, series)
+            if mismatch is not None:
+                error_ledger.record("ranking_engine.price_backfill", mismatch)
+        except Exception as exc:
+            error_ledger.record(
+                "ranking_engine.price_backfill",
+                f"price-series backfill failed for {iid}, NOT retried",
+                exc,
+            )
+
+    async def _backfill_open_interest(self, iid: str, now_ns: int) -> None:
+        try:
+            read = self._derivs.open_interest
+            rows = await asyncio.to_thread(read, iid, now_ns - OI_LOOKBACK_NS, now_ns)
+            for detail in self._board.backfill_open_interest(iid, rows):
+                error_ledger.record(DERIVS_BACKFILL_SITE, detail)
+        except Exception as exc:
+            error_ledger.record(
+                DERIVS_BACKFILL_SITE, f"open-interest backfill failed for {iid}, NOT retried", exc
+            )
+
+    async def _backfill_liquidations(self, iid: str, now_ns: int) -> None:
+        try:
+            read = self._derivs.liquidations
+            rows = await asyncio.to_thread(read, iid, now_ns - LIQUIDATION_WINDOW_NS, now_ns)
+            for detail in self._board.backfill_liquidations(iid, rows):
+                error_ledger.record(DERIVS_BACKFILL_SITE, detail)
+        except Exception as exc:
+            error_ledger.record(
+                DERIVS_BACKFILL_SITE, f"liquidation backfill failed for {iid}, NOT retried", exc
+            )
 
     async def _prices_days_ago(self) -> tuple[dict[str, float], dict[str, float]]:
         """

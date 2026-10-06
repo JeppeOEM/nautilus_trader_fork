@@ -19,6 +19,11 @@ one of these, implemented in `ranking.infrastructure` and wired by `ranking/__ma
 
 from typing import Protocol
 
+from kernel.liquidation import Liquidation
+from kernel.open_interest import OpenInterest
+
+from ranking.domain.price_series import PricePoint
+
 
 # The published channel names (AD-D12: frozen for the whole migration).
 SNAPSHOTS_CHANNEL = "snapshots:raw"
@@ -26,6 +31,11 @@ CONTROL_CHANNEL = "ranking:control"
 RANKINGS_CHANNEL = "rankings:live"
 # Story 29.5: every venue's market names (no metric), one message per venue per volume cycle.
 MARKETS_CHANNEL = "markets:live"
+# Story 33.4: capture's published derivatives rows (`kernel.derivs_wire`) and liquidations
+# (`Liquidation.to_dict` rows), each one JSON array per message; spelled here because ranking may
+# not import `capture` (`capture.infrastructure.redis_stream` holds the publisher's constants).
+DERIVS_CHANNEL = "derivs:raw"
+LIQUIDATIONS_CHANNEL = "liquidations:raw"
 
 
 class VolumeSource(Protocol):
@@ -45,13 +55,31 @@ class VolumeSource(Protocol):
 
 class PriceHistory(Protocol):
     """
-    The archived per-second prices of one instrument, for the one-time price-series backfill.
+    The archived traded seconds of one instrument, for the one-time price-series backfill.
 
-    Invariant: an ascending `(ts_event, price)` series from `start_ns` on; a second with no trade
-    contributes nothing (never a zero price).
+    Invariant: an ascending `PricePoint` series from `start_ns` on, each second's float close plus
+    its exact close and traded volume (Story 33.4: the hourly volume's backfill rides this one
+    read); a second with no trade contributes nothing (never a zero price).
     """
 
-    def series(self, instrument_id: str, start_ns: int) -> list[tuple[int, float]]: ...
+    def series(self, instrument_id: str, start_ns: int) -> list[PricePoint]: ...
+
+
+class DerivsHistory(Protocol):
+    """
+    The archived open interest and liquidations of one instrument (Story 33.4), read once per
+    instrument at its first backfill and never retried.
+
+    Invariant: every row with `ts_event` in the inclusive `[start_ns, end_ns]`, ascending, each
+    stored row once; a row stored twice with different values raises (the engine ledgers it),
+    never one copy picked. MEM-01: the caller bounds the window (25 h, 1 h).
+    """
+
+    def open_interest(
+        self, instrument_id: str, start_ns: int, end_ns: int
+    ) -> list[OpenInterest]: ...
+
+    def liquidations(self, instrument_id: str, start_ns: int, end_ns: int) -> list[Liquidation]: ...
 
 
 class RankingHistory(Protocol):

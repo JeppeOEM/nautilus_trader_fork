@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from ranking.infrastructure.metrics_store import COLS
 from ranking.infrastructure.metrics_store import SqliteMetricsStore
 from views import coin_detail
 
@@ -150,3 +151,8 @@ def test_history_serves_days_within_retention(
 
     assert response.status_code == 200
     assert response.json() == {"items": []}
+
+
+def test_the_item_mirrors_every_metrics_column_in_order() -> None:
+    """Story 33.4 appended columns: the route's item must carry each, after its own `ts`."""
+    assert list(metrics_routes.MetricHistoryItem.model_fields) == ["ts", *COLS]
