@@ -2542,12 +2542,18 @@ The page never derives a symbol from the id itself. `[amended 2026-09-28: Story 
 
 ### 2.11 Price alerts (the `alerting/` context, Story 24.3, was `data_api/alerts.py`)
 
-**Store:** `alerts.toml` (`ALERTS_PATH`, default `platform/data_api/alerts.toml`; compose sets
-`/app/data_api/alerts.toml`, bind-mounted from `platform/data_api/alerts.toml`). Owner: the
-`alerting` context -- `alerting/infrastructure/toml_store.py`'s `AlertStore` is its only reader and
-writer (full rewrite on every change; a corrupt file raises at load rather than starting empty),
-constructed once per process by `data_api/alert_wiring.py`. Key set, frozen (AD-D12): one
-`[[alerts]]` table per alert with `id`, `instrument_id`, `level`, `frequency`
+**Store:** `alerts.toml` (`ALERTS_PATH`, default `platform/data/alerts/alerts.toml`; compose sets
+`/app/alerts_dir/alerts.toml`, inside the `platform/data/alerts/` directory mount -- a directory
+because the save renames over the file, which a single-file bind mount refuses; DW-197 moved it
+there from `platform/data_api/alerts.toml`). Owner: the `alerting` context --
+`alerting/infrastructure/toml_store.py`'s `AlertStore` is its only reader and writer (atomic full
+rewrite on every change: a sibling `.alerts.toml.tmp`, fsynced, renamed over the file, directory
+fsynced; a failed `add`/`delete` save leaves the file and the in-memory list as they were and
+raises; a failed directory fsync after the rename is ledgered at `alerting.store.fsync_dir`, not
+raised, since the new file is already published; a corrupt file raises at load rather than
+starting empty), constructed once per process by `data_api/alert_wiring.py`.
+`[amended 2026-10-06: DW-197/DW-199]` Key set, frozen (AD-D12): one `[[alerts]]` table per
+alert with `id`, `instrument_id`, `level`, `frequency`
 (`once_per_bar_close` | `once_per_bar` | `only_once`, `alerting.domain.policy.FiringPolicy`),
 `bar_seconds`, `template`, `webhook_url` (may be empty), `created_ns`, optional `expires_at_ns`,
 `triggered`, optional `last_fired_ns` (TOML has no null: an absent optional key is `None`).

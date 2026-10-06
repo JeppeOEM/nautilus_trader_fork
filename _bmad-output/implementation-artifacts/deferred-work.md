@@ -1558,7 +1558,9 @@ resolution: already resolved: platform/data_api/tests/test_ranking_columns_mirro
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: alerts.toml
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-24-3-alerting-context-as-forming-bar-observer.md` summary: `alerting.infrastructure.toml_store.AlertStore._save` truncates `alerts.toml` (`open("wb")`) and then dumps, so a crash or full disk mid-write leaves a truncated file that `_load` deliberately refuses — and `data_api` then fails at import, because `data_api.alert_wiring` builds the store at module load. evidence: `_save` has no temp-file + `os.replace`; `_load` raises on a corrupt file by design ("a corrupt file raises on load rather than starting empty"). Pre-existing: moved verbatim from `data_api/alerts.py` at `18244a90ce`. The fix (atomic write-then-rename, text unchanged) is small but touches every config-persistence writer's durability contract (`views/preferences.py` writes the same way), so it belongs in one focused pass over all of them.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw2-alert-store-durability
+resolution-undo: c907cf861979e0c8c50225092f3c43a1eeac190c0807cb7f77cbaadbae2e1433 2026-10-06 7374617475733a206f70656e
 
 ### DW-198: `AlertStore._load` builds `Alert(entry)` without checking `frequency` against `FiringPolicy`, so a hand-edited or legacy `alerts.toml` entry with an unknown …
 
@@ -1573,7 +1575,9 @@ decision: 2026-10-05 Skip the entry and ledger it — Drop the entry with an err
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: /api/alerts
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-24-3-alerting-context-as-forming-bar-observer.md` summary: `alerting.infrastructure.toml_store.AlertStore.add`/`delete` mutate the in-memory list before `_save()`, so a failed write (disk full, permission) returns 500 from `/api/alerts` while the unsaved alert keeps firing (add), or while the deleted alert stays gone until a restart brings it back and `engine.forget` is skipped (delete). evidence: `add` appends and then `_save()`s under the lock, and `delete` reassigns `self._alerts` and then `_save()`s, with no rollback on exception. Pre-existing: moved verbatim from the baseline's `data_api/alerts.py` at `18244a90ce`. Belongs with the atomic-write entry above, in the same pass over config-persistence writers.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw2-alert-store-durability
+resolution-undo: c907cf861979e0c8c50225092f3c43a1eeac190c0807cb7f77cbaadbae2e1433 2026-10-06 7374617475733a206f70656e
 
 ### DW-200: `research.strategies.backtest_dydx.run` and `backtest_snapshot.run` default `catalog_path` to the cwd-relative `"platform/data/catalog"`, while …
 
@@ -2298,3 +2302,7 @@ status: open
 - source_spec: `_bmad-output/implementation-artifacts/spec-dw-capture-service-lifecycle.md`
   summary: Anything raising in `CaptureService._run` between `_connect` and the `try` that guards the loops (`subscribe_global`, `_catch_up_candle_store`'s unguarded `self._second_sink.watermarks()`, `apply`) leaves the client connected and feeding a service that is gone, with no `_disconnect`, no drain and no final flush, so the messages already queued are dropped without a ledger line.
   evidence: pre-existing: at baseline e6272ad9c6 `_run` has the same order (`await self._connect(...)` ... `self._catch_up_candle_store()` / `await self.apply(...)` before `try:`), and `_catch_up_candle_store` iterates `self._second_sink.watermarks()` with no handler there either; `run()`'s `finally` only closes the second sink. Surfaced by the 2026-10-06 follow-up review of the DW-267 drain, which covers only failures after the loops start.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-dw-197-199-alert-store-durability.md`
+  summary: Runtime-rewritten data files are git-tracked (`platform/data/alerts/alerts.toml`, as `platform/data/preferences/*.toml` already are), so any upstream change to a tracked copy makes the VPS `git pull` refuse the locally rewritten file.
+  evidence: The 32-5 and DW-197 DEPLOY_CHECKLIST entries both need `git checkout --` surgery for exactly this; upgrade path is gitignoring the files (keeping a `.gitkeep`), since `AlertStore._load` and the preference readers already start empty on a missing file.

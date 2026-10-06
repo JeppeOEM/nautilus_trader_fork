@@ -178,8 +178,9 @@ runtime command leaves the VPS checkout modified (`docs/DEPLOY_CHECKLIST.md`'s 2
 - **Docker mount:** the three plan files are the only collector config mounts that are `rw` in
   `docker-compose.yml` (each read-write only in its own collector's container). Outside them,
   only the preference files the UI saves are `rw` (the `data/preferences/` directory: `chart_indicators.toml`,
-  `screener_columns.toml`, `chart_drawings.toml`; and `data_api/alerts.toml`); every other config file (`bots/config.toml`
-  included) is mounted `:ro` and never written back by the running process.
+  `screener_columns.toml`, `chart_drawings.toml`; and the `data/alerts/` directory,
+  `alerts.toml` plus its save temp); every other config file (`bots/config.toml` included) is
+  mounted `:ro` and never written back by the running process.
 - `bot_tui` never edits these files directly — it only publishes `collector:control`
   messages, keeping each file's filesystem access to its one collector container.
 

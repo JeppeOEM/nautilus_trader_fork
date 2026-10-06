@@ -1492,3 +1492,38 @@ Epic 33's chart stories (33.5, 33.9, 33.10, 33.12) are deployed, so one pass cov
       TPO widths, FRVP edge grab, SVP HD's zoom response), plus the footprint toggle.
 - [ ] Record here, with the date, each behaviour that differs from §A8.2; each one becomes a
       deferred-work entry.
+
+### DW-197/DW-199 alert store saves atomically from its own directory (commit: this change's)
+
+`AlertStore` now saves `alerts.toml` atomically (sibling temp, fsync, rename, directory fsync) and
+rolls back its in-memory list when an `add`/`delete` save fails. A rename cannot replace a
+single-file bind mount (EBUSY), so the file moved from `platform/data_api/alerts.toml` to
+`platform/data/alerts/alerts.toml` (`git mv`, committed empty), `docker-compose.yml` mounts the
+`data/alerts/` directory at `/app/alerts_dir/` and sets `ALERTS_PATH=/app/alerts_dir/alerts.toml`.
+The file's text and key set are unchanged.
+
+- [ ] On the VPS, stop the writer first so no alert save or fire lands between the copy and the
+      pull: `cd ~/nautilus_trader_fork/platform && docker compose stop data_api`.
+- [ ] Keep the live file outside the checkout (not `/tmp`, which a reboot mid-procedure clears):
+      `cp data_api/alerts.toml ~/alerts.toml.pre-dw197`, then
+      `git checkout -- data_api/alerts.toml` (the API rewrote the tracked copy in place, so the
+      pull would refuse it) and `git pull`.
+- [ ] Put it in the new directory: `cp ~/alerts.toml.pre-dw197 data/alerts/alerts.toml` (this
+      overwrites the committed empty copy), then confirm the old file is gone
+      (`test ! -e data_api/alerts.toml || rm data_api/alerts.toml`) and that `data/alerts/` and
+      its file are owned by uid 1000 (`ls -ln data/alerts/`; if not,
+      `sudo chown -R 1000:1000 data/alerts/`) -- the store writes its temp file in that
+      directory, so the directory itself must be writable, not just the file.
+- [ ] Check the host's compose environment does not set `ALERTS_PATH` to the old
+      `/app/data_api/alerts.toml` anywhere (`platform/.env`, an override file): that path is no
+      longer mounted, so `data_api` would start with no alerts and save into the container.
+- [ ] `make up`, then check: the web UI's alerts list still shows every alert saved before the
+      deploy, and creating then deleting a test alert works and leaves no `.alerts.toml.tmp` in
+      `data/alerts/`. Keep `~/alerts.toml.pre-dw197` until then.
+- [ ] Rollback (only if this deploy is reverted): the old compose mounts
+      `data_api/alerts.toml`, so carry the live file back or the reverted API starts with the
+      stale pre-migration file. `docker compose stop data_api`, then
+      `cp data/alerts/alerts.toml ~/alerts.toml.post-dw197` and
+      `git checkout -- data/alerts/alerts.toml` (the checkout of the reverted commit refuses a
+      modified tracked file), check out or pull the revert, then
+      `cp ~/alerts.toml.post-dw197 data_api/alerts.toml` and `make up`.

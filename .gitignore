@@ -188,6 +188,8 @@ bench_data/
 /platform/data/errors/
 !/platform/data/errors/.gitkeep
 /platform/data/bots_churn_check/
+# AlertStore's atomic-save temp, left behind only by a process killed mid-save (DW-197).
+/platform/data/alerts/.alerts.toml.tmp
 # The archive scheduler's cursor state and the reference recorders' raw files (Story 31.1).
 /platform/data/archive/
 /platform/data/verification/

@@ -303,7 +303,7 @@ services:
       METRICS_DB_PATH: "/app/metrics_dir/metrics.db"
       CANDLES_DB_DIR: "/app/candles_dir"
       CHART_PREFERENCES_DIR: "/app/preferences"
-      ALERTS_PATH: "/app/data_api/alerts.toml"
+      ALERTS_PATH: "/app/alerts_dir/alerts.toml"
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
       TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
       ERROR_LEDGER_DIR: "/app/errors_dir"
@@ -316,8 +316,11 @@ services:
       # rw (not ro): data_api both writes its own process_start/record() lines here and
       # reads every service's files back for GET /api/errors' `services` block (story 23.3).
       - ./data/errors:/app/errors_dir
-      # rw: saved alerts (Story 20.1) -- host file must exist (committed empty), same reason.
-      - ./data_api/alerts.toml:/app/data_api/alerts.toml:rw
+      # rw: saved alerts (Story 20.1). A directory, not the single file: the store saves by
+      # renaming a temp file over alerts.toml, and a rename cannot replace a single-file bind
+      # mount (EBUSY) (DW-197). The directory (and the committed alerts.toml in it) must exist on
+      # the host, or Docker would create it root-owned and uid 1000 could not write.
+      - ./data/alerts/:/app/alerts_dir/:rw
       # rw: the UI's preference files (chart_indicators.toml, screener_columns.toml,
       # chart_drawings.toml), one mounted directory instead of one bind mount per file, so a new
       # preference file needs no new mount (Story 32.5). data_api's PUT routes are the only

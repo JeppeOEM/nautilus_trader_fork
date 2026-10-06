@@ -32,6 +32,7 @@ from alerting.application.engine import AlertEngine
 from alerting.application.service import AlertService
 from alerting.domain.alert import Alert
 from alerting.domain.alert import new_alert
+from alerting.infrastructure import toml_store
 from alerting.infrastructure.deliverer import NotifyDeliverer
 from alerting.infrastructure.toml_store import AlertStore
 from fastapi.testclient import TestClient
@@ -209,6 +210,38 @@ def test_routes_create_list_delete(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert client.delete(f"/api/alerts/{listed[0]['id']}").status_code == 204
     assert client.get("/api/alerts").json() == []
     assert client.delete("/api/alerts/nope").status_code == 404
+
+
+class _ForgetRecordingEngine(AlertEngine):
+    def __init__(self, store: AlertStore) -> None:
+        super().__init__(store, _RecordingDeliverer())
+        self.forgotten: list[str] = []
+
+    def forget(self, alert_id: str) -> None:
+        self.forgotten.append(alert_id)
+        super().forget(alert_id)
+
+
+def test_failed_delete_keeps_the_alert_and_its_run_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # DW-199: a delete whose save raises keeps the alert listed and watched, so the engine's run
+    # state for it must not be forgotten either.
+    store = AlertStore(tmp_path / "alerts.toml")
+    engine = _ForgetRecordingEngine(store)
+    service = AlertService(store, _RecordingDeliverer(), engine)
+    alert = _alert()
+    store.add(alert)
+
+    def _failing_fsync(fd: int) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(toml_store.os, "fsync", _failing_fsync)
+    with pytest.raises(OSError, match="No space left"):
+        service.delete(alert.id)
+
+    assert engine.forgotten == []
+    assert [a.id for a in store.list()] == [alert.id]
 
 
 @pytest.mark.parametrize(
