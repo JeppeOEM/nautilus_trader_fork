@@ -352,5 +352,6 @@ Every derived value was compared with `verification/domain/reference_signals.py`
    25.1b the `archive` compose service schedules it, not a cron line: `docs/DEPLOY_CHECKLIST.md`
    §1) and
    record the first run's summary lines, the trade footprint and the per-venue pass rates in
-   D-45/D-51. Do not run `repair_catalog` on a day `rebuild_seconds` has rebuilt: its
-   `ohlc_outside_book` detector compares exchange-timed trades with the mid-second book.
+   D-45/D-51. `repair_catalog` refuses every flagged row the trade archive covers (`repair.covered`,
+   exit 2, enforced since DW-206): its `ohlc_outside_book` detector compares exchange-timed trades
+   with the mid-second book, and `rebuild_seconds` is those rows' repair.

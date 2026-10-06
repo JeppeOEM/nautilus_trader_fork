@@ -963,7 +963,7 @@ _MUTABLE_LITERALS = (ast.Dict, ast.List, ast.Set, ast.DictComp, ast.ListComp, as
 _CACHE_DECORATORS = frozenset({"cache", "lru_cache", "cached_property"})
 # The kernel's own two sanctioned import-time effects are `register_arrow` (once per `Data`
 # class) and `apply_zstd_default()` -- but the latter is only ever *defined* here, never
-# *called* here (its callers are `collector.py`/`backfill_bars.py`/`archive.application.repair`),
+# *called* here (its callers are `collector.py`/`backfill_bars.py`),
 # so at kernel module scope the only bare call an import may legitimately run is `register_arrow`.
 _SANCTIONED_BARE_CALLS = frozenset({"register_arrow"})
 # A call whose *result* is bound to a module-level name is an import-time effect too (`_C =

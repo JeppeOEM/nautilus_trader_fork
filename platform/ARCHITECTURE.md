@@ -194,7 +194,9 @@ capture/
   (`make consolidate`, every venue; `--closed-hours` for the current day's closed hours of the
   small types), `backup_catalog` (`make backup-catalog`: the guarded `rclone sync` of the closed
   files off-box, rclone from the image),
-  `repair_catalog` (clear impossible trade OHLC; never on a day `rebuild_seconds` rebuilt),
+  `repair_catalog` (clear impossible trade OHLC in place through `CatalogFiles`, staged then
+  renamed; pre-archive rows only, a row the trade archive covers is refused, `repair.covered`,
+  DW-204/DW-206),
   `migrate_open_interest` (one-shot layout migration). Story 22.13: `kernel.fold` (the one exact
   trades -> second fold, live and rebuild), `rebuild_seconds` (a closed day's trade columns from
   the raw `trade_tick` archive, on `ts_event`), `compare_klines` (1 m bars vs the venue's klines,

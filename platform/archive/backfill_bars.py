@@ -22,8 +22,9 @@ Usage:
         [--bar-spec 1-MINUTE-LAST] [--environment mainnet] [--apply]
 
 **Report-only unless `--apply`**. What is written, the timestamp convention, coverage and every
-Known limit are `archive.application.backfill_bars`'s docstring. One of the two offline
-`write_data()` callers (with `repair_catalog`), listed in `docs/DATA_DICTIONARY.md` section 6.
+Known limit are `archive.application.backfill_bars`'s docstring. The one offline `write_data()`
+caller (`repair_catalog` rewrites through `CatalogFiles` since DW-204), listed in
+`docs/DATA_DICTIONARY.md` section 6.
 
 Known limit: the fetch keeps the PyO3 adapters' f64 kline path (D-52) instead of the
 `VenueKlines` ACL `compare_klines` uses -- moving it would change the written `Bar` values.

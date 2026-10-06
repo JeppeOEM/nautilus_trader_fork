@@ -397,8 +397,11 @@ Record numbers where each line says, never in a story file.
 
 ## 4. Things not to do
 
-- Do not run `repair_catalog` on a day `rebuild_seconds` has rebuilt: its `ohlc_outside_book`
-  detector compares exchange-timed trades with the mid-second book and would clear real trades.
+- `repair_catalog` never repairs a row the trade archive covers (enforced since DW-206): its
+  `ohlc_outside_book` detector compares exchange-timed trades with the mid-second book and would
+  clear real trades, so every flagged row at or after the instrument's coverage start is refused
+  (`repair.covered`, exit 2) -- `rebuild_seconds` is their repair. An exit 2 with only
+  `repair.covered` is expected on a catalog with a trade archive, not a failure to chase.
 - Do not run `rebuild_seconds --include-open-day` while that venue's collector is running.
 
 ## 6. Day-long clean-run check (story 23.3)

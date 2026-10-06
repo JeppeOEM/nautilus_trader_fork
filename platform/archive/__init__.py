@@ -25,10 +25,12 @@ and `rebuilt` lives only inside one saga run (`application.nightly`), so `reconc
 leave the catalog only by `domain.retention.RetentionPolicy`'s decision, executed by
 `application.prune` through `CatalogFiles.delete` -- verified-and-aged trades, dropped dYdX
 instruments and per-instrument delta retention, read from the collection plan file (the dYdX
-collector holds no prune loop any more); the one exception is `application.repair`, which
-replaces a wrong row through Nautilus's own `delete_data_range` + `write_data` (a correction,
-not a retention; its Known limit). *One rewriter*: every in-place Parquet rewrite is
-`infrastructure.catalog_files.CatalogFiles.rewrite` (verified temp-then-rename, Arrow metadata
+collector holds no prune loop any more); the one exception is `application.repair`, whose
+in-place rewrite may drop an extra stored copy of a flagged second identical to the cleared copy
+it keeps (a correction, not a retention; ledgered `repair.duplicate`). *One rewriter*: every
+in-place Parquet rewrite is `infrastructure.catalog_files.CatalogFiles` (`rewrite`, or the
+staged `stage_rewrite` + `commit_rewrites` of the rebuild and the repair: verified
+temp-then-rename, Arrow metadata
 and every value kept, written with `infrastructure.compact_parquet.compact_write_options`, Story
 30.1). *One writer per leaf*: capture writes the current UTC day and archive never changes
 a row of it -- `CatalogFiles` refuses a whole-file write, merge or delete of a file whose `ts_init`
@@ -64,8 +66,11 @@ composition roots and tests (capture writes its own
 `write_failed`/`quarantined` markers, `capture.infrastructure.gap_markers`), and archive imports neither
 capture nor views (`platform/tests/test_boundaries.py`).
 
-Known limits: `repair_catalog` rewrites through Nautilus's `delete_data_range` + `write_data`
-(AD-6's official path), not `CatalogFiles`; `backfill_bars` keeps its PyO3 f64 fetch path rather
+Known limits: `repair_catalog`'s renames of one instrument's files are individually atomic, not as
+a set (a partial commit is ledgered, every file stays whole, a rerun completes it), and a flagged
+row inside an archive-gap span after the trade archive's coverage start is repaired by neither
+it nor the rebuild (a trade file pruned before `pruned` markers existed would also leave the
+coverage start late); `backfill_bars` keeps its PyO3 f64 fetch path rather
 than the `VenueKlines` ACL (moving it would change the written bars, D-52); standalone
 `compare_klines --rebuilt-by` is an operator attestation that cannot be checked; retention acts on
 closed UTC days only, so its floor is about a day. Each names its upgrade path where it lives.

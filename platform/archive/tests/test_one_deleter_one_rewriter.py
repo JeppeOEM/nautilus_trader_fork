@@ -46,12 +46,10 @@ _MUTATIONS = frozenset(
     }
 )
 _OWNED = {"replace": "os", "remove": "os", "rename": "os", "move": "shutil"}
-# AC2: the only offline `ParquetDataCatalog.write_data()` callers (and repair's range delete).
+# AC2: the only offline `ParquetDataCatalog.write_data()` caller. The repair rewrites through
+# `CatalogWriter` since DW-204, so nothing in archive calls `delete_data_range` any more.
 _CATALOG_WRITES = frozenset({"write_data", "delete_data_range"})
-_CATALOG_WRITERS = {
-    _ARCHIVE / "application" / "backfill_bars.py",
-    _ARCHIVE / "application" / "repair.py",
-}
+_CATALOG_WRITERS = {_ARCHIVE / "application" / "backfill_bars.py"}
 _INFRASTRUCTURE = ("archive.infrastructure", "candles.infrastructure")
 
 
@@ -110,7 +108,7 @@ def test_only_catalog_files_writes_renames_or_removes_a_file() -> None:
     assert _called(_SOURCES[_REWRITER], _MUTATIONS), "the rewriter itself must still be seen"
 
 
-def test_only_backfill_and_repair_write_through_the_nautilus_catalog() -> None:
+def test_only_backfill_writes_through_the_nautilus_catalog() -> None:
     callers = {path for path, tree in _SOURCES.items() if _called(tree, _CATALOG_WRITES)}
     assert callers == _CATALOG_WRITERS
 

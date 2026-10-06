@@ -107,7 +107,10 @@ class CatalogWriter(Protocol):
     torn one; a multi-file change is staged and verified in full before its first rename
     (`stage_rewrite` + `commit_rewrites`); (3) only retention deletes rows (`delete`, called by
     `archive.application.prune` alone) -- `remove_merged_sources` removes files whose rows another
-    file already holds. The commands that could violate them are exactly these methods.
+    file already holds. The one rewrite that drops a row is `archive.application.repair`'s: an
+    extra stored copy of a flagged second, identical in every column to the cleared copy it keeps
+    (no information lost; ledgered `repair.duplicate`). The commands that could violate them are
+    exactly these methods.
     """
 
     def assert_span_closed(self, start_ns: int, end_ns: int) -> None:

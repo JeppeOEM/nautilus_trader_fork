@@ -14,14 +14,15 @@
 """
 The archive's one choice of Parquet write options (Story 30.1): the most compact lossless
 settings the epic-30 measurements support, for every file the archive writes itself (not the
-`write_data` files of `archive.backfill_bars` and `archive.repair_catalog`).
+`write_data` files of `archive.backfill_bars`; `archive.repair_catalog` rewrites through
+`CatalogFiles`, so a repaired file gets them, DW-204).
 
 `compact_write_options` is the only place `pq.write_table` options are chosen for a catalog file
 (DATA-05); `archive.infrastructure.catalog_files.CatalogFiles`, the one rewriter, is the only
 caller that writes with them -- this module chooses, it never writes. The live minute files keep
 Nautilus's own `write_data` encoding (FORK-01; `kernel.parquet_compat` only makes it zstd); a
 file gets these settings when archive merges or rewrites it (nightly and intraday consolidation,
-the nightly snapshot rebuild, the migration tools, `archive.tools.recompress`).
+the nightly snapshot rebuild, the repair, the migration tools, `archive.tools.recompress`).
 
 The settings and why:
 

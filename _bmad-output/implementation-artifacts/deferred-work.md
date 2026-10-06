@@ -1626,7 +1626,9 @@ resolution-undo: dcc0700427eddf493cae780ae257b14adaad477dcd1d81d72caf42af892bf69
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: repair_catalog runs `delete_data_range` then `write_data` per row with no backup or atomicity; a crash between them loses that second's snapshot. evidence: archive/application/repair.py `repair_instrument`. This predates 25.1.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw-archive-repair-atomic-and-guarded
+resolution-undo: ff6a7f0c9b9ea1178362256386cc4688080f4686f5efd4dbee70862f78023d36 2026-10-06 7374617475733a206f70656e
 decision: 2026-10-05 Rewrite via CatalogFiles.rewrite (verified temp-then-rename) instead of delete+write — Replace the flagged rows in-file through the maintenance rewriter.
 
 ### DW-205: The retention `file_days` rule widens only backwards (the previous day). A file ending just before midnight can hold venue-clock-ahead trades of the next day …
@@ -1643,7 +1645,9 @@ resolution-undo: 503907f1821fa3d9323ad14b8c3f6d3be2067e07f8adbfeaa0b3aad39585a6c
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: repair_catalog's "never run on a rebuilt day" rule is enforced only by its docstring; nothing checks the rebuild or `verified_days` state before clearing trades. evidence: archive/repair_catalog.py. This predates 25.1.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw-archive-repair-atomic-and-guarded
+resolution-undo: ff6a7f0c9b9ea1178362256386cc4688080f4686f5efd4dbee70862f78023d36 2026-10-06 7374617475733a206f70656e
 decision: 2026-10-05 Refuse rows at or after the instrument's trade-archive coverage start (pre-archive rows only) — Use archive Coverage.start to refuse repairing covered rows.
 
 ### DW-207: One stray `*.parquet` with an unparsable name in a snapshot or trade leaf crashes `compare_klines` (`instruments_on_day`) before any instrument is compared …

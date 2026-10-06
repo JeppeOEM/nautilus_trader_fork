@@ -3293,11 +3293,20 @@ compact write settings below (Story 30.1; zstd before it), reads it back, and re
 place only when its full schema (Arrow metadata included), its row count and every value in
 order match `[amended 2026-09-29: Story 30.1]`; a crash leaves only the temp file, which
 the next run of any archive tool deletes (with the pre-25.1 `*.rebuild.tmp`,
-`*.consolidate.tmp`, `*.parquet.tmp`). The only offline `ParquetDataCatalog.write_data()` callers
-are `archive.backfill_bars` (venue bars, §1.3) and `archive.repair_catalog` (cleared snapshot
-rows, through `delete_data_range` + `write_data`; `--apply` needs `--candles-dir` holding a store (and a `--candles-db` inside it), and every UTC day
-holding a cleared row loses its stored `verified_days` verdict before the first delete -- one that
-cannot be cleared leaves the instrument unrepaired, `repair.error`, DW-203). No archive tool changes a row of the current
+`*.consolidate.tmp`, `*.parquet.tmp`). The only offline `ParquetDataCatalog.write_data()` caller
+is `archive.backfill_bars` (venue bars, §1.3). `archive.repair_catalog` clears a flagged snapshot
+row's eight trade columns in place in its own file through `CatalogFiles` (DW-204): every changed
+file of an instrument is staged as a verified temp, then every UTC day holding a cleared row loses
+its stored `verified_days` verdict, then the temps are renamed -- a failure before the first rename
+leaves every file untouched, a rename failing part-way leaves every file whole (`repair.error`, a
+rerun completes it). `--apply` needs `--candles-dir` holding a store (and a `--candles-db` inside
+it); a verdict that cannot be cleared leaves the instrument unrepaired (`repair.error`, DW-203).
+Only pre-archive rows are repaired: a flagged row at or after the instrument's trade-archive
+coverage start (the earliest stored trade or `_archive_gaps` marker, so a prune never moves it
+later) is refused (`repair.covered`, once per instrument with the count and the first/last
+`ts_event`, exit 2; an unreadable trade archive refuses the instrument, `repair.error`, DW-206),
+since `rebuild_seconds` is its repair. An extra stored copy of a flagged second identical to the
+cleared copy is dropped (`repair.duplicate`); copies that differ are refused (`repair.error`). No archive tool changes a row of the current
 UTC day: a whole-file rewrite (the migration tools), merge or delete of a file whose `ts_init` span
 reaches it is refused (`OpenDayWriteError`; ledgered `<tool>.open_day` and skipped), and the
 rebuild's row-preserving rewrite may touch such a file only with every row whose `ts_event` lies in
@@ -3315,7 +3324,8 @@ file that is unreadable, empty, malformed, or holds a window that is not finite 
 nothing pruned), `prune.error` (one file's stat/delete failed: skipped, the run goes on; with
 `prune.open_day` or a `marker_failed` keep, the run exits 2),
 `repair.error` (an instrument id with no venue, or a venue `kernel.venues` does not know: refused,
-never repaired without its capture lock), `archive.catalog_missing` (any archive tool given a
+never repaired without its capture lock), `repair.covered` (DW-206: flagged rows the trade
+archive covers, refused, exit 2), `archive.catalog_missing` (any archive tool given a
 catalog directory that does not exist: exit 1, nothing done), `migrate_open_interest.error` and
 `normalize_snapshot_schema.error` (one file failed -- unreadable, refused, a failed read-back or
 an I/O error: left as it was, the run goes on, exit 2; the latter tool deleted in Story 30.2)
@@ -3333,14 +3343,14 @@ temp file before its rename and the directory after it, and before any source or
 ### Write settings (Story 30.1)
 
 Every file archive writes itself -- nightly and intraday consolidation merges, the nightly
-snapshot rebuild, the migration tools, `archive.tools.recompress` -- takes its Parquet write
+snapshot rebuild, the repair (DW-204), the migration tools, `archive.tools.recompress` -- takes its Parquet write
 options from one function, `archive.infrastructure.compact_parquet.compact_write_options`, the only place they
 are chosen (`platform/CLAUDE.md` DATA-05); `CatalogFiles` is the only caller that writes with them.
 Capture's live minute files keep the encoding of Nautilus's own `write_data` (FORK-01;
-`kernel.parquet_compat` only makes it zstd), as do the files of the two offline `write_data`
-callers above (`archive.backfill_bars`, `archive.repair_catalog`: each module calls
-`apply_zstd_default()` at import -- the repair since DW-260, before which its files were snappy), so
-a file gets these settings when archive merges or rewrites it.
+`kernel.parquet_compat` only makes it zstd), as do the files of the one offline `write_data`
+caller above (`archive.backfill_bars`, which calls `apply_zstd_default()` at import; the repair
+did too from DW-260 until DW-204 moved it onto `CatalogFiles`), so a file gets these settings when
+archive merges or rewrites it.
 
 | Setting | Value | Why |
 |---|---|---|
