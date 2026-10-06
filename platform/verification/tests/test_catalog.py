@@ -101,6 +101,7 @@ from verification.domain.catalog_check import row_digest
 from verification.domain.catalog_check import schema_signature
 from verification.domain.reference_signals import RefCandle
 from verification.infrastructure.catalog_scan import CatalogScan
+from verification.infrastructure.liquidation_reader import LiquidationCatalog
 from verification.subject.consolidation import maintenance_writer
 from verification.subject.nautilus_reads import digest_encoded
 
@@ -120,9 +121,13 @@ _SCHEMA = """
 CREATE TABLE candles (
     instrument_id TEXT NOT NULL, bar_seconds INTEGER NOT NULL, t INTEGER NOT NULL,
     o REAL, h REAL, l REAL, c REAL, v REAL NOT NULL, seconds_observed INTEGER NOT NULL,
+    buy_v INTEGER, sell_v INTEGER, buy_n INTEGER, sell_n INTEGER, pv INTEGER,
+    liq_long_v INTEGER, liq_short_v INTEGER, liq_n INTEGER,
+    price_precision INTEGER, size_precision INTEGER,
     PRIMARY KEY (instrument_id, bar_seconds, t)
 ) WITHOUT ROWID;
 """
+_INSERT = f"INSERT INTO candles VALUES ({', '.join('?' * 19)})"  # noqa: S608 -- placeholders
 
 
 # --- the day's rows -------------------------------------------------------------------------------
@@ -232,10 +237,24 @@ def _units(units: int, places: int) -> float:
     return float(Decimal(units).scaleb(-places))
 
 
+def _flow(rows: list[_Second], iid: str) -> tuple[Any, ...]:
+    """
+    Section 2.15's ten columns of the fixture's rows, by hand: a traded second buys
+    `1_000 + second % 3` and sells 500 units (precision 3) in one trade each and closes at
+    `price + 1` (precision 2); Bybit linear has the liquidation feed, known since the day before
+    (`_write_day`) and none this day: 0; Hyperliquid has none (null).
+    """
+    traded = [r for r in rows if r.price is not None]
+    buy = sum(1_000 + r.second % 3 for r in traded)
+    pv = sum(((r.price or 0) + 1) * (1_000 + r.second % 3 + 500) for r in traded)
+    liquidations = (0, 0, 0) if iid == _BTC else (None, None, None)
+    return (buy, 500 * len(traded), len(traded), len(traded), pv, *liquidations, 2, 3)
+
+
 def _bar(width: int, t: int, rows: list[_Second], iid: str) -> tuple[Any, ...]:
     traded = [r for r in rows if r.price is not None]
     if not traded:
-        return (iid, width, t, None, None, None, None, 0.0, len(rows))
+        return (iid, width, t, None, None, None, None, 0.0, len(rows), *_flow(rows, iid))
     volume = sum(1_000 + r.second % 3 + 500 for r in traded)
     return (
         iid,
@@ -247,6 +266,7 @@ def _bar(width: int, t: int, rows: list[_Second], iid: str) -> tuple[Any, ...]:
         _units((traded[-1].price or 0) + 1, 2),
         _units(volume, 3),
         len(rows),
+        *_flow(rows, iid),
     )
 
 
@@ -266,7 +286,7 @@ def _write_store(path: Path, bars: list[tuple[Any, ...]]) -> None:
     db = sqlite3.connect(path)
     try:
         db.executescript(_SCHEMA)
-        db.executemany("INSERT INTO candles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", bars)
+        db.executemany(_INSERT, bars)
         db.commit()
     finally:
         db.close()
@@ -333,6 +353,12 @@ def _write_day(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, day: _Day = _Day
     store = tmp_path / "candles" / f"candles_{day.venue.lower()}.db"
     _write_store(store, _bars([*day.rows, *day.extra_snapshots], day.iid))
     _env(monkeypatch, tmp_path, day.venue, day.iid)
+    # The feed's first archived liquidation, a day before the judged one, so every bucket of the
+    # day is known (0 without a liquidation), never null (section 2.15, audit D-160). Given as the
+    # oracle source's answer rather than written: the catalog tool's structure check does not
+    # know the `custom_liquidation` type (`NautilusReads.known`), which this test does not judge.
+    feed_start_ns = (_START_S - 86_400) * _NS
+    monkeypatch.setattr(LiquidationCatalog, "first_ts_event", lambda _self, _iid: feed_start_ns)
     return catalog
 
 
@@ -581,6 +607,37 @@ def test_an_altered_and_a_deleted_bar_are_different_and_missing(
     assert status == 1
     widths = report["candles"][0]["widths"]["60"]["counts"]
     assert (widths[DIFFERENT], widths["missing"]) == (1, 1)
+
+
+@pytest.mark.usefixtures("nautilus_log_guard")
+@pytest.mark.parametrize(
+    "change",
+    [
+        "buy_v = buy_v + 1",  # a tampered order-flow sum
+        "liq_n = NULL, liq_long_v = NULL, liq_short_v = NULL",  # a feed's 0 read as unknown
+        "size_precision = 4",  # the right units at the wrong precision
+    ],
+)
+def test_a_tampered_order_flow_column_is_different(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    change: str,
+) -> None:
+    """Section 2.15: the stored integers are proven exactly, null is never 0 (Story 33.3)."""
+    _write_day(tmp_path, monkeypatch)
+    db = sqlite3.connect(tmp_path / "candles" / "candles_bybit.db")
+    try:
+        db.execute(
+            f"UPDATE candles SET {change} WHERE bar_seconds = 300 AND t = ?",  # noqa: S608
+            (_START_S * 1000,),
+        )
+        db.commit()
+    finally:
+        db.close()
+    status, report = _run(capsys)
+    assert status == 1
+    assert report["candles"][0]["widths"]["300"]["counts"][DIFFERENT] == 1
 
 
 @pytest.mark.usefixtures("nautilus_log_guard")
@@ -936,9 +993,10 @@ def test_an_extra_bar_an_undefined_bar_and_an_unknown_width_each_fail(
             "WHERE bar_seconds = 60 AND t = ?",
             (first,),
         )
-        extra = (_BTC, 60, first + 3_600_000, 1.0, 1.0, 1.0, 1.0, 1.0, 60)
-        unknown = (_BTC, 120, first, 1.0, 1.0, 1.0, 1.0, 1.0, 120)
-        db.executemany("INSERT INTO candles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [extra, unknown])
+        nulls = (None,) * 10
+        extra = (_BTC, 60, first + 3_600_000, 1.0, 1.0, 1.0, 1.0, 1.0, 60, *nulls)
+        unknown = (_BTC, 120, first, 1.0, 1.0, 1.0, 1.0, 1.0, 120, *nulls)
+        db.executemany(_INSERT, [extra, unknown])
         db.commit()
     finally:
         db.close()

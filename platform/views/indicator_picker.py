@@ -50,7 +50,6 @@ coupling to catalog internals.
 
 import math
 import os
-from collections import defaultdict
 from collections.abc import Callable
 from collections.abc import Sequence
 from dataclasses import asdict
@@ -61,17 +60,18 @@ from typing import Any
 from typing import Literal
 from typing import Protocol
 
+from candles.application import queries
+from candles.domain.fold import BAR_SECONDS
 from candles.domain.fold import bucket_start_ms
 from kernel.candle_patterns import CandlePattern
 from kernel.candle_patterns import PatternName
 from kernel.candle_patterns import Thresholds
-from kernel.indicators import trade_aggregates
+from kernel.venues import venue_of
 
 from nautilus_trader import indicators as _ind
 from nautilus_trader.indicators import MovingAverageType
 from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.enums import PriceType
-from views.catalog_reads import query_second_snapshots
 from views.chart_series import CancellationTracker
 
 
@@ -497,11 +497,7 @@ def native_catalog_json() -> dict[str, Any]:
 
 # Duplicated from dashboard.py's own module-level constant (same env var, same default) --
 # this module cannot import it from there without a circular import (dashboard.py imports
-# this module). One line, not worth a shared-constants module for just this (DESIGN-01) --
-# `_second_snapshots` below duplicates a larger chunk (the catalog-query + CustomData-unwrap
-# logic itself); that duplication is worth revisiting into a shared helper once a second
-# real call site needs the identical pattern (Story 10.3/10.4 need a different one, for
-# OrderBookDelta, so this may end up staying a one-off).
+# this module). One line, not worth a shared-constants module for just this (DESIGN-01).
 # Known limit: the one environment read left in `views` -- every other read model takes its
 # catalog path from the caller (the interface, AD-D12's env contract). It reads the same variable
 # with the same default as `data_api.settings.CATALOG_PATH`, so the two resolve identically in
@@ -520,12 +516,15 @@ class ReplayWindow:
     `start_ms`/`end_ms` are `None` for the live (not-yet-closed) window -- mirrors
     `coin_indicators_handler`'s existing live/historical branch in dashboard.py, which already
     picks `_live_candles_json` vs `_historical_candles_json` on exactly this same condition.
+    `candles_dir` is where the candle stores live (Story 33.3: CVD's `all` anchor sums the stored
+    bars before the window); None when the caller has no store, and `all` is then refused.
     """
 
     instrument_id: str
     bar_seconds: int
     start_ms: int | None
     end_ms: int | None
+    candles_dir: str | None = None
 
 
 ReplayFn = Callable[[list[dict], dict[str, Any], ReplayWindow], dict[str, list[float | None]]]
@@ -542,6 +541,9 @@ class CustomIndicatorSpec:
     # Raises `ValueError` for merged params the replay would refuse; the save-time half of the rule
     # `check_params` applies (a native spec gets it from its constructor). None: nothing to check.
     check_params: Callable[[dict[str, Any]], None] | None = None
+    # A string param's allowed values, served as the catalog's `choices` (the picker's dropdown)
+    # and enforced by `check_params`, as a native enum param's are.
+    choices: dict[str, list[str]] = field(default_factory=dict)
 
 
 CUSTOM_INDICATOR_CATALOG: dict[str, CustomIndicatorSpec] = {}
@@ -564,7 +566,7 @@ def replay_custom(
 def custom_catalog_json() -> dict[str, Any]:
     """`CUSTOM_INDICATOR_CATALOG` serialized for the merged `/data/indicators/catalog` response."""
     return {
-        name: {"params": spec.params, "panel": spec.panel}
+        name: {"params": spec.params, "panel": spec.panel, "choices": spec.choices}
         for name, spec in CUSTOM_INDICATOR_CATALOG.items()
     }
 
@@ -577,27 +579,8 @@ def _bucket_ns(ts_ns: int, bar_seconds: int) -> int:
     return bucket_start_ms(ts_ns // 1_000_000, bar_seconds) * 1_000_000
 
 
-def _second_snapshots(window: ReplayWindow) -> list[dict]:
-    """Fetch this window's DydxSecondSnapshot rows from the catalog, as plain dicts."""
-    snapshots = query_second_snapshots(
-        _CATALOG_PATH,
-        window.instrument_id,
-        window.start_ms * 1_000_000,
-        window.end_ms * 1_000_000,
-    )
-    # buy_count/sell_count are required by trade_aggregates()'s reduction below even though
-    # _cvd_replay only consumes the volume totals it returns -- not dead data, just an unused
-    # part of a shared function's output.
-    return [
-        {
-            "buy_volume": s.buy_volume,
-            "sell_volume": s.sell_volume,
-            "buy_count": s.buy_count,
-            "sell_count": s.sell_count,
-            "ts_event": s.ts_event,
-        }
-        for s in snapshots
-    ]
+CVD_ANCHORS = ("session", "visible", "all")
+_DAY_SECONDS = 86_400
 
 
 def _cvd_replay(
@@ -606,47 +589,92 @@ def _cvd_replay(
     window: ReplayWindow,
 ) -> dict[str, list[float | None]]:
     """
-    Per-candle running-cumulative buy_volume - sell_volume for the currently-requested
-    window -- an unbounded, request-anchored total (resets to 0 at whichever candle happens
-    to be first in the current view), not the 5-minute rolling/decaying oscillator the old
-    chart_data.py row computed. This is a deliberate scope choice for the picker version (see
-    epics.md Story 10.2 AC #1) -- panning/resizing the visible window changes where the sum
-    restarts, so read it as "net flow within the current view," not an absolute level.
+    Per-candle cumulative volume delta, `Σ(buy_v - sell_v)` of the bars' own stored order flow
+    (Story 33.3, `docs/DATA_DICTIONARY.md` §2.15): no raw-second replay, so every bar of every
+    width has a value, live or historical. The sum is exact, in integer units rescaled to the
+    finest `size_precision` present (`10**k`), and becomes a float only in the output.
 
-    Unrelated to ofi_strategy.py's own "cum_delta" signal (a live Strategy's independent
-    5-minute rolling-window implementation) -- same name, different metric, different code.
+    `anchor` picks where the sum starts:
+    - `visible`: 0 before the first candle given (net flow within the current view; panning moves
+      where it restarts);
+    - `session`: 0 at every UTC day's first bar (`bucket_start_ms(t, 86_400)`), so on 1D and wider
+      every bar is its own session;
+    - `all`: the stored bars before the first candle (`queries.flow_delta_before` at the widest
+      stored width dividing `bar_seconds`) plus the running total. Known limit: the store keeps
+      1m bars 30 days and 5m bars 90 (`RETAIN_DAYS`), so at 1m/5m/10m "all" starts at that
+      retention edge, not at the first trade ever (audit D-159); upgrade path: a per-day delta
+      table kept past the bars' retention.
 
-    Historical only -- the old fixed row was never live either (it always replayed the
-    date-range form's explicit window, never an in-process live buffer). Live requests get
-    None for every candle, a real gap, not a fabricated value (DATA-01).
+    A bar whose flow is null (a pre-migration bar) gets None, never 0 (DATA-01), and the running
+    total carries on past it. Unrelated to `ofi_strategy.py`'s 5-minute rolling "cum_delta".
 
-    A candle bucket with zero snapshot rows is *not* treated as "no volume" (which would
-    silently paper over a genuine second-snapshot collection gap as a flat/unchanged value,
-    DATA-01) -- it gets None, and the running total resumes from its last real value on the
-    next bucket that does have data.
+    Known limit (null-flow bars): the total carries on *without* a null bar's term (the contract's
+    rule: the value is None, the sum is not reset), so every level after a pre-migration gap omits
+    that bar's delta until the operator's history rebuild (`docs/DEPLOY_CHECKLIST.md`, 33-3) fills
+    it; the gap itself shows as None, never as a fabricated value. Upgrade path: none needed once
+    the rebuild has run; a stored-null bar after it is a DATA-02 question.
+    Known limit (`all`): its prefix sums the *known* stored bars only -- a null-flow bar before the
+    window contributes nothing to it, the same omission as above. Upgrade path: the same rebuild.
+    Known limit (older than the store): a page whose bars are older than the store's first bar of
+    that width (the `raw_1s` history the store never held, or pruned 1m/5m) has no stored prefix,
+    so `all` accumulates from 0 at the page's first bar, as `visible` does (audit D-159). Upgrade
+    path: the per-day delta table above.
     """
-    if window.start_ms is None or window.end_ms is None:
-        return {"value": [None] * len(candles)}
-    buckets: dict[int, list[dict]] = defaultdict(list)
-    for row in _second_snapshots(window):
-        buckets[_bucket_ns(row["ts_event"], window.bar_seconds)].append(row)
-    running_total = 0.0
+    anchor = params["anchor"]
+    if anchor not in CVD_ANCHORS:
+        raise ValueError(f"anchor={anchor!r} is not one of the choices {list(CVD_ANCHORS)}")
+    prefix = _cvd_prefix(candles, window) if anchor == "all" else None
+    known = [c["size_precision"] for c in candles if c.get("buy_v") is not None]
+    precision = max([*known, prefix[1] if prefix else 0])
+    total = 0 if prefix is None else prefix[0] * 10 ** (precision - prefix[1])
+    session: int | None = None
     values: list[float | None] = []
     for candle in candles:
-        rows = buckets.get(candle["t"] * 1_000_000, [])
-        if not rows:
+        if anchor == "session" and bucket_start_ms(candle["t"], _DAY_SECONDS) != session:
+            session, total = bucket_start_ms(candle["t"], _DAY_SECONDS), 0
+        if candle.get("buy_v") is None:
             values.append(None)
             continue
-        buy_vol, sell_vol, _, _ = trade_aggregates(rows)
-        running_total += buy_vol - sell_vol
-        values.append(running_total)
+        delta = candle["buy_v"] - candle["sell_v"]
+        total += delta * 10 ** (precision - candle["size_precision"])
+        values.append(total / 10**precision)
     return {"value": values}
 
 
+def _cvd_prefix(candles: list[dict], window: ReplayWindow) -> tuple[int, int] | None:
+    """Return the exact stored delta before the first candle, `(units, precision)`, or None."""
+    if window.candles_dir is None:
+        raise ValueError("CVD anchor 'all' needs the candle store (no candles_dir given)")
+    if not candles:
+        return None
+    width = _widest_stored_divisor(window.bar_seconds)
+    with queries.open_store(window.candles_dir, venue_of(window.instrument_id)) as db:
+        if db is None:
+            return None
+        return queries.flow_delta_before(db, window.instrument_id, width, candles[0]["t"])
+
+
+def _widest_stored_divisor(bar_seconds: int) -> int:
+    """Return the widest stored width whose bars tile `bar_seconds` (10m -> 5m, 1W -> 1D)."""
+    widths = [w for w in BAR_SECONDS if bar_seconds % w == 0]
+    if not widths:
+        raise ValueError(f"no stored bar width divides {bar_seconds} s: CVD 'all' cannot anchor")
+    return max(widths)
+
+
+def _check_cvd_params(params: dict[str, Any]) -> None:
+    if params.get("anchor") not in CVD_ANCHORS:
+        raise ValueError(
+            f"anchor={params.get('anchor')!r} is not one of the choices {list(CVD_ANCHORS)}"
+        )
+
+
 CUSTOM_INDICATOR_CATALOG["CumulativeVolumeDelta"] = CustomIndicatorSpec(
-    params={},
+    params={"anchor": "visible"},
     panel="oscillator",
     replay=_cvd_replay,
+    check_params=_check_cvd_params,
+    choices={"anchor": list(CVD_ANCHORS)},
 )
 
 
@@ -685,7 +713,7 @@ def _cancel_pressure_replay(
     tracker's state as of the LAST delta processed becomes that candle's value; a bucket with
     no delta events carries forward the last known value, up to `_MAX_FORWARD_FILL_BUCKETS`
     (DATA-01 -- a real ingestion gap must eventually read as unknown again, not confidently
-    stale forever). Unlike CVD's running-cumulative sum (a flow, correctly reset per bucket),
+    stale forever). Unlike CVD's running-cumulative sum (a flow, never forward-filled),
     cancel pressure is a *level* -- the book's current cancellation-pressure state -- so
     persisting the last real observation across a quiet bucket is the metric's own correct
     behavior, not fabrication. Candles before the first delta is processed are None (real
@@ -698,7 +726,7 @@ def _cancel_pressure_replay(
     of treating it as genuine data or silently continuing the pre-clear value.
 
     Reuses book_features.CancellationTracker unchanged -- no new cancellation math (DESIGN-02).
-    Historical only, same reasoning as CVD (Story 10.2): the old fixed row was never live.
+    Historical only (Story 10.2): the old fixed row was never live.
     """
     if window.start_ms is None or window.end_ms is None:
         none_col: list[float | None] = [None] * len(candles)
@@ -817,7 +845,7 @@ def _ofi_replay(
 
     Reuses `_order_book_deltas` (Story 10.3) -- OFI is the second, not third, book-delta
     consumer this module now shares that helper with (DESIGN-01: no further extraction needed).
-    Historical only, same reasoning as CVD/Cancel Pressure: the old fixed row was never live.
+    Historical only, same reasoning as Cancel Pressure: the old fixed row was never live.
     """
     if window.start_ms is None or window.end_ms is None:
         return {"value": [None] * len(candles)}
@@ -922,9 +950,12 @@ def check_params(name: str, params: Any) -> None:
     if name in INDICATOR_CATALOG:
         _check_native_params(name, INDICATOR_CATALOG[name], params)
         return
-    custom_check = CUSTOM_INDICATOR_CATALOG[name].check_params
-    if custom_check is not None:
-        custom_check({**CUSTOM_INDICATOR_CATALOG[name].params, **params})
+    custom = CUSTOM_INDICATOR_CATALOG[name]
+    for key, allowed in custom.choices.items():
+        if key in params and params[key] not in allowed:
+            raise ValueError(f"{key}={params[key]!r} is not one of the choices {allowed}")
+    if custom.check_params is not None:
+        custom.check_params({**custom.params, **params})
 
 
 def _default_params(name: str) -> dict[str, Any]:

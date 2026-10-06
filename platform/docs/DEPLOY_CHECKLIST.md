@@ -1453,6 +1453,51 @@ changed; the coverage record's existing mount already carries the new kind.
       --reports-dir DIR` writes `DIR/liquidations.json`, or run `python3 -m
       verification.liquidations --venue BYBIT --day <day> --json --catalog <catalog>` directly.
 
+### 33-3-per-bar-order-flow-and-liquidation-aggregates-in-the-candle-store-folded-once (commit: this story's)
+
+The candle store gains ten nullable INTEGER columns (`buy_v`, `sell_v`, `buy_n`, `sell_n`, `pv`,
+`liq_long_v`, `liq_short_v`, `liq_n`, `price_precision`, `size_precision`) and the
+`liquidations_applied` and `liquidation_feed_since` tables (`docs/DATA_DICTIONARY.md` §2.15). Each collector migrates its own
+`candles_<venue>.db` in place when it opens it (`ALTER TABLE ... ADD COLUMN`): every existing row
+reads **null** in the new columns (unknown, never 0) until its day is rebuilt. New seconds fill
+them live; the open day's pre-deploy part is filled by that day's nightly `candles.rebuild --day D`
+(after midnight); older days only by a full rebuild. The data_api serves the new keys on
+`/api/candles` and `/ws/live` (null where not filled) and the CVD indicator gains an `anchor`
+param; `verification.candles`/`catalog` fail a day whose stored bars are still null. No config key,
+env var, compose service or bind mount changed.
+
+- [ ] On the VPS, pull this commit and rebuild/restart the collectors, the archive and the data_api:
+      `cd ~/nautilus_trader_fork/platform && make up` (or `docker compose up -d --build
+      bybit_collector hyperliquid_collector archive data_api`). Restart the collectors before (or
+      together with) the data_api: a data_api reading a not-yet-migrated file serves the new keys
+      as null, which is correct, but the collectors are what migrate.
+- [ ] Confirm the migration ran: `sqlite3 data/candles/candles_bybit.db "PRAGMA table_info(candles)"`
+      lists the ten columns after `seconds_observed`, and `.tables` shows `liquidations_applied` and
+      `liquidation_feed_since` (same for `candles_hyperliquid.db`). After the Bybit collector's
+      start `SELECT * FROM liquidation_feed_since` holds each Bybit linear id whose last day had a
+      liquidation (its startup catch-up records the start); until a row exists for an id, its live
+      bars' `liq_*` stay null, never 0 (audit D-160). Check the ledger shows no `collector.candle_store` line
+      since the restart (`GET /api/errors`); a `CandleOverflowError` there is a DATA-02 finding.
+- [ ] Fill the history: once the collectors run the new code, rebuild every closed day of each
+      venue (the open day is left to the nightly; one writer per instrument-day, so `--workers 1`
+      as the nightly runs it):
+      `docker compose exec archive python3 -m candles.rebuild --catalog /app/catalog --db /app/candles_dir/candles_bybit.db --venue BYBIT --workers 1`
+      then the same with `candles_hyperliquid.db` and `--venue HYPERLIQUID` (dYdX only if its
+      store is still served: `make up-dydx` deployments).
+- [ ] Verify: `sqlite3 data/candles/candles_bybit.db "SELECT COUNT(*) FROM candles WHERE buy_v IS
+      NULL AND seconds_observed > 0 AND t < strftime('%s','now','start of day') * 1000"` is 0 (and
+      for `candles_hyperliquid.db`); Bybit linear bars carry `liq_n` (0 or more) only where the
+      bar **starts at or after** that id's feed start (`SELECT since_ns FROM
+      liquidation_feed_since WHERE instrument_id = '<id>'`, which after the rebuild equals the
+      `MIN(ts_event)` of its `data/custom_liquidation/<id>/` files or an earlier live one) and
+      `liq_n IS NULL` on every bar starting before it -- the bar straddling it null at every width,
+      1m to 1D alike: `SELECT bar_seconds, COUNT(*) FROM candles WHERE instrument_id = '<id>' AND
+      t * 1000000 < <since_ns> AND liq_n IS NOT NULL GROUP BY bar_seconds` returns no row --
+      history archived before the Story 33.1 feed is unknown, never 0 (audit D-160) -- and every
+      Hyperliquid and spot bar `liq_n IS NULL`; `curl -s "localhost:9100/api/candles/BTCUSDT-LINEAR.BYBIT?before_ns=$(date +%s%N)&limit=3"`
+      shows the ten keys after `partial`; and the next nightly's `verify_day` keeps `candles` and
+      `catalog` at 0 failing for the rebuilt days.
+
 ### DW-182 archive-gap markers decode under the strict reader (Story 23.2; commit: 3f8328d048)
 
 Story 23.2 made `kernel.archive_markers.decode` refuse an inverted span (`from_ns > to_ns`), and the

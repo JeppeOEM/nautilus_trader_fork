@@ -18,10 +18,13 @@ retention loop (Story 24.1). `CaptureService` no longer does either, and a venue
 write no bars and prune nothing, silently -- so the wiring is asserted per venue, not once.
 """
 
+import logging
 from pathlib import Path
 
 import pytest
 from candles.application.sink import CandleSink
+from kernel.second_snapshot import SecondOHLC
+from observability import error_ledger
 
 from capture.application.capture_service import CaptureService
 from capture.application.ports import SecondSink
@@ -124,3 +127,27 @@ def test_the_client_feeds_this_capture_service(
     capture = _collector(tmp_path, monkeypatch)
     assert capture._client._on_data == capture._on_data
     assert capture._client._ledger == capture._ledger
+
+
+def _second(s: int, buy_units: int) -> SecondOHLC:
+    """Return a traded second `s` of day 20_000: close 10 units at precisions (1, 3)."""
+    t = (20_000 * 86_400 + s) * 1_000_000_000
+    return SecondOHLC(t, 1.0, 1.0, 1.0, 1.0, buy_units / 1e3, 0.0, 1, 3, 10, buy_units, 0, 1, 0)
+
+
+def test_a_store_write_over_int64_is_refused_and_ledgered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    The int64 bound binds at the store write only: 2^62 + 2^62 = 2^63 buy units in one minute is
+    refused (`CandleOverflowError`) by the real sink, and capture's existing per-flush path ledgers
+    it once at `collector.candle_store`, ingestion carrying on.
+    """
+    capture = _collector(tmp_path, monkeypatch)
+    error_ledger.reset()
+    with caplog.at_level(logging.ERROR):
+        capture._apply_to_candle_store({_IID: [_second(0, 2**62), _second(1, 2**62)]})
+    (record,) = [r for r in caplog.records if "candle store write failed" in r.getMessage()]
+    assert "CandleOverflowError on 1 writes" in record.getMessage()
+    assert error_ledger.counts() == {"collector.candle_store": 1}
+    error_ledger.reset()

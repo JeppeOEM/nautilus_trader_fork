@@ -1705,7 +1705,31 @@ HTTP pager). Exit 0 when every failing count is 0, 1 otherwise or on a refusal, 
   `NON_VENUE_HTTP_CLIENTS`: "the local data_api HTTP API");
 - the reference recorder's raw trades (§1.15, `VERIFY_DATA_DIR`, every copy of an id merged:
   `channel_trades`, `merge_reference`), read one venue hour at a time (files H-1..H+1);
-- the coverage record `<catalog>/../coverage/<venue>.jsonl` and the archive-gap markers.
+- the coverage record `<catalog>/../coverage/<venue>.jsonl` and the archive-gap markers;
+- for an instrument with a liquidation feed (restated: a venue of `LIQUIDATION_VENUES` and its
+  `linear` category, `verification.domain.liquidation_check.has_liquidation_feed`), the day's
+  archived liquidations read raw (`verification.infrastructure.liquidation_reader`, Story 33.3).
+
+**Section 2.15's columns (Story 33.3).** The reference fold (`reference_signals.fold_candles`) also
+computes each bucket's ten integer columns, independently: from the *decoded* `Decimal` values of
+every row (never the stored integers the production fold sums), summed and counted back into units
+at the bucket's finest precisions, with the day's liquidations each `venue_event_id` once (a
+liquidation may make a bucket of its own: `seconds_observed = 0`, observation class `no_data`), and
+the liquidation group null for an instrument without the feed -- and, for one with it, for every
+bucket that does not start at or after the feed start (one before it, or straddling it, at every
+width: §2.15's one feed-start rule), the start being the instrument's earliest archived
+liquidation lowered to the earliest row folded, a bound the oracle reads itself
+(`LiquidationCatalog.first_ts_event`: every file's `ts_event` column, never file names, unlike
+production's `liquidation_feed_since_ns`; read once per instrument per run; the 1W week is null
+whole when it starts before the start). Copies of one `venue_event_id` that disagree are reported
+(`reference_signals.unique_liquidations` raises naming them), never resolved by keeping one. The catalog fold's `judge_bar` (and
+so §1.20's tool too, which reads the same liquidations) and the served `served_agreement` compare
+them **exactly** -- every unit and both precisions; a null where the reference has a value (a
+pre-migration row, a feed's 0 read as unknown), or the reverse, is `different` / `served_differs`.
+A store file not yet migrated is read with NULL for the missing columns, so such a day fails until
+`candles.rebuild` refolds it. The 1W week merges its days' columns the same way. Trade counts are
+now in a bar, so a second whose reference fold differs from its row only in `buy_count` /
+`sell_count` is a differing second too `[amended 2026-10-05: Story 33.3]`.
 
 **Per plan instrument, per width, per bucket of D.** The day grid is `86400 / w` buckets for each
 of the nine widths dividing a day (`DAY_BAR_SECONDS`): the six stored `(60, 300, 900, 3600, 14400,
@@ -2624,19 +2648,27 @@ Three readers, all over that one fold, so they cannot disagree:
 - **The stored closed bar** — `candles.application.queries.window(db, iid, bar_seconds,
   before_ms, limit)`: up to `limit` traded buckets with `t < before_ms`, oldest first, read from
   `candles_<venue>.db` (§5). Each dict is
-  `{t (ms), o, h, l, c, v, seconds_observed, partial, source: "candle_store"}`; `partial` is
+  `{t (ms), o, h, l, c, v, seconds_observed, partial, source: "candle_store"}` followed by §2.15's
+  ten integer keys `buy_v, sell_v, buy_n, sell_n, pv, liq_long_v, liq_short_v, liq_n,
+  price_precision, size_precision` (Story 33.3; null on a pre-migration row, and on a file the
+  collector has not migrated yet, read through `PRAGMA table_info`); `partial` is
   `seconds_observed < 0.9 * bar_seconds` (D-15), meaning the collector only saw part of the
   bucket and its high/low/volume are understated. Only buckets that traded are returned
-  (`o IS NOT NULL`). `latest`, `oldest_t` and `watermarks` are the other reads.
-- **The forming bar** — `candles.application.forming.forming_bar(rows, bar_seconds)`: the newest
-  traded bucket of the live 1 s rows it is given, as `{t (ms), o, h, l, c, v}`, or `None` when
-  nothing traded in them. `views/live_candles.py`'s `LiveCandleBus` calls it per `snapshots:raw` tick over the
+  (`o IS NOT NULL`). `latest`, `oldest_t`, `newest_t`, `bucket_starts`, `flow_delta_before`
+  (§2.15) and `watermarks` are the other reads; the coverage ones (`oldest_t(traded_only=False)`,
+  `newest_t`, `bucket_starts`) count only `seconds_observed > 0`, so a liquidation-only row never
+  makes a span look observed.
+- **The forming bar** — `candles.application.forming.forming_bar(rows, bar_seconds,
+  liquidations)`: the newest traded bucket of the live 1 s rows (and, for an instrument with the
+  liquidation feed, the bucket's liquidations) it is given, as `{t (ms), o, h, l, c, v}` followed
+  by §2.15's ten keys (appended, AD-D12), or `None` when nothing traded in them. `views/live_candles.py`'s `LiveCandleBus` calls it per `snapshots:raw` tick over the
   in-progress bucket's buffer; that dict *is* the `/ws/live` `bar` payload. `bar_seconds` need
   not be one the store keeps (the chart offers 10 m, 30 m, 1 w). The same dict is handed to every
   attached `BarObserver` watching the pair -- the alert engine (§2.11) -- so an alert is evaluated
   on the candle the chart draws, whether or not a chart is open.
 - **The archive-side read** — `candles.application.queries.candle_dicts_for_window(iid, start_ns,
-  end_ns, bar_seconds, snapshot_rows_fn)`: the same fold over raw 1 s rows read from Parquet, for
+  end_ns, bar_seconds, snapshot_rows_fn, liquidation_rows_fn)`: the same fold over raw 1 s rows
+  (and, `liquidation_rows_fn` not None, the window's liquidations: §2.15) read from Parquet, for
   history older than the store's first bucket, and the only source of the read-time widths (10m,
   30m, 45m, 1W). Each dict carries `source: "raw_1s"` and, since Story 31.8, `partial` by the same
   `is_partial(seconds_observed, bar_seconds)` rule as a stored bar (before, a read-time bar carried
@@ -2670,16 +2702,24 @@ epoch-aligned; none is offered (`TIMEFRAMES` holds day divisors and 1W only). Th
 read stays capped at 7 days (`chart_series.MAX_QUERY_SPAN_SECONDS`). **Known limit:** so a 1W
 OFI/OBI pane page holds at most two buckets (the older one computed from only the days inside the
 read -- the OFI/OBI replay, `indicator_series_page`, still queries unaligned windows: audit D-122,
-OPEN), and the picker's custom indicators (CVD, cancel pressure, delta OFI) carry a value only on
-the last 7 1D bars or the last 1W bar of a page (§2.7); upgrade path: stored per-bar aggregates,
-paged like the candle store, instead of raw-row replays. Known limit (research):
+OPEN), and the picker's raw-delta custom indicators (cancel pressure, delta OFI) carry a value only
+on the last 7 1D bars or the last 1W bar of a page (§2.7); upgrade path: stored per-bar aggregates,
+paged like the candle store, instead of raw-row replays -- which is what CVD now reads (§2.15,
+Story 33.3). Known limit (research):
 `ReturnSeries.resample` keys buckets by `ts // period` (its invariant: every stamp a multiple of the
 period), so a 604800 s resample there is epoch-(Thursday-)anchored; upgrade path: an anchored grid
 in `ReturnSeries`.
 
 `candles.domain.candle.is_valid_candle` is the shape guard every served candle passes
-(`l <= min(o,c) <= max(o,c) <= h`, `v >= 0`, all finite); a violator is a bug upstream, failed
-loudly as a 500 and counted (`candles.invalid_candle`), never clamped (DATA-07).
+(`l <= min(o,c) <= max(o,c) <= h`, `v >= 0`, all finite, and since Story 33.3 §2.15's rules: flow
+all null or all set, no negative volume or count, `buy_v + sell_v == round(v * 10**size_precision)`,
+`liq_n` 0 exactly when both liquidated volumes are); a violator is a bug upstream, failed loudly as
+a 500 and counted (`candles.invalid_candle`), never clamped (DATA-07).
+
+`GET /api/candles/{iid}`'s `CandleItem` and the `/ws/live` `bar` payload carry the same ten keys
+after their existing ones (AD-D12: added keys only, every existing key keeps its value); an item's
+own `price_precision`/`size_precision` govern its units (they may be finer than the response's
+definition precisions after a venue changed them), and every key of a gap marker is null.
 
 ### 2.6 Book features (`views/chart_series.py`, was `ml_signals/book_features.py`)
 
@@ -2704,9 +2744,11 @@ candle store, then the archive's seconds -> bars fold), `snapshot_series_page`/`
 nothing traded),
 `indicator_series_page` (per-bar OFI/OBI replay, microprice, spread: `replay_bucket_samples`,
 the last value per bucket, the §2.2 gap rule and §2.5 bucket rule, OBI's zero-total Known limit of
-§2.3) and `indicator_values_page` (whose custom indicators replay raw seconds/deltas over a window
-capped at `MAX_QUERY_SPAN_SECONDS`, 7 days, back from the page's end: an older bar of a long 1W/1D
-page carries None for them, MEM-01)
+§2.3) and `indicator_values_page` (whose raw-delta custom indicators -- cancel pressure, delta
+OFI -- replay raw deltas over a window capped at `MAX_QUERY_SPAN_SECONDS`, 7 days, back from the
+page's end: an older bar of a long 1W/1D page carries None for them, MEM-01; CVD reads the bars'
+own stored `buy_v - sell_v` instead, so every bar of every width has a value, with an `anchor`
+param, §2.15 `[amended 2026-10-05: Story 33.3]`)
 (the picker's indicators over the chart's own candles, via `views.indicator_picker`). Every
 archived second is priced as written -- a crossed second (`bid >= ask`) included: today's gate
 never writes one (`SecondSampler` rejects it as `Crossed`, Story 26.1), so one in the archive predates that
@@ -3064,6 +3106,193 @@ changes); this one is executed trades.
   precision). The chart polls for a new bar only once one can have closed (`useFootprint`), so a
   1D/1W chart does not re-read days of trades every minute.
 
+### 2.15 Per-bar order flow and liquidation aggregates (the `candles/` context, Story 33.3)
+
+The one seconds -> bars fold (§2.5, `candles.domain.fold.fold_arrays`) also sums each bucket's
+order flow and liquidations, as **exact integers**, into ten columns stored beside `o/h/l/c/v`,
+served after them, and pushed on `/ws/live`. They are stored inputs, not signals (SIGNAL-01): a
+flow indicator (CVD now, Story 33.6's set next) reads them, never a raw-second replay.
+
+| Column | Units | What it sums |
+|---|---|---|
+| `buy_v` / `sell_v` | `10^-size_precision` | every second's `buy_volume` / `sell_volume` units (§1.7) |
+| `buy_n` / `sell_n` | trades | every second's `buy_count` / `sell_count` |
+| `pv` | `10^-(price_precision + size_precision)` | `close_price_units x (buy + sell)` over the traded seconds: the VWAP numerator (`vwap = pv / (buy_v + sell_v)`, rescaled) |
+| `liq_long_v` / `liq_short_v` | `10^-size_precision` | the `Liquidation` rows' `size_units` (§1.26) by liquidated side: `long` is a forced **sell**, `short` a forced **buy** |
+| `liq_n` | liquidations | the bucket's liquidations, each `venue_event_id` once |
+| `price_precision` / `size_precision` | decimals | the bucket's finest (max) precision over its seconds and liquidations |
+
+- **Exact.** The sums are of the snapshot's integer units (never its decoded floats) and of the
+  liquidations' `size_units`. A part at a coarser precision is rescaled by `10**k` (exact). The
+  fold and the merge sum in exact Python integers at any magnitude and never raise on size: a
+  read-time fold (a `raw_1s` page, the forming bar, a non-stored width such as 1W or 45m) returns
+  the exact sum, since it never reaches SQLite. Only the store write refuses a value outside int64
+  (the INTEGER column's range): `candles.domain.fold.check_storable` raises `CandleOverflowError`
+  before binding, never a wrapped or REAL value (the live sink ledgers it at
+  `collector.candle_store`, the rebuild fails loudly). Known limit (stored ceiling): the column that
+  binds first is `pv`, price units x size units. Bybit BTCUSDT spot (size precision 6,
+  `basePrecision` 0.000001; price precision 1-2) at ~1e5 USDT is at most ~1e7 price units, and a
+  busy day of ~2e4 BTC is ~2e10 size units, so a stored 1D `pv` is ~2e17 against int64's 9.2e18
+  (a factor ~45); the volumes and counts are far below. Upgrade path: a wider stored encoding of
+  `pv` (TEXT decimal or two INTEGER limbs) before any stored 1D `pv` nears 1e18. A
+  liquidation carries no price into the fold, so a bucket only a liquidation made has
+  `price_precision = 0` (its `pv` is 0 at any precision) until a second merges in. A liquidation
+  falls in `bucket_start_ms(ts_event // 1_000_000, bar)`, the one bucket rule.
+- **Null vs 0.** Null is unknown, never 0: a row stored before the migration (and a bucket that
+  merged one) keeps null flow and liquidation columns until `python -m candles.rebuild` refolds its
+  day. Known limit (null group, claimed id): a liquidation merged live into a bucket whose stored
+  liquidation group is null (a pre-migration row, or a bucket before or straddling the feed start)
+  is counted in no bar of that width until the nightly rebuild of its day recounts it from the
+  archive, while its `venue_event_id` is already claimed in `liquidations_applied` -- a claim is per
+  liquidation, not per width (the same liquidation may count at 1m and be null at 1D), so a
+  catch-up replay does not re-offer it either. Upgrade path: the operator's history rebuild
+  (DEPLOY_CHECKLIST 33-3) refolds every pre-migration day; after it only the straddling bucket,
+  null by the feed-start rule, remains. The liquidation group is null for an instrument without a liquidation feed and 0 for one
+  with the feed but none in the bucket; "has a feed" is the one predicate
+  `kernel.liquidation.has_liquidation_feed`: Bybit `-LINEAR` ids only (Bybit spot has no stream,
+  Hyperliquid no market-wide feed, §1.26, Story 33.2; dYdX's `LIQUIDATED` trade type is dropped by
+  the adapter). Known limit (audit D-156): a window the liquidation socket missed reads 0 in the
+  bar, not null; the coverage record names it (`liquidations_unrecoverable`, §1.26); upgrade path:
+  the rebuild nulls the liquidation columns of every bucket overlapping such a window.
+- **One feed-start rule (review loops 1 and 2, audit D-160).** "Has a feed" is a per-id rule,
+  but a feed has a start: history archived before Story 33.1's feed existed must not read "no
+  liquidation". A feed id's `liq_*` are known for a bucket only if the bucket **starts at or
+  after** the id's feed start `since_ns`; a bucket before it, or straddling it, is null at every
+  width (`candles.domain.fold.LiquidationArrays.since_ns`, `first_bucket_at_or_after`), and a
+  liquidation inside a straddling bucket is counted in no bar and creates no row. Every path
+  derives `since_ns` as a minimum, and the fold lowers it to its own earliest row, so a row older
+  than a path's bound moves the bound and never raises:
+  - the rebuild (`rebuild_instrument` -> `rebuild_day`): the store's persisted start, the archive's
+    earliest `Liquidation.ts_event` (`kernel.catalog_files.liquidation_feed_since_ns`,
+    column-projected from the earliest file(s) by name span) and the day's rows; it persists the
+    result back;
+  - the `raw_1s` page (`views.chart_series._parquet_page`) and the technicals fallback
+    (`views.ranking_columns._read_candles`): the store's persisted start (one indexed SELECT,
+    `candles.application.queries.liquidation_feed_since`), else -- only when the store has no row
+    -- the archive's earliest (`views.catalog_reads.liquidation_feed_start`), lowered to the rows
+    folded, the live tail's included (`candles.domain.fold.archive_liquidations`). Known limit:
+    while the store has a row, archived liquidations older than it (history archived before the
+    store existed, not rebuilt yet) are not consulted, so that span reads null until a rebuild of
+    it lowers the stored start;
+  - the live sink: the store's `liquidation_feed_since(instrument_id, since_ns)` table, lowered by
+    `apply_liquidations` to its rows' earliest `ts_event`. `apply_seconds` folds a fragment with
+    0 only for buckets starting at or after it, null otherwise (no row: null everywhere), and capture
+    applies a flush's liquidations before its seconds, so the live store and a later rebuild of the
+    same day store the same `liq_*` bucket for bucket;
+  - the live bus's forming bar (`views.live_candles.LiveCandleBus`): the archive's earliest, never
+    read on the event loop -- in each seed's thread, and otherwise by a background
+    `asyncio.to_thread` refresh at most every 300 s (`FEED_SINCE_REFRESH_SECONDS`; a failed read
+    is ledgered at `live_candles.feed_since` and keeps the previous value) -- and the earliest
+    liquidation seen live. Known limit: this is the same rule but not the same bound as the
+    store's persisted start, so until the archive read lands, or while the store's start is
+    earlier than both, the forming bar reads null where the stored bar of the same bucket reads a
+    known value, and until a rebuild lowers the store's start to the archive's (after a deploy the
+    store's start is the earliest liquidation the live sink applied) the reverse: known here, null
+    in the store. The bound never makes a false 0 (every source is a liquidation the feed
+    delivered), but a `liquidations:raw` frame the bus never received (pub/sub is at most once: a
+    reconnect, or a liquidation published before a data_api restart and not yet flushed when the
+    seed read the archive) leaves the forming bar short, 0 where the bucket holds one, until the
+    bucket rolls; the chart's next history read shows the stored value;
+  - the oracle: the same rule restated from its own raw read (`LiquidationCatalog.first_ts_event`,
+    once per instrument per run; `reference_signals.KnownLiquidations`, §1.21), which reports
+    disagreeing copies of one `venue_event_id` (`ValueError`), never keeping one.
+
+  With no start known anywhere every bucket is null. Known limit: the archive cannot say when the
+  feed started, only when its first liquidation landed, so the span between the two is null
+  (conservative), and so is the bucket holding the first liquidation unless it starts exactly at
+  it. Known limit: an id's very first liquidation may reach the live sink in a later flush than
+  seconds after it (a separate socket); those seconds' buckets were folded with no start known and
+  stay null until the nightly rebuild of the day, never a false 0. Upgrade path for both: a durable
+  per-id "feed confirmed since" marker written by capture when the liquidation socket subscribes.
+- **Known limit (untraded liquidations, audit D-162).** A liquidation in a bucket with no trade is
+  stored (its row exists, `liq_*` counted) but not served, since a bar exists only for a traded
+  bucket (`o IS NOT NULL`); so the served 1m bars' `liq_*` of an hour can sum short of the 1h bar's,
+  which holds every liquidation of the hour. Upgrade path: Story 33.4's `liquidation_bars` reads the
+  columns without the `o IS NOT NULL` filter.
+- **The `v` identity.** On every bar whose flow is known, `buy_v + sell_v == round(v *
+  10**size_precision)`: `v` stays the float sum it always was, byte for byte, and the integers are
+  its exact counterpart. `candles.domain.candle.is_valid_candle` refuses a bar breaking it, a
+  negative count or volume, partly null flow, `liq_n = 0` with a liquidated volume, or `liq_n > 0`
+  without one (a 500 at `candles.invalid_candle`, DATA-07). Known limit (audit D-155): the check
+  is exact, so it fails once the float sum's error reaches half a unit; that error is at most about
+  `n * u * U` units (`u` = 2^-53, `n` the summed seconds, `U` the bar's volume in units), so the
+  worst case breaches at `U ~= 2^52 / n`: about 5.2e10 units at 1D (`n` = 86,400) and 7.4e9 at 1W
+  (`n` = 604,800, a read-time width). Bybit BTCUSDT spot, size precision 6 (`basePrecision`
+  0.000001), trades ~2e4 BTC a day: ~2e10 units a day (under the 1D bound) and up to ~1e11 a week,
+  so the 1W worst-case bound **is** exceeded for BTC spot (~7 units of possible error). The typical
+  error, rounding to nearest being a random walk, is about `u * U * sqrt(n)`: ~1e-16 x 1e11 x 780
+  ~= 1e-2 units there, far below 0.5, so a false refusal is not expected -- but not proven
+  impossible. A breach is loud (500 + `candles.invalid_candle`), never silent. Upgrade path: derive
+  `v` from the units (`(buy_v + sell_v) / 10**size_precision`) once the store's OHLCV columns are
+  integer, which makes the identity hold by construction.
+- **The merge.** A bucket folded in parts (flushes, a liquidation before its seconds) is combined
+  by `candles.domain.fold.merge_buckets`, the store's one merge rule, in Python: `o` keeps the older
+  part's, `c` takes the newer's, `h`/`l` NULL-safe max/min, `v` and `seconds_observed` added (the
+  same IEEE sums the old SQL `_UPSERT` made), the integer groups rescaled to the finer precision and
+  added, a group null on either side null in the result. The store reads the fragment's rows (one
+  SELECT per width), merges and writes them back (`INSERT OR REPLACE`) inside one `BEGIN IMMEDIATE`
+  transaction (`sqlite_store._immediate`, every write path: `apply_seconds`, `apply_liquidations`,
+  the rebuilds), so no other connection can write between the read and the replace.
+- **Liquidations exactly once.** `liquidations_applied(instrument_id, venue_event_id, ts_event)`
+  records every applied liquidation; the live sink (`CandleSink.apply_liquidations`, before each
+  flush's seconds; a row of another instrument is refused), the startup catch-up (the last day of
+  `kernel.catalog_files.query_liquidations`, for every feed id of the watermarks and the plan,
+  whatever its seconds' state) and the rebuild (which deletes and re-inserts its day's ids) all skip an id already there, so a
+  replayed batch or a catch-up overlap counts once. A liquidation may create a bucket row with
+  `seconds_observed = 0`; it is never served (no trade) and never coverage (every coverage query
+  counts `seconds_observed > 0` only). Ids older than two days are pruned (the catch-up spans one
+  day; `tests/test_liquidation_dedup_retention.py` holds the retention above the window plus a
+  flush).
+- **Migration.** `connect_rw` adds the ten columns to an older file (`ALTER TABLE ... ADD COLUMN`,
+  null on old rows, the columns re-read inside a `BEGIN IMMEDIATE` lock so a collector and a
+  rebuild opening the file together migrate it once) and creates `liquidations_applied` and
+  `liquidation_feed_since`; a read-only reader of a file not migrated
+  yet selects NULL for them. The operator refolds history with `candles.rebuild` (DEPLOY_CHECKLIST,
+  Story 33.3).
+- **Live.** `views.live_candles.LiveCandleBus` also subscribes `liquidations:raw` and folds each
+  row of a feed instrument into the forming bucket of every buffer of its instrument (deduped by
+  `venue_event_id`, reset at the bucket roll; a fresh or rolled buffer starts from the recent
+  tail's), republishing each changed pair once per frame and isolating a pair whose fold fails
+  (`live_candles.publish`, the seed's publish too: a failed seed publish un-marks the pair so the
+  next subscribe re-seeds it). A first tick into the bucket a seed already filled keeps the seed's
+  archived liquidations (only a changed bucket resets them). The forming bar's columns are the
+  same fold of the same rows as the stored bar's, bounded by the same rule; where the bus's feed
+  start is later than the store's (the live bus's Known limit above), its `liq_*` read null;
+  the archive-side page folds the window's archived liquidations plus the bus's recent tail
+  (`recent_liquidations`), each venue event once.
+- **Known limit (JSON range).** `pv` (and a very large volume) can exceed 2^53, which a browser's
+  `JSON.parse` rounds to the nearest double; Python consumers get the exact int. The UI uses `pv`
+  only as a VWAP numerator (`pv / (buy_v + sell_v)`), where a 2^-53 relative error is invisible.
+  Upgrade path: a string encoding of the integer columns (an added key, AD-D12).
+- **Known limit (`pv`).** The second-close VWAP: each second's whole volume is weighted at that
+  second's close, not each trade at its own price, so a second that swept several levels prices
+  them all at its last (audit D-158). Upgrade path: Story 32.8's raw trade reader
+  (`kernel.catalog_files.query_trade_columns`) summing `price x size` per trade into the bar.
+
+**CVD from the bars.** The picker's `CumulativeVolumeDelta` (`views.indicator_picker._cvd_replay`)
+is the running sum of `buy_v - sell_v` over the page's candles, exact in integer units at the
+finest precision present and a float only in the output; a bar with null flow is None and the sum
+carries on past it *without* that bar's term. Known limits (audit D-161): a level after a
+pre-migration gap therefore omits the gap's bars until the operator's history rebuild fills them;
+`all`'s stored prefix sums the known bars only (a null bar before the window adds nothing); and a
+page whose bars are older than the store's first bar of that width (`raw_1s` history, pruned
+1m/5m) has no prefix, so `all` accumulates from 0 at the page's first bar, as `visible` does. Its `anchor` param (catalog `choices`, checked at save):
+- `visible` (the default): 0 before the first candle on screen -- net flow within the view;
+- `session`: 0 at each UTC day's first bar (`bucket_start_ms(t, 86_400)`), so on 1D and wider
+  every bar is its own session;
+- `all`: the exact stored `Σ(buy_v - sell_v)` before the first candle
+  (`candles.application.queries.flow_delta_before`, one indexed SQLite aggregate per precision, at
+  the widest stored width tiling the chart's: 10m -> 5m, 30m/45m -> 15m, 1W -> 1D) plus the running
+  sum. Known limit (audit D-159): the store keeps 1m bars 30 days and 5m bars 90 (`RETAIN_DAYS`), so
+  at 1m, 5m and 10m "all" starts at that retention edge, not at the first trade ever; and the
+  aggregate is O(stored bars before the window), at most 43,200 at 1m. Upgrade path: a per-day
+  delta table kept past the bars' retention and summed by day. No stored running total exists: a
+  per-bar prefix would have to be rewritten for every later bar whenever the nightly rebuild
+  recomputes a closed day, breaking the one-writer-per-instrument-day invariant.
+
+There is no raw-second replay and no 7-day window for CVD any more: every bar of every width,
+historical or live, has a value from its stored flow.
+
 ---
 
 ## 3. Ranking engine (`platform/ranking/`, the `ranking_engine` service)
@@ -3286,6 +3515,8 @@ can find and add a coin without looking its id up elsewhere.
 | `DydxSecondSnapshot` mid-price sequence (300-tick window) | `statistics.stdev` fast volatility | `volatility_fast` | separate from `volatility_score` and catalog `volatility` — 3 distinct volatility numbers by design |
 | `DydxSecondSnapshot.close_price` (25h lookback; `TradeTick` pre-cutover) | `ranking.domain.metrics.price_stats_from_series()` → `pct_change_1h/24h`, catalog `volatility` | `pct_1h`, `pct_24h`, `volatility` | over the in-memory `PriceSeriesStore` (fed live, backfilled once per instrument from the catalog), refreshed every 60s by the ranking slow loop. `pct_1w`/`pct_1m` come from `metrics_store`'s persisted prices (`price_near_days_ago`), `None` until 7/30 days of history exist |
 | dYdX indexer `volume24H`, Bybit v5 tickers `turnover24h` (linear; spot USDT/USDC-quoted only), Hyperliquid `metaAndAssetCtxs` `dayNtlVlm` (independent polls in `ranking/infrastructure/volume_*`) | — (used as-is, USD) | `volume24h` | **this is the sort key when mode = `"volume"` (default)**; an instrument with no volume is absent from that mode and counted at `ranking_engine.volume24h` |
+| `DydxSecondSnapshot.buy_volume`/`sell_volume`/`buy_count`/`sell_count`/`close_price` units (§1.7) | the candle store's `buy_v`, `sell_v`, `buy_n`, `sell_n`, `pv` (§2.15, folded once by `candles.domain.fold`) → CVD (`anchor` session/visible/all), Story 33.6's flow indicators | *not present* | per bar, exact integers at the bar's precisions; `/api/candles` and `/ws/live` serve them (Story 33.3) |
+| `Liquidation.side`/`size_units` (§1.26, Bybit linear only) | the candle store's `liq_long_v`, `liq_short_v`, `liq_n` (§2.15) | *not present* | each `venue_event_id` once (`liquidations_applied`); null for an instrument without the feed, 0 for a quiet bucket of one with it (Story 33.3) |
 | `OrderBookDeltas` | `book_features.py`, `chart_data.py`, `footprint.py` | *not present* | chart-page-only; never reaches `ranking_engine` |
 | `MarkPriceUpdate` / `IndexPriceUpdate` | — | *not present* | research notebook frames only (`CatalogFrames.mark_index`, Story 27.1); `ranking` no longer backfills prices from marks (Story 31.3) |
 | `FundingRateUpdate` | — | *not present* | research notebook frames only (`CatalogFrames.funding`, Story 27.1) |

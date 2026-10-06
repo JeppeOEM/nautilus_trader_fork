@@ -21,8 +21,10 @@ side from importing `views`, `candles` or `data_api` -- the reference side never
 checks (DATA-02, `tests/test_boundaries.py`'s `NON_VENUE_HTTP_CLIENTS`).
 
 The response contract (`data_api/routes/candles.py`, `docs/DATA_DICTIONARY.md` section 2.5):
-`{"items": [{"t", "o", "h", "l", "c", "v", "partial"}], "has_more", "venue", "market"}`, items
-oldest first, every `t < before_ns`; an item whose `o` is null is a gap row, ignored. A page that
+`{"items": [{"t", "o", "h", "l", "c", "v", "partial", <section 2.15's ten integer keys>}],
+"has_more", "venue", "market"}`, items oldest first, every `t < before_ns`; an item whose `o` is
+null is a gap row, ignored. An integer key must be an integer or null (never a float: units are
+exact). A page that
 does not have this shape is refused (`Unservable`), as is an unreachable server or a non-200 status:
 a verdict over a page the tool could not read would be a guess.
 """
@@ -47,7 +49,20 @@ from verification.domain.conservation import NS_PER_S
 # The whole page's deadline: a local server answers one bounded page in well under a second; one
 # that does not within this is refused rather than waited on.
 TIMEOUT_S = 60
-_ITEM_KEYS = frozenset({"t", "o", "h", "l", "c", "v", "partial"})
+# Section 2.15's per-bar order-flow and liquidation keys (Story 33.3), restated from the route.
+_AGGREGATE_KEYS = (
+    "buy_v",
+    "sell_v",
+    "buy_n",
+    "sell_n",
+    "pv",
+    "liq_long_v",
+    "liq_short_v",
+    "liq_n",
+    "price_precision",
+    "size_precision",
+)
+_ITEM_KEYS = frozenset({"t", "o", "h", "l", "c", "v", "partial", *_AGGREGATE_KEYS})
 _VALUE_KEYS = ("o", "h", "l", "c", "v")
 _HTTP_SCHEMES = frozenset({"http", "https"})
 
@@ -91,6 +106,15 @@ def _number(item: dict[str, Any], key: str, where: str) -> float | None:
     return float(value)
 
 
+def _integer(item: dict[str, Any], key: str, where: str) -> int | None:
+    value = item.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise Unservable(f"{where}: `{key}` is {value!r}, not an integer")
+    return value
+
+
 def _bar(item: Any, where: str) -> ServedBar | None:
     """Parse one item; None for a gap row (`o` null)."""
     if not isinstance(item, dict) or not set(item) <= _ITEM_KEYS or "t" not in item:
@@ -103,7 +127,8 @@ def _bar(item: Any, where: str) -> ServedBar | None:
     o, h, low, c, v = (_number(item, key, where) for key in _VALUE_KEYS)
     if o is None:
         return None
-    return ServedBar(t=t, o=o, h=h, l=low, c=c, v=v, partial=partial)
+    aggregates = {key: _integer(item, key, where) for key in _AGGREGATE_KEYS}
+    return ServedBar(t=t, o=o, h=h, l=low, c=c, v=v, partial=partial, **aggregates)
 
 
 def parse_page(body: bytes, before_ms: int, where: str) -> ServedPage:

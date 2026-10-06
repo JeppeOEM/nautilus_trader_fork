@@ -15,7 +15,9 @@
 """
 Read-only catalog file helpers (DDD spine AD-D3): the read twin of `venue_http` -- file-span and
 leaf listing plus column-projected Parquet reads of the second-snapshot rows over the catalog root,
-and of the raw trade archive's integer columns (`query_trade_columns`, Story 32.8).
+and of the raw trade archive's integer columns (`query_trade_columns`, Story 32.8), and of the
+archived liquidations (`query_liquidations`, and their archive-side start,
+`liquidation_feed_since_ns`, Story 33.3).
 
 Invariant: reading only. Nothing here writes, renames or deletes a catalog file, or constructs a
 `ParquetDataCatalog` (the catalog object's decoder turns every row's 20-level book into Python
@@ -24,7 +26,7 @@ from Nautilus's own `class_to_filename`, so they can never drift from what `writ
 Files are selected by their name's `ts_init` span (`kernel.clocks.CatalogFileSpan`) and rows by
 their exact `ts_event` (MEM-01: callers read one instrument, and the rebuilds one day, at a time).
 Only `query_second_ohlc` and `query_top_of_book` widen the span by `READ_SPAN_MARGIN_NS`
-(`query_index_prices` and `query_trade_columns` by `MAX_TS_INIT_SKEW_NS`);
+(`query_index_prices`, `query_trade_columns` and `query_liquidations` by `MAX_TS_INIT_SKEW_NS`);
 `files_by_day` and `data_file_ranges` take the span as written, as their pre-kernel originals did --
 the rebuild re-reads a whole day, so a row whose `ts_init` lands in the neighbouring file is picked
 up there.
@@ -37,6 +39,7 @@ read.
 
 import glob
 import os
+from types import MappingProxyType
 from typing import NamedTuple
 
 import numpy as np
@@ -49,6 +52,7 @@ from kernel.clocks import NS_PER_DAY
 from kernel.clocks import NS_PER_MS
 from kernel.clocks import READ_SPAN_MARGIN_NS
 from kernel.clocks import CatalogFileSpan
+from kernel.liquidation import Liquidation
 from kernel.second_snapshot import OHLC_UNIT_COLUMNS
 from kernel.second_snapshot import PRECISION_COLUMNS
 from kernel.second_snapshot import TOP_OF_BOOK_COLUMNS
@@ -71,8 +75,16 @@ from nautilus_trader.persistence.funcs import class_to_filename
 
 
 SNAPSHOT_DIRNAME = class_to_filename(DydxSecondSnapshot)  # "custom_dydx_second_snapshot"
-_TRADE_READ_COLUMNS = ("ts_event", *PRECISION_COLUMNS, *OHLC_UNIT_COLUMNS, *VOLUME_UNIT_COLUMNS)
+_COUNT_COLUMNS = ("buy_count", "sell_count")
+_TRADE_READ_COLUMNS = (
+    "ts_event",
+    *PRECISION_COLUMNS,
+    *OHLC_UNIT_COLUMNS,
+    *VOLUME_UNIT_COLUMNS,
+    *_COUNT_COLUMNS,
+)
 INDEX_PRICE_DIRNAME = class_to_filename(IndexPriceUpdate)  # "index_price_update"
+LIQUIDATION_DIRNAME = class_to_filename(Liquidation)  # "custom_liquidation"
 
 
 def snapshot_files(catalog_path: str, instrument_id: str) -> list[str]:
@@ -151,14 +163,36 @@ def _optional(value: float) -> float | None:
 
 
 def _ohlc_rows(path: str, start_ns: int, end_ns: int) -> list[SecondOHLC]:
+    """
+    One file's `SecondOHLC` rows. A null volume, count or precision is refused (`ValueError` naming
+    the file and column, `_refuse_null_flow`) before any decode, exactly as `second_ohlc_arrays`
+    refuses it: these rows feed the same exact order-flow fold (the live bus's seed, the `raw_1s`
+    page, the catch-up), and a None unit would fail it unnamed or read as a fabricated 0.
+    """
     table = _read_snapshot_columns(path, list(_TRADE_READ_COLUMNS), start_ns, end_ns)
+    _refuse_null_flow(table, path)
     values = trade_float_columns(table)
     ts = table.column("ts_event").to_pylist()
+    units = {
+        name: table.column(name).to_pylist()
+        for name in (*PRECISION_COLUMNS, "close_price", *VOLUME_UNIT_COLUMNS, *_COUNT_COLUMNS)
+    }
     return [
         SecondOHLC(
-            ts[i],
-            *(_optional(values[name][i]) for name in OHLC_UNIT_COLUMNS),
-            *(float(values[name][i]) for name in VOLUME_UNIT_COLUMNS),
+            ts_event=ts[i],
+            open_price=_optional(values["open_price"][i]),
+            high_price=_optional(values["high_price"][i]),
+            low_price=_optional(values["low_price"][i]),
+            close_price=_optional(values["close_price"][i]),
+            buy_volume=float(values["buy_volume"][i]),
+            sell_volume=float(values["sell_volume"][i]),
+            price_precision=units["price_precision"][i],
+            size_precision=units["size_precision"][i],
+            close_price_units=units["close_price"][i],
+            buy_volume_units=units["buy_volume"][i],
+            sell_volume_units=units["sell_volume"][i],
+            buy_count=units["buy_count"][i],
+            sell_count=units["sell_count"][i],
         )
         for i in range(table.num_rows)
     ]
@@ -329,16 +363,26 @@ def second_ohlc_arrays(paths: list[str]) -> dict[str, np.ndarray]:
     row's precisions (`trade_float_columns`); each file opened once. The rebuild's read path: no
     per-row Python objects, no per-call directory scan. A float-layout file raises
     `LegacySnapshotLayoutError`.
+
+    Story 33.3 adds the same rows' integer columns as int64 arrays, never through a float:
+    `close_units` (0 where nothing traded: `c` is NaN there and the fold reads no close),
+    `buy_units`, `sell_units`, `buy_n`, `sell_n`, `price_precision` and `size_precision` -- the
+    order-flow fold's input (`candles.domain.fold.FlowArrays`). Only the close may be null there (a
+    second without a trade); a null volume, count or precision raises `ValueError` naming the file
+    and column (`_flow_units`).
     """
     out = {k: np.empty(0, dtype=np.float64) for k in ("o", "h", "l", "c", "v")}
     out["ts_ms"] = np.empty(0, dtype=np.int64)
+    out.update({k: np.empty(0, dtype=np.int64) for k in _FLOW_ARRAY_COLUMNS.values()})
     parts: list[dict[str, np.ndarray]] = []
     for path in paths:
         pf = pq.ParquetFile(path)
         require_integer_layout(pf.schema_arrow, path)
         table = pf.read(columns=list(_TRADE_READ_COLUMNS))
+        flow = _flow_units(table, path)  # first: a null volume is refused before any decode
         values = trade_float_columns(table)
         values["ts_event"] = table.column("ts_event").to_numpy().astype(np.int64)
+        values.update(flow)
         parts.append(values)
     if not parts:
         return out
@@ -346,7 +390,51 @@ def second_ohlc_arrays(paths: list[str]) -> dict[str, np.ndarray]:
     out["ts_ms"] = joined["ts_event"] // NS_PER_MS
     out["o"], out["h"], out["l"], out["c"] = (joined[k] for k in OHLC_UNIT_COLUMNS)
     out["v"] = joined["buy_volume"] + joined["sell_volume"]
+    out.update({k: joined[k] for k in _FLOW_ARRAY_COLUMNS.values()})
     return out
+
+
+# Snapshot column -> `second_ohlc_arrays` key of the integer order-flow inputs (Story 33.3).
+_FLOW_ARRAY_COLUMNS = MappingProxyType(
+    {
+        "close_price": "close_units",
+        "buy_volume": "buy_units",
+        "sell_volume": "sell_units",
+        "buy_count": "buy_n",
+        "sell_count": "sell_n",
+        "price_precision": "price_precision",
+        "size_precision": "size_precision",
+    }
+)
+
+
+# The one integer input that may be null: the close of a second in which nothing traded.
+_NULLABLE_FLOW_COLUMNS = frozenset({"close_price"})
+
+
+def _flow_units(table: pa.Table, path: str) -> dict[str, np.ndarray]:
+    """
+    Return the integer columns as int64. A null close (no trade) reads 0, never NaN: the fold reads
+    no close where `c` is NaN. A null anywhere else (a volume, a count, a precision) is refused with
+    `ValueError` naming the file and column -- a 0 there would be a fabricated "nothing traded" the
+    exact order-flow sums would carry into every bar (DATA-07).
+    """
+    _refuse_null_flow(table, path)
+    return {
+        key: table.column(name).fill_null(0).to_numpy().astype(np.int64)
+        for name, key in _FLOW_ARRAY_COLUMNS.items()
+    }
+
+
+def _refuse_null_flow(table: pa.Table, path: str) -> None:
+    """Raise `ValueError` naming `path` and the column for a null outside the close (DATA-07)."""
+    for name in _FLOW_ARRAY_COLUMNS:
+        nulls = table.column(name).null_count
+        if nulls and name not in _NULLABLE_FLOW_COLUMNS:
+            raise ValueError(
+                f"{path}: {nulls} null value(s) in the integer column {name!r}, "
+                f"refused: the order-flow fold never reads a missing value as 0"
+            )
 
 
 # -- raw trades (Story 32.8) -------------------------------------------------------------------------
@@ -555,3 +643,93 @@ def _require_agreeing_copies(
             f"{instrument_id}: trade {ids[bad].as_py()!r} is stored twice with different "
             f"price, size or side, refused"
         )
+
+
+# -- liquidations (Story 33.3) -------------------------------------------------------------------------
+
+
+def query_liquidations(
+    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int
+) -> list[Liquidation]:
+    """
+    Every archived `Liquidation` of the instrument with `ts_event` in the inclusive
+    `[start_ns, end_ns]`, sorted by `ts_event`, each venue event once: the candle fold's liquidation
+    input (the live catch-up, the rebuild, the forming bar's seed, the archive-side read).
+
+    Files are chosen by their `ts_init` span widened by `MAX_TS_INIT_SKEW_NS`, as the trade read
+    does. One `venue_event_id` stored twice (a minute file and its consolidated day file) is kept
+    once; copies that disagree on anything but `ts_init` (the receive stamp of one venue event may
+    differ between two deliveries) raise `ValueError` naming the id -- the caller ledgers it, never
+    picks one (DATA-07). No liquidation directory (an instrument without the feed, or none yet):
+    `[]`.
+
+    MEM-01: the caller bounds the window (a day at most); this reads all of it at once.
+    """
+    directory = os.path.join(catalog_path, "data", LIQUIDATION_DIRNAME, instrument_id)
+    kept: dict[str, Liquidation] = {}
+    for path in sorted(glob.glob(os.path.join(directory, "*.parquet"))):
+        if not CatalogFileSpan.from_path(path).overlaps(start_ns, end_ns, MAX_TS_INIT_SKEW_NS):
+            continue
+        table = pq.read_table(
+            path,
+            columns=list(Liquidation.schema().names),
+            filters=[("ts_event", ">=", start_ns), ("ts_event", "<=", end_ns)],
+        )
+        for values in table.to_pylist():
+            _keep_once(kept, Liquidation.from_dict(values), instrument_id)
+    return sorted(kept.values(), key=lambda row: (row.ts_event, row.venue_event_id))
+
+
+def _keep_once(kept: dict[str, Liquidation], row: Liquidation, instrument_id: str) -> None:
+    """Keep the first copy of a venue event; refuse a second copy that is not the same event."""
+    first = kept.setdefault(row.venue_event_id, row)
+    if first is row:
+        return
+    same = {**Liquidation.to_dict(first), "ts_init": 0} == {
+        **Liquidation.to_dict(row),
+        "ts_init": 0,
+    }
+    if not same:
+        raise ValueError(
+            f"{instrument_id}: liquidation {row.venue_event_id!r} is stored twice with different "
+            f"values ({first!r} vs {row!r}), refused"
+        )
+
+
+def liquidation_feed_since_ns(catalog_path: str, instrument_id: str) -> int | None:
+    """
+    Return the earliest archived `Liquidation.ts_event` of the instrument, or None when none is
+    archived: the archive's part of a feed instrument's feed start, from which its bars may say "no
+    liquidation" (0) rather than "unknown" (null). Every archive-side fold of a feed id passes it --
+    the rebuild (which lowers it to the store's persisted start), the `raw_1s` page and the
+    technicals fallback (lowered to the rows folded; `candles.domain.fold.LiquidationArrays.
+    since_ns`), and the live bus reads it as well -- so history archived before the feed existed
+    (Story 33.1) is never stored or served as 0. A bucket is known only if it starts at or after
+    the start: a straddling one is null at every width (Story 33.3 review loop 2).
+
+    Column-projected (`ts_event` only), from the earliest file(s) by filename span: files are
+    visited in span-start order and the walk stops at the first file whose span starts more than
+    `MAX_TS_INIT_SKEW_NS` after the earliest `ts_event` found (no row of it, or of any later file,
+    can be earlier: a row's `ts_init` trails its `ts_event` by at most that bound).
+
+    Known limit: the archive cannot say when the feed started, only when its first liquidation
+    landed, so the span between the feed's real start and the id's first archived liquidation reads
+    null, not 0 -- conservative: unknown, never a false "none" -- and so does the bucket holding
+    the first liquidation, unless it starts exactly at it (that liquidation is counted in no bar).
+    Upgrade path: a durable per-id "feed confirmed since" marker written by capture when the liquidation
+    socket subscribes, read here instead of the first row.
+    """
+    directory = os.path.join(catalog_path, "data", LIQUIDATION_DIRNAME, instrument_id)
+    paths = glob.glob(os.path.join(directory, "*.parquet"))
+    spans = sorted((CatalogFileSpan.from_path(path).start_ns, path) for path in paths)
+    earliest: int | None = None
+    for start_ns, path in spans:
+        if earliest is not None and start_ns - MAX_TS_INIT_SKEW_NS > earliest:
+            break
+        column = pq.read_table(path, columns=["ts_event"]).column("ts_event")
+        if column.null_count:
+            raise ValueError(f"{path}: a liquidation row without `ts_event`, refused")
+        if len(column):
+            first = int(column.to_numpy().min())
+            earliest = first if earliest is None else min(earliest, first)
+    return earliest

@@ -35,7 +35,7 @@ def _sink(tmp_path: Path) -> tuple[CandleSink, CandleStore]:
     return CandleSink(store), store
 
 
-def test_the_sink_offers_exactly_the_ports_two_methods(tmp_path: Path) -> None:
+def test_the_sink_offers_exactly_the_ports_methods(tmp_path: Path) -> None:
     """
     `CandleSink` never imports `capture.application.ports.SecondSink` -- candles imports no context but
     kernel and observability, so the port is satisfied structurally (spine AD-D2). The typed
@@ -56,7 +56,7 @@ def test_applied_seconds_become_bars_and_a_watermark(tmp_path: Path) -> None:
 
 
 def test_a_replayed_batch_applies_nothing_and_changes_no_volume(tmp_path: Path) -> None:
-    """The `_UPSERT` accumulates `v`, so only the watermark keeps a second from counting twice."""
+    """The merge accumulates `v`, so only the watermark keeps a second from counting twice."""
     sink, store = _sink(tmp_path)
     rows = [_second(s, 100.0 + s) for s in range(60)]
     sink.apply(_IID, rows)

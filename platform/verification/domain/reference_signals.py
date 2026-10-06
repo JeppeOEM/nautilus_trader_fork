@@ -38,7 +38,9 @@ What each function implements, by dictionary section:
   z-score (population standard deviation, None when undefined).
 - §2.3 OBI: `obi`.
 - §2.12 depth: `depth_within_bps` (NaN beyond the stored depth).
-- §2.5 candles: `bucket_start`, `fold_candles`.
+- §2.5 candles: `bucket_start`, `fold_candles` (and §2.15's per-bar order-flow and liquidation
+  columns, folded from the decoded decimals and scaled back to units at the bucket's finest
+  precisions -- never from the stored integers the production fold sums).
 - §2.7 Lines mode: `cvd_weighted_price`.
 - §3.2/§3.3 price stats: `pct_change`, `price_as_of`, `pct_change_from`, `vol_score_1h`,
   `vol_catalog_24h`, `vol_fast`.
@@ -54,8 +56,10 @@ from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
+from dataclasses import fields
 from decimal import Decimal
 from decimal import localcontext
+from typing import Protocol
 
 
 # Significant digits of every reference computation: far beyond any stored value (int64 units are
@@ -64,6 +68,7 @@ from decimal import localcontext
 DIGITS = 60
 NS_PER_S = 1_000_000_000
 MS_PER_S = 1_000
+NS_PER_MS = 1_000_000
 SECONDS_PER_DAY = 86_400
 WEEK_SECONDS = 604_800
 # 1970-01-01 was a Thursday: the first Monday 00:00 UTC is 4 days after the epoch (§2.5).
@@ -461,9 +466,79 @@ def bucket_start(ts_ms: int, bar_seconds: int) -> int:
     return (ts_ms - anchor) // width * width + anchor
 
 
+class LiquidationRow(Protocol):
+    """One archived liquidation as the oracle reads it raw (`liquidation_check.StoredLiquidation`)."""
+
+    @property
+    def venue_event_id(self) -> str: ...
+
+    @property
+    def side(self) -> str: ...
+
+    @property
+    def size_units(self) -> int: ...
+
+    @property
+    def size_precision(self) -> int: ...
+
+    @property
+    def ts_event(self) -> int: ...
+
+
+@dataclass(frozen=True)
+class KnownLiquidations:
+    """
+    A feed instrument's archived liquidations for a fold, and the bound from which they are known:
+    `known_from_ns`, the instrument's earliest archived liquidation, derived by the oracle from its
+    own raw read (`liquidation_reader.LiquidationCatalog.first_ts_event`), lowered to the earliest
+    row given. A bucket's liquidations are known only if the bucket starts at or after it; one
+    before it, or straddling it, reads None at every width (unknown: the archive cannot show the
+    feed covered all of it), never 0; a known bucket without a liquidation reads 0 (§2.15, Story
+    33.3 review loop 2's one feed-start rule, restated here independently of production's).
+    """
+
+    rows: tuple[LiquidationRow, ...]
+    known_from_ns: int
+
+    def since_ns(self) -> int:
+        """Return the feed start: the bound lowered to the earliest row (a row proves the feed ran)."""
+        return min([self.known_from_ns, *(row.ts_event for row in self.rows)])
+
+    def first_known_bucket(self, bar_seconds: int) -> int:
+        """Return the start (ms) of the first bucket starting at or after `since_ns`."""
+        since_ns = self.since_ns()
+        since_ms = -(-since_ns // NS_PER_MS)  # the first whole millisecond at or after it
+        start = bucket_start(since_ms, bar_seconds)
+        return start if start == since_ms else start + bar_seconds * MS_PER_S
+
+
+def unique_liquidations(rows: Sequence[LiquidationRow]) -> list[LiquidationRow]:
+    """
+    Keep one copy of each `venue_event_id` (an overlapping file holds the same event twice). Copies
+    that disagree are reported -- `ValueError` naming every such id -- never resolved by keeping one:
+    which copy is the venue's the oracle cannot tell, so the candle check of that day fails loudly.
+    """
+    kept: dict[str, LiquidationRow] = {}
+    conflicts: set[str] = set()
+    for row in rows:
+        first = kept.setdefault(row.venue_event_id, row)
+        if first is not row and first != row:
+            conflicts.add(row.venue_event_id)
+    if conflicts:
+        raise ValueError(
+            f"archived liquidation copies disagree for venue_event_id {sorted(conflicts)}"
+        )
+    return list(kept.values())
+
+
 @dataclass(frozen=True)
 class RefCandle:
-    """One folded bucket: OHLC None when nothing traded, `volume` 0 then; every row counted."""
+    """
+    One folded bucket: OHLC None when nothing traded, `volume` 0 then; every row counted. §2.15's
+    columns follow, as integer units at the bucket's own `price_precision`/`size_precision`: the
+    order flow of every row, and the liquidations (None for an instrument without the feed). They
+    default to None so a hand-built candle without them still compares on the six fields.
+    """
 
     t: int
     open: Decimal | None
@@ -472,25 +547,69 @@ class RefCandle:
     close: Decimal | None
     volume: Decimal
     seconds_observed: int
+    buy_v: int | None = None
+    sell_v: int | None = None
+    buy_n: int | None = None
+    sell_n: int | None = None
+    pv: int | None = None
+    liq_long_v: int | None = None
+    liq_short_v: int | None = None
+    liq_n: int | None = None
+    price_precision: int | None = None
+    size_precision: int | None = None
+
+
+# §2.15's ten columns, in the served and stored order.
+AGGREGATE_FIELDS = tuple(f.name for f in fields(RefCandle))[7:]
 
 
 @_exact
-def fold_candles(books: Sequence[RefBook], bar_seconds: int) -> dict[int, RefCandle]:
+def fold_candles(
+    books: Sequence[RefBook],
+    bar_seconds: int,
+    liquidations: KnownLiquidations | None = None,
+) -> dict[int, RefCandle]:
     """
     §2.5: per bucket, open of the first traded second, high/low across them, close of the last,
     volume summed over the traded seconds; `seconds_observed` counts every row. Rows in `ts_event`
     order (equal stamps keep their input order).
+
+    §2.15: the bucket's order flow (buy/sell volume and counts of every row, `pv` the sum of each
+    traded second's close times its volume) and, for an instrument with the feed (`liquidations`
+    not None), the liquidations whose `ts_event` falls in it, each `venue_event_id` once (a
+    liquidation may make a bucket of its own, with no row) -- None for a bucket starting before the
+    feed start, or straddling it (`KnownLiquidations.first_known_bucket`), whose liquidations make
+    no bucket of their own. Copies of one event that disagree raise (`unique_liquidations`). All
+    in units at the bucket's finest precisions (a liquidation-only bucket's price precision is 0).
     """
     buckets: dict[int, list[RefBook]] = {}
     for book in sorted(books, key=lambda b: b.ts_event):
         buckets.setdefault(bucket_start(book.ts_event // 1_000_000, bar_seconds), []).append(book)
-    return {t: _fold_bucket(t, rows) for t, rows in buckets.items()}
+    forced: dict[int, list[LiquidationRow]] = {}
+    known_from = None
+    if liquidations is not None:
+        known_from = liquidations.first_known_bucket(bar_seconds)
+        for row in unique_liquidations(liquidations.rows):
+            t = bucket_start(row.ts_event // 1_000_000, bar_seconds)
+            if t >= known_from:
+                forced.setdefault(t, []).append(row)
+    return {
+        t: _fold_bucket(
+            t,
+            buckets.get(t, []),
+            None if known_from is None or t < known_from else forced.get(t, []),
+        )
+        for t in set(buckets) | set(forced)
+    }
 
 
-def _fold_bucket(t: int, rows: list[RefBook]) -> RefCandle:
+def _fold_bucket(
+    t: int, rows: list[RefBook], liquidations: list[LiquidationRow] | None
+) -> RefCandle:
     traded = [r for r in rows if r.close_price is not None]
+    flow = _flow(rows, liquidations)
     if not traded:
-        return RefCandle(t, None, None, None, None, Decimal(0), len(rows))
+        return RefCandle(t, None, None, None, None, Decimal(0), len(rows), **flow)
     return RefCandle(
         t=t,
         open=traded[0].open_price,
@@ -499,7 +618,55 @@ def _fold_bucket(t: int, rows: list[RefBook]) -> RefCandle:
         close=traded[-1].close_price,
         volume=sum((r.buy_volume + r.sell_volume for r in traded), Decimal(0)),
         seconds_observed=len(rows),
+        **flow,
     )
+
+
+def _flow(rows: list[RefBook], liquidations: list[LiquidationRow] | None) -> dict[str, int | None]:
+    """§2.15 for one bucket, from the decoded decimals, in units at the finest precisions."""
+    price_p = max((r.price_precision for r in rows), default=0)
+    size_p = max(
+        [*(r.size_precision for r in rows), *(liq.size_precision for liq in liquidations or ())],
+        default=0,
+    )
+    traded = [r for r in rows if r.close_price is not None]
+    pv = sum((r.close_price * (r.buy_volume + r.sell_volume) for r in traded), Decimal(0))  # type: ignore[operator]
+    flow: dict[str, int | None] = {
+        "buy_v": units_exactly(sum((r.buy_volume for r in rows), Decimal(0)), size_p),
+        "sell_v": units_exactly(sum((r.sell_volume for r in rows), Decimal(0)), size_p),
+        "buy_n": sum(r.buy_count for r in rows),
+        "sell_n": sum(r.sell_count for r in rows),
+        "pv": units_exactly(pv, price_p + size_p),
+        "price_precision": price_p,
+        "size_precision": size_p,
+    }
+    flow.update(_forced(liquidations, size_p))
+    return flow
+
+
+def _forced(liquidations: list[LiquidationRow] | None, size_p: int) -> dict[str, int | None]:
+    """Return the liquidated volume per side (a `long` one is a forced sell) and the count."""
+    if liquidations is None:
+        return {"liq_long_v": None, "liq_short_v": None, "liq_n": None}
+    sides = {"long": Decimal(0), "short": Decimal(0)}
+    for row in liquidations:
+        if row.side not in sides:
+            raise ValueError(f"{row.venue_event_id}: stored side {row.side!r} is not long/short")
+        sides[row.side] += _value(row.size_units, row.size_precision)
+    return {
+        "liq_long_v": units_exactly(sides["long"], size_p),
+        "liq_short_v": units_exactly(sides["short"], size_p),
+        "liq_n": len(liquidations),
+    }
+
+
+def units_exactly(value: Decimal, precision: int) -> int:
+    """Return a decimal as an integer count of `10^-precision`; a finer value is refused."""
+    with localcontext(prec=DIGITS):
+        scaled = value.scaleb(precision)
+    if scaled != scaled.to_integral_value():
+        raise ValueError(f"{value} is not exact at precision {precision}")
+    return int(scaled)
 
 
 # --- §2.7: the Lines-mode CVD-weighted price -------------------------------------------------

@@ -245,6 +245,11 @@ class SecondRow(Protocol):
     `open_price`..`close_price` are `None` for a second in which nothing traded. The values are the
     decoded floats (`unit_float`); candle bars are aggregations and stay floats (Known limit in
     `candles/domain/fold.py`).
+
+    The integer fields (Story 33.3) are the same second in its stored units: `close_price_units`
+    counts `10^-price_precision` (None when nothing traded), the two volumes `10^-size_precision`,
+    and the counts are trades. The fold sums them exactly into the per-bar order-flow columns
+    (`buy_v`, `sell_v`, `buy_n`, `sell_n`, `pv`), never through the floats above.
     """
 
     @property
@@ -268,9 +273,34 @@ class SecondRow(Protocol):
     @property
     def sell_volume(self) -> float: ...
 
+    @property
+    def price_precision(self) -> int: ...
+
+    @property
+    def size_precision(self) -> int: ...
+
+    @property
+    def close_price_units(self) -> int | None: ...
+
+    @property
+    def buy_volume_units(self) -> int: ...
+
+    @property
+    def sell_volume_units(self) -> int: ...
+
+    @property
+    def buy_count(self) -> int: ...
+
+    @property
+    def sell_count(self) -> int: ...
+
 
 class SecondOHLC(NamedTuple):
-    """The per-second fields candle aggregation needs (duck-types `DydxSecondSnapshot` there)."""
+    """
+    The per-second fields candle aggregation needs (duck-types `DydxSecondSnapshot` there): the
+    decoded floats the OHLC/`v` fold reads, then the integer units the order-flow fold reads
+    (Story 33.3), all required -- a row without its units cannot be folded exactly.
+    """
 
     ts_event: int
     open_price: float | None
@@ -279,6 +309,13 @@ class SecondOHLC(NamedTuple):
     close_price: float | None
     buy_volume: float
     sell_volume: float
+    price_precision: int
+    size_precision: int
+    close_price_units: int | None
+    buy_volume_units: int
+    sell_volume_units: int
+    buy_count: int
+    sell_count: int
 
 
 # Book depth moves within the second we sample it; allow 0.1% before calling it impossible.

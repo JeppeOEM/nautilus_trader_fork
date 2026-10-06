@@ -15,8 +15,9 @@
 """
 The process-wide bus instances of the API (Story 24.2): `bus`, the one `rankings:live` subscriber
 behind `GET /api/rankings`, the Technicals tab and every `/ws/live` connection,
-`live_candle_bus`, the one `snapshots:raw` subscriber behind every live-candle subscription, the
-candle pages' unflushed tail and the alert engine, and `archive_bus`, the one `archive:status`
+`live_candle_bus`, the one `snapshots:raw` and `liquidations:raw` subscriber behind every
+live-candle subscription, the candle pages' unflushed tails (`recent_rows` and, Story 33.3,
+`recent_liquidations`) and the alert engine, and `archive_bus`, the one `archive:status`
 subscriber behind `GET /api/archive/status` (Story 25.1b).
 
 Invariant: one subscriber per channel per process -- every reader shares these two objects, so no

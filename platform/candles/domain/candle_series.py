@@ -16,8 +16,10 @@
 
 from collections.abc import Iterable
 
+from kernel.liquidation import Liquidation
 from kernel.second_snapshot import SecondRow
 
+from candles.domain.fold import FoldedBucket
 from candles.domain.fold import fold_rows
 
 
@@ -29,8 +31,9 @@ class CandleSeries:
 
     * **Exactly once.** A second at or below `through_ns` was already folded in, so `accept` drops
       it. The commands that would violate it are a re-delivered flush and a startup catch-up that
-      overlaps what the last run applied -- both routine. It matters because the store's `_UPSERT`
-      *accumulates* `v` and `seconds_observed`: a second applied twice inflates the bucket's volume
+      overlaps what the last run applied -- both routine. It matters because the store's merge
+      (`domain.fold.merge_buckets`) *accumulates* `v`, `seconds_observed` and the order-flow sums:
+      a second applied twice inflates the bucket's volume
       and can push a genuinely partial bucket over the `partial` threshold, and nothing downstream
       could tell. The watermark is the only thing preventing that.
     * **Never ahead of the archive.** `accept` is called only with rows whose
@@ -73,14 +76,26 @@ class CandleSeries:
         self._through_ns = fresh[-1].ts_event
         return fresh, self._through_ns
 
-    def buckets(self, rows: Iterable[SecondRow]) -> dict[tuple[int, int], list]:
+    def buckets(
+        self,
+        rows: Iterable[SecondRow],
+        liquidations: Iterable[Liquidation] | None = None,
+        liquidations_since_ns: int | None = None,
+    ) -> dict[tuple[int, int], FoldedBucket]:
         """
-        Fold accepted seconds into `(bar_seconds, bucket_start_ms) -> [o, h, l, c, v, observed]`.
+        Fold accepted seconds into `(bar_seconds, bucket_start_ms) -> FoldedBucket`.
 
-        The one aggregation (`domain.fold.fold_arrays`), over exactly the rows given.
+        The one aggregation (`domain.fold.fold_arrays`), over exactly the rows given, and the
+        instrument's liquidations: None for an instrument without the feed (the `liq_*` columns
+        are None), an empty iterable for one with it (they are 0). Liquidations have their own
+        exactly-once guard, the store's `liquidations_applied` table, not this watermark.
+        `liquidations_since_ns` is the feed's start (`domain.fold.LiquidationArrays.since_ns`): a
+        bucket starting before it reads None, not 0.
 
         It does not consult the watermark: exactly-once is `accept`'s job, so a caller folding a
         batch for the store passes `accept`'s output, never its own rows. Folding unjudged rows is
         legitimate for a read (the forming bar re-folds the current bucket every tick).
         """
-        return fold_rows(rows)
+        return fold_rows(
+            rows, liquidations=liquidations, liquidations_since_ns=liquidations_since_ns
+        )

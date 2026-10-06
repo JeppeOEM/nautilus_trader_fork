@@ -154,11 +154,13 @@ from time import perf_counter_ns
 from typing import Any
 from typing import ClassVar
 
+from kernel.catalog_files import query_liquidations
 from kernel.catalog_files import query_second_ohlc
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import NS_PER_S
 from kernel.clocks import READ_SPAN_MARGIN_NS
 from kernel.liquidation import Liquidation
+from kernel.liquidation import has_liquidation_feed
 from kernel.second_snapshot import BOOK_DEPTH
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import ohlc_outside_book
@@ -451,6 +453,69 @@ def _coverage_reason(verdict: Rejected) -> str:
         return coverage.UNENCODABLE
     # A new `Rejected` member must get its own reason, never another's by default.
     raise TypeError(f"no coverage reason for verdict {verdict!r}")
+
+
+class _SinkFailures:
+    """
+    One flush's candle-store failures across instruments, reduced to one ledger line: how many
+    distinct instruments failed, every failed write named by kind (`seconds` / `liquidations`),
+    every distinct exception type with how many writes it hit, and the traceback of the cause that
+    hit the most (ties broken on the type name, so the line is reproducible).
+
+    An instrument whose liquidations and seconds both failed is one instrument, listed under both
+    kinds: the count is of instruments, never of writes, so a store-wide fault on 30 coins reads
+    "30 instruments" whatever share of them has the liquidation feed.
+    """
+
+    KINDS = ("seconds", "liquidations")
+
+    def __init__(self) -> None:
+        self.failed: dict[str, list[str]] = {kind: [] for kind in self.KINDS}
+        self._by_type: dict[str, Exception] = {}
+        self._hits: Counter[str] = Counter()
+
+    def run(self, iid: str, kind: str, apply: Callable[[], object]) -> None:
+        try:
+            apply()
+        except Exception as e:
+            self.failed[kind].append(iid)
+            # One line carries one traceback, so keep one exception per distinct type and name them
+            # all in the detail: a store-wide fault plus an incidental second cause must not reduce
+            # to whichever instrument happened to be applied first.
+            self._by_type.setdefault(type(e).__name__, e)
+            self._hits[type(e).__name__] += 1
+
+    def __bool__(self) -> bool:
+        return any(self.failed.values())
+
+    def line(self) -> tuple[str, Exception]:
+        """Return the ledger detail and the exception whose traceback it carries."""
+        # The traceback goes to the cause that hit the most writes, not the alphabetically first
+        # one: a store-wide `OSError` on 29 coins must not be masked by an incidental
+        # `AttributeError` on the thirtieth.
+        worst = min(self._hits, key=lambda name: (-self._hits[name], name))
+        instruments = {iid for iids in self.failed.values() for iid in iids}
+        kinds = "; ".join(
+            f"{kind}: {', '.join(sorted(iids))}" for kind, iids in self.failed.items() if iids
+        )
+        causes = ", ".join(f"{n} on {self._hits[n]} writes" for n in sorted(self._hits))
+        detail = (
+            f"candle store write failed for {len(instruments)} instruments ({kinds}) [{causes}]; "
+            "a failed seconds write is refilled by the next start's catch-up (if within a day) or "
+            "python -m candles.rebuild, a failed liquidation write only by the next start's "
+            "catch-up (the last day's archive) or the nightly rebuild of its day"
+        )
+        return detail, self._by_type[worst]
+
+
+def _unfed_liquidations_line(unfed: dict[str, int]) -> str:
+    """Return the ledger detail for one flush's liquidations of instruments without the feed."""
+    named = ", ".join(f"{iid} ({n})" for iid, n in sorted(unfed.items()))
+    return (
+        f"liquidations of {len(unfed)} instrument(s) without a liquidation feed reached the candle "
+        f"store hand-off and were not folded (their liq_* columns are null by definition; "
+        f"kernel.liquidation.has_liquidation_feed disagrees with the venue's feed): {named}"
+    )
 
 
 class CaptureService:
@@ -1047,6 +1112,7 @@ class CaptureService:
         never a wrong pass). Upgrade path: a durable per-id "noted through" watermark.
         """
         flushed_seconds: dict[str, list[DydxSecondSnapshot]] = {}
+        flushed_liquidations: dict[str, list[Liquidation]] = {}
         now_ns = time.time_ns()
         batches = self._buffer.take(now_ns, final, self._ingest_backlog() > 0)
         for key, items in batches:
@@ -1067,8 +1133,10 @@ class CaptureService:
             self._hotpath.note_write(elapsed_ns)
             if key[0] is DydxSecondSnapshot:
                 flushed_seconds[key[1]] = items
+            elif key[0] is Liquidation:
+                flushed_liquidations[key[1]] = items
         # The sink first: whatever the coverage append does, the flushed seconds reach it.
-        self._apply_to_candle_store(flushed_seconds)
+        self._apply_to_candle_store(flushed_seconds, flushed_liquidations)
         await self._write_coverage(final)
 
     def _timed_write(self, items: list[Any]) -> int:
@@ -1188,46 +1256,59 @@ class CaptureService:
             iid, lost[0].ts_init, now_ns, "write_failed", len(lost), self._ledger
         )
 
-    def _apply_to_candle_store(self, flushed: dict[str, list[DydxSecondSnapshot]]) -> None:
+    def _apply_to_candle_store(
+        self,
+        flushed: dict[str, list[DydxSecondSnapshot]],
+        liquidations: dict[str, list[Liquidation]] | None = None,
+    ) -> None:
         """
-        Hand what just reached Parquet to the second sink, one instrument at a time.
+        Hand what just reached Parquet to the second sink, one instrument at a time: the
+        liquidations (Story 33.3), each of an instrument with the feed only, then the seconds.
 
-        Only flushed seconds are applied, so the store is never ahead of the archive. A failure must
+        Liquidations first: they lower the store's persisted feed start (`liquidation_feed_since`),
+        and the seconds of the same flush read 0 `liq_*` only for buckets starting at or after it.
+        The other order would fold the seconds of an id's very first liquidation's flush with no
+        start known, null where the rebuild of the same day stores 0 (Story 33.3 review loop 2:
+        the live store and the rebuild must agree bucket for bucket). A liquidation landing before
+        its seconds creates its row with `seconds_observed = 0`; the seconds merge in.
+
+        Liquidations of an instrument without the feed (`has_liquidation_feed` false: the store
+        refuses them, its `liq_*` columns are null by definition) are archived but not folded; that
+        contradicts the predicate, so it is ledgered at the same site, one line per flush naming
+        each such instrument and its row count, never skipped quietly (DATA-07).
+
+        Only flushed rows are applied, so the store is never ahead of the archive. A failure must
         not stop ingestion or the other instruments: it is loud (DATA-07), and the next start's
         catch-up or `python -m candles.rebuild` repairs it.
 
-        One instrument's failure is isolated but the flush is ledgered once, naming every instrument
-        that failed. A store-wide fault (disk full, a locked file) fails every subscribed instrument
-        in the same flush, and one line each would exceed the ledger's 60-lines-per-site-per-minute
-        cap and suppress the very detail this is here to record.
+        A failed liquidation write is not retried live: the rows are in the archive, and only the
+        next start's catch-up (`_catch_up_liquidations`, the last day) or the nightly rebuild of
+        their day re-applies them (each `venue_event_id` once). Until then their buckets are short
+        of them; the ledger line says so.
+
+        One instrument's failure is isolated but the flush is ledgered once, counting the distinct
+        instruments that failed and naming each failed write by kind (`seconds: a, b;
+        liquidations: c`). A store-wide fault (disk full,
+        a locked file) fails every subscribed instrument in the same flush, and one line each would
+        exceed the ledger's 60-lines-per-site-per-minute cap and suppress the very detail this is
+        here to record.
         """
         if self._second_sink is None:
             return
-        failed: list[str] = []
-        by_type: dict[str, Exception] = {}
-        hits: Counter[str] = Counter()
+        sink = self._second_sink
+        failures = _SinkFailures()
+        unfed: dict[str, int] = {}
+        for iid, rows in (liquidations or {}).items():
+            if not has_liquidation_feed(iid):
+                unfed[iid] = len(rows)
+                continue
+            failures.run(iid, "liquidations", functools.partial(sink.apply_liquidations, iid, rows))
         for iid, rows in flushed.items():
-            try:
-                self._second_sink.apply(iid, rows)
-            except Exception as e:
-                failed.append(iid)
-                # One line carries one traceback, so keep one exception per distinct type and name
-                # them all in the detail: a store-wide fault plus an incidental second cause must
-                # not reduce to whichever instrument `flushed` happened to yield first.
-                by_type.setdefault(type(e).__name__, e)
-                hits[type(e).__name__] += 1
-        if failed:
-            # The traceback goes to the cause that hit the most instruments, not the alphabetically
-            # first one: a store-wide `OSError` on 29 coins must not be masked by an incidental
-            # `AttributeError` on the thirtieth. Ties break on the name, so the line is reproducible.
-            worst = min(hits, key=lambda name: (-hits[name], name))
-            self._ledger(
-                sites.CANDLE_STORE,
-                f"candle store write failed for {len(failed)} instruments "
-                f"({', '.join(f'{n} on {hits[n]}' for n in sorted(hits))}): "
-                + ", ".join(sorted(failed)),
-                by_type[worst],
-            )
+            failures.run(iid, "seconds", functools.partial(sink.apply, iid, rows))
+        if failures:
+            self._ledger(sites.CANDLE_STORE, *failures.line())
+        if unfed:
+            self._ledger(sites.CANDLE_STORE, _unfed_liquidations_line(unfed))
 
     def _catch_up_candle_store(self) -> None:
         """
@@ -1237,6 +1318,12 @@ class CaptureService:
         store behind the archive, and nothing else would ever fill that hole. Runs before the first
         subscribe, so no live second can reach the sink first and push the watermark past the gap. A
         gap wider than a day is left to the rebuild CLI (it would read too much here) and logged.
+
+        Liquidations are caught up on their own, before the seconds and whatever their state
+        (`_catch_up_liquidations`): every feed id among the watermarks and the plan, over the last
+        day only -- an id with no watermark yet (new to the plan, or a fresh store) or one whose
+        seconds are more than a day behind still gets them, and they set the feed start its
+        seconds are bounded by.
 
         No sink is a legal construction (the collector's own tests build one), but in a deployed
         process it means a venue entrypoint forgot `second_sink=` and every bar is silently missing.
@@ -1252,12 +1339,17 @@ class CaptureService:
             return
         catalog_path = self._archive.catalog_path
         now_ns = time.time_ns()
-        for iid, mark in self._second_sink.watermarks().items():
+        marks = self._second_sink.watermarks()
+        for iid in sorted(set(marks) | self._plan_ids):
+            if has_liquidation_feed(iid):
+                self._catch_up_liquidations(iid, catalog_path, now_ns)
+        for iid, mark in marks.items():
             if now_ns - mark > _CATCH_UP_MAX_NS:
                 self._ledger(
                     sites.CANDLE_STORE_BEHIND,
                     f"candle store for {iid} is more than a day behind the archive (watermark "
-                    f"{mark}): not caught up at start; run python -m candles.rebuild",
+                    f"{mark}): its seconds are not caught up at start, and its liquidations only "
+                    "over the last day; run python -m candles.rebuild for the rest",
                 )
                 continue
             try:
@@ -1266,6 +1358,31 @@ class CaptureService:
                 self._ledger(
                     sites.CANDLE_STORE_CATCH_UP, f"candle store catch-up failed for {iid}", e
                 )
+
+    def _catch_up_liquidations(self, iid: str, catalog_path: str, now_ns: int) -> None:
+        """
+        Re-apply the last day's archived liquidations of a feed instrument (Story 33.3). Those the
+        store already took are skipped by its `venue_event_id` dedup, so the overlap with what the
+        last run applied is harmless; a crash between a flush and its sink write is filled.
+
+        Invariant: the dedup outlives the replay -- `liquidations_applied` keeps an id
+        `LIQUIDATIONS_APPLIED_RETAIN_DAYS` (2 days, candles' own constant: capture never imports
+        candles' infrastructure), more than this one-day window plus a flush interval, so no id
+        the replay re-reads has been pruned from the dedup (asserted by
+        `tests/test_liquidation_dedup_retention.py`). Anything older is the rebuild's.
+        """
+        try:
+            self._second_sink.apply_liquidations(  # type: ignore[union-attr]
+                iid, query_liquidations(catalog_path, iid, now_ns - _CATCH_UP_MAX_NS, now_ns)
+            )
+        except Exception as e:
+            self._ledger(
+                sites.CANDLE_STORE_CATCH_UP,
+                f"candle store liquidation catch-up failed for {iid}: its last day's archived "
+                "liquidations are re-applied only by the next start's catch-up or the nightly "
+                "rebuild of each day",
+                e,
+            )
 
     async def _flush_loop(self) -> None:
         while not self._stop.is_set():

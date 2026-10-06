@@ -77,6 +77,7 @@ from verification.domain.subscriptions import VENUES
 from verification.infrastructure.catalog_reader import CoverageFiles
 from verification.infrastructure.catalog_reader import ParquetArchive
 from verification.infrastructure.catalog_scan import CandleStoreFile
+from verification.infrastructure.liquidation_reader import LiquidationCatalog
 from verification.infrastructure.raw_store import RawReader
 from verification.infrastructure.raw_store import TruncatedTail
 from verification.infrastructure.raw_store import venue_dir
@@ -110,6 +111,7 @@ def inputs_of(args: argparse.Namespace, environ: Mapping[str, str], fetch: Fetch
         store=CandleStoreFile(candle_store(args, environ, catalog)),
         coverage=coverage,
         served=served,
+        liquidations=LiquidationCatalog(catalog),
     )
 
 

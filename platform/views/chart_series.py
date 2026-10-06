@@ -72,6 +72,8 @@ from kernel.indicators import microprice as calc_microprice
 from kernel.indicators import mid_price as calc_mid_price
 from kernel.indicators import snapshot_depth
 from kernel.indicators import spread as calc_spread
+from kernel.liquidation import Liquidation
+from kernel.liquidation import has_liquidation_feed
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import SecondOHLC
 from kernel.venues import venue_of
@@ -85,6 +87,7 @@ from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import InstrumentId
 from views.catalog_reads import fetch_page
 from views.catalog_reads import has_older_data
+from views.catalog_reads import liquidation_feed_start
 from views.catalog_reads import query_second_snapshots
 
 
@@ -777,6 +780,8 @@ _MIN_CANDLE_WINDOW_SECONDS = 3600
 
 # The live tail the collector has not flushed to the catalog yet (`LiveCandleBus.recent_rows`).
 RecentRows = Callable[[str, int, int], list[SecondOHLC]]
+# Its liquidation twin (`LiveCandleBus.recent_liquidations`, Story 33.3).
+RecentLiquidations = Callable[[str, int, int], list[Liquidation]]
 
 
 class ImpossibleCandle(Exception):
@@ -799,6 +804,25 @@ def _catalog_plus_recent(
     have = {r.ts_event for r in rows}
     tail = recent_rows(instrument_id, start_ns, end_ns)
     return rows + [r for r in tail if r.ts_event not in have]
+
+
+def _liquidations_plus_recent(
+    catalog_path: str,
+    recent_liquidations: RecentLiquidations,
+    instrument_id: str,
+    start_ns: int,
+    end_ns: int,
+) -> list[Liquidation]:
+    """
+    Return the archived liquidations of the window plus the live tail the collector has not
+    flushed yet, each venue event once (`venue_event_id`, D-150): the archive's copy wins, a tail row the
+    archive already holds is not added again.
+    """
+    rows = catalog_files.query_liquidations(catalog_path, instrument_id, start_ns, end_ns)
+    have = {row.venue_event_id for row in rows}
+    tail = recent_liquidations(instrument_id, start_ns, end_ns)
+    fresh = {row.venue_event_id: row for row in tail if row.venue_event_id not in have}
+    return rows + list(fresh.values())
 
 
 def _candle_window_span_ns(limit: int, bar_seconds: int) -> int:
@@ -848,11 +872,20 @@ def _parquet_page(
     limit: int,
     bar_seconds: int,
     catalog_path: str,
+    candles_dir: str,
     recent_rows: RecentRows,
+    recent_liquidations: RecentLiquidations,
 ) -> tuple[list[dict], bool]:
     """
     One page straight from the Parquet archive (slow: reads a window of tiny files). Serves
-    history the candle store does not hold (older than its first day, or pruned).
+    history the candle store does not hold (older than its first day, or pruned). An instrument
+    with a liquidation feed folds the window's archived liquidations plus the live tail
+    (`_liquidations_plus_recent`), bounded by the feed's start: the candle store's persisted start,
+    else the archive's first liquidation (`views.catalog_reads.liquidation_feed_start`), lowered
+    to the earliest row folded, so a live-tail
+    row older than the archive moves the bound instead of failing the page. A bar starting before
+    that start, or straddling it, or every bar when no start is known, gets null `liq_*`, never 0
+    (audit D-160). One without the feed gets null `liq_*` columns throughout (Story 33.3).
 
     Every query window -- the first and each gap jump -- starts on a bucket boundary (Story 31.8):
     its end is rounded up to a bucket boundary and its span is whole buckets, so no served bar is
@@ -864,6 +897,11 @@ def _parquet_page(
     """
     before_ms = before_ns // 1_000_000
     rows_fn = partial(_catalog_plus_recent, catalog_path, recent_rows)
+    liquidations_fn = None
+    since_ns = None
+    if has_liquidation_feed(instrument_id):
+        since_ns = liquidation_feed_start(catalog_path, candles_dir, instrument_id)
+        liquidations_fn = partial(_liquidations_plus_recent, catalog_path, recent_liquidations)
 
     def fetch(start_ns: int, end_ns: int) -> list[dict]:
         # The readers' windows are inclusive; a row stamped exactly at `end_ns` opens the next
@@ -877,6 +915,8 @@ def _parquet_page(
                 min(end_ns, before_ns) - 1,
                 bar_seconds,
                 snapshot_rows_fn=rows_fn,
+                liquidation_rows_fn=liquidations_fn,
+                liquidations_since_ns=since_ns,
             )
             if c["t"] < before_ms and _checked(instrument_id, bar_seconds, c)
         ]
@@ -925,6 +965,7 @@ def candle_page(
     catalog_path: str,
     candles_dir: str,
     recent_rows: RecentRows,
+    recent_liquidations: RecentLiquidations,
 ) -> tuple[list[dict], bool]:
     """
     Return the one candle source for the chart, its indicator panes and anything else that must agree
@@ -945,7 +986,14 @@ def candle_page(
         return kept, True  # older archive history exists beyond this full page
     older_before_ns = kept[0]["t"] * 1_000_000 if kept else before_ns
     older, has_more = _parquet_page(
-        instrument_id, older_before_ns, limit - len(kept), bar_seconds, catalog_path, recent_rows
+        instrument_id,
+        older_before_ns,
+        limit - len(kept),
+        bar_seconds,
+        catalog_path,
+        candles_dir,
+        recent_rows,
+        recent_liquidations,
     )
     return older + kept, has_more
 
@@ -1062,6 +1110,7 @@ def indicator_values_page(
     catalog_path: str,
     candles_dir: str,
     recent_rows: RecentRows,
+    recent_liquidations: RecentLiquidations,
 ) -> tuple[list[dict], bool, dict[str, str]]:
     """
     `(rows with gap rows, has_more, errors)`: every requested indicator replayed over the same
@@ -1088,6 +1137,7 @@ def indicator_values_page(
             catalog_path=catalog_path,
             candles_dir=candles_dir,
             recent_rows=recent_rows,
+            recent_liquidations=recent_liquidations,
         )
     except ImpossibleCandle:
         raise
@@ -1099,14 +1149,16 @@ def indicator_values_page(
     window = indicator_picker.ReplayWindow(
         instrument_id=instrument_id,
         bar_seconds=bar_seconds,
-        # MEM-01: the custom replays read raw seconds/deltas over this window, so it is capped at
+        # MEM-01: the raw-delta replays read raw deltas over this window, so it is capped at
         # `MAX_QUERY_SPAN_SECONDS` back from the end (500 1W bars would be ~10 years). A bar before
         # the cap has no input read, so its custom value is None -- a gap, never a fabricated one.
-        # Known limit: at 1D only the last 7 bars, and at 1W only the last bar, carry a custom value
-        # (CVD, cancel pressure, delta OFI); upgrade path: a stored per-bar aggregate of these
-        # inputs (like the candle store), read instead of replaying raw rows.
+        # Known limit: at 1D only the last 7 bars, and at 1W only the last bar, carry a cancel
+        # pressure or delta OFI value; upgrade path: a stored per-bar aggregate of these inputs
+        # (like the candle store's order flow), read instead of replaying raw rows. CVD reads the
+        # bars' own `buy_v`/`sell_v` (Story 33.3), so every bar of every width carries it.
         start_ms=max(kept[0]["t"], end_ms - MAX_QUERY_SPAN_SECONDS * 1000),
         end_ms=end_ms,
+        candles_dir=candles_dir,
     )
     by_time, errors = indicator_picker.values_by_time(kept, entries, window)
     rows = [{"t": t, "values": values} for t, values in sorted(by_time.items())]
@@ -1337,6 +1389,7 @@ def footprint_page(
     catalog_path: str,
     candles_dir: str,
     recent_rows: RecentRows,
+    recent_liquidations: RecentLiquidations,
     price_precision: int,
     size_precision: int,
     now_ns: int,
@@ -1368,6 +1421,7 @@ def footprint_page(
         catalog_path=catalog_path,
         candles_dir=candles_dir,
         recent_rows=recent_rows,
+        recent_liquidations=recent_liquidations,
     )
     starts_ms, trimmed = _settled_bars(candles, bar_seconds, end_ns)
     if len(starts_ms) > limit:

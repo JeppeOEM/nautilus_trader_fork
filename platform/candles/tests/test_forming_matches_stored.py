@@ -26,6 +26,8 @@ import pytest
 from candles.application import queries
 from candles.application.forming import forming_bar
 from candles.domain.candle import is_partial
+from candles.domain.candle import is_valid_candle
+from candles.domain.fold import AGGREGATE_KEYS
 from candles.infrastructure.sqlite_store import CandleStore
 from candles.tests.test_candle_store import _DAY0_MS
 from candles.tests.test_candle_store import _IID
@@ -53,9 +55,9 @@ def _flushed(store: CandleStore, rows: list) -> None:
     """
     Write the day through the collector's path: 30-second `SecondSink.apply` batches.
 
-    Distinct from `_rebuilt` on purpose. Folding the day at once cannot exercise `_UPSERT`'s
-    accumulation (`v = v + excluded.v`, `h = max(...)`, `seconds_observed = seconds_observed + ...`),
-    which is what actually has to agree with a single fold for a live chart's bar not to jump -- a
+    Distinct from `_rebuilt` on purpose. Folding the day at once cannot exercise the merge's
+    accumulation (`merge_buckets`: `v` added, `h` the max, `seconds_observed` and the order-flow
+    sums added), which is what actually has to agree with a single fold for a live chart's bar not to jump -- a
     bucket wider than a flush is written by many statements and read as one bar.
     """
     ordered = sorted(rows, key=lambda r: r.ts_event)
@@ -84,9 +86,25 @@ def test_forming_bar_equals_the_stored_closed_bar(
     for bar in closed:
         live = forming_bar(buckets[bar["t"]], bar_seconds)
         assert live is not None, bar
-        for key in ("t", "o", "h", "l", "c"):
+        for key in ("t", "o", "h", "l", "c", *AGGREGATE_KEYS):
             assert live[key] == bar[key], (bar_seconds, key, live, bar)
         assert live["v"] == pytest.approx(bar["v"], rel=1e-12), (bar_seconds, live, bar)
+
+
+@pytest.mark.parametrize("bar_seconds", _BARS)
+def test_every_stored_and_forming_bar_holds_the_volume_identity(
+    stored: tuple[CandleStore, list], bar_seconds: int
+) -> None:
+    """Story 33.3: `buy_v + sell_v == round(v * 10**size_precision)` on the whole day, both paths."""
+    store, rows = stored
+    buckets = _bucket_rows(rows, bar_seconds)
+    for bar in queries.window(store.connection, _IID, bar_seconds, 1 << 62, 10_000):
+        live = forming_bar(buckets[bar["t"]], bar_seconds)
+        assert live is not None
+        for candle in (bar, live):
+            units = round(candle["v"] * 10 ** candle["size_precision"])
+            assert candle["buy_v"] + candle["sell_v"] == units, (bar_seconds, candle)
+            assert is_valid_candle(candle), candle
 
 
 @pytest.mark.parametrize("bar_seconds", _BARS)

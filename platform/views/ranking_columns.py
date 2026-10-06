@@ -43,10 +43,13 @@ from typing import Protocol
 
 from candles.application import queries
 from candles.application.forming import bars_from_rows
+from candles.domain.fold import archive_liquidations
 from kernel import catalog_files
+from kernel.liquidation import has_liquidation_feed
 from kernel.venues import venue_of
 
 from views import indicator_picker
+from views.catalog_reads import liquidation_feed_start
 
 
 # Each entry: (store_key, header_label, format_fn).
@@ -157,25 +160,36 @@ def _recent_candles(
                     return stored
     except Exception as exc:
         raise CatalogReadError(str(exc)) from exc
-    return _read_candles(instrument_id, bar_seconds, now_ns, catalog_path)
+    return _read_candles(instrument_id, bar_seconds, now_ns, catalog_path, candles_dir)
 
 
 def _read_candles(
-    instrument_id: str, bar_seconds: int, now_ns: int, catalog_path: str
+    instrument_id: str, bar_seconds: int, now_ns: int, catalog_path: str, candles_dir: str
 ) -> list[dict]:
     """
     Read candles the slow way, for a coin the candle store does not hold.
 
     Raw 1s columns aggregated to `bar_seconds`, over at most a week (MEM-01), so 4H+ columns may get
-    fewer bars than the store gives.
+    fewer bars than the store gives. An instrument with a liquidation feed folds the window's
+    archived liquidations too, bounded by the feed's start -- the candle store's persisted one,
+    else the archive's first (`views.catalog_reads.liquidation_feed_start`), lowered to the rows read
+    (`archive_liquidations`) -- so its bars carry the same `liq_*` the store and the `raw_1s` page
+    would (null before or straddling the start, or throughout with none known; audit D-160).
     """
     bars = _TECHNICALS_BARS if bar_seconds <= 3600 else _TECHNICALS_WIDE_BARS
     span_ns = min((bars + 5) * bar_seconds, _FALLBACK_MAX_SPAN_S) * 1_000_000_000
+    start_ns = now_ns - span_ns
     try:
-        rows = catalog_files.query_second_ohlc(
-            catalog_path, instrument_id, now_ns - span_ns, now_ns
-        )
-        return bars_from_rows(rows, bar_seconds)[-bars:]
+        rows = catalog_files.query_second_ohlc(catalog_path, instrument_id, start_ns, now_ns)
+        liquidations, since_ns = None, None
+        if has_liquidation_feed(instrument_id):
+            liquidations, since_ns = archive_liquidations(
+                catalog_files.query_liquidations(catalog_path, instrument_id, start_ns, now_ns),
+                liquidation_feed_start(catalog_path, candles_dir, instrument_id),
+            )
+        return bars_from_rows(rows, bar_seconds, liquidations, liquidations_since_ns=since_ns)[
+            -bars:
+        ]
     except Exception as exc:
         raise CatalogReadError(str(exc)) from exc
 
@@ -221,7 +235,7 @@ def technicals_values(
         if not candles or now_ns // 1_000_000 - candles[-1]["t"] > max_age_ms:
             continue  # no data / stopped: an honest gap, never a stale value shown as current (DATA-01)
         group = [(i, e) for i, e in enumerate(entries) if e.bar_seconds == bar_seconds]
-        keyed.update(_latest_of_group(instrument_id, bar_seconds, candles, group))
+        keyed.update(_latest_of_group(instrument_id, bar_seconds, candles, group, candles_dir))
     return keyed
 
 
@@ -242,6 +256,7 @@ def _latest_of_group(
     bar_seconds: int,
     candles: list[dict],
     group: list[tuple[int, TechnicalsEntry]],
+    candles_dir: str,
 ) -> dict[str, float | None]:
     """Return the newest candle's value of every entry of one timeframe, keyed by entry index."""
     window = indicator_picker.ReplayWindow(
@@ -249,6 +264,7 @@ def _latest_of_group(
         bar_seconds=bar_seconds,
         start_ms=candles[0]["t"],
         end_ms=candles[-1]["t"] + bar_seconds * 1000,
+        candles_dir=candles_dir,
     )
     by_time, errors = indicator_picker.values_by_time(candles, [e for _, e in group], window)
     if (

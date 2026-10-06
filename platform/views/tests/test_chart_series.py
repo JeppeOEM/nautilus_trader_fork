@@ -327,7 +327,15 @@ def test_the_custom_indicator_replay_window_is_capped_at_the_query_span(
     monkeypatch.setattr(indicator_picker, "values_by_time", capture)
 
     chart_series.indicator_values_page(
-        _IID, 0, 500, 604_800, [], catalog_path="", candles_dir="", recent_rows=lambda *a: []
+        _IID,
+        0,
+        500,
+        604_800,
+        [],
+        catalog_path="",
+        candles_dir="",
+        recent_rows=lambda *a: [],
+        recent_liquidations=lambda *a: [],
     )
 
     (window,) = seen

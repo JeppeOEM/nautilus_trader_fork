@@ -499,12 +499,10 @@ def _picker_tally(feed_open: bool) -> Tally:
     for rows in _book_inputs(300):
         prods, books = both(rows)
         folded = sorted(
-            ((t, v) for (_w, t), v in fold_rows(prods, bars=(60,)).items() if v[0] is not None)
+            ((t, b) for (_w, t), b in fold_rows(prods, bars=(60,)).items() if b.o is not None),
+            key=lambda pair: pair[0],
         )
-        candles = [
-            {"t": t, "o": o, "h": h, "l": low, "c": c, "v": v}
-            for t, (o, h, low, c, v, _n) in folded
-        ]
+        candles = [{"t": t, "o": b.o, "h": b.h, "l": b.l, "c": b.c, "v": b.v} for t, b in folded]
         closes = [
             _fed_price(c, feed_open)
             for _, c in sorted(ref.fold_candles(books, 60).items())

@@ -130,6 +130,34 @@ def test_catalog_non_empty_with_both_categories_present(
     assert categories == {"native", "custom"}
 
 
+def test_the_catalog_serves_the_cvd_anchor_choices(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story 33.3: a custom entry carries its string params' choices, the picker's dropdown."""
+    body = _client(tmp_path, monkeypatch).get("/api/indicators/catalog").json()
+    cvd = body["CumulativeVolumeDelta"]
+    assert (cvd["params"], cvd["panel"], cvd["category"]) == (
+        {"anchor": "visible"},
+        "oscillator",
+        "custom",
+    )
+    assert cvd["choices"] == {"anchor": ["session", "visible", "all"]}
+
+
+def test_a_cvd_anchor_outside_its_choices_is_refused_at_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+    payload = [
+        {"name": "CumulativeVolumeDelta", "params": {"anchor": "week"}, "category": "custom"}
+    ]
+    response = client.put(f"/api/coin/{_IID}/indicators", json=payload)
+    assert response.status_code == 400
+    assert "anchor" in response.text
+
+
 def test_coin_never_configured_returns_empty_list(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

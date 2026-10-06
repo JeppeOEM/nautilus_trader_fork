@@ -30,6 +30,7 @@ from typing import Any
 from typing import NamedTuple
 from typing import Protocol
 
+from kernel.liquidation import Liquidation
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import SecondRow
 
@@ -261,9 +262,21 @@ class SecondSink(Protocol):
 
     `apply` returns the number of seconds it actually took (rows at or before its own watermark are
     a replay and count 0). It may raise: capture ledgers the failure per instrument and carries on.
+
+    `apply_liquidations` (Story 33.3) takes the same flush's archived `Liquidation` rows of one
+    instrument with the feed, under the same never-ahead-of-the-archive rule, and capture calls it
+    **before** that flush's `apply`: the liquidations lower the store's persisted feed start
+    (`liquidation_feed_since`) first, so the seconds folded next read 0 `liq_*` for every bucket
+    starting at or after it -- the other order would leave an id's very first flush with a
+    liquidation null where the rebuild of the same day stores 0 (audit D-160). The sink applies
+    each venue event once (`venue_event_id`), so the startup catch-up may replay a whole day of
+    them. It returns how many were new and may raise like `apply`; a failed call is not retried
+    live, only re-applied by the next start's catch-up (the last day) or the nightly rebuild.
     """
 
     def apply(self, instrument_id: str, rows: Sequence[SecondRow]) -> int: ...
+
+    def apply_liquidations(self, instrument_id: str, rows: Sequence[Liquidation]) -> int: ...
 
     def watermarks(self) -> Mapping[str, int]: ...
 

@@ -30,6 +30,8 @@ from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import NS_PER_DAY
 from kernel.clocks import NS_PER_S
 from kernel.clocks import READ_SPAN_MARGIN_NS
+from kernel.liquidation import LiquidatedSide
+from kernel.liquidation import Liquidation
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import LegacySnapshotLayoutError
 from kernel.second_snapshot import SecondOHLC
@@ -107,8 +109,23 @@ def test_data_file_ranges_ascending_from_names(catalog: str) -> None:
 def test_query_second_ohlc_filters_on_ts_event(catalog: str) -> None:
     rows = catalog_files.query_second_ohlc(catalog, _IID, _DAY0, _DAY0 + 20 * NS_PER_S)
     assert rows == [
-        SecondOHLC(_DAY0 + 10 * NS_PER_S, 10.0, 10.0, 10.0, 10.0, 1.0, 0.5),
-        SecondOHLC(_DAY0 + 20 * NS_PER_S, None, None, None, None, 0.0, 0.0),
+        SecondOHLC(
+            _DAY0 + 10 * NS_PER_S,
+            10.0,
+            10.0,
+            10.0,
+            10.0,
+            1.0,
+            0.5,
+            4,
+            4,
+            100_000,
+            10_000,
+            5_000,
+            1,
+            1,
+        ),
+        SecondOHLC(_DAY0 + 20 * NS_PER_S, None, None, None, None, 0.0, 0.0, 4, 4, None, 0, 0, 0, 0),
     ]
 
 
@@ -141,6 +158,21 @@ def test_second_ohlc_arrays(catalog: str) -> None:
     assert math.isnan(cols["c"][1])
     assert list(cols["v"]) == [1.5, 0.0, 1.5, 1.5, 1.5]
     assert len(catalog_files.second_ohlc_arrays([])["ts_ms"]) == 0
+
+
+def test_second_ohlc_arrays_carry_the_integer_flow_columns(catalog: str) -> None:
+    """Story 33.3: the units as int64, a no-trade close read as 0, never through a float."""
+    cols = catalog_files.second_ohlc_arrays(sorted(catalog_files.snapshot_files(catalog, _IID)))
+    assert cols["close_units"].dtype == np.int64
+    assert cols["close_units"].tolist() == [100_000, 0, 110_000, 120_000, 130_000]
+    assert cols["buy_units"].tolist() == [10_000, 0, 10_000, 10_000, 10_000]
+    assert cols["sell_units"].tolist() == [5_000, 0, 5_000, 5_000, 5_000]
+    assert cols["buy_n"].tolist() == [1, 0, 1, 1, 1]
+    assert cols["sell_n"].tolist() == [1, 0, 1, 1, 1]
+    assert cols["price_precision"].tolist() == [4] * 5
+    assert cols["size_precision"].tolist() == [4] * 5
+    empty = catalog_files.second_ohlc_arrays([])
+    assert all(len(empty[k]) == 0 for k in ("close_units", "buy_n", "size_precision"))
 
 
 def _book(ts_event: int, bids: list[float], asks: list[float]) -> DydxSecondSnapshot:
@@ -610,3 +642,74 @@ def test_an_unreadable_trade_file_is_refused_naming_it(tmp_path: Path) -> None:
     Path(path).write_bytes(Path(path).read_bytes()[:64])  # truncated: no Parquet footer
     with pytest.raises(catalog_files.TradeDecodeError, match="unreadable, refused"):
         catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + 1, 0, 0)
+
+
+@pytest.mark.parametrize("column", ["buy_volume", "sell_volume", "buy_count", "sell_count"])
+def test_second_ohlc_arrays_refuses_a_null_flow_column(
+    catalog: str, tmp_path: Path, column: str
+) -> None:
+    """
+    A null volume, count or precision is never read as 0 (no fabricated "nothing traded"): the
+    rebuild read raises naming the file and the column. Only the close may be null (no trade).
+    """
+    source = sorted(catalog_files.snapshot_files(catalog, _IID))[0]
+    table = pq.read_table(source)
+    index = table.schema.get_field_index(column)
+    field = table.schema.field(index).with_nullable(True)
+    nulls = pa.nulls(table.num_rows, field.type)
+    broken = tmp_path / Path(source).name
+    pq.write_table(table.set_column(index, field, nulls), broken)
+    with pytest.raises(ValueError, match=f"null value.*{column!r}") as raised:
+        catalog_files.second_ohlc_arrays([str(broken)])
+    assert str(broken) in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "column",
+    ["buy_volume", "sell_volume", "buy_count", "sell_count", "price_precision", "size_precision"],
+)
+def test_the_second_ohlc_rows_refuse_a_null_flow_column(
+    catalog: str, tmp_path: Path, column: str
+) -> None:
+    """`query_second_ohlc`'s per-file read refuses the same nulls, naming the file and column."""
+    source = sorted(catalog_files.snapshot_files(catalog, _IID))[0]
+    table = pq.read_table(source)
+    index = table.schema.get_field_index(column)
+    field = table.schema.field(index).with_nullable(True)
+    broken = tmp_path / Path(source).name
+    pq.write_table(table.set_column(index, field, pa.nulls(table.num_rows, field.type)), broken)
+    with pytest.raises(ValueError, match=f"null value.*{column!r}") as raised:
+        catalog_files._ohlc_rows(str(broken), 0, 1 << 62)
+    assert str(broken) in str(raised.value)
+
+
+def _liquidation_at(ts_event: int, ts_init: int, key: str) -> Liquidation:
+    iid = InstrumentId.from_str("BTCUSDT-LINEAR.BYBIT")
+    return Liquidation.from_wire_text(
+        iid, LiquidatedSide.LONG, "0.001", "84000.00", (2, 3), key, ts_event, ts_init
+    )
+
+
+def test_liquidation_feed_since_is_none_without_an_archived_liquidation(tmp_path: Path) -> None:
+    assert catalog_files.liquidation_feed_since_ns(str(tmp_path), "BTCUSDT-LINEAR.BYBIT") is None
+
+
+def test_liquidation_feed_since_is_the_earliest_ts_event_across_files(tmp_path: Path) -> None:
+    """
+    Three files: the first (by name span) starts at ts_init T+100 s and holds an event at T+90 s;
+    the second's span starts at T+200 s, within the 300 s skew bound of T+90 s, and holds an event
+    at T+10 s (its ts_init trails by 190 s): the earliest, T+10 s. The third starts at T+1,000 s,
+    past T+10 s + 300 s, so no row of it can be earlier: it is never opened (made unreadable).
+    """
+    t = _DAY0
+    writer = ParquetDataCatalog(str(tmp_path))
+    writer.write_data([_liquidation_at(t + 90 * NS_PER_S, t + 100 * NS_PER_S, "a")])
+    writer.write_data([_liquidation_at(t + 10 * NS_PER_S, t + 200 * NS_PER_S, "b")])
+    writer.write_data([_liquidation_at(t + 900 * NS_PER_S, t + 1_000 * NS_PER_S, "c")])
+    directory = tmp_path / "data" / "custom_liquidation" / "BTCUSDT-LINEAR.BYBIT"
+    files = sorted(directory.glob("*.parquet"))
+    assert len(files) == 3
+    files[-1].write_bytes(b"not parquet")  # opened only if the walk failed to stop
+    since = catalog_files.liquidation_feed_since_ns(str(tmp_path), "BTCUSDT-LINEAR.BYBIT")
+    assert since == t + 10 * NS_PER_S
+    assert MAX_TS_INIT_SKEW_NS == 300 * NS_PER_S

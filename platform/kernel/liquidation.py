@@ -51,6 +51,8 @@ import pyarrow as pa
 from kernel.second_snapshot import SnapshotEncodingError
 from kernel.second_snapshot import price_of
 from kernel.second_snapshot import units_of
+from kernel.venues import has_venue
+from kernel.venues import market_suffix
 from nautilus_trader.core.data import Data
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import FIXED_PRECISION
@@ -68,6 +70,23 @@ def _exact() -> Context:
     kernel holds no module-level mutable state.
     """
     return Context(prec=80, traps=[Inexact])
+
+
+def has_liquidation_feed(instrument_id: str) -> bool:
+    """
+    Whether the platform captures this instrument's liquidations: Bybit `-LINEAR` ids only.
+
+    The one predicate behind the candle store's null-vs-0 rule (Story 33.3): an instrument with the
+    feed reads 0 liquidations in a bucket none landed in, one without reads null (unknown), never
+    0. Bybit spot has no liquidation stream; Hyperliquid has no market-wide feed and Story 33.2
+    refuted both public-data hypotheses (`docs/DATA_DICTIONARY.md` §1.26), and the operator
+    declined a node feed; dYdX's `LIQUIDATED` trade type is dropped by the adapter and not
+    deployed. A venue that gains a feed is added here, and only here -- and in its independent
+    restatement on the verification oracle's side, `verification.domain.liquidation_check.
+    has_liquidation_feed` (DATA-02: the oracle never imports the code it checks), which
+    `platform/tests/test_liquidation_feed_predicates.py` holds equal to this one on a table of ids.
+    """
+    return has_venue(instrument_id, "BYBIT") and market_suffix(instrument_id) == "LINEAR"
 
 
 class LiquidatedSide(Enum):

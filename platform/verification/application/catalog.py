@@ -100,7 +100,10 @@ from verification.domain.catalog_check import judge_candles
 from verification.domain.catalog_check import judge_leaf
 from verification.domain.catalog_check import rehearsal_verdict
 from verification.domain.catalog_check import schema_classes
+from verification.domain.liquidation_check import StoredLiquidation
+from verification.domain.liquidation_check import has_liquidation_feed
 from verification.domain.plan_file import RecordingPlan
+from verification.domain.reference_signals import KnownLiquidations
 
 
 Fingerprint = frozenset[tuple[str, int, int, int]]
@@ -152,6 +155,19 @@ class CandleSource(Protocol):
     def path(self) -> str: ...
 
     def bars(self, instrument_id: str, day_start_ns: int) -> tuple[list[StoredBar], int]: ...
+
+
+class LiquidationSource(Protocol):
+    """
+    The catalog's archived liquidations, read raw: an instrument's rows in `[start, end)`, and its
+    earliest archived `ts_event` (None: nothing archived), the oracle's own known-from bound.
+    """
+
+    def liquidations(
+        self, instrument_id: str, start_ns: int, end_ns: int
+    ) -> list[StoredLiquidation]: ...
+
+    def first_ts_event(self, instrument_id: str) -> int | None: ...
 
 
 class NautilusReader(Protocol):
@@ -214,6 +230,8 @@ class CatalogInputs:
     backtest: BacktestReader
     rehearsal: Rehearsal
     candles: CandleSource
+    # The archived liquidations the candle judgement folds for a feed instrument (section 2.15).
+    liquidations: LiquidationSource
 
 
 @dataclass(frozen=True)
@@ -447,8 +465,24 @@ def _candles(day: _Day, received: Mapping[str, Received]) -> tuple[CandleReport,
     reports = []
     for iid in day.plan.instruments:
         bars, unknown = day.bars[iid]
-        reports.append(judge_candles(iid, received[iid].trade_rows, bars, unknown))
+        forced = _known_liquidations(day, iid)
+        reports.append(judge_candles(iid, received[iid].trade_rows, bars, unknown, forced))
     return tuple(reports)
+
+
+def _known_liquidations(day: _Day, iid: str) -> KnownLiquidations | None:
+    """
+    Return the day's archived liquidations of a feed instrument, known from its first archived one
+    (§2.15); None for an instrument without the feed or with nothing archived.
+    """
+    if not has_liquidation_feed(day.plan.venue, iid):
+        return None
+    source = day.inputs.liquidations
+    known_from = source.first_ts_event(iid)
+    if known_from is None:
+        return None
+    rows = source.liquidations(iid, day.start, day.start + NS_PER_DAY)
+    return KnownLiquidations(tuple(rows), known_from)
 
 
 # --- the day --------------------------------------------------------------------------------------

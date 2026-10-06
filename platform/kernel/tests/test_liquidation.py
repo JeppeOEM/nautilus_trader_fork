@@ -19,8 +19,10 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 
+from kernel.catalog_files import query_liquidations
 from kernel.liquidation import LiquidatedSide
 from kernel.liquidation import Liquidation
+from kernel.liquidation import has_liquidation_feed
 from kernel.second_snapshot import SnapshotEncodingError
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import Price
@@ -126,3 +128,63 @@ def test_the_stored_columns_are_the_documented_schema(tmp_path: Path) -> None:
     table = pq.read_table(path)
     assert table.column("side").to_pylist() == ["long"]
     assert table.column("price_units").to_pylist() == [8_513_850]
+
+
+# -- the feed predicate and the catalog read (Story 33.3) -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("iid", "expected"),
+    [
+        ("BTCUSDT-LINEAR.BYBIT", True),
+        ("BTCUSDT-SPOT.BYBIT", False),
+        ("BTCUSD-INVERSE.BYBIT", False),
+        ("BTC-USD-PERP.HYPERLIQUID", False),
+        ("BTC-USD-PERP.DYDX", False),
+        ("BTCUSDT-LINEAR.OTHER", False),
+        ("not-an-id", False),
+    ],
+)
+def test_only_bybit_linear_has_a_liquidation_feed(iid: str, expected: bool) -> None:
+    assert has_liquidation_feed(iid) is expected
+
+
+def test_query_liquidations_reads_the_inclusive_window_sorted(tmp_path: Path) -> None:
+    early = _row("0.041", ts=_T_NS)
+    late = _row("0.483", side=LiquidatedSide.SHORT, ts=_T_NS + 2_000_000_000)
+    outside = _row("0.100", ts=_T_NS + 3_000_000_000)
+    ParquetDataCatalog(str(tmp_path)).write_data([early, late, outside])
+    rows = query_liquidations(str(tmp_path), str(_BTC), _T_NS, _T_NS + 2_000_000_000)
+    assert [Liquidation.to_dict(r) for r in rows] == [
+        Liquidation.to_dict(early),
+        Liquidation.to_dict(late),
+    ]
+
+
+def test_query_liquidations_keeps_one_copy_of_a_venue_event(tmp_path: Path) -> None:
+    """The same event in two files (a minute file and its day file) is one liquidation."""
+    catalog = ParquetDataCatalog(str(tmp_path))
+    row = _row()
+    catalog.write_data([row])
+    filler = _row("0.500", ts=_T_NS + 1_000_000_000)  # a wider file span: a second file
+    catalog.write_data([_row(ts=_T_NS), filler], skip_disjoint_check=True)
+    assert len(list((tmp_path / "data" / "custom_liquidation" / str(_BTC)).glob("*"))) == 2
+    rows = query_liquidations(str(tmp_path), str(_BTC), _T_NS - 1, _T_NS + 1)
+    assert [Liquidation.to_dict(r) for r in rows] == [Liquidation.to_dict(row)]
+
+
+def test_query_liquidations_refuses_two_copies_that_disagree(tmp_path: Path) -> None:
+    catalog = ParquetDataCatalog(str(tmp_path))
+    catalog.write_data([_row("0.041")])
+    other = _row("0.050")
+    forged = Liquidation.from_dict(
+        {**Liquidation.to_dict(other), "venue_event_id": _row().venue_event_id}
+    )
+    filler = _row("0.500", ts=_T_NS + 1_000_000_000)
+    catalog.write_data([forged, filler], skip_disjoint_check=True)
+    with pytest.raises(ValueError, match="stored twice with different values"):
+        query_liquidations(str(tmp_path), str(_BTC), _T_NS - 1, _T_NS + 1)
+
+
+def test_query_liquidations_without_a_directory_is_empty(tmp_path: Path) -> None:
+    assert query_liquidations(str(tmp_path), "BTC-USD-PERP.HYPERLIQUID", 0, 2**62) == []

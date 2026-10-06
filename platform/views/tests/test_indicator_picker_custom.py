@@ -26,9 +26,13 @@ entries (CumulativeVolumeDelta and later additions) live in the same module-leve
 """
 
 import tempfile
+from pathlib import Path
 
 import pytest
-from kernel.tests.snapshot_factory import make_snapshot
+from candles.infrastructure.sqlite_store import CandleStore
+from candles.infrastructure.sqlite_store import db_path_for_venue
+from kernel.second_snapshot import SecondOHLC
+from kernel.venues import venue_of
 
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
@@ -57,7 +61,7 @@ def _window() -> ReplayWindow:
 def _echo_replay(
     candles: list[dict], params: dict, window: ReplayWindow
 ) -> dict[str, list[float | None]]:
-    """A placeholder replay: one output ("value") per candle, scaled by params["scale"]."""
+    """Return one placeholder output ("value") per candle, scaled by params["scale"]."""
     return {"value": [c["c"] * params["scale"] for c in candles]}
 
 
@@ -93,119 +97,119 @@ def test_catalog_json_returns_params_and_panel_per_entry() -> None:
     assert ci.custom_catalog_json()["PlaceholderCustom"] == {
         "params": {"scale": 1.0},
         "panel": "histogram",
+        "choices": {},
     }
     assert (
         "category" not in ci.custom_catalog_json()["PlaceholderCustom"]
     )  # tagged only at the merge point
 
 
-# -- Story 10.2: CumulativeVolumeDelta -------------------------------------------------------
+# -- Story 10.2 / 33.3: CumulativeVolumeDelta, from the bars' stored order flow ---------------
+
+_HOUR_MS = 3_600_000
+_DAY1_MS = 20_000 * 86_400_000  # a UTC midnight
 
 
-def _write_snapshots(
-    tmp_path: str,
-    buy_sell_pairs: list[tuple[float, float]],
-    base_ns: int = _TS_NS,
-) -> tuple[int, int]:
-    """Write one DydxSecondSnapshot per (buy_volume, sell_volume) pair, 1s apart."""
-    step_ns = 1_000_000_000
-    snapshots = [
-        make_snapshot(
-            instrument_id=InstrumentId.from_str(_IID),
-            bid_prices=[100.0],
-            bid_sizes=[1.0],
-            ask_prices=[101.0],
-            ask_sizes=[1.0],
-            buy_volume=buy_vol,
-            sell_volume=sell_vol,
-            buy_count=1,
-            sell_count=1,
-            ts_event=base_ns + i * step_ns,
-            ts_init=base_ns + i * step_ns,
-        )
-        for i, (buy_vol, sell_vol) in enumerate(buy_sell_pairs)
-    ]
-    ParquetDataCatalog(tmp_path).write_data(snapshots)
-    return snapshots[0].ts_event, snapshots[-1].ts_event
+def _flow_bar(t: int, buy_v: int | None, sell_v: int | None, size_precision: int = 1) -> dict:
+    """Build a candle as `candle_page` serves it: only the keys CVD reads besides `t`."""
+    flow = buy_v is not None
+    return {
+        "t": t,
+        "buy_v": buy_v,
+        "sell_v": sell_v,
+        "size_precision": size_precision if flow else None,
+    }
 
 
-def test_cvd_accumulates_buy_minus_sell_volume_per_candle(monkeypatch: pytest.MonkeyPatch) -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        # 6 one-second snapshots -> two 3-second candle buckets.
-        bar_ns = 3_000_000_000
-        aligned_base_ns = (_TS_NS // bar_ns) * bar_ns  # deliberately bucket-aligned base
-        first_ns, _ = _write_snapshots(
-            tmp,
-            [(5.0, 2.0), (1.0, 1.0), (0.0, 3.0), (4.0, 0.0), (2.0, 2.0), (1.0, 0.0)],
-            base_ns=aligned_base_ns,
-        )
-        monkeypatch.setattr(ci, "_CATALOG_PATH", tmp)
-        candles = [
-            {"t": aligned_base_ns // 1_000_000},
-            {"t": (aligned_base_ns + bar_ns) // 1_000_000},
-        ]
-        start_ms = first_ns // 1_000_000
-        window = ReplayWindow(
-            instrument_id=_IID, bar_seconds=3, start_ms=start_ms, end_ms=start_ms + 6000
-        )
-        result = ci.replay_custom(candles, "CumulativeVolumeDelta", {}, window)
-        # bucket 1: (5-2)+(1-1)+(0-3) = 0; bucket 2 adds (4-0)+(2-2)+(1-0) = +5 -> running 5
-        assert result["value"] == [0.0, 5.0]
+def _hourly(bars: list[dict], candles_dir: str | None = None) -> ReplayWindow:
+    return ReplayWindow(
+        instrument_id=_IID,
+        bar_seconds=3600,
+        start_ms=bars[0]["t"],
+        end_ms=bars[-1]["t"] + _HOUR_MS,
+        candles_dir=candles_dir,
+    )
 
 
-def test_cvd_returns_none_for_every_candle_in_live_mode() -> None:
-    live_window = ReplayWindow(instrument_id=_IID, bar_seconds=60, start_ms=None, end_ms=None)
-    result = ci.replay_custom([{"t": 0}, {"t": 60_000}], "CumulativeVolumeDelta", {}, live_window)
-    assert result == {"value": [None, None]}
+# The spec's matrix: day 1 10:00 delta +3, day 1 11:00 flow null, day 2 00:00 delta +2 (at size
+# precision 1: 30 and 20 units).
+_MATRIX = [
+    _flow_bar(_DAY1_MS + 10 * _HOUR_MS, 50, 20),
+    _flow_bar(_DAY1_MS + 11 * _HOUR_MS, None, None),
+    _flow_bar(_DAY1_MS + 24 * _HOUR_MS, 25, 5),
+]
 
 
-def test_cvd_flags_a_snapshot_gap_as_none_instead_of_a_flat_carry_forward(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_cvd_accumulates_the_bars_buy_minus_sell() -> None:
+    bars = [_flow_bar(0, 60, 60), _flow_bar(_HOUR_MS, 70, 20)]  # deltas 0 and +5.0
+    result = ci.replay_custom(bars, "CumulativeVolumeDelta", {}, _hourly(bars))
+    assert result["value"] == [0.0, 5.0]
+
+
+def test_cvd_a_null_flow_bar_is_none_and_the_total_carries_on() -> None:
+    """A pre-migration bar's flow is unknown: None, never a flat carry-forward (DATA-01)."""
+    result = ci.replay_custom(_MATRIX, "CumulativeVolumeDelta", {}, _hourly(_MATRIX))
+    assert result["value"] == [3.0, None, 5.0]
+
+
+def test_cvd_session_restarts_at_each_utc_day() -> None:
+    params = {"anchor": "session"}
+    result = ci.replay_custom(_MATRIX, "CumulativeVolumeDelta", params, _hourly(_MATRIX))
+    assert result["value"] == [3.0, None, 2.0]
+
+
+def test_cvd_session_on_daily_bars_is_each_bars_own_delta() -> None:
+    days = [_flow_bar(_DAY1_MS + d * 86_400_000, 40, 10) for d in range(3)]
+    window = ReplayWindow(_IID, 86_400, days[0]["t"], days[-1]["t"] + 86_400_000)
+    result = ci.replay_custom(days, "CumulativeVolumeDelta", {"anchor": "session"}, window)
+    assert result["value"] == [3.0, 3.0, 3.0]
+
+
+def test_cvd_all_starts_from_the_stored_bars_before_the_window(tmp_path: Path) -> None:
     """
-    A candle bucket with zero DydxSecondSnapshot rows means the collector's snapshot data
-    didn't arrive for that second, not that trading was flat -- DATA-01 requires flagging
-    this as unknown, not silently carrying the running total forward as if nothing happened.
+    The store holds one 09:00 second buying 12 and selling 2 at size precision 0 (+10); the
+    visible bars are at precision 1, so the total runs at 1: 100 + 30 = 130 -> 13.0, then 15.0.
     """
-    with tempfile.TemporaryDirectory() as tmp:
-        bar_ns = 3_000_000_000
-        aligned_base_ns = (_TS_NS // bar_ns) * bar_ns
-        # Only the first bucket's 3 seconds have snapshots -- the second bucket is a real gap.
-        first_ns, _ = _write_snapshots(
-            tmp, [(5.0, 2.0), (1.0, 1.0), (0.0, 3.0)], base_ns=aligned_base_ns
-        )
-        monkeypatch.setattr(ci, "_CATALOG_PATH", tmp)
-        candles = [
-            {"t": aligned_base_ns // 1_000_000},
-            {"t": (aligned_base_ns + bar_ns) // 1_000_000},
-        ]
-        start_ms = first_ns // 1_000_000
-        window = ReplayWindow(
-            instrument_id=_IID, bar_seconds=3, start_ms=start_ms, end_ms=start_ms + 6000
-        )
-        result = ci.replay_custom(candles, "CumulativeVolumeDelta", {}, window)
-        assert result["value"] == [0.0, None]
+    store = CandleStore(db_path_for_venue(tmp_path, venue_of(_IID)))
+    ts = (_DAY1_MS + 9 * _HOUR_MS) * 1_000_000
+    store.apply(_IID, [SecondOHLC(ts, 1.0, 1.0, 1.0, 1.0, 12.0, 2.0, 0, 0, 1, 12, 2, 1, 1)])
+    store.close()
+    params = {"anchor": "all"}
+    window = _hourly(_MATRIX, str(tmp_path))
+    result = ci.replay_custom(_MATRIX, "CumulativeVolumeDelta", params, window)
+    assert result["value"] == [13.0, None, 15.0]
 
 
-def test_cvd_resumes_running_total_after_a_gap(monkeypatch: pytest.MonkeyPatch) -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        bar_ns = 3_000_000_000
-        aligned_base_ns = (_TS_NS // bar_ns) * bar_ns
-        # Bucket 1 has data, bucket 2 is a gap (no snapshots written for it), bucket 3 has data.
-        bucket1 = _write_snapshots(tmp, [(5.0, 2.0)], base_ns=aligned_base_ns)[0]
-        _write_snapshots(tmp, [(4.0, 1.0)], base_ns=aligned_base_ns + 2 * bar_ns)
-        monkeypatch.setattr(ci, "_CATALOG_PATH", tmp)
-        candles = [
-            {"t": aligned_base_ns // 1_000_000},
-            {"t": (aligned_base_ns + bar_ns) // 1_000_000},
-            {"t": (aligned_base_ns + 2 * bar_ns) // 1_000_000},
-        ]
-        start_ms = bucket1 // 1_000_000
-        window = ReplayWindow(
-            instrument_id=_IID, bar_seconds=3, start_ms=start_ms, end_ms=start_ms + 9000
-        )
-        result = ci.replay_custom(candles, "CumulativeVolumeDelta", {}, window)
-        assert result["value"] == [3.0, None, 6.0]  # 3.0 carries through the gap, then +3.0
+def test_cvd_all_with_no_store_file_starts_at_zero(tmp_path: Path) -> None:
+    window = _hourly(_MATRIX, str(tmp_path / "none"))
+    result = ci.replay_custom(_MATRIX, "CumulativeVolumeDelta", {"anchor": "all"}, window)
+    assert result["value"] == [3.0, None, 5.0]
+
+
+def test_cvd_all_without_a_candles_dir_is_refused() -> None:
+    with pytest.raises(ValueError, match="candle store"):
+        ci.replay_custom(_MATRIX, "CumulativeVolumeDelta", {"anchor": "all"}, _hourly(_MATRIX))
+
+
+def test_cvd_an_unknown_anchor_is_refused_at_replay_and_at_save() -> None:
+    with pytest.raises(ValueError, match="anchor"):
+        ci.replay_custom(_MATRIX, "CumulativeVolumeDelta", {"anchor": "week"}, _hourly(_MATRIX))
+    with pytest.raises(ValueError, match="not one of the choices"):
+        ci.check_params("CumulativeVolumeDelta", {"anchor": "week"})
+    ci.check_params("CumulativeVolumeDelta", {"anchor": "session"})
+
+
+def test_cvd_computes_in_live_mode_too() -> None:
+    live = ReplayWindow(instrument_id=_IID, bar_seconds=3600, start_ms=None, end_ms=None)
+    result = ci.replay_custom(_MATRIX, "CumulativeVolumeDelta", {}, live)
+    assert result["value"] == [3.0, None, 5.0]
+
+
+def test_cvd_mixed_precision_bars_sum_exactly() -> None:
+    """0.1 + 0.2 in floats is 0.30000000000000004; in units at precision 2 it is 30 -> 0.3."""
+    bars = [_flow_bar(0, 1, 0, 1), _flow_bar(_HOUR_MS, 20, 0, 2)]
+    result = ci.replay_custom(bars, "CumulativeVolumeDelta", {}, _hourly(bars))
+    assert result["value"] == [0.1, 0.3]
 
 
 def test_cvd_registered_in_production_catalog_with_correct_shape() -> None:
@@ -213,8 +217,9 @@ def test_cvd_registered_in_production_catalog_with_correct_shape() -> None:
     # path a request actually uses -- catalog_json() and dashboard's merge point both read
     # this without needing to know CumulativeVolumeDelta's internals.
     assert ci.custom_catalog_json()["CumulativeVolumeDelta"] == {
-        "params": {},
+        "params": {"anchor": "visible"},
         "panel": "oscillator",
+        "choices": {"anchor": ["session", "visible", "all"]},
     }
 
 
@@ -310,6 +315,7 @@ def test_cancel_pressure_registered_in_production_catalog_with_correct_shape() -
     assert ci.custom_catalog_json()["CancelPressure"] == {
         "params": {"window": 200},
         "panel": "histogram",
+        "choices": {},
     }
 
 
@@ -464,4 +470,5 @@ def test_ofi_registered_in_production_catalog_with_correct_shape() -> None:
     assert ci.custom_catalog_json()["OrderFlowImbalance"] == {
         "params": {"window": 20},
         "panel": "oscillator",
+        "choices": {},
     }

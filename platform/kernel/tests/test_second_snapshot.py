@@ -70,7 +70,9 @@ _IID = "BTC-USD-PERP.DYDX"
 
 
 def _ohlc() -> SecondOHLC:
-    return SecondOHLC(1_000_000_000, 100.0, 101.0, 99.0, 100.5, 1.0, 0.5)
+    return SecondOHLC(
+        1_000_000_000, 100.0, 101.0, 99.0, 100.5, 1.0, 0.5, 4, 4, 1_005_000, 10_000, 5_000, 1, 1
+    )
 
 
 def _snapshot() -> DydxSecondSnapshot:
@@ -108,7 +110,8 @@ def test_the_live_snapshot_satisfies_the_protocol() -> None:
 
 
 def test_the_two_shapes_carry_the_same_per_second_values() -> None:
-    fields = ("ts_event", "open_price", "high_price", "low_price", "close_price")
+    """Every protocol field, the Story 33.3 units included, reads the same on both shapes."""
+    fields = SecondOHLC._fields
     assert [getattr(_ohlc(), f) for f in fields] == [getattr(_snapshot(), f) for f in fields]
 
 

@@ -398,6 +398,7 @@ def get_indicator_values(
             catalog_path=_candles.CATALOG_PATH,
             candles_dir=_candles.CANDLES_DB_DIR,
             recent_rows=buses.live_candle_bus.recent_rows,
+            recent_liquidations=buses.live_candle_bus.recent_liquidations,
         )
     except chart_series.ImpossibleCandle as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

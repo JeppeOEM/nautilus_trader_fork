@@ -40,6 +40,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from verification.domain.conservation import instrument_category
+from verification.domain.verdict import LIQUIDATION_VENUES
+
 
 NS_PER_S = 1_000_000_000
 MATCH_WINDOW_NS = 2 * NS_PER_S
@@ -51,6 +54,18 @@ SELLER = 2
 # The liquidated side as stored (`side` column) -> the aggressor side of its forced order.
 FORCED_AGGRESSOR = MappingProxyType({"long": SELLER, "short": BUYER})
 UNMATCHED_SHOWN = 20
+
+
+def has_liquidation_feed(venue: str, instrument_id: str) -> bool:
+    """
+    Whether the platform captures this instrument's liquidations, restated from
+    `docs/DATA_DICTIONARY.md` §1.26/§2.15 (never imported from the kernel): a venue of
+    `LIQUIDATION_VENUES` (Bybit) and its `linear` category. The candle oracle folds such an
+    instrument's liquidations (0 in a quiet bucket) and leaves every other's null.
+    `platform/tests/test_liquidation_feed_predicates.py` holds it equal to the production
+    predicate on a table of ids, without this module importing it.
+    """
+    return venue in LIQUIDATION_VENUES and instrument_category(venue, instrument_id) == "linear"
 
 
 @dataclass(frozen=True)

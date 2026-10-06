@@ -22,11 +22,13 @@ indicator-values route for the same instrument/params: same computation, differe
 
 import json
 import time
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from kernel.second_snapshot import SecondOHLC
+from kernel.tests.snapshot_factory import make_second
 from kernel.tests.snapshot_factory import make_snapshot
 from views import ranking_columns
 from views.rankings_bus import RankingsBus
@@ -46,14 +48,17 @@ _MINUTE_NS = 60_000_000_000
 
 def _traded_second(ts_ns: int, price: float) -> SecondOHLC:
     """One traded second for the candle-store fixture, shaped like the candle tests' own rows."""
-    return SecondOHLC(
-        ts_event=ts_ns,
-        open_price=price,
-        high_price=price + 0.5,
-        low_price=price - 0.5,
-        close_price=price + 0.1,
+    p = Decimal(str(price))
+    return make_second(
+        ts_ns,
+        p + Decimal("0.1"),
+        open_price=p,
+        high_price=p + Decimal("0.5"),
+        low_price=p - Decimal("0.5"),
         buy_volume=1.0,
         sell_volume=0.25,
+        buy_count=1,
+        sell_count=1,
     )
 
 

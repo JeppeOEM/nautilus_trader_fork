@@ -51,6 +51,7 @@ from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import replace
 from decimal import Decimal
+from decimal import localcontext
 from fractions import Fraction
 from types import MappingProxyType
 
@@ -63,17 +64,21 @@ from verification.domain.catalog_check import STORE_BAR_SECONDS
 from verification.domain.catalog_check import StoredBar
 from verification.domain.catalog_check import TradeRow
 from verification.domain.catalog_check import WidthCandles
+from verification.domain.catalog_check import aggregates_agree
 from verification.domain.catalog_check import judge_width
 from verification.domain.conservation import EXAMPLES
 from verification.domain.conservation import NS_PER_S
 from verification.domain.conservation import SECONDS_PER_DAY
 from verification.domain.conservation import Intervals
 from verification.domain.conservation import SecondCounts
+from verification.domain.reference_signals import DIGITS
 from verification.domain.reference_signals import WEEK_SECONDS
+from verification.domain.reference_signals import KnownLiquidations
 from verification.domain.reference_signals import RefBook
 from verification.domain.reference_signals import RefCandle
 from verification.domain.reference_signals import bucket_start
 from verification.domain.reference_signals import fold_candles
+from verification.domain.reference_signals import units_exactly
 from verification.domain.signal_compare import FAILING
 from verification.domain.signal_compare import Agreement
 from verification.domain.signal_compare import at_places
@@ -150,7 +155,10 @@ def week_start_ms(day_start_ns: int) -> int:
 
 @dataclass(frozen=True)
 class ServedBar:
-    """One served item with `o` set: its values as the JSON carried them, `partial` None if absent."""
+    """
+    One served item with `o` set: its values as the JSON carried them, `partial` None if absent,
+    and §2.15's ten integer keys (None when the item carried null or nothing).
+    """
 
     t: int
     o: float | None
@@ -159,6 +167,16 @@ class ServedBar:
     c: float | None
     v: float | None
     partial: bool | None
+    buy_v: int | None = None
+    sell_v: int | None = None
+    buy_n: int | None = None
+    sell_n: int | None = None
+    pv: int | None = None
+    liq_long_v: int | None = None
+    liq_short_v: int | None = None
+    liq_n: int | None = None
+    price_precision: int | None = None
+    size_precision: int | None = None
 
 
 @dataclass(frozen=True)
@@ -262,6 +280,9 @@ class PreparedDay:
     differing: tuple[int, ...]
     off_grid: frozenset[int]
     causes: Causes
+    # The day's archived liquidations and their known start; None for an instrument without the
+    # feed, or with nothing archived (§2.15).
+    liquidations: KnownLiquidations | None = None
 
 
 def _masked_row(row: TradeRow, folded: TradeColumns | None) -> TradeRow:
@@ -273,6 +294,7 @@ def prepare_day(
     rows: Sequence[TradeRow],
     reference: Mapping[int, TradeColumns | None],
     causes: Causes,
+    liquidations: KnownLiquidations | None = None,
 ) -> PreparedDay:
     """
     Build the day's folds' inputs. `reference` holds the fold of every observed second with
@@ -304,6 +326,7 @@ def prepare_day(
         differing=tuple(sorted(differing)),
         off_grid=frozenset(off_grid),
         causes=causes,
+        liquidations=liquidations,
     )
 
 
@@ -311,7 +334,11 @@ def prepare_day(
 
 
 def served_agreement(bar: ServedBar, ref: RefCandle, places: tuple[int, int]) -> str:
-    """o/h/l/c at the bucket's price places and v at its size places (`at_places`)."""
+    """
+    o/h/l/c at the bucket's price places and v at its size places (`at_places`), and §2.15's ten
+    keys exactly equal in units (`aggregates_agree`: a null where the reference has a value, or
+    the reverse, differs).
+    """
     price, size = places
     found = [
         at_places(s, r, price)
@@ -320,7 +347,7 @@ def served_agreement(bar: ServedBar, ref: RefCandle, places: tuple[int, int]) ->
         )
     ]
     found.append(at_places(bar.v, ref.volume, size))
-    if any(agreement in FAILING for agreement in found):
+    if any(agreement in FAILING for agreement in found) or not aggregates_agree(bar, ref):
         return SERVED_DIFFERS
     return FLOAT_NOISE if Agreement.FLOAT_NOISE in found else EXACT
 
@@ -365,8 +392,11 @@ def judge_reference(
 
 
 def bucket_kind(ref: RefCandle | None) -> str:
-    """`no_data` without a row, `untraded` with rows but no trade, else `traded`."""
-    if ref is None:
+    """
+    `no_data` without a row (a bucket only a liquidation made has none), `untraded` with rows but
+    no trade, else `traded`.
+    """
+    if ref is None or ref.seconds_observed == 0:
         return NO_DATA
     return UNTRADED if ref.close is None else TRADED
 
@@ -467,13 +497,15 @@ def judge_day_width(
 ) -> WidthReport:
     """Judge every bucket of the day at one width dividing it (`DAY_BAR_SECONDS`)."""
     folds = _Folds(
-        fold_candles(day.books, bar_seconds),
-        fold_candles(day.masked, bar_seconds),
+        fold_candles(day.books, bar_seconds, day.liquidations),
+        fold_candles(day.masked, bar_seconds, day.liquidations),
         bucket_places(day.rows, bar_seconds),
     )
     grid = day_grid(day.day_start_s, bar_seconds)
     kinds = Counter(bucket_kind(folds.catalog.get(t)) for t in grid)
-    catalog = None if stored is None else judge_width(bar_seconds, day.rows, day.books, stored)
+    catalog = None
+    if stored is not None:
+        catalog = judge_width(bar_seconds, day.rows, day.books, stored, day.liquidations)
     reference, examples = _reference_classes(day, folds, bar_seconds)
     served_counts: Mapping[str, int] | None = None
     if served is not None:
@@ -499,8 +531,9 @@ def merge_candles(t: int, parts: Sequence[RefCandle]) -> RefCandle:
     """
     seconds = sum(part.seconds_observed for part in parts)
     traded = [part for part in parts if part.close is not None]
+    flow = merge_aggregates(parts)
     if not traded:
-        return RefCandle(t, None, None, None, None, Decimal(0), seconds)
+        return RefCandle(t, None, None, None, None, Decimal(0), seconds, **flow)
     return RefCandle(
         t=t,
         open=traded[0].open,
@@ -509,7 +542,64 @@ def merge_candles(t: int, parts: Sequence[RefCandle]) -> RefCandle:
         close=traded[-1].close,
         volume=sum((p.volume for p in traded), Decimal(0)),
         seconds_observed=seconds,
+        **flow,
     )
+
+
+# Each §2.15 column's units: (price places, size places) it is counted in.
+_UNIT_OF = MappingProxyType(
+    {
+        "buy_v": (0, 1),
+        "sell_v": (0, 1),
+        "buy_n": (0, 0),
+        "sell_n": (0, 0),
+        "pv": (1, 1),
+        "liq_long_v": (0, 1),
+        "liq_short_v": (0, 1),
+        "liq_n": (0, 0),
+    }
+)
+
+
+def merge_aggregates(parts: Sequence[RefCandle]) -> dict[str, int | None]:
+    """
+    Section 2.15's columns of consecutive buckets as one: each part's units read as decimals at
+    its own precisions, summed, and counted again at the finest of them; a column None in any
+    part is None (unknown stays unknown).
+    """
+    price_p = max((p.price_precision or 0 for p in parts), default=0)
+    size_p = max((p.size_precision or 0 for p in parts), default=0)
+    out: dict[str, int | None] = {"price_precision": price_p, "size_precision": size_p}
+    for name, (uses_price, uses_size) in _UNIT_OF.items():
+        values = [getattr(p, name) for p in parts]
+        if any(v is None for v in values):
+            out[name] = None
+            continue
+        out[name] = _merged_units(values, parts, (uses_price, uses_size), (price_p, size_p))
+    if all(out[name] is None for name in _UNIT_OF):
+        out["price_precision"] = out["size_precision"] = None
+    return out
+
+
+def _merged_units(
+    values: list[int],
+    parts: Sequence[RefCandle],
+    uses: tuple[int, int],
+    places: tuple[int, int],
+) -> int:
+    """Sum one column's parts as exact decimals (`DIGITS`) and count it at `places`."""
+    uses_price, uses_size = uses
+    with localcontext(prec=DIGITS):
+        total = sum(
+            (
+                Decimal(v).scaleb(
+                    -(uses_price * (p.price_precision or 0) + uses_size * (p.size_precision or 0))
+                )
+                for v, p in zip(values, parts, strict=True)
+            ),
+            Decimal(0),
+        )
+    return units_exactly(total, uses_price * places[0] + uses_size * places[1])
 
 
 @dataclass(frozen=True)

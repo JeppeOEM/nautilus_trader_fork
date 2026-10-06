@@ -61,5 +61,13 @@ def test_buckets_counts_every_accepted_second_traded_or_not() -> None:
     rows = [_second(0, 100.0), _second(1, None), _second(2, 101.0)]
     buckets = CandleSeries(_IID).buckets(rows)
     minute = buckets[(60, rows[0].ts_event // 1_000_000 // 60_000 * 60_000)]
-    assert minute[5] == 3  # seconds_observed
-    assert (minute[0], minute[3]) == (100.0, 101.1)  # open of the first traded, close of the last
+    assert minute.seconds_observed == 3
+    assert (minute.o, minute.c) == (100.0, 101.1)  # open of the first traded, close of the last
+
+
+def test_buckets_pass_the_liquidation_input_through() -> None:
+    """None is no feed (null `liq_*`), an empty list the feed with nothing (0)."""
+    rows = [_second(0, 100.0)]
+    key = (60, rows[0].ts_event // 1_000_000 // 60_000 * 60_000)
+    assert CandleSeries(_IID).buckets(rows)[key].liq_n is None
+    assert CandleSeries(_IID).buckets(rows, liquidations=[])[key].liq_n == 0

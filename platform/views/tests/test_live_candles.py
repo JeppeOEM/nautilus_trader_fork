@@ -226,6 +226,7 @@ async def test_seed_wide_bar_reads_raw_seconds_plus_unflushed_tail(
     is built from), extended by live seconds the catalog has not flushed yet.
     """
     from kernel.second_snapshot import SecondOHLC
+    from kernel.tests.snapshot_factory import make_second
 
     import views.live_candles as lc
 
@@ -236,10 +237,24 @@ async def test_seed_wide_bar_reads_raw_seconds_plus_unflushed_tail(
 
     def seconds(_path: str, _iid: str, a: int, b: int) -> list[SecondOHLC]:
         assert (a, b) == (start_ns, pytest.approx(now_ns, abs=5_000_000_000))
+
+        def traded(ts: int, o: float, h: float, low: float, c: float) -> SecondOHLC:
+            return make_second(
+                ts,
+                c,
+                open_price=o,
+                high_price=h,
+                low_price=low,
+                buy_volume=1.0,
+                sell_volume=0.5,
+                buy_count=1,
+                sell_count=1,
+            )
+
         return [
-            SecondOHLC(start_ns, 100.0, 105.0, 99.0, 104.0, 1.0, 0.5),
-            SecondOHLC(start_ns + 1_000_000_000, None, None, None, None, 0.0, 0.0),
-            SecondOHLC(start_ns + 2_000_000_000, 104.0, 110.0, 103.0, 108.0, 1.0, 0.5),
+            traded(start_ns, 100.0, 105.0, 99.0, 104.0),
+            make_second(start_ns + 1_000_000_000),
+            traded(start_ns + 2_000_000_000, 104.0, 110.0, 103.0, 108.0),
         ]
 
     monkeypatch.setattr(lc, "query_second_ohlc", seconds)

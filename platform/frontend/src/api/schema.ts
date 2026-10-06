@@ -67,6 +67,16 @@ export interface CandleItem {
   c?: number | null;
   v?: number | null;
   partial?: boolean | null;
+  buy_v?: number | null;
+  sell_v?: number | null;
+  buy_n?: number | null;
+  sell_n?: number | null;
+  pv?: number | null;
+  liq_long_v?: number | null;
+  liq_short_v?: number | null;
+  liq_n?: number | null;
+  price_precision?: number | null;
+  size_precision?: number | null;
 }
 
 export interface CandlesResponse {

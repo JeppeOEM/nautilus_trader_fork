@@ -90,6 +90,36 @@ describe("useLiveCandle", () => {
     expect(result.current).toEqual({ time: 60, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10 });
   });
 
+  it("parses a bar carrying Story 33.3's order-flow keys to the same chart datum as one without", () => {
+    // AD-D12: the /ws/live bar only gains keys (appended after t,o,h,l,c,v); the chart reads none
+    // of them yet (33.6), so both shapes must produce the identical datum.
+    const withFlow = {
+      ...candleMessage(),
+      bar: {
+        ...candleMessage().bar,
+        buy_v: 6000,
+        sell_v: 4000,
+        buy_n: 3,
+        sell_n: 2,
+        pv: 15_000_000,
+        liq_long_v: null,
+        liq_short_v: null,
+        liq_n: null,
+        price_precision: 1,
+        size_precision: 3,
+      },
+    };
+    const plain = renderHook(() => useLiveCandle("BTC-USD-PERP.DYDX", 60));
+    act(() => latestSocket().open());
+    act(() => latestSocket().receive(candleMessage()));
+    const flow = renderHook(() => useLiveCandle("BTC-USD-PERP.DYDX", 60));
+    act(() => latestSocket().open());
+    act(() => latestSocket().receive(withFlow));
+
+    expect(flow.result.current).toEqual(plain.result.current);
+    expect(flow.result.current).toEqual({ time: 60, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10 });
+  });
+
   it("ignores a message for a channel it did not subscribe to", () => {
     const { result } = renderHook(() => useLiveCandle("BTC-USD-PERP.DYDX", 60));
     act(() => latestSocket().open());

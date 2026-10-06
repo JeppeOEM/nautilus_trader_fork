@@ -112,6 +112,7 @@ def _page(
         catalog_path=catalog,
         candles_dir=f"{catalog}-no-candle-store",  # the Parquet fold: the snapshots' trade units
         recent_rows=_no_tail,
+        recent_liquidations=lambda *_: [],
         price_precision=pp,
         size_precision=sp,
         now_ns=before_ns if now_ns is None else now_ns,
@@ -319,6 +320,7 @@ def test_each_bars_rows_sum_to_its_candle_volume(tmp_path: Path) -> None:
         catalog_path=catalog,
         candles_dir=f"{catalog}-no-candle-store",
         recent_rows=_no_tail,
+        recent_liquidations=lambda *_: [],
     )
     assert len(bars) == len(candles) == 5
     for bar, candle in zip(bars, candles, strict=True):

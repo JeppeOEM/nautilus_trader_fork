@@ -75,6 +75,7 @@ from verification.domain.conservation import NS_PER_HOUR
 from verification.domain.subscriptions import VENUES
 from verification.infrastructure.catalog_scan import CandleStoreFile
 from verification.infrastructure.catalog_scan import CatalogScan
+from verification.infrastructure.liquidation_reader import LiquidationCatalog
 from verification.subject.backtest_probe import BacktestReads
 from verification.subject.consolidation import Rehearsals
 from verification.subject.consolidation import WriterFactory
@@ -118,6 +119,7 @@ def inputs_of(
         backtest=BacktestReads(catalog),
         rehearsal=Rehearsals(scratch_dir(args, environ, catalog), writer),
         candles=CandleStoreFile(store),
+        liquidations=LiquidationCatalog(catalog),
     )
 
 

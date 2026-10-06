@@ -41,6 +41,8 @@ from types import MappingProxyType
 from verification.domain.conservation import NS_PER_HOUR
 from verification.domain.conservation import NS_PER_S
 from verification.domain.conservation import SECONDS_PER_DAY
+from verification.domain.reference_signals import AGGREGATE_FIELDS
+from verification.domain.reference_signals import KnownLiquidations
 from verification.domain.reference_signals import RefBook
 from verification.domain.reference_signals import RefCandle
 from verification.domain.reference_signals import bucket_start
@@ -523,7 +525,10 @@ class ParityReport:
 
 @dataclass(frozen=True)
 class StoredBar:
-    """One candle-store row (`candles` table): REAL o/h/l/c (NULL when nothing traded) and v."""
+    """
+    One candle-store row (`candles` table): REAL o/h/l/c (NULL when nothing traded) and v, then
+    §2.15's ten INTEGER columns (NULL: unknown -- a pre-migration row, or no liquidation feed).
+    """
 
     bar_seconds: int
     t: int
@@ -533,6 +538,16 @@ class StoredBar:
     c: float | None
     v: float
     seconds_observed: int
+    buy_v: int | None = None
+    sell_v: int | None = None
+    buy_n: int | None = None
+    sell_n: int | None = None
+    pv: int | None = None
+    liq_long_v: int | None = None
+    liq_short_v: int | None = None
+    liq_n: int | None = None
+    price_precision: int | None = None
+    size_precision: int | None = None
 
 
 @dataclass(frozen=True)
@@ -591,11 +606,20 @@ def _worst(found: Iterable[Agreement]) -> str:
     return EXACT
 
 
+def aggregates_agree(found: object, ref: RefCandle) -> bool:
+    """
+    §2.15's ten columns of a stored or served bar against the reference: every integer and both
+    precisions equal, exactly, and null only where the reference is null (null is never 0).
+    """
+    return all(getattr(found, name) == getattr(ref, name) for name in AGGREGATE_FIELDS)
+
+
 def judge_bar(stored: StoredBar, ref: RefCandle, places: tuple[int, int]) -> str:
     """
     One bucket: o/h/l/c exact at the bucket's price places, v at its size places
-    (`at_places`, never a tolerance), `seconds_observed` int-equal. `both_undefined` is a bucket
-    nothing traded in on both sides (NULL o/h/l/c, volume 0).
+    (`at_places`, never a tolerance), `seconds_observed` int-equal, and §2.15's columns exactly
+    equal in units (`aggregates_agree`). `both_undefined` is a bucket nothing traded in on both
+    sides (NULL o/h/l/c, volume 0).
     """
     price, size = places
     prices = [
@@ -610,6 +634,8 @@ def judge_bar(stored: StoredBar, ref: RefCandle, places: tuple[int, int]) -> str
     verdict = _worst([*prices, volume])
     if verdict != UNDEFINED_MISMATCH and stored.seconds_observed != ref.seconds_observed:
         return DIFFERENT  # after definedness, which `_worst` names first
+    if verdict != UNDEFINED_MISMATCH and not aggregates_agree(stored, ref):
+        return DIFFERENT
     if verdict == EXACT and all(p is Agreement.BOTH_UNDEFINED for p in prices):
         return BOTH_UNDEFINED
     return verdict
@@ -661,10 +687,19 @@ def _bar_line(bar_seconds: int, t: int, verdict: str, detail: str) -> str:
 
 
 def judge_width(
-    bar_seconds: int, rows: Sequence[TradeRow], books: Sequence[RefBook], bars: Sequence[StoredBar]
+    bar_seconds: int,
+    rows: Sequence[TradeRow],
+    books: Sequence[RefBook],
+    bars: Sequence[StoredBar],
+    liquidations: KnownLiquidations | None = None,
 ) -> WidthCandles:
-    """Class every bucket of one width: both sides present, only the reference, only the store."""
-    reference = fold_candles(books, bar_seconds)
+    """
+    Class every bucket of one width: both sides present, only the reference, only the store. The
+    day's `liquidations` (None: the instrument has no feed, or nothing archived; buckets before
+    their known start read None) go into the reference fold, so a
+    liquidation-only store row is matched, never `extra`.
+    """
+    reference = fold_candles(books, bar_seconds, liquidations)
     places = _bucket_places(rows, bar_seconds)
     stored = {bar.t: bar for bar in bars}
     counts: Counter[str] = Counter()
@@ -675,7 +710,9 @@ def judge_width(
         elif t not in reference:
             verdict, detail = EXTRA, f"stored {stored[t]}"
         else:
-            verdict = judge_bar(stored[t], reference[t], places[t])
+            # A liquidation-only bucket has no row, so no places: its o/h/l/c/v are undefined
+            # on both sides and compared at any.
+            verdict = judge_bar(stored[t], reference[t], places.get(t, (0, 0)))
             detail = f"stored {stored[t]} reference {reference[t]}"
         counts[verdict] += 1
         if verdict in FAILING_CANDLES | {FLOAT_NOISE} and len(examples) < _EXAMPLES:
@@ -690,11 +727,15 @@ def judge_candles(
     rows: Sequence[TradeRow],
     bars: Sequence[StoredBar],
     unknown_width: int,
+    liquidations: KnownLiquidations | None = None,
 ) -> CandleReport:
-    """Judge every stored width over the day's received rows (`ts_event` in the day)."""
+    """
+    Judge every stored width over the day's received rows (`ts_event` in the day) and, for an
+    instrument with a liquidation feed, the day's archived liquidations (None without one).
+    """
     books = [row.book() for row in rows]
     widths = tuple(
-        judge_width(width, rows, books, [b for b in bars if b.bar_seconds == width])
+        judge_width(width, rows, books, [b for b in bars if b.bar_seconds == width], liquidations)
         for width in STORE_BAR_SECONDS
     )
     return CandleReport(instrument_id, len(rows), widths, unknown_width)

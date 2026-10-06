@@ -43,6 +43,8 @@ from verification.domain.liquidation_check import Fill
 from verification.domain.liquidation_check import StoredLiquidation
 from verification.domain.liquidation_check import covered_seconds
 from verification.domain.liquidation_check import match_liquidations
+from verification.infrastructure import liquidation_reader
+from verification.infrastructure.liquidation_reader import LiquidationCatalog
 
 
 _S = 1_000_000_000
@@ -240,3 +242,55 @@ def test_a_quiet_instrument_and_an_old_window_are_not_reported(
     tool.main(argv, clock=lambda: _CLOCK)
     report = json.loads(capsys.readouterr().out)
     assert [entry["instrument_id"] for entry in report["instruments"]] == [_BTC]
+
+
+def test_the_first_archived_liquidation_is_read_once_per_instrument(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Story 33.3 review loop 2: the candles tool asks per judged day; the files are walked once."""
+    iid = InstrumentId.from_str(_BTC)
+    first = Liquidation.from_wire_text(
+        iid, LiquidatedSide.LONG, "0.010", "60000.10", (2, 3), "k1", _START + _S, _START + _S
+    )
+    ParquetDataCatalog(str(tmp_path)).write_data([first])
+    source = LiquidationCatalog(tmp_path)
+    reads: list[str] = []
+    real = LiquidationCatalog._read_first_ts_event
+
+    def counted(self: LiquidationCatalog, instrument_id: str) -> int | None:
+        reads.append(instrument_id)
+        return real(self, instrument_id)
+
+    monkeypatch.setattr(LiquidationCatalog, "_read_first_ts_event", counted)
+    assert [source.first_ts_event(_BTC) for _ in range(3)] == [_START + _S] * 3
+    assert reads == [_BTC]
+
+
+def test_a_window_read_opens_only_the_files_its_name_span_can_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Two files ten days apart: a read of the second's day opens that file only (the name span,
+    widened by the 300 s margin), never the instrument's whole history.
+    """
+    iid = InstrumentId.from_str(_BTC)
+
+    def row(key: str, ts: int) -> Liquidation:
+        return Liquidation.from_wire_text(
+            iid, LiquidatedSide.LONG, "0.010", "60000.10", (2, 3), key, ts, ts
+        )
+
+    old, new = _START - 10 * 86_400 * _S, _START + _S
+    ParquetDataCatalog(str(tmp_path)).write_data([row("old", old)])
+    ParquetDataCatalog(str(tmp_path)).write_data([row("new", new)])
+    opened: list[str] = []
+    real = liquidation_reader.read_window
+
+    def spy(path: Path, columns: list[str], start_ns: int, end_ns: int) -> object:
+        opened.append(path.name)
+        return real(path, columns, start_ns, end_ns)
+
+    monkeypatch.setattr(liquidation_reader, "read_window", spy)
+    rows = LiquidationCatalog(tmp_path).liquidations(_BTC, _START, _START + 86_400 * _S)
+    assert [r.venue_event_id for r in rows] == ["new"]
+    assert len(opened) == 1

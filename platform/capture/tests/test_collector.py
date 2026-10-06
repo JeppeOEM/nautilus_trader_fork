@@ -31,6 +31,7 @@ import pytest
 from kernel import archive_markers
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import CatalogFileSpan
+from kernel.liquidation import Liquidation
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import SecondRow
 from observability import error_ledger
@@ -125,6 +126,18 @@ class _RecordingSink:
         self._failing: dict[str, type[Exception]] = dict.fromkeys(failing or (), RuntimeError)
         self._failing.update(failing_with or {})
         self._through: dict[str, int] = {}
+        self.liquidations: dict[str, list[str]] = {}
+        self.failing_liquidations: set[str] = set()
+
+    def apply_liquidations(self, instrument_id: str, rows: Sequence[Liquidation]) -> int:
+        """Record each venue event once (the port's dedup rule), or fail for `failing_liquidations`."""
+        self.calls.append(f"{instrument_id} (liquidations)")
+        if instrument_id in self.failing_liquidations:
+            raise OSError("candle store liquidation write failed")
+        seen = self.liquidations.setdefault(instrument_id, [])
+        fresh = [r.venue_event_id for r in rows if r.venue_event_id not in seen]
+        seen.extend(fresh)
+        return len(fresh)
 
     def apply(self, instrument_id: str, rows: Sequence[SecondRow]) -> int:
         self.calls.append(instrument_id)
