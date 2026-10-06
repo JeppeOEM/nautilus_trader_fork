@@ -50,6 +50,7 @@ from kernel.catalog_files import query_top_of_book
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import NS_PER_MS
 from kernel.second_snapshot import DydxSecondSnapshot
+from observability import error_ledger
 
 import nautilus_trader.analysis as nautilus_analysis
 from nautilus_trader.backtest.config import ImportableFeeModelConfig
@@ -149,6 +150,7 @@ def write_derived_quotes(spec: RunSpec, instruments: list[Instrument], directory
             str(instrument.id),
             max(0, start_ns - MAX_TS_INIT_SKEW_NS),
             end_ns + MAX_TS_INIT_SKEW_NS,
+            on_foreign=error_ledger.record,
         )
         if not tops:
             raise ValueError(f"no {instrument.id} snapshots between {spec.start} and {spec.end}")

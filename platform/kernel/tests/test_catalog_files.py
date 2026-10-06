@@ -17,6 +17,7 @@
 import ast
 import math
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -74,7 +75,11 @@ def _snapshot(ts_event: int, ts_init: int, close: float | None) -> DydxSecondSna
 
 @pytest.fixture
 def catalog(tmp_path: Path) -> str:
-    """Three files: day 0 (two rows), one straddling midnight, day 1 far later."""
+    return _snapshot_catalog(tmp_path)
+
+
+def _snapshot_catalog(tmp_path: Path) -> str:
+    """Four files: day 0 (two of one row each), one straddling midnight, day 1 far later."""
     writer = ParquetDataCatalog(str(tmp_path))
     writer.write_data([_snapshot(_DAY0 + 10 * NS_PER_S, _DAY0 + 11 * NS_PER_S, 10.0)])
     writer.write_data([_snapshot(_DAY0 + 20 * NS_PER_S, _DAY0 + 21 * NS_PER_S, None)])
@@ -610,3 +615,272 @@ def test_an_unreadable_trade_file_is_refused_naming_it(tmp_path: Path) -> None:
     Path(path).write_bytes(Path(path).read_bytes()[:64])  # truncated: no Parquet footer
     with pytest.raises(catalog_files.TradeDecodeError, match="unreadable, refused"):
         catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + 1, 0, 0)
+
+
+# -- file faults: foreign names, vanished files, unreadable files (DW-181/183/288/289) ------------
+
+_SNAPSHOT_WINDOW = (0, 2 * _DAY0)
+_WHOLE = (0, 1 << 62)
+
+
+def _trade_catalog(tmp_path: Path) -> str:
+    return _write_trades(tmp_path, [_tick("1", "2", AggressorSide.BUYER, "a", _DAY0, _DAY0)])
+
+
+def _leaf(root: str, dirname: str) -> Path:
+    return Path(root) / "data" / dirname / _IID
+
+
+def _real_files(root: str, dirname: str) -> list[str]:
+    return sorted(str(p) for p in _leaf(root, dirname).glob("*.parquet"))
+
+
+def _add_foreign(root: str, dirname: str) -> Path:
+    """Copy a real catalog file under a name the catalog never writes: read, it would add rows."""
+    path = _leaf(root, dirname) / "notes.parquet"
+    shutil.copy(_real_files(root, dirname)[0], path)
+    return path
+
+
+def _gone(path: str) -> str:
+    """Return a path the read wants (a real file's span) that no longer exists."""
+    return str(Path(path).parent / "removed" / Path(path).name)
+
+
+_INDEX = catalog_files.INDEX_PRICE_DIRNAME
+_SNAP = catalog_files.SNAPSHOT_DIRNAME
+# (builder, data directory, the listing function a reader calls, read(root, on_foreign))
+_SELF_LISTING_READERS = [
+    pytest.param(
+        _snapshot_catalog,
+        _SNAP,
+        "snapshot_files",
+        lambda root, hook: catalog_files.query_second_ohlc(
+            root, _IID, *_SNAPSHOT_WINDOW, on_foreign=hook
+        ),
+        id="query_second_ohlc",
+    ),
+    pytest.param(
+        _snapshot_catalog,
+        _SNAP,
+        "snapshot_files",
+        lambda root, hook: catalog_files.query_top_of_book(
+            root, _IID, *_SNAPSHOT_WINDOW, on_foreign=hook
+        ),
+        id="query_top_of_book",
+    ),
+    pytest.param(
+        _index_catalog,
+        _INDEX,
+        "_leaf_files",
+        lambda root, hook: catalog_files.query_index_prices(root, _IID, *_WHOLE, on_foreign=hook),
+        id="query_index_prices",
+    ),
+    pytest.param(
+        _index_catalog,
+        _INDEX,
+        "_leaf_files",
+        lambda root, hook: catalog_files.price_precision_labels(
+            root, IndexPriceUpdate, _IID, *_WHOLE, on_foreign=hook
+        ),
+        id="price_precision_labels",
+    ),
+]
+# The self-listing readers plus the trade reader, which lists again too but refuses exhaustion with
+# its own `TradeDecodeError` (covered by its own tests above).
+_RELISTING_READERS = [
+    *_SELF_LISTING_READERS,
+    pytest.param(
+        _trade_catalog,
+        catalog_files.TRADE_DIRNAME,
+        "trade_files",
+        lambda root, hook: _trade_rows(
+            catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + 1, 0, 0, on_foreign=hook)
+        ),
+        id="query_trade_columns",
+    ),
+]
+_NAME_PARSING_READERS = [
+    pytest.param(
+        _snapshot_catalog,
+        _SNAP,
+        lambda root, hook: catalog_files.data_file_ranges(root, _IID, on_foreign=hook),
+        id="data_file_ranges",
+    ),
+    pytest.param(
+        _snapshot_catalog,
+        _SNAP,
+        lambda root, hook: catalog_files.files_by_day(
+            root, _IID, *_SNAPSHOT_WINDOW, on_foreign=hook
+        ),
+        id="files_by_day",
+    ),
+    pytest.param(
+        _trade_catalog,
+        catalog_files.TRADE_DIRNAME,
+        lambda root, hook: _trade_rows(
+            catalog_files.query_trade_columns(root, _IID, _DAY0, _DAY0 + 1, 0, 0, on_foreign=hook)
+        ),
+        id="query_trade_columns",
+    ),
+    *(pytest.param(*p.values[:2], p.values[3], id=p.id) for p in _SELF_LISTING_READERS),
+]
+
+
+@pytest.mark.parametrize(("build", "dirname", "read"), _NAME_PARSING_READERS)
+def test_a_foreign_file_name_is_reported_once_and_skipped(
+    tmp_path: Path, build: Callable[[Path], str], dirname: str, read: Callable[..., object]
+) -> None:
+    root = build(tmp_path)
+    expected = read(root, None)
+    foreign = _add_foreign(root, dirname)
+    reported: list[tuple[str, str]] = []
+    assert read(root, lambda site, detail: reported.append((site, detail))) == expected
+    assert len(reported) == 1
+    site, detail = reported[0]
+    assert site == catalog_files.FOREIGN_FILE_SITE == "catalog.foreign_file"
+    assert detail.startswith(f"{foreign}: not a catalog file name (")
+    assert detail.endswith("); skipped")
+
+
+@pytest.mark.parametrize(("build", "dirname", "read"), _NAME_PARSING_READERS)
+def test_a_foreign_file_name_without_a_hook_is_refused(
+    tmp_path: Path, build: Callable[[Path], str], dirname: str, read: Callable[..., object]
+) -> None:
+    root = build(tmp_path)
+    _add_foreign(root, dirname)
+    with pytest.raises(ValueError) as raised:
+        read(root, None)
+    assert not isinstance(raised.value, catalog_files.CatalogReadError)
+
+
+@pytest.mark.parametrize(("build", "dirname", "listing", "read"), _RELISTING_READERS)
+def test_a_file_vanished_since_the_listing_is_read_again_from_a_fresh_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build: Callable[[Path], str],
+    dirname: str,
+    listing: str,
+    read: Callable[..., object],
+) -> None:
+    """The consolidation wrote the day file and removed a minute source after the listing."""
+    root = build(tmp_path)
+    expected = read(root, None)
+    real = _real_files(root, dirname)
+    listings = iter([[_gone(real[0]), *real], real])
+    monkeypatch.setattr(catalog_files, listing, lambda *_: next(listings))
+    assert read(root, None) == expected
+
+
+@pytest.mark.parametrize(("build", "dirname", "listing", "read"), _RELISTING_READERS)
+def test_a_foreign_file_met_by_both_listings_of_one_read_is_reported_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build: Callable[[Path], str],
+    dirname: str,
+    listing: str,
+    read: Callable[..., object],
+) -> None:
+    root = build(tmp_path)
+    expected = read(root, None)
+    real = _real_files(root, dirname)
+    foreign = str(_add_foreign(root, dirname))
+    listings = iter([[_gone(real[0]), foreign, *real], [foreign, *real]])
+    monkeypatch.setattr(catalog_files, listing, lambda *_: next(listings))
+    reported: list[tuple[str, str]] = []
+    assert read(root, lambda site, detail: reported.append((site, detail))) == expected
+    assert [detail.split(":")[0] for _, detail in reported] == [foreign]
+
+
+@pytest.mark.parametrize(("build", "dirname", "listing", "read"), _SELF_LISTING_READERS)
+def test_a_listing_that_keeps_losing_files_is_refused_naming_the_instrument(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build: Callable[[Path], str],
+    dirname: str,
+    listing: str,
+    read: Callable[..., object],
+) -> None:
+    root = build(tmp_path)
+    gone = [_gone(path) for path in _real_files(root, dirname)]
+    monkeypatch.setattr(catalog_files, listing, lambda *_: gone)
+    with pytest.raises(catalog_files.CatalogReadError, match="kept disappearing") as raised:
+        read(root, None)
+    assert f"{_IID}:" in str(raised.value)
+    assert f"{catalog_files._LISTING_ATTEMPTS} listings" in str(raised.value)
+
+
+_SNAPSHOT_READERS = [p for p in _SELF_LISTING_READERS if p.values[1] == _SNAP]
+
+
+@pytest.mark.parametrize(("build", "dirname", "listing", "read"), _SNAPSHOT_READERS)
+def test_a_relist_meeting_the_day_file_beside_its_sources_returns_each_second_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build: Callable[[Path], str],
+    dirname: str,
+    listing: str,
+    read: Callable[..., object],
+) -> None:
+    """The relist lands after the day file's rename, before its sources are all removed."""
+    root = build(tmp_path)
+    expected = read(root, None)
+    real = _real_files(root, dirname)
+    day_file = str(_leaf(root, dirname) / _timestamps_to_filename(_DAY0, _DAY0 + NS_PER_DAY - 1))
+    shutil.copy(real[0], day_file)  # the merged copy of the first source's rows
+    listings = iter([[_gone(real[0]), *real], [day_file, *real]])
+    monkeypatch.setattr(catalog_files, listing, lambda *_: next(listings))
+    assert read(root, None) == expected
+
+
+@pytest.mark.parametrize(("build", "dirname", "listing", "read"), _SNAPSHOT_READERS)
+def test_a_second_stored_twice_with_different_values_is_refused(
+    tmp_path: Path,
+    build: Callable[[Path], str],
+    dirname: str,
+    listing: str,
+    read: Callable[..., object],
+) -> None:
+    root = build(tmp_path)
+    second = _DAY0 + 10 * NS_PER_S
+    ParquetDataCatalog(root).write_data([_snapshot(second, second + 2 * NS_PER_S, 99.0)])
+    with pytest.raises(catalog_files.CatalogReadError, match="stored twice") as raised:
+        read(root, None)
+    assert str(raised.value).startswith(f"{_IID}: second {second} ")
+
+
+def _truncate(path: str) -> None:
+    Path(path).write_bytes(Path(path).read_bytes()[:64])  # no Parquet footer
+
+
+@pytest.mark.parametrize(("build", "dirname", "listing", "read"), _SELF_LISTING_READERS)
+def test_an_unreadable_file_is_refused_naming_it(
+    tmp_path: Path,
+    build: Callable[[Path], str],
+    dirname: str,
+    listing: str,
+    read: Callable[..., object],
+) -> None:
+    root = build(tmp_path)
+    path = _real_files(root, dirname)[0]
+    _truncate(path)
+    with pytest.raises(catalog_files.CatalogReadError, match="unreadable, refused") as raised:
+        read(root, None)
+    assert str(raised.value).startswith(f"{path}: ")
+
+
+def test_second_ohlc_arrays_refuses_an_unreadable_file_naming_it(catalog: str) -> None:
+    paths = _real_files(catalog, _SNAP)
+    _truncate(paths[1])
+    with pytest.raises(catalog_files.CatalogReadError, match="unreadable, refused") as raised:
+        catalog_files.second_ohlc_arrays(paths)
+    assert str(raised.value).startswith(f"{paths[1]}: ")
+
+
+def test_second_ohlc_arrays_refuses_a_vanished_file_never_reads_partially(catalog: str) -> None:
+    """The caller's list is stale: it writes candles, so it must refuse, never drop the file."""
+    paths = _real_files(catalog, _SNAP)
+    gone = _gone(paths[0])
+    with pytest.raises(catalog_files.CatalogReadError, match="gone before it was read") as raised:
+        catalog_files.second_ohlc_arrays([gone, *paths[1:]])
+    assert str(raised.value).startswith(f"{gone}: ")

@@ -45,6 +45,7 @@ from candles.application import queries
 from candles.application.forming import bars_from_rows
 from kernel import catalog_files
 from kernel.venues import venue_of
+from observability import error_ledger
 
 from views import indicator_picker
 
@@ -173,7 +174,7 @@ def _read_candles(
     span_ns = min((bars + 5) * bar_seconds, _FALLBACK_MAX_SPAN_S) * 1_000_000_000
     try:
         rows = catalog_files.query_second_ohlc(
-            catalog_path, instrument_id, now_ns - span_ns, now_ns
+            catalog_path, instrument_id, now_ns - span_ns, now_ns, on_foreign=error_ledger.record
         )
         return bars_from_rows(rows, bar_seconds)[-bars:]
     except Exception as exc:

@@ -41,6 +41,7 @@ from fastapi import Request
 from fastapi.concurrency import run_in_threadpool
 from kernel.venues import market_kind
 from kernel.venues import venue_of
+from observability import error_ledger
 from pydantic import BaseModel
 from views import chart_series
 from views import indicator_picker
@@ -404,7 +405,9 @@ def get_indicator_values(
     except chart_series.CandleReadError as exc:
         # A catalog read failure (missing/corrupt catalog dir, I/O error) is a server-side
         # condition, not a client-input problem -- 500, never a silent/opaque failure
-        # (DATA-02).
+        # (DATA-02). Ledgered here, where the request fails: views wraps the cause unledgered
+        # (a corrupt or repeatedly vanishing catalog file, `CatalogReadError`; DATA-07).
+        error_ledger.record("data_api.indicator_values_catalog_read", str(exc), exc)
         raise HTTPException(status_code=500, detail=f"failed to read catalog: {exc}") from exc
 
     if not rows:

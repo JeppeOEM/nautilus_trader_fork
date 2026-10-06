@@ -26,7 +26,9 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from kernel.catalog_files import SNAPSHOT_DIRNAME
 from kernel.tests.snapshot_factory import make_snapshot
+from observability import error_ledger
 from views.preferences import IndicatorEntry
 from views.preferences import load_chart_indicators as load_config
 from views.preferences import save_chart_indicators as save_config
@@ -703,3 +705,28 @@ def test_put_over_an_unreadable_stored_file_is_500(
 
     assert response.status_code == 500
     assert "failed to read chart_indicators.toml" in response.json()["detail"]
+
+
+def test_indicator_values_on_an_unreadable_catalog_file_is_a_ledgered_500(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DW-289: views wraps the read failure unledgered, so the route ledgers it (DATA-07)."""
+    catalog_path = str(tmp_path / "cat")
+    _write_snapshots(catalog_path, [(_BASE_NS - i * 60_000_000_000, 100.0 + i) for i in range(3)])
+    (path,) = (Path(catalog_path) / "data" / SNAPSHOT_DIRNAME / _IID).glob("*.parquet")
+    path.write_bytes(path.read_bytes()[:64])  # no Parquet footer
+    client = _client(tmp_path, monkeypatch, catalog_path=catalog_path)
+    error_ledger.reset()
+    response = client.get(
+        f"/api/coin/{_IID}/indicator-values",
+        params={
+            "before_ns": _BASE_NS + 60_000_000_000,
+            "limit": 5,
+            "bar_seconds": 60,
+            "entries": json.dumps([{"name": "SimpleMovingAverage", "params": {"period": 2}}]),
+        },
+    )
+    assert response.status_code == 500
+    assert f"{path}: unreadable, refused" in response.json()["detail"]
+    assert error_ledger.counts() == {"data_api.indicator_values_catalog_read": 1}

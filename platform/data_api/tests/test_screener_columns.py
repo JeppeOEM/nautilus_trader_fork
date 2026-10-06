@@ -312,10 +312,17 @@ def test_a_valueerror_from_one_coins_catalog_read_does_not_become_a_whole_reques
     client = _client(tmp_path, monkeypatch)
     real = ranking_columns.catalog_files.query_second_ohlc
 
-    def read(path: str, iid: str, a: int, b: int) -> list:
+    def read(
+        path: str,
+        iid: str,
+        a: int,
+        b: int,
+        *,
+        on_foreign: ranking_columns.catalog_files.ForeignFileReporter | None = None,
+    ) -> list:
         if iid.startswith("BAD"):
             raise ValueError("Arrow schema mismatch")
-        return real(path, iid, a, b)
+        return real(path, iid, a, b, on_foreign=on_foreign)
 
     monkeypatch.setattr(ranking_columns.catalog_files, "query_second_ohlc", read)
     entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 60}])

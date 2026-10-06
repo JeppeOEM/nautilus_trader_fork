@@ -750,7 +750,9 @@ def snapshot_series_page(
         rows = price_series_rows(sorted(kept, key=lambda s: s.ts_event))
         return _take_last_n_real_rows(rows, limit)
 
-    ranges = catalog_files.data_file_ranges(catalog_path, instrument_id)
+    ranges = catalog_files.data_file_ranges(
+        catalog_path, instrument_id, on_foreign=error_ledger.record
+    )
     span_ns = before_ns - _snapshot_window_start_ns(before_ns, limit)
     kept = fetch_page(fetch, ranges, before_ns, span_ns)
     if not kept:
@@ -795,7 +797,9 @@ def _catalog_plus_recent(
     catalog_path: str, recent_rows: RecentRows, instrument_id: str, start_ns: int, end_ns: int
 ) -> list[SecondOHLC]:
     """Catalog rows plus the live tail the collector has not flushed yet (see live_candles.RECENT_SECONDS)."""
-    rows = catalog_files.query_second_ohlc(catalog_path, instrument_id, start_ns, end_ns)
+    rows = catalog_files.query_second_ohlc(
+        catalog_path, instrument_id, start_ns, end_ns, on_foreign=error_ledger.record
+    )
     have = {r.ts_event for r in rows}
     tail = recent_rows(instrument_id, start_ns, end_ns)
     return rows + [r for r in tail if r.ts_event not in have]
@@ -881,7 +885,9 @@ def _parquet_page(
             if c["t"] < before_ms and _checked(instrument_id, bar_seconds, c)
         ]
 
-    ranges = catalog_files.data_file_ranges(catalog_path, instrument_id)
+    ranges = catalog_files.data_file_ranges(
+        catalog_path, instrument_id, on_foreign=error_ledger.record
+    )
     span_ns = _candle_window_span_ns(limit, bar_seconds)
     align = partial(_bucket_end_ns, bar_seconds=bar_seconds)
     kept = fetch_page(fetch, ranges, before_ns, span_ns, align_end=align)[-limit:]
@@ -938,7 +944,9 @@ def candle_page(
     )
     if store_has_more:
         return kept, True
-    ranges = catalog_files.data_file_ranges(catalog_path, instrument_id)  # a directory listing
+    ranges = catalog_files.data_file_ranges(
+        catalog_path, instrument_id, on_foreign=error_ledger.record
+    )  # a directory listing
     if coverage_ms is not None and not has_older_data(ranges, coverage_ms * 1_000_000):
         return kept, False
     if len(kept) >= limit:
@@ -1037,7 +1045,9 @@ def indicator_series_page(
         buckets = replay_bucket_samples(snapshots, bar_seconds)
         return [p for _, p in sorted(buckets.items()) if p["t"] < before_ms]
 
-    ranges = catalog_files.data_file_ranges(catalog_path, instrument_id)
+    ranges = catalog_files.data_file_ranges(
+        catalog_path, instrument_id, on_foreign=error_ledger.record
+    )
     span_ns = before_ns - _indicator_series_window_start_ns(before_ns, limit, bar_seconds)
     kept = fetch_page(fetch, ranges, before_ns, span_ns)[-limit:]
     if not kept:
@@ -1305,7 +1315,9 @@ def _read_trades(
     instrument_id: str, catalog_path: str, lo: int, hi: int, precision: tuple[int, int]
 ) -> catalog_files.TradeColumns:
     try:
-        columns = catalog_files.query_trade_columns(catalog_path, instrument_id, lo, hi, *precision)
+        columns = catalog_files.query_trade_columns(
+            catalog_path, instrument_id, lo, hi, *precision, on_foreign=error_ledger.record
+        )
     except catalog_files.TradeDecodeError as exc:
         error_ledger.record("views.footprint_trade_decode", str(exc), exc)
         raise

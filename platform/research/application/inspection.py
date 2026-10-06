@@ -170,7 +170,7 @@ def file_coverage(
     """
     spans = [
         (lo, hi)
-        for lo, hi in data_file_ranges(catalog_path, instrument_id)
+        for lo, hi in data_file_ranges(catalog_path, instrument_id, on_foreign=error_ledger.record)
         if CatalogFileSpan(lo, hi).overlaps(start_ns, end_ns - 1, MAX_TS_INIT_SKEW_NS)
     ]
     return pd.DataFrame(
@@ -492,7 +492,14 @@ def precision_labels(
     """
     rows = []
     for data_cls in (TradeTick, MarkPriceUpdate, IndexPriceUpdate):
-        files = price_precision_labels(catalog_path, data_cls, instrument_id, start_ns, end_ns)
+        files = price_precision_labels(
+            catalog_path,
+            data_cls,
+            instrument_id,
+            start_ns,
+            end_ns,
+            on_foreign=error_ledger.record,
+        )
         found = {f.price_precision for f in files}
         rows.append(
             {

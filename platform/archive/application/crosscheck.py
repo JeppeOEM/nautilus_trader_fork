@@ -234,7 +234,9 @@ def _snapshot_seconds(
     for day_start in _day_starts(since_ns, until_ns):
         lo = max(day_start, since_ns)
         hi = min(day_start + NS_PER_DAY - 1, until_ns)
-        rows = query_second_ohlc(catalog_path, instrument_id, lo, hi)
+        rows = query_second_ohlc(
+            catalog_path, instrument_id, lo, hi, on_foreign=error_ledger.record
+        )
         seconds.extend(row.ts_event for row in rows if lo <= row.ts_event <= hi)
     seconds.sort()
     return seconds

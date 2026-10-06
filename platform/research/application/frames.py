@@ -42,6 +42,7 @@ from kernel.open_interest import OpenInterest
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.venues import asset_key
 from kernel.venues import venue_of
+from observability import error_ledger
 
 from nautilus_trader.model.data import CustomData
 from nautilus_trader.model.data import FundingRateUpdate
@@ -345,7 +346,13 @@ class CatalogFrames:
         """
         start_ns, end_ns = window_ns(start, end)
         marks = self._query(MarkPriceUpdate, instrument_id, start, end)
-        indexes = query_index_prices(self._catalog_path, instrument_id, start_ns, end_ns - 1)
+        indexes = query_index_prices(
+            self._catalog_path,
+            instrument_id,
+            start_ns,
+            end_ns - 1,
+            on_foreign=error_ledger.record,
+        )
         nan = float("nan")
         rows = [
             {
@@ -383,5 +390,11 @@ class CatalogFrames:
         """
         if data_cls is IndexPriceUpdate:
             start_ns, end_ns = window_ns(start, end)
-            return query_index_prices(self._catalog_path, instrument_id, start_ns, end_ns - 1)
+            return query_index_prices(
+                self._catalog_path,
+                instrument_id,
+                start_ns,
+                end_ns - 1,
+                on_foreign=error_ledger.record,
+            )
         return self._query(data_cls, instrument_id, start, end)

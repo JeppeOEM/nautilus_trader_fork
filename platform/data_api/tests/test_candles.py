@@ -20,12 +20,16 @@ from pathlib import Path
 import pytest
 from candles.infrastructure.sqlite_store import CandleStore
 from fastapi.testclient import TestClient
+from kernel.catalog_files import SNAPSHOT_DIRNAME
+from kernel.catalog_files import CatalogReadError
 from kernel.second_snapshot import SecondOHLC
 from kernel.tests.snapshot_factory import make_snapshot
+from observability import error_ledger
 from views import chart_series
 
 import data_api.app as app_module
 import data_api.routes.candles as candles_routes
+import data_api.routes.footprint as footprint_routes
 from nautilus_trader.model.currencies import BTC
 from nautilus_trader.model.currencies import USDT
 from nautilus_trader.model.identifiers import InstrumentId
@@ -383,8 +387,6 @@ def test_venue_field_and_malformed_id_400(tmp_path: Path, monkeypatch: pytest.Mo
 def test_invalid_candle_fails_the_request_loudly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from observability import error_ledger
-
     catalog_path = str(tmp_path / "catalog")
     _write_snapshots(catalog_path, [(_BASE_NS - i * 60_000_000_000, 100.0 + i) for i in range(3)])
     real = chart_series.queries.candle_dicts_for_window
@@ -485,3 +487,62 @@ def test_an_instrument_without_a_definition_is_a_404_naming_it(
     resp = client.get(f"/api/candles/NOPE-USD-PERP.DYDX?before_ns={_BASE_NS}&limit=3")
     assert resp.status_code == 404
     assert "NOPE-USD-PERP.DYDX" in resp.json()["detail"]
+
+
+def _snapshot_leaf(catalog_path: str) -> Path:
+    return Path(catalog_path) / "data" / SNAPSHOT_DIRNAME / _IID
+
+
+def test_an_unreadable_snapshot_file_fails_the_request_and_is_ledgered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DW-289: a truncated file is an archive fault, never a page missing its seconds."""
+    catalog_path = str(tmp_path / "catalog")
+    _write_snapshots(catalog_path, [(_BASE_NS - i * 60_000_000_000, 100.0 + i) for i in range(3)])
+    (path,) = _snapshot_leaf(catalog_path).glob("*.parquet")
+    path.write_bytes(path.read_bytes()[:64])  # no Parquet footer
+    client = _client(catalog_path, monkeypatch)
+    error_ledger.reset()
+    resp = client.get(
+        f"/api/candles/{_IID}?before_ns={_BASE_NS + 60_000_000_000}&limit=10&bar_seconds=60",
+    )
+    assert resp.status_code == 500
+    assert resp.json()["detail"].startswith(f"{path}: unreadable, refused")
+    assert error_ledger.counts() == {"data_api.candles_catalog_read": 1}
+
+
+def test_a_foreign_file_name_is_ledgered_and_the_catalogs_candles_served(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DW-181: a stray `*.parquet` costs a ledger line, never the instrument's chart."""
+    catalog_path = str(tmp_path / "catalog")
+    _write_snapshots(catalog_path, [(_BASE_NS - i * 60_000_000_000, 100.0 + i) for i in range(3)])
+    client = _client(catalog_path, monkeypatch)
+    url = f"/api/candles/{_IID}?before_ns={_BASE_NS + 60_000_000_000}&limit=10&bar_seconds=60"
+    expected = client.get(url).json()
+    (path,) = _snapshot_leaf(catalog_path).glob("*.parquet")
+    (path.parent / "notes.parquet").write_bytes(path.read_bytes())
+    error_ledger.reset()
+    resp = client.get(url)
+    assert resp.status_code == 200
+    assert resp.json() == expected
+    assert set(error_ledger.counts()) == {"catalog.foreign_file"}
+
+
+def test_a_catalog_read_error_on_a_route_that_does_not_map_it_is_a_ledgered_500(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The app-level mapping: the footprint route reads `candle_page` and maps no read error."""
+    catalog_path = str(tmp_path / "catalog")
+    client = _client(catalog_path, monkeypatch)
+    monkeypatch.setattr(footprint_routes, "CATALOG_PATH", catalog_path)
+
+    def unreadable(*args: object, **kwargs: object) -> None:
+        raise CatalogReadError("x.parquet: unreadable, refused: no footer")
+
+    monkeypatch.setattr(chart_series, "footprint_page", unreadable)
+    error_ledger.reset()
+    resp = client.get(f"/api/coin/{_IID}/footprint?before_ns={_BASE_NS}&limit=10")
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "x.parquet: unreadable, refused: no footer"
+    assert error_ledger.counts() == {"data_api.catalog_read": 1}

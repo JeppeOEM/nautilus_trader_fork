@@ -1425,7 +1425,9 @@ resolution-undo: 36635e4be7c38ae86fb67ecab9a11a98778641ab03dc21803191ad05a746646
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-23-2-kernel-shared-kernel.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-23-2-kernel-shared-kernel.md` summary: one file-name parser (`kernel.clocks.CatalogFileSpan.from_path`), two policies for a `*.parquet` whose stem the catalog did not write inside an instrument leaf: `prune_catalog._parsed_files` skips it with a warning and never prunes it, while `kernel.catalog_files` (`data_file_ranges`/`files_by_day`/`query_second_ohlc`), `compare_klines.instruments_on_day` and `rebuild_seconds.covered_from`/`trade_files` let the `ValueError` abort the whole instrument (a `data_api` request 500s, `compare_klines` aborts, the rebuild refuses the instrument); nothing documents which is intended. evidence: both review hunters of the 23.2 second pass flagged it independently. Pre-dates 23.2: the former `catalog_stats._stamp_to_ns` raised `ValueError` at the same sites and `prune_catalog` already caught it alone (`git show 7bd64952fd:platform/collector_core/prune_catalog.py:198-206`); the move preserved both behaviours verbatim. A foreign file only reaches a leaf by hand (the collector quarantines unreadable files out of the leaf), so no live path produces it today.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw-catalog-readers-skip-and-ledger
+resolution-undo: 9452af3d15aa48b5980ac2177e29ca6f20152d75e05d99ce21efca1f22e644c8 2026-10-06 7374617475733a206f70656e
 decision: 2026-10-05 All readers skip and ledger it (like reconcile_day._overlaps_day) — Make CatalogFileSpan callers in kernel.catalog_files and rebuild_day skip+ledger foreign names.
 
 ### DW-182: `kernel.archive_markers.decode`/`ArchiveGap.encode`'s new inverted-span refusal (this story's third pass) has no companion check-before-rollout: if any …
@@ -1442,7 +1444,9 @@ resolution-undo: 9077e58b03eea8f8c9d2570018bc9c06100b365969d0b85199174491807bf96
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-23-2-kernel-shared-kernel.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-23-2-kernel-shared-kernel.md` summary: the catalog read helpers list files and then open them in a second step with no guard for a file that vanished in between (`kernel.catalog_files._ohlc_rows`/`second_ohlc_arrays` call `pq.ParquetFile(path)` on paths from an earlier `snapshot_files` glob), so a `data_api` candle or paging request that overlaps `prune_catalog`/`consolidate_catalog`/`rebuild_seconds` rewriting that instrument's files raises `FileNotFoundError` and 500s instead of skipping the one file. evidence: flagged by the 23.2 fourth pass's edge-case hunter. Pre-dates 23.2 and was moved verbatim: `git show 2d7dd5ab6e:platform/ml_signals/catalog_stats.py:157-166` has the same list-then-open shape with no `try`. Real on the deployed box because `make nightly` runs consolidate/prune against the same catalog `data_api` serves from, but not yet observed — the VPS rollout (DEPLOY_CHECKLIST.md §5) has not run. Fix is a `try/except (FileNotFoundError, OSError): continue` per file, which is a policy decision (skip silently vs. ledger the skip) rather than a mechanical patch, so it belongs with the archive context move in 25.1.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw-catalog-readers-skip-and-ledger
+resolution-undo: 9452af3d15aa48b5980ac2177e29ca6f20152d75e05d99ce21efca1f22e644c8 2026-10-06 7374617475733a206f70656e
 decision: 2026-10-05 Skip and ledger the vanished file — Skip with error_ledger record.
 
 ### DW-184: two readers of the same snapshot rows disagree at the window's lower edge — `kernel.catalog_files.query_second_ohlc` widens the file span by …
@@ -2306,7 +2310,9 @@ origin: migrated from legacy ledger (flat append from spec-32-8-volume-footprint
 location: platform/kernel/catalog_files.py
 source_spec: `_bmad-output/implementation-artifacts/spec-32-8-volume-footprint-bars-from-the-raw-trade-archive-toggled-from-the-indicators-menu.md`
 reason: The views' other catalog readers (`kernel.catalog_files.query_second_ohlc` and its siblings behind `candle_page`) list files and then open them, so a nightly consolidation that removes minute files after writing their day file makes a concurrent read raise an unledgered `FileNotFoundError` (a bare 500). evidence: `archive/consolidate_catalog.py` writes the merged day file and then removes its sources; no reader in `views/` or `kernel/catalog_files.py` other than the new `query_trade_columns` (Story 32.8 follow-up review) catches `FileNotFoundError` or lists again.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw-catalog-readers-skip-and-ledger
+resolution-undo: 9452af3d15aa48b5980ac2177e29ca6f20152d75e05d99ce21efca1f22e644c8 2026-10-06 7374617475733a206f70656e
 
 ### DW-289: Catalog readers behind `candle_page` let a corrupt Parquet file's `ArrowInvalid`/`OSError` escape unmapped as a bare 500 no `error_ledger.record` site counts (DATA-07)
 
@@ -2314,7 +2320,9 @@ origin: migrated from legacy ledger (flat append from spec-32-8-volume-footprint
 location: platform/kernel/catalog_files.py
 source_spec: `_bmad-output/implementation-artifacts/spec-32-8-volume-footprint-bars-from-the-raw-trade-archive-toggled-from-the-indicators-menu.md`
 reason: `kernel.catalog_files.query_second_ohlc` and the other pre-existing catalog readers behind `candle_page` let a truncated or corrupt Parquet file's `pyarrow.ArrowInvalid`/`OSError` escape unmapped, so the chart request fails as a bare 500 that no `error_ledger.record` site counts (DATA-07). evidence: Only the new `query_trade_columns` (Story 32.8 second follow-up review) maps an unreadable file to a ledgered error; `query_second_ohlc` and its siblings call `pq.read_table`/`pq.read_schema` with no handler, and `data_api/routes/candles.py` maps only `ImpossibleCandle`.
-status: open
+status: done 2026-10-06
+resolution: resolved by sweep bundle dw-catalog-readers-skip-and-ledger
+resolution-undo: 9452af3d15aa48b5980ac2177e29ca6f20152d75e05d99ce21efca1f22e644c8 2026-10-06 7374617475733a206f70656e
 
 ### DW-290: `CaptureService._run` failures between `_connect` and the loop-guarding `try` leave the client connected with no disconnect, drain or final flush
 

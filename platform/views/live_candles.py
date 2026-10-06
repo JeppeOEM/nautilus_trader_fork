@@ -175,7 +175,9 @@ def _catalog_rows_for_seed(
 
     A wide bucket (4H, 1D) is up to ~1,440 small files, read once per subscription off the event loop.
     """
-    return query_second_ohlc(catalog_path, instrument_id, start_ns, end_ns)
+    return query_second_ohlc(
+        catalog_path, instrument_id, start_ns, end_ns, on_foreign=error_ledger.record
+    )
 
 
 class LiveCandleBus:

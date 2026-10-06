@@ -651,7 +651,9 @@ class CaptureService:
     def _ledger(site: str, detail: str = "", exc: BaseException | None = None) -> None:
         """
         Record on the error ledger: capture's only call to it (DATA-07); `site` is a `sites`
-        constant. Static so `run_forever` can ledger a failed `build()`, which leaves no instance.
+        constant, or `kernel.catalog_files.FOREIGN_FILE_SITE` when a catalog reader's `on_foreign`
+        hook reports through it. Static so `run_forever` can ledger a failed `build()`, which
+        leaves no instance.
         """
         error_ledger.record(site, detail, exc)
 
@@ -1280,7 +1282,10 @@ class CaptureService:
                 behind[iid] = mark
                 continue
             try:
-                self._second_sink.apply(iid, query_second_ohlc(catalog_path, iid, mark + 1, now_ns))
+                rows = query_second_ohlc(
+                    catalog_path, iid, mark + 1, now_ns, on_foreign=self._ledger
+                )
+                self._second_sink.apply(iid, rows)
             except Exception as e:
                 failures[iid] = e
         if behind:

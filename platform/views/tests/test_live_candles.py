@@ -241,8 +241,9 @@ async def test_seed_wide_bar_reads_raw_seconds_plus_unflushed_tail(
     now_ns = _NOW_NS
     start_ns = now_ns // bucket_ns * bucket_ns
 
-    def seconds(_path: str, _iid: str, a: int, b: int) -> list[SecondOHLC]:
+    def seconds(_path: str, _iid: str, a: int, b: int, *, on_foreign: object) -> list[SecondOHLC]:
         assert (a, b) == (start_ns, now_ns)
+        assert on_foreign is error_ledger.record  # a stray file name is ledgered, then skipped
         return [
             SecondOHLC(start_ns, 100.0, 105.0, 99.0, 104.0, 1.0, 0.5),
             SecondOHLC(start_ns + 1_000_000_000, None, None, None, None, 0.0, 0.0),
@@ -666,7 +667,7 @@ def test_seed_publish_is_not_handed_to_observers(monkeypatch: pytest.MonkeyPatch
 
     bus = LiveCandleBus(_NO_CATALOG, clock=_clock)
     seeded = _snapshot(_NOW_NS // 60_000_000_000 * 60_000_000_000, 100.0)
-    monkeypatch.setattr(lc, "query_second_ohlc", lambda *_a: [lc._second_row(seeded)])
+    monkeypatch.setattr(lc, "query_second_ohlc", lambda *_a, **_k: [lc._second_row(seeded)])
     queue = bus.subscribe(_IID, _BAR_SECONDS)
     observer = _RecordingObserver(frozenset({(_IID, _BAR_SECONDS)}))
     bus.attach(observer)

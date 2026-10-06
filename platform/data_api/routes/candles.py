@@ -21,7 +21,10 @@ Format + transport only (Story 24.2): the page itself is `views.chart_series.can
 candle store first, the archive's one seconds -> bars fold for what it does not cover) and its
 gap rows `views.chart_series.with_gap_markers`. This module clamps the query params, passes its
 own `CATALOG_PATH`/`CANDLES_DB_DIR` and the live bus's unflushed tail in, builds the response
-models, and maps `ImpossibleCandle` to a 500.
+models, and maps `ImpossibleCandle` to a 500. A catalog file the read cannot use (truncated or
+corrupt, or files that kept disappearing across its listings: `kernel.catalog_files.CatalogReadError`)
+is ledgered at `data_api.candles_catalog_read` and a 500 too (DATA-07): the chart shows an error,
+never a page missing that file's seconds.
 
 `CATALOG_PATH` comes from `data_api.settings` (a leaf module -- routes can't import it from
 `app.py`, which imports them).
@@ -29,8 +32,10 @@ models, and maps `ImpossibleCandle` to a 500.
 
 from fastapi import APIRouter
 from fastapi import HTTPException
+from kernel import catalog_files
 from kernel.venues import market_kind
 from kernel.venues import venue_of
+from observability import error_ledger
 from pydantic import BaseModel
 from views import chart_series
 from views.catalog_reads import NoInstrumentDefinition
@@ -109,6 +114,10 @@ def get_candles(
     except chart_series.ImpossibleCandle as exc:
         # An impossible candle means upstream code malfunctioned (DATA-07): views has already
         # ledgered it; fail the request so the chart shows an error, never serve or drop it.
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except catalog_files.CatalogReadError as exc:
+        # An archive fault, not a client error: ledgered here, where the request fails (DATA-07).
+        error_ledger.record("data_api.candles_catalog_read", str(exc), exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     if not kept:
         return CandlesResponse(

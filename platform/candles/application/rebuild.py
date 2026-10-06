@@ -30,6 +30,7 @@ from kernel.catalog_files import data_file_ranges
 from kernel.catalog_files import files_by_day
 from kernel.catalog_files import second_ohlc_arrays
 from kernel.venues import has_venue
+from observability import error_ledger
 
 from candles.domain.fold import DAY_MS
 from candles.infrastructure.sqlite_store import CandleStore
@@ -52,7 +53,7 @@ def all_instruments(catalog_path: str) -> list[str]:
 
 def data_range_ns(catalog_path: str, iid: str) -> tuple[int, int] | None:
     """(first, last) timestamp covered by an instrument's snapshot files, from filenames only."""
-    ranges = data_file_ranges(catalog_path, iid)
+    ranges = data_file_ranges(catalog_path, iid, on_foreign=error_ledger.record)
     return (ranges[0][0], ranges[-1][1]) if ranges else None
 
 
@@ -90,7 +91,8 @@ def rebuild_instrument(
     first_day, last_day = start_ns // DAY_NS, end_ns // DAY_NS
     window = (first_day * DAY_NS, (last_day + 1) * DAY_NS - 1)
     try:
-        for day, paths in sorted(files_by_day(catalog_path, iid, *window).items()):
+        days = files_by_day(catalog_path, iid, *window, on_foreign=error_ledger.record)
+        for day, paths in sorted(days.items()):
             if not first_day <= day <= last_day:
                 continue
             cols = second_ohlc_arrays(paths)

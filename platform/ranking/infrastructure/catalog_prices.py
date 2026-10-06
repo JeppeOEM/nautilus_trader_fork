@@ -24,6 +24,7 @@ trade-close series (and so into `pct_1h`/`pct_24h`/`volatility`).
 """
 
 from kernel.catalog_files import query_second_ohlc
+from observability import error_ledger
 
 
 # No upper bound: the series runs up to the newest archived second.
@@ -42,5 +43,11 @@ class CatalogPriceHistory:
         self._catalog_path = catalog_path
 
     def series(self, instrument_id: str, start_ns: int) -> list[tuple[int, float]]:
-        rows = query_second_ohlc(self._catalog_path, instrument_id, start_ns, _OPEN_END_NS)
+        rows = query_second_ohlc(
+            self._catalog_path,
+            instrument_id,
+            start_ns,
+            _OPEN_END_NS,
+            on_foreign=error_ledger.record,
+        )
         return sorted((r.ts_event, r.close_price) for r in rows if r.close_price is not None)

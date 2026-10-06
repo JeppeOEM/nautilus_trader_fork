@@ -64,8 +64,10 @@ float-layout day file (`rebuild.legacy_layout`: run `archive.tools.migrate_snaps
 then rerun the day), a trade finer than its row's precision (`rebuild.off_grid`: never rounded),
 day files whose full schema differs or lacks the trade columns (`rebuild.mixed_schema`, D-24), a change
 to a row of the current UTC day (`rebuild.open_day`), a temp that failed its read-back
-(`rebuild.verify`), an unreadable file or gap marker (`rebuild.error`), a stored verdict that
-could not be cleared (`rebuild.verdict`). All of an instrument-day's changed files are staged and
+(`rebuild.verify`), an unreadable or vanished file or gap marker (`rebuild.error`), a stored verdict
+that could not be cleared (`rebuild.verdict`). A `*.parquet` name the catalog did not write is not a
+refusal: it is skipped and ledgered (`catalog.foreign_file`, `kernel.catalog_files.named_spans`),
+and the day is rebuilt from the catalog's own files. All of an instrument-day's changed files are staged and
 verified before the first one is renamed, so a refusal leaves every file as it was. Only files
 with a changed row are written; `apply` False = report only (no writer needed). One
 instrument-day in memory at a time, trades one hour at a time (MEM-01).
@@ -106,9 +108,9 @@ import pyarrow.parquet as pq
 from candles.application.rebuild import all_instruments
 from candles.application.rebuild import venue_instruments
 from candles.application.verified_days import VerifiedDays
+from kernel.catalog_files import named_spans
 from kernel.catalog_files import snapshot_files
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
-from kernel.clocks import CatalogFileSpan
 from kernel.fold import SecondTradeFields
 from kernel.fold import fold_trades
 from kernel.second_snapshot import MIGRATION_TOOL
@@ -201,9 +203,11 @@ def covered_from(catalog_path: str, iid: str) -> int | None:
     inside `[first ts_event, first ts_init)` would be treated as covered, and its unarchived live
     trades replaced; that needs a restart shorter than the trade's arrival lag (under
     `stale_trade_seconds`, 10 s). Upgrade path: record the archive's start in the catalog.
+
+    A file name the catalog did not write is skipped and ledgered (`catalog.foreign_file`).
     """
     paths = glob.glob(os.path.join(catalog_path, "data", "trade_tick", iid, "*.parquet"))
-    starts = {p: CatalogFileSpan.from_path(p).start_ns for p in paths}
+    starts = {p: span.start_ns for p, span in named_spans(paths, error_ledger.record)}
     if not starts:
         return None
     earliest = min(starts.values())
@@ -270,11 +274,14 @@ def _row_seconds(files: list[str], lo: int, hi: int, label: str) -> dict[int, in
 
 
 def trade_files(catalog_path: str, iid: str) -> list[tuple[str, int, int]]:
-    """Return (path, first ts_init, last ts_init) of each of the instrument's trade files."""
+    """
+    Return (path, first ts_init, last ts_init) of each of the instrument's trade files. A file name
+    the catalog did not write is skipped and ledgered (`catalog.foreign_file`): no archive writer
+    produced it (`kernel.catalog_files.named_spans`).
+    """
     paths = glob.glob(os.path.join(catalog_path, "data", "trade_tick", iid, "*.parquet"))
-    spans = [CatalogFileSpan.from_path(p) for p in paths]
     return sorted(
-        (path, span.start_ns, span.end_ns) for path, span in zip(paths, spans, strict=True)
+        (path, span.start_ns, span.end_ns) for path, span in named_spans(paths, error_ledger.record)
     )
 
 
@@ -407,14 +414,15 @@ def day_files(catalog_path: str, iid: str, day_start_ns: int) -> list[str]:
     """
     Every snapshot file that can hold a row of the day: its `ts_init` span overlaps
     `[D start, D end + _TS_INIT_MARGIN_NS]` (a row of D is sampled up to that bound after its
-    `ts_event`, so it can sit in a file that starts after midnight). An unparsable name raises
-    `ValueError` (the instrument-day is refused, `rebuild.error`).
+    `ts_event`, so it can sit in a file that starts after midnight). A file name the catalog did
+    not write is skipped and ledgered (`catalog.foreign_file`): no archive writer produced it, and
+    the day is rebuilt from the catalog's own files.
     """
     hi = day_start_ns + _DAY_NS - 1 + _TS_INIT_MARGIN_NS
     return sorted(
         path
-        for path in snapshot_files(catalog_path, iid)
-        if CatalogFileSpan.from_path(path).overlaps(day_start_ns, hi)
+        for path, span in named_spans(snapshot_files(catalog_path, iid), error_ledger.record)
+        if span.overlaps(day_start_ns, hi)
     )
 
 

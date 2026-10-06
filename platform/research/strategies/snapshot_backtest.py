@@ -26,6 +26,7 @@ from typing import Any
 
 from kernel.catalog_files import query_top_of_book
 from kernel.second_snapshot import DydxSecondSnapshot
+from observability import error_ledger
 
 from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.backtest.node import BacktestDataConfig
@@ -73,6 +74,7 @@ def run(
         symbol,
         dt_to_unix_nanos(time_object_to_dt(start)),
         dt_to_unix_nanos(time_object_to_dt(end)),
+        on_foreign=error_ledger.record,
     )
     if not tops:
         raise ValueError(f"No {symbol} snapshots between {start} and {end}")

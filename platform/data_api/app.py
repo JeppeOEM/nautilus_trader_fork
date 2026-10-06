@@ -48,6 +48,7 @@ from fastapi import HTTPException
 from fastapi import Query
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from kernel.catalog_files import CatalogReadError
 from kernel.clocks import NS_PER_S
 from kernel.clocks import READ_SPAN_MARGIN_NS
 from kernel.venues import MalformedInstrumentId
@@ -273,6 +274,18 @@ def errors(since_ns: int | None = None) -> ErrorsResponse:
 @app.exception_handler(MalformedInstrumentId)
 async def _malformed_instrument_id(_: Request, exc: MalformedInstrumentId) -> JSONResponse:
     return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(CatalogReadError)
+async def _catalog_read_error(_: Request, exc: CatalogReadError) -> JSONResponse:
+    """
+    Ledger and 500 an unreadable (or repeatedly vanishing) catalog file on a route that does not
+    map it itself (the footprint route, through `candle_page`): an archive fault (DATA-07), never
+    the bare unledgered 500 an unmapped exception gives. `/api/candles` maps it at its own site,
+    `data_api.candles_catalog_read`.
+    """
+    error_ledger.record("data_api.catalog_read", str(exc), exc)
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
 app.include_router(alerts_routes.router)

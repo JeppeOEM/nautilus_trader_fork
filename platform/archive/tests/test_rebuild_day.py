@@ -16,6 +16,7 @@
 
 import glob
 import json
+import shutil
 import sqlite3
 import time
 from decimal import Decimal
@@ -492,6 +493,40 @@ def test_a_zero_row_trade_file_proves_no_coverage(tmp_path: Path) -> None:
     assert covered_from(str(tmp_path), _IID) == _at(5)  # the empty file is skipped, no crash
     Path(path).unlink()
     assert covered_from(str(tmp_path), _IID) is None
+
+
+def _add_foreign(leaf: Path) -> Path:
+    """Copy a real catalog file under a name the catalog never writes (read, it would add rows)."""
+    foreign = leaf / "notes.parquet"
+    shutil.copy(next(leaf.glob("*.parquet")), foreign)
+    return foreign
+
+
+def test_a_foreign_file_name_is_skipped_and_ledgered_and_the_day_rebuilt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _late_trade_day(tmp_path)
+    foreign_snapshot = _add_foreign(tmp_path / "data" / "custom_dydx_second_snapshot" / _IID)
+    foreign_trades = _add_foreign(tmp_path / "data" / "trade_tick" / _IID)
+    untouched = foreign_snapshot.read_bytes()
+    error_ledger.reset()
+    recorded: list[tuple[str, str]] = []
+    record = error_ledger.record
+
+    def recording(site: str, detail: str = "", exc: BaseException | None = None) -> None:
+        recorded.append((site, detail))
+        record(site, detail, exc)
+
+    monkeypatch.setattr(error_ledger, "record", recording)
+    report = _rebuild(tmp_path)
+    assert (report.rebuilt, report.changed, report.without_trades) == (56, 2, 54)
+    assert (report.duplicates, report.orphan_trades, report.files_rewritten) == (0, 0, 1)
+    # The trade leaf is listed twice (`covered_from`, `trade_files`), the snapshot leaf once.
+    assert error_ledger.counts() == {"catalog.foreign_file": 3}
+    reported = sorted(detail.split(": ")[0] for _, detail in recorded)
+    assert reported == sorted([str(foreign_snapshot), str(foreign_trades), str(foreign_trades)])
+    assert all(detail.endswith("; skipped") for _, detail in recorded)
+    assert foreign_snapshot.read_bytes() == untouched
 
 
 def test_apply_on_the_open_day_is_refused_even_with_include_open_day(tmp_path: Path) -> None:
