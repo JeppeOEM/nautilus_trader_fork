@@ -1836,6 +1836,20 @@ defaults (`utc`, no session breaks, countdown on, last-price line and label on).
 - [ ] After an hour, `curl -s localhost:9100/api/errors` shows no new `data_api` watchlist,
       `views.markets` or layout site, and the browser's error bar is empty.
 
+### 33-13-liquidation-and-forced-flow-research-and-the-strategy-filter (commit: this story's)
+
+Research code only: the liquidations frame (`CatalogFrames.liquidations`), the liquidation study
+behind the new notebook `research/notebooks/09_liquidations`, `OFIStrategy`'s
+`forced_flow_filter`/`liquidation_cascade_mode` and the `seconds_liquidations` backtest kind. No
+service, schema, stored file, Redis channel, env var or compose key changes; no bot runs the new
+OFI modes. The research context ships in the `collector` and `live-paper` images, so the new code
+reaches the VPS with the next image rebuild and needs nothing else there.
+
+- [ ] Nothing to run beyond the next `make redeploy-all` (or any rebuild of the `collector` /
+      `live-paper` images): confirm afterwards that `live-paper`'s `liquidation_cascade` bot (if a
+      fleet holds one) still starts and logs its first cycle -- its notional rule moved into
+      `liquidation_cascade_strategy.definition_units` unchanged.
+
 ### 33-14-liquidation-cascade-bot-shorts-into-a-long-liquidation-cascade-backtested-and-paper-run (commit: this story's)
 
 A new paper strategy, `liquidation_cascade` (`research/strategies/liquidation_cascade_strategy.py`,

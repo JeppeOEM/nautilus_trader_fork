@@ -3258,13 +3258,32 @@ segment between them, so past the second anchor the alert watches a line the cha
 (audit D-198; upgrade path: a per-drawing `extend` setting honoured by the chart's primitive and
 the alert alike).
 
-### 2.12 Research reads (the six notebooks of `research/notebooks/`, Epic 27)
+### 2.12 Research reads (the nine notebooks of `research/notebooks/`, Epic 27 and Story 33.13)
 
-`[amended 2026-09-28: Story 27.9]` What each notebook reads from the stores, and every value it
-shows that is derived on read, with the one function that derives it (SIGNAL-01: nothing below is
-stored; every market-data read is bounded by the notebook's `START`/`END`, NB-04). Index,
+`[amended 2026-09-28: Story 27.9]` `[amended 2026-10-07: Story 33.13 -- notebook 09, the
+liquidations frame, the liquidation research functions and the `seconds_liquidations` kind; the
+count was stale at six since 07 and 08]` What each notebook reads from the stores, and every value
+it shows that is derived on read, with the one function that derives it (SIGNAL-01: nothing below
+is stored; every market-data read is bounded by the notebook's `START`/`END`, NB-04). Index,
 purpose and run times: `research/README.md`. No notebook reads `metrics.db`: ranking history
 reaches research only over HTTP (§2.9).
+
+**The frames research reads liquidations through (Story 33.13).** `CatalogFrames.liquidations(iid,
+*, start, end)` (`MarketFrames.liquidations`) reads the §1.26 `Liquidation` rows with `ts_event`
+in `[start, end)`, one UTC day at a time through `kernel.catalog_files.query_liquidations` (each
+venue event once; two stored copies that disagree are ledgered at
+`research.frames.liquidation_duplicate` and raise). Columns `LIQUIDATIONS_COLUMNS`: `ts_event`,
+`side` (`long` | `short`, the liquidated position), `size_units`, `price_units`,
+`size_precision`, `price_precision`, then `size`, `price` and `notional` (quote currency at the
+bankruptcy price) each decoded once from the units, `price_kind` and `venue_event_id`, `ts_init`.
+`price_kind` is the constant `"bankruptcy"` on every row (`frames.PRICE_KIND`): there is no stored
+kind column and no mark-priced feed (Known limit; upgrade path: a stored column read instead). An
+id without `has_liquidation_feed` (anything but Bybit LINEAR) reads nothing and is the empty frame
+with every column -- never an invented row. `CatalogFrames.seconds` also carries
+`buy_volume_units`/`sell_volume_units`, the exact integer volumes (added columns only), which the
+organic delta and the forced share sum. The backtest kind `seconds_liquidations`
+(`RunSpec.data`) streams the derived quotes, the snapshots and the liquidation rows
+(`client_id="LIQUIDATIONS"`) to one strategy; like `liquidations` it needs a feed id.
 
 **`01_catalog_inspection`**
 
@@ -3356,7 +3375,19 @@ reaches research only over HTTP (§2.9).
   (`kernel.candle_patterns.CandlePatternSet`); forward returns and the hit rate
   (`research.domain.events.forward_returns`/`hit_rate`).
 
-**`08_strategy_gallery`** (the liquidation cascade runs, Story 33.14)
+**`07_indicator_atlas`**
+
+- *Stored, read:* the candle store's bars (`t`, `o`, `h`, `l`, `c`, `v`, `partial`) through
+  `CatalogFrames.bars`/`bar_coverage`; `DydxSecondSnapshot` rows (the decoded top levels) through
+  `CatalogFrames.seconds`.
+- *Derived on read:* every bar indicator of `nautilus_trader.indicators` and the swing points
+  (`research.application.indicator_atlas.replay`/`fuzzy_frame`/`swing_points`), and the snapshot
+  indicators (`indicator_atlas.snapshot_indicators` over `kernel.indicators`' `Microprice`,
+  `OrderFlowImbalance`, `MultiLevelOFI`, `MultiLevelOBI`); `docs/NAUTILUS_INDICATOR_BACKTEST_CATALOG.md`
+  lists them.
+
+**`08_strategy_gallery`** (the liquidation cascade runs, Story 33.14; the OFI forced-flow runs,
+Story 33.13)
 
 - *Stored, read:* `CASCADE_INSTRUMENT`'s instrument definition; its `DydxSecondSnapshot` rows'
   top of book, turned into `QuoteTick`s (`research.application.backtest_runner.
@@ -3377,6 +3408,59 @@ reaches research only over HTTP (§2.9).
   cascade row's label names its instrument and data kind (`Cascade follow short only
   (BTCUSDT-LINEAR.BYBIT, liquidations)`), in the leaderboard and the equity chart alike. A run
   whose params name no stop uses `DEFAULT_STOP_PCT` (1 %), the strategy module's one default.
+
+- *The OFI forced-flow runs (Story 33.13):* four `OFIStrategy` runs on `CASCADE_INSTRUMENT` with
+  `data="seconds_liquidations"` (`research.application.gallery.ofi_specs`): the baseline, the
+  forced-flow filter and the cascade `fade` and `follow` gates, each setting both forced-flow
+  fields over `OFI_PARAMS` so a row differs from the baseline by one input, all four with the
+  cumulative-delta gate on (`gallery.OFI_BASE_PARAMS`, `cum_delta_threshold` 0) so the filter can
+  change a decision, the execution models the gallery's. *Stored, read:* the snapshots' top of book (the derived quotes), the full
+  snapshots (`bid_*`/`ask_*`, `buy_volume_units`/`sell_volume_units`, `size_precision`,
+  `ts_event`, `ts_init`) and the `Liquidation` rows, all streamed by `BacktestDataConfig`.
+  *Derived on read:* the organic delta per snapshot (`kernel.indicators.organic_delta_units` of
+  the volumes and the liquidated sizes received since the previous snapshot, rescaled exactly to
+  its `size_precision`, audit D-220), the cascade phase (`kernel.indicators.LiquidationCascade`
+  fed at the definition's precisions, `research.strategies.cascade_rules.next_phase`) and the gate
+  (`cascade_rules.cascade_allows`, audit D-223); the sample beside the table
+  (`gallery.ofi_sample`: `cascade_sample` with the OFI detector fields); the leaderboard metrics
+  (`MetricReport`). No id without a feed runs them.
+
+**`09_liquidations`** (Story 33.13)
+
+- *Stored, read* (one UTC day at a time, `research.application.liquidations.liquidation_study`,
+  MEM-01): `INSTRUMENT`'s liquidations frame (above); its `DydxSecondSnapshot` rows through
+  `CatalogFrames.seconds`, reduced to `ts_event`, `buy_volume_units`, `sell_volume_units`,
+  `size_precision` and the 1 s mid grid (`inspection.second_grid`) before the next day; its
+  `TradeTick`s (`MarketFrames.objects`, the day widened by the match tolerance: `size`,
+  `aggressor_side`, `ts_event`); `MarkPriceUpdate` through `CatalogFrames.mark_index` (the day
+  widened by `max_mark_age_s`); `OpenInterest`; `same_symbol`'s other-venue leg and its
+  liquidations frame (empty: Hyperliquid has no feed).
+- *Derived on read:* the cascade episodes (`liquidations.cascade_episodes`: `replay_cascade` of
+  the one `LiquidationCascade` over the frame's exact rows, `start_ns`, `end_ns`, `direction`,
+  `side`, `duration_s`, `peak_rate` and `notional` in quote currency, and `fwd_1m`/`fwd_5m`/
+  `fwd_15m`/`fwd_60m` = `mid[e + h] / mid[e] - 1` from the end second e,
+  `research.domain.events.forward_returns`, NaN for an open episode or a missing mid; scaled at
+  the instrument definition's precisions, `MarketFrames.definition_precisions`); the implied
+  leverage `mark / abs(mark - bankruptcy price)` against the latest mark within `max_mark_age_s`,
+  per liquidation and per UTC day (`count`, `finite`, `wrong_side` -- a bankruptcy price not on
+  the loss side of the mark, NaN -- and p10..p90; `liquidations.implied_leverage`). At the trigger
+  it is about `1 / (maintenance margin rate + fee rate)` of an isolated position: Bybit's risk
+  tier, not the leverage chosen (audit D-221); the forced share per minute and hour (`liquidations.forced_share`:
+  `kernel.indicators.units_ratio` of the liquidated over the traded size, exact at the bucket's
+  finest size precision, NaN at 0 traded); the trade match (`liquidations.match_to_trades`: same
+  exact size, forced aggressor, earliest unused trade within `match_tol_s`, the
+  `verification.domain.liquidation_check` rule restated, audit D-222); the organic delta per
+  second and per minute (`liquidations.organic_delta`/`organic_per_minute`, a liquidation placed
+  in the snapshot second of its `ts_event` -- the capture's trade rule -- or counted
+  `unattributed`, audit D-220); the liquidations against the OI change per `oi_bucket_s`
+  (`research.application.aligned.liquidations_vs_oi`: size, notional, `bucket_last` change --
+  the first bucket's against the bucket before the window, read for it (`aligned.oi_window_start`)
+  and left out of the output -- `deleveraging`, `share_of_oi_drop`); the cross-venue pairing of
+  episodes by start, one to one, greedily in start order with the nearest unused episode, a tie
+  to the later one (`aligned.cross_venue_liquidations`), against the other venue's leg with a
+  feed, else Hyperliquid's; its `reason` names the empty side, or says that no other-venue leg
+  exists. The sample line reports the UTC days touched and the window's hours. An id without a feed
+  reports NaN/NA liquidation columns and counts of 0, never zeros as data.
 
 **Known limits pinned by Story 31.3** (each held by a test in
 `verification/tests/test_reference_series.py` or the named one, against the reference of §2.13):

@@ -801,6 +801,15 @@ def _read_liquidations(
     return sorted(kept.values(), key=lambda row: (row.ts_event, row.venue_event_id))
 
 
+class LiquidationDuplicateError(ValueError):
+    """
+    One venue event stored twice with different values (`query_liquidations`): the caller ledgers
+    it at its duplicate site and raises, never picks a copy (DATA-07). A `ValueError`, so a caller
+    that catches every refused read still does; its own class lets a caller tell it from any other
+    failed read (a listing that kept losing files).
+    """
+
+
 def _keep_once(kept: dict[str, Liquidation], row: Liquidation, instrument_id: str) -> None:
     """Keep the first copy of a venue event; refuse a second copy that is not the same event."""
     first = kept.setdefault(row.venue_event_id, row)
@@ -811,7 +820,7 @@ def _keep_once(kept: dict[str, Liquidation], row: Liquidation, instrument_id: st
         "ts_init": 0,
     }
     if not same:
-        raise ValueError(
+        raise LiquidationDuplicateError(
             f"{instrument_id}: liquidation {row.venue_event_id!r} is stored twice with different "
             f"values ({first!r} vs {row!r}), refused"
         )

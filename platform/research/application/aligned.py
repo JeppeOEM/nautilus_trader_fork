@@ -23,6 +23,11 @@ observed is a hole and a NaN return, never an error and never a fill); 1 s retur
 correlation is pairwise-complete and nothing is forward-filled (DATA-01). Same-asset matching is
 `kernel.venues.asset_key`'s (through `MarketFrames.same_symbol`); nothing here parses an id beyond
 `venue_of`. Every read is bounded by the window's `start_ns`/`end_ns` (MEM-01).
+
+Liquidations against the other derivatives (Story 33.13): `liquidations_vs_oi` sets each bucket's
+liquidated size and notional (exact integer sums, decoded once) beside the bucket's open-interest
+change (`bucket_last`), and `cross_venue_liquidations` pairs two venues' cascade episodes
+(`research.application.liquidations.cascade_episodes`) by start.
 """
 
 import math
@@ -35,6 +40,7 @@ from itertools import combinations
 import numpy as np
 import pandas as pd
 from kernel.clocks import NS_PER_S
+from kernel.second_snapshot import unit_float
 from kernel.venues import VENUE_KINDS
 from kernel.venues import AssetKey
 from kernel.venues import asset_key
@@ -612,3 +618,184 @@ def anchor_cluster(clusters: Mapping[str, list[list[str]]], anchor: str) -> tupl
 def returns_frame(returns: AlignedReturns) -> pd.DataFrame:
     """Return the aligned returns as a frame, one column per id, indexed by UTC bucket start."""
     return pd.DataFrame(returns.matrix, index=_utc_index(returns.ts_ns), columns=list(returns.ids))
+
+
+# `liquidations_vs_oi`'s columns, per bucket.
+LIQUIDATIONS_VS_OI_COLUMNS = (
+    "liquidation_size",
+    "liquidation_notional",
+    "oi_change",
+    "deleveraging",
+    "share_of_oi_drop",
+)
+CASCADE_PAIR_COLUMNS = ("a_start_ns", "b_start_ns", "direction", "lag_s")
+
+
+def finest_sum(values: Iterable[tuple[int, int]]) -> tuple[int, int]:
+    """
+    Return the exact sum of `(units, precision)` values (units of `10^-precision`) as `(units,
+    precision)` at the finest precision among them -- every part is rescaled to a finer scale only,
+    by an exact integer multiplication, never rounded (DATA-04). `(0, 0)` for no value.
+    """
+    total, finest = 0, 0
+    for units, precision in values:
+        if precision > finest:
+            total *= 10 ** (precision - finest)
+            finest = precision
+        total += units * 10 ** (finest - precision)
+    return total, finest
+
+
+def _liquidation_buckets(
+    liqs: pd.DataFrame, bucket_ns: int, buckets: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Each bucket's liquidated size (base) and notional (quote), exact sums decoded once; 0.0 if none."""
+    sizes: dict[int, list[tuple[int, int]]] = {}
+    notionals: dict[int, list[tuple[int, int]]] = {}
+    columns = zip(
+        liqs["ts_event"].tolist(),
+        liqs["size_units"].tolist(),
+        liqs["size_precision"].tolist(),
+        liqs["price_units"].tolist(),
+        liqs["price_precision"].tolist(),
+        strict=True,
+    )
+    for ts, size, size_p, price, price_p in columns:
+        key = int(ts) // bucket_ns
+        sizes.setdefault(key, []).append((int(size), int(size_p)))
+        notionals.setdefault(key, []).append((int(size) * int(price), int(size_p) + int(price_p)))
+    size = [unit_float(*finest_sum(sizes.get(int(k), []))) for k in buckets]
+    notional = [unit_float(*finest_sum(notionals.get(int(k), []))) for k in buckets]
+    return np.asarray(size, dtype="float64"), np.asarray(notional, dtype="float64")
+
+
+def oi_window_start(start_ns: int, bucket_s: int) -> int:
+    """
+    Return where `liquidations_vs_oi`'s open-interest read starts: the start of the `bucket_s`
+    bucket before the one holding `start_ns`, so the window's first bucket has a change.
+    """
+    bucket_ns = bucket_s * NS_PER_S
+    return (start_ns // bucket_ns - 1) * bucket_ns
+
+
+def liquidations_vs_oi(
+    liqs: pd.DataFrame | None, oi: pd.DataFrame, bucket_s: int, start_ns: int, end_ns: int
+) -> pd.DataFrame:
+    """
+    Per `bucket_s` bucket of the window's complete grid (indexed by the bucket's UTC start, as
+    `bucket_last`): `liquidation_size` (base units) and `liquidation_notional` (quote, at the
+    bankruptcy price) of the liquidations with `ts_event` in the bucket, `oi_change` (the bucket's
+    last open interest minus the previous bucket's, `bucket_last`), `deleveraging` (`oi_change <
+    0` and a liquidated size > 0) and `share_of_oi_drop` (`liquidation_size / -oi_change` where
+    the OI fell, NaN elsewhere).
+
+    The first bucket's change is taken against the bucket before the window: `oi` should hold the
+    readings from one bucket before `start_ns` (`oi_window_start`), and that pre-window bucket is
+    left out of the output. Without a pre-window reading the first change is NaN, as any gap.
+
+    Invariant: a bucket without an OI reading has a NaN change on both sides, never a carried
+    value (DATA-01); a bucket with no liquidation has size 0 for an id with the feed, and `liqs
+    = None` (no feed) makes both liquidation columns NaN, never 0; `deleveraging` is False
+    wherever either input is unknown.
+    """
+    bucket_ns = bucket_s * NS_PER_S
+    buckets = np.arange(start_ns // bucket_ns, -(-end_ns // bucket_ns), dtype="int64")
+    with_previous = bucket_last(
+        oi, "open_interest", bucket_s, oi_window_start(start_ns, bucket_s), end_ns
+    )
+    last = with_previous.to_numpy(dtype="float64")
+    change = last[1:] - last[:-1]  # the pre-window bucket only serves the first change
+    if liqs is None:
+        size = notional = np.full(len(buckets), math.nan)
+    else:
+        size, notional = _liquidation_buckets(liqs, bucket_ns, buckets)
+    falling = change < 0  # NaN compares False
+    share = np.full(len(buckets), math.nan)
+    share[falling] = size[falling] / -change[falling]
+    return pd.DataFrame(
+        {
+            "liquidation_size": size,
+            "liquidation_notional": notional,
+            "oi_change": change,
+            "deleveraging": falling & (size > 0),
+            "share_of_oi_drop": share,
+        },
+        index=_utc_index(buckets * bucket_ns),
+        columns=list(LIQUIDATIONS_VS_OI_COLUMNS),
+    )
+
+
+@dataclass(frozen=True)
+class CascadeLeadLag:
+    """
+    Two venues' cascade episodes paired by start (`cross_venue_liquidations`).
+
+    Invariant: the pairing is one-to-one: `pairs` holds one row per `a` episode that found an
+    unused same-direction `b` episode starting within `max_lag_s` of it (`lag_s = (b - a) / 1 s`,
+    positive when `a` leads), in `a`'s start order, and no `b` episode is in two rows; `a_episodes`/`b_episodes` count each side's episodes; `reason` is set
+    exactly when a side has none, naming it, and `pairs` is then empty.
+
+    Known limit: Hyperliquid, the only other venue an asset is collected on, has no liquidation
+    feed (Story 33.2, `docs/DATA_DICTIONARY.md` §1.26), so its side is empty and the result is
+    `reason` alone until a feed exists; upgrade path: a venue with a feed added to
+    `kernel.liquidation.has_liquidation_feed`, whose episodes this pairs unchanged.
+    """
+
+    a: str
+    b: str
+    pairs: pd.DataFrame
+    a_episodes: int
+    b_episodes: int
+    reason: str | None
+
+
+def _nearest_start(
+    b_starts: np.ndarray,
+    b_directions: np.ndarray,
+    unused: np.ndarray,
+    episode: tuple[int, int],
+    max_lag_ns: int,
+) -> int | None:
+    """
+    Return the index of the unused `b` start of the same direction nearest `episode`'s start
+    within the lag, a tie going to the later `b` (lag >= 0); None when there is none.
+    """
+    start, direction = episode
+    distance = np.abs(b_starts - start)
+    candidates = np.flatnonzero(unused & (b_directions == direction) & (distance <= max_lag_ns))
+    if not candidates.size:
+        return None
+    # Sort by (distance, -start): the nearest, and of two equally near the later one.
+    best = min(candidates.tolist(), key=lambda k: (int(distance[k]), -int(b_starts[k])))
+    return int(best)
+
+
+def cross_venue_liquidations(
+    a: pd.DataFrame, b: pd.DataFrame, max_lag_s: int, a_name: str = "a", b_name: str = "b"
+) -> CascadeLeadLag:
+    """
+    Pair the episodes of `a` and `b` (two `cascade_episodes` frames) one to one by start, greedily
+    in `a`'s start order: each `a` episode takes the nearest *unused* `b` episode of the same
+    direction whose start lies within `max_lag_s` of its own, a tie going to the later `b` (lag
+    >= 0); `CascadeLeadLag`'s invariant. `a_name`/`b_name` name the sides in `reason`.
+    `max_lag_s < 0` raises `ValueError`.
+    """
+    if max_lag_s < 0:
+        raise ValueError(f"max_lag_s must be >= 0, got {max_lag_s}")
+    empty = [name for name, side in ((a_name, a), (b_name, b)) if side.empty]
+    reason = f"no cascade episode on {' and '.join(empty)}" if empty else None
+    rows = []
+    b_starts = b["start_ns"].to_numpy(dtype="int64")
+    b_directions = b["direction"].to_numpy(dtype="int64")
+    unused = np.ones(len(b), dtype=bool)
+    episodes = sorted(zip(a["start_ns"].tolist(), a["direction"].tolist(), strict=True))
+    for start, direction in episodes:
+        found = _nearest_start(
+            b_starts, b_directions, unused, (start, direction), max_lag_s * NS_PER_S
+        )
+        if found is not None:
+            unused[found] = False
+            b_start = int(b_starts[found])
+            rows.append((start, b_start, direction, (b_start - start) / NS_PER_S))
+    pairs = pd.DataFrame(rows, columns=list(CASCADE_PAIR_COLUMNS))
+    return CascadeLeadLag(a_name, b_name, pairs, len(a), len(b), reason)

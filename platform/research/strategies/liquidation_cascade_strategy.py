@@ -337,6 +337,28 @@ def _avg_open(position: Position) -> Decimal:
     return Decimal(repr(position.avg_px_open))
 
 
+def definition_units(row: Liquidation, instrument: Instrument, skipped_before: int) -> int | None:
+    """
+    Return the row's notional (`Liquidation.notional_units_at`) at `instrument`'s definition
+    precisions, the one feeding rule of `LiquidationCascade` in every strategy (this one's and
+    `OFIStrategy`'s cascade mode, Story 33.13). None, recorded in the error ledger at
+    `UNSCALABLE_ROW_SITE`, when the definition's precisions cannot hold it exactly (DATA-04): the
+    caller counts it (`skipped_before` is its count before this row, for the ledger line) and does
+    not feed it, never a rounded value.
+    """
+    precisions = (instrument.price_precision, instrument.size_precision)
+    try:
+        return row.notional_units_at(*precisions)
+    except SnapshotEncodingError as exc:
+        error_ledger.record(
+            UNSCALABLE_ROW_SITE,
+            f"{row.instrument_id} liquidation {row.venue_event_id} not fed "
+            f"({skipped_before + 1} so far): {exc}",
+            exc,
+        )
+        return None
+
+
 class _SignalLog:
     """
     An append-only JSON-lines file of one bot's decision cycles, in `bots.strategies.signal_log`'s
@@ -547,21 +569,13 @@ class LiquidationCascadeStrategy(Strategy):
         """
         Return the row's notional at the instrument definition's precisions; None (recorded in
         the error ledger at `UNSCALABLE_ROW_SITE` and counted in `unscalable_rows`) when it is not
-        exact there.
+        exact there (`definition_units`).
         """
         assert self.instrument is not None  # on_start stopped the strategy otherwise
-        precisions = (self.instrument.price_precision, self.instrument.size_precision)
-        try:
-            return row.notional_units_at(*precisions)
-        except SnapshotEncodingError as exc:
+        units = definition_units(row, self.instrument, self.unscalable_rows)
+        if units is None:
             self.unscalable_rows += 1
-            error_ledger.record(
-                UNSCALABLE_ROW_SITE,
-                f"{row.instrument_id} liquidation {row.venue_event_id} not fed "
-                f"({self.unscalable_rows} so far): {exc}",
-                exc,
-            )
-            return None
+        return units
 
     # --- decisions -----------------------------------------------------------------------------
 

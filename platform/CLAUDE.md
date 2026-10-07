@@ -164,9 +164,10 @@ A venue is one package, `capture/venues/<v>/`, of named files wired into the one
 
 ## Research notebooks
 
-The six notebooks of `research/notebooks/` (index, recipes and launch: `research/README.md`) read
+The nine notebooks of `research/notebooks/` (index, recipes and launch: `research/README.md`) read
 the archive, never write it, and are the researcher's view of numbers computed elsewhere
-`[amended 2026-09-28: Story 27.9]`.
+`[amended 2026-09-28: Story 27.9]` `[amended 2026-10-07: Story 33.13 -- nine with 07, 08 and
+09_liquidations; the count said six]`.
 
 - **NB-01** — **A notebook holds no analysis logic.** Every computation is a `research/domain`,
   `research/application`, `kernel` or `kernel.performance_metrics` call; a code cell only calls

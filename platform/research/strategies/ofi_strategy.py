@@ -23,27 +23,80 @@ Entry needs all of:
   4. Trend agrees: EMA fast/slow on 1-minute mid closes; counter-trend entries are blocked
 
 Exits: OFI crosses zero back (`exit_on_zero`), or trend flips against the position.
+
+**Forced flow** (Story 33.13, both off by default; on, they need a Bybit LINEAR id and subscribe to
+its `Liquidation` rows through `LIQUIDATION_CLIENT_ID`, the backtest's `seconds_liquidations` kind):
+
+- `forced_flow_filter`: the cumulative delta (3.) is organic -- each snapshot pushes
+  `kernel.indicators.organic_delta_units` of its exact `buy_volume_units`/`sell_volume_units` and
+  the long/short liquidation sizes received since the previous snapshot, rescaled exactly to the
+  snapshot's `size_precision` (`kernel.second_snapshot.units_of`), decoded once. A size that
+  precision cannot hold is recorded at `FORCED_FLOW_SITE` and that second's delta is NaN, which
+  blocks a cum-delta-gated entry while it is in the window, never a value with the row dropped
+  (DATA-07).
+- `liquidation_cascade_mode` (`follow` | `fade` | `off`): `kernel.indicators.LiquidationCascade`
+  fed as `LiquidationCascadeStrategy` feeds it (`definition_units`: the notional at the
+  definition's precisions, at the row's `ts_init`) and advanced at every snapshot's `ts_init`, its
+  updates folded into `cascade_rules.next_phase`; an entry is submitted only when
+  `cascade_rules.cascade_allows` passes it. OFI still decides every entry; the mode only gates.
+
+Known limit: a liquidation counts toward the snapshot that follows its arrival (`ts_init` order,
+what a live strategy knows), while research's `organic_delta` places it in the snapshot second of
+its venue `ts_event`; a liquidation received after its second closed lands one snapshot later here
+(audit D-220). Liquidations received before a one-sided snapshot or before the first snapshot
+after a feed gap (`> OFI_GAP_NS`) belong to seconds that have no usable snapshot: they are not
+netted but discarded, counted in `unattributed_liquidations` and logged at WARNING (the
+research side's `unattributed`). Upgrade path: hold liquidations by `ts_event` second and apply
+them to that second's snapshot, as the capture service holds trades.
+
+Known limit: the modes are research-only: no bot runs `OFIStrategy` with them, and live delivery
+order is not checked (a row received before the detector's clock is placed at it, as a backtest
+never delivers one); upgrade path: `LiquidationCascadeStrategy`'s stale-row rule, before a bot
+wiring.
 """
 
+import math
 from collections import deque
 from decimal import Decimal
 
 from kernel.indicators import OFI_GAP_NS
+from kernel.indicators import LiquidationCascade
 from kernel.indicators import MultiLevelOFI
+from kernel.indicators import organic_delta_units
+from kernel.liquidation import LIQUIDATION_CLIENT_ID
+from kernel.liquidation import LiquidatedSide
+from kernel.liquidation import Liquidation
+from kernel.liquidation import has_liquidation_feed
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import SnapshotEncodingError
+from kernel.second_snapshot import unit_float
+from kernel.second_snapshot import units_of
+from observability import error_ledger
 
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.core.data import Data
 from nautilus_trader.indicators import ExponentialMovingAverage
 from nautilus_trader.model.data import DataType
 from nautilus_trader.model.enums import OrderSide
+from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.trading.strategy import Strategy
+from research.strategies.cascade_rules import MODE_OFF
+from research.strategies.cascade_rules import MODES
+from research.strategies.cascade_rules import QUIET
+from research.strategies.cascade_rules import CascadeView
+from research.strategies.cascade_rules import cascade_allows
+from research.strategies.cascade_rules import next_phase
+from research.strategies.liquidation_cascade_strategy import definition_units
 
 
 _NS_PER_S = 1_000_000_000
 _MINUTE_NS = 60 * _NS_PER_S
+# `liquidation_cascade_mode`'s values: off, or one of the cascade rules' modes.
+CASCADE_MODES = (MODE_OFF, *MODES)
+# The error-ledger site of a liquidation size the snapshot's size precision cannot hold exactly.
+FORCED_FLOW_SITE = "research.ofi.unscalable_forced_flow"
 
 
 class OFIStrategyConfig(StrategyConfig, frozen=True):
@@ -73,6 +126,13 @@ class OFIStrategyConfig(StrategyConfig, frozen=True):
         trade direction (base-asset units).
     trend_ema_fast / trend_ema_slow : int
         EMA periods in minutes. fast > slow = bull = longs only.
+    forced_flow_filter : bool
+        Take the forced (liquidation) flow out of the cumulative delta (Story 33.13).
+    liquidation_cascade_mode : str
+        `off`, `follow` or `fade`: gate entries on the liquidation cascade's phase.
+    cascade_window_s / cascade_baseline_s / cascade_intensity_threshold / cascade_decay_ratio
+        The `LiquidationCascade` detector's parameters (`LiquidationCascadeStrategy`'s defaults);
+        `cascade_window_s` is also the fade window's length.
     """
 
     instrument_id: InstrumentId
@@ -89,14 +149,62 @@ class OFIStrategyConfig(StrategyConfig, frozen=True):
     cum_delta_threshold: float | None = None
     trend_ema_fast: int = 8
     trend_ema_slow: int = 21
+    forced_flow_filter: bool = False
+    liquidation_cascade_mode: str = MODE_OFF
+    cascade_window_s: int = 30
+    cascade_baseline_s: int = 3_600
+    cascade_intensity_threshold: float = 3.0
+    cascade_decay_ratio: float = 0.5
+
+
+def _check_forced_flow(config: OFIStrategyConfig) -> None:
+    """Refuse an unknown cascade mode, and either forced-flow option on an id without the feed."""
+    mode = config.liquidation_cascade_mode
+    if mode not in CASCADE_MODES:
+        raise ValueError(f"liquidation_cascade_mode must be one of {CASCADE_MODES}, not {mode!r}")
+    if (config.forced_flow_filter or mode != MODE_OFF) and not has_liquidation_feed(
+        str(config.instrument_id)
+    ):
+        raise ValueError(
+            f"forced_flow_filter and liquidation_cascade_mode need a liquidation feed (Bybit "
+            f"LINEAR), {config.instrument_id} has none"
+        )
 
 
 class OFIStrategy(Strategy):
-    """Trades an OFI z-score, gated by book imbalance, cumulative delta and a minute-EMA trend."""
+    """
+    Trades an OFI z-score, gated by book imbalance, cumulative delta and a minute-EMA trend, and
+    optionally by the forced flow (the module docstring).
+
+    Invariant: with `forced_flow_filter=False` and `liquidation_cascade_mode="off"` it subscribes
+    to nothing but the snapshots and decides exactly as before Story 33.13. A bad forced-flow
+    config raises `ValueError` here, before any node runs it.
+    """
 
     def __init__(self, config: OFIStrategyConfig) -> None:
         super().__init__(config)
+        _check_forced_flow(config)
         self.instrument: Instrument | None = None
+        # Liquidation rows whose notional the definition's precisions cannot hold (not fed).
+        self.unscalable_rows = 0
+        # The liquidated size per side received since the last snapshot, as `Quantity.raw` sums.
+        self._forced_raw = dict.fromkeys(LiquidatedSide, 0)
+        self._forced_rows = 0
+        # This instrument's liquidation rows received, and those discarded unattributed: received
+        # before a one-sided snapshot or across a feed gap (the module docstring).
+        self.delivered_liquidations = 0
+        self.unattributed_liquidations = 0
+        self._phase = QUIET
+        self._cascade = (
+            None
+            if config.liquidation_cascade_mode == MODE_OFF
+            else LiquidationCascade(
+                config.cascade_window_s,
+                config.cascade_baseline_s,
+                config.cascade_intensity_threshold,
+                config.cascade_decay_ratio,
+            )
+        )
         self._first_ts: int | None = None
         self._last_ts: int | None = None
         self._prev_ofi = 0.0
@@ -124,22 +232,40 @@ class OFIStrategy(Strategy):
             self.stop()
             return
         self.subscribe_data(DataType(DydxSecondSnapshot), instrument_id=self.config.instrument_id)
+        if self.config.forced_flow_filter or self._cascade is not None:
+            self.subscribe_data(
+                DataType(Liquidation),
+                client_id=ClientId(LIQUIDATION_CLIENT_ID),
+                instrument_id=self.config.instrument_id,
+            )
 
     def on_data(self, data: Data) -> None:
-        if not isinstance(data, DydxSecondSnapshot) or not data.bid_prices or not data.ask_prices:
+        if isinstance(data, Liquidation):
+            self._on_liquidation(data)
             return
+        if isinstance(data, DydxSecondSnapshot):
+            self._on_snapshot(data)
+
+    def _on_snapshot(self, data: DydxSecondSnapshot) -> None:
+        # Every snapshot closes the forced-flow accumulation and moves the detector (and with it
+        # the cascade phase, before any entry is gated), a one-sided one included.
+        self._advance_cascade(data.ts_init)
         ts = data.ts_event
+        one_sided = not data.bid_prices or not data.ask_prices
         # A hole in the 1s feed (collector restart / WS resubscribe) makes the next OFI delta
         # compare against a stale book: clear it first, at the one platform-wide threshold
         # (`kernel.indicators.OFI_GAP_NS`, 3 s since Story 31.3 -- this strategy used 5 s).
         after_gap = self._last_ts is not None and ts - self._last_ts > OFI_GAP_NS
+        delta = self._second_delta(data, attributable=not (one_sided or after_gap))
+        if one_sided:
+            return
         if after_gap:
             self._ofi.clear_prev_state()
         self._last_ts = ts
         self._first_ts = self._first_ts or ts
 
         self._ofi.update_raw(data.bid_prices, data.bid_sizes, data.ask_prices, data.ask_sizes)
-        self._track_cum_delta(ts, data.buy_volume - data.sell_volume)
+        self._track_cum_delta(ts, delta)
         self._track_trend(ts, (data.bid_prices[0] + data.ask_prices[0]) / 2)
 
         # The post-gap row only re-baselines MultiLevelOFI and leaves its value at the pre-gap
@@ -157,6 +283,93 @@ class OFIStrategy(Strategy):
     def _warmed_up(self, ts: int) -> bool:
         assert self._first_ts is not None
         return ts - self._first_ts >= self.config.warmup_seconds * _NS_PER_S
+
+    # ------------------------------------------------------------------
+    # Forced flow (Story 33.13)
+    # ------------------------------------------------------------------
+
+    def _on_liquidation(self, row: Liquidation) -> None:
+        if row.instrument_id != self.config.instrument_id or self.instrument is None:
+            return
+        self.delivered_liquidations += 1
+        if self.config.forced_flow_filter:
+            self._forced_raw[row.side] += row.size.raw
+            self._forced_rows += 1
+        if self._cascade is None:
+            return
+        units = definition_units(row, self.instrument, self.unscalable_rows)
+        if units is None:
+            self.unscalable_rows += 1
+            return
+        self._cascade.update_liquidation(row.side, units, row.ts_init)
+        self._update_phase()
+
+    def _advance_cascade(self, ts_init: int) -> None:
+        if self._cascade is not None:
+            self._cascade.advance(ts_init)
+            self._update_phase()
+
+    def _update_phase(self) -> None:
+        cascade = self._cascade
+        assert cascade is not None  # only called with a detector
+        assert cascade.clock_ns is not None  # just updated
+        view = CascadeView(
+            episode_start_ns=cascade.episode_start_ns,
+            episode_ended=cascade.episode_ended,
+            episode_direction=cascade.episode_direction,
+            rising=cascade.rising,
+            spent=cascade.spent,
+            total_rate=cascade.rate_long + cascade.rate_short,
+            baseline=cascade.baseline,
+        )
+        self._phase = next_phase(self._phase, view, cascade.clock_ns, self.config.cascade_window_s)
+
+    def _take_forced(self, data: DydxSecondSnapshot, attributable: bool) -> tuple[int, int]:
+        """
+        Return the liquidated (long, short) `Quantity.raw` sums received since the last snapshot
+        and reset them. When the snapshot cannot hold them (`attributable` False: it is one-sided,
+        or follows a gap, so they belong to seconds without a snapshot) they are discarded --
+        counted in `unattributed_liquidations` and logged once at WARNING -- and (0, 0) returned,
+        never netted against a second whose volume does not hold their trades.
+        """
+        raws = (self._forced_raw[LiquidatedSide.LONG], self._forced_raw[LiquidatedSide.SHORT])
+        rows = self._forced_rows
+        self._forced_raw = dict.fromkeys(LiquidatedSide, 0)
+        self._forced_rows = 0
+        if attributable or rows == 0:
+            return raws
+        self.unattributed_liquidations += rows
+        self.log.warning(
+            f"{rows} liquidation(s) received before the snapshot at {data.ts_event} (one-sided or "
+            f"after a feed gap) not netted: unattributed ({self.unattributed_liquidations} so far)"
+        )
+        return 0, 0
+
+    def _second_delta(self, data: DydxSecondSnapshot, attributable: bool) -> float:
+        """
+        Return the snapshot's delta: `buy_volume - sell_volume` without the filter, else its
+        organic delta (the module docstring) over the liquidations `_take_forced` attributes to
+        it, NaN when a liquidation size is not exact at the snapshot's precision. Resets the
+        accumulation either way.
+        """
+        if not self.config.forced_flow_filter:
+            return data.buy_volume - data.sell_volume
+        long_raw, short_raw = self._take_forced(data, attributable)
+        try:
+            liq_long = units_of(long_raw, data.size_precision)
+            liq_short = units_of(short_raw, data.size_precision)
+        except SnapshotEncodingError as exc:
+            error_ledger.record(
+                FORCED_FLOW_SITE,
+                f"{data.instrument_id} forced flow at {data.ts_event} not exact at size "
+                f"precision {data.size_precision}: the second's delta is NaN",
+                exc,
+            )
+            return math.nan
+        organic = organic_delta_units(
+            data.buy_volume_units, data.sell_volume_units, liq_long, liq_short
+        )
+        return unit_float(organic, data.size_precision)
 
     # ------------------------------------------------------------------
     # State
@@ -196,7 +409,8 @@ class OFIStrategy(Strategy):
 
         if c.cum_delta_threshold is not None:
             cum = sum(d for _, d in self._cum_delta_events)
-            if (cum if buy else -cum) < c.cum_delta_threshold:
+            # `not >=`, so an unknown (NaN) organic delta in the window blocks the entry.
+            if not (cum if buy else -cum) >= c.cum_delta_threshold:
                 return False
 
         # Blocks counter-trend entries; None (EMAs not warm yet) does not block.
@@ -223,11 +437,19 @@ class OFIStrategy(Strategy):
             self._submit(OrderSide.SELL if long else OrderSide.BUY)
 
     def _enter(self, ofi: float, data: DydxSecondSnapshot) -> None:
+        side = self._entry_side(ofi, data)
+        if side is not None and cascade_allows(
+            self.config.liquidation_cascade_mode, side, self._phase
+        ):
+            self._submit(side)
+
+    def _entry_side(self, ofi: float, data: DydxSecondSnapshot) -> OrderSide | None:
         t = self.config.ofi_threshold
         if ofi > t and self._filters_pass(OrderSide.BUY, data):
-            self._submit(OrderSide.BUY)
-        elif ofi < -t and self._filters_pass(OrderSide.SELL, data):
-            self._submit(OrderSide.SELL)
+            return OrderSide.BUY
+        if ofi < -t and self._filters_pass(OrderSide.SELL, data):
+            return OrderSide.SELL
+        return None
 
     def _submit(self, side: OrderSide) -> None:
         assert self.instrument is not None
@@ -244,3 +466,11 @@ class OFIStrategy(Strategy):
         self._prev_ofi = 0.0
         self._cum_delta_events.clear()
         self._new_indicators()
+        self.unscalable_rows = 0
+        self._forced_raw = dict.fromkeys(LiquidatedSide, 0)
+        self._forced_rows = 0
+        self.delivered_liquidations = 0
+        self.unattributed_liquidations = 0
+        self._phase = QUIET
+        if self._cascade is not None:
+            self._cascade.reset()

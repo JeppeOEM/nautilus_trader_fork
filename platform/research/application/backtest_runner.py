@@ -80,6 +80,7 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from research.application.ports import FEE_MODELS
 from research.application.ports import FILL_MODELS
 from research.application.ports import LATENCY_KEYS
+from research.application.ports import LIQUIDATION_KINDS
 from research.application.ports import RunResult
 from research.application.ports import RunSpec
 from research.application.ports import check_params
@@ -137,7 +138,7 @@ def settlement_currency(spec: RunSpec) -> str:
 
 def write_derived_quotes(spec: RunSpec, instruments: list[Instrument], directory: str) -> None:
     """
-    Write the `seconds` and `liquidations` kinds' quote catalog: each instrument and one `QuoteTick`
+    Write the `seconds`, `liquidations` and `seconds_liquidations` kinds' quote catalog: each instrument and one `QuoteTick`
     per snapshot top of book in the window (`kernel.catalog_files.query_top_of_book`, level 0 only,
     MEM-01) -- the simulated exchange has no market to fill against otherwise. Written once per
     sweep.
@@ -163,13 +164,17 @@ def write_derived_quotes(spec: RunSpec, instruments: list[Instrument], directory
 _SNAPSHOT_CLS = f"{DydxSecondSnapshot.__module__}:{DydxSecondSnapshot.__qualname__}"
 LIQUIDATION_CLS = f"{Liquidation.__module__}:{Liquidation.__qualname__}"
 # The kinds that replay quotes derived from the snapshots' top of book (`write_derived_quotes`).
-_QUOTED_KINDS = ("seconds", "liquidations")
+_QUOTED_KINDS = ("seconds", "liquidations", "seconds_liquidations")
+# The kinds that stream the archived snapshots themselves.
+_SNAPSHOT_KINDS = ("seconds", "seconds_liquidations")
 
 
 def _data_configs(spec: RunSpec, quotes_dir: str) -> list[BacktestDataConfig]:
     """
     Build the run's data configs. Their bounds are inclusive and on `ts_init` (the replay clock),
-    so `end` is passed as `end_ns - 1` to keep the spec's half-open `[start, end)`.
+    so `end` is passed as `end_ns - 1` to keep the spec's half-open `[start, end)`. Per id, in
+    this order: the derived quotes (`_QUOTED_KINDS`), the snapshots (`_SNAPSHOT_KINDS`), the
+    liquidation rows (`LIQUIDATION_KINDS`), else the raw trade archive (`trades`, `bars:<spec>`).
     """
     start_ns, end_ns = window_ns(spec.start, spec.end)
     bounds: dict[str, Any] = {"start_time": start_ns, "end_time": end_ns - 1}
@@ -181,25 +186,30 @@ def _data_configs(spec: RunSpec, quotes_dir: str) -> list[BacktestDataConfig]:
                     catalog_path=quotes_dir, data_cls=QuoteTick, instrument_id=iid, **bounds
                 )
             )
-        if spec.data == "seconds":
-            configs.append(
-                BacktestDataConfig(
-                    catalog_path=spec.catalog_path,
-                    data_cls=_SNAPSHOT_CLS,
-                    instrument_id=iid,
-                    client_id=spec.venue,  # custom type: bookkeeping label only
-                    **bounds,
-                )
-            )
-        elif spec.data == "liquidations":
+        if spec.data in _SNAPSHOT_KINDS:
+            configs.append(_snapshot_config(spec, iid, bounds))
+        if spec.data in LIQUIDATION_KINDS:
             configs.append(_liquidation_config(spec.catalog_path, iid, bounds))
-        elif spec.data not in _QUOTED_KINDS:  # "trades" and "bars:<spec>": the raw trade archive
+        if spec.data not in _QUOTED_KINDS:
             configs.append(
                 BacktestDataConfig(
                     catalog_path=spec.catalog_path, data_cls=TradeTick, instrument_id=iid, **bounds
                 )
             )
     return configs
+
+
+def _snapshot_config(
+    spec: RunSpec, iid: InstrumentId, bounds: Mapping[str, Any]
+) -> BacktestDataConfig:
+    """Return the data config of one id's archived `DydxSecondSnapshot` rows."""
+    return BacktestDataConfig(
+        catalog_path=spec.catalog_path,
+        data_cls=_SNAPSHOT_CLS,
+        instrument_id=iid,
+        client_id=spec.venue,  # custom type: bookkeeping label only
+        **bounds,
+    )
 
 
 def _liquidation_config(

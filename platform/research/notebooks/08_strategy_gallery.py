@@ -16,7 +16,7 @@
 # %% [markdown]
 # # 08 Strategy gallery
 #
-# Seventeen ready-made strategies run side by side over one window through the same
+# Twenty-one ready-made strategy runs side by side over one window through the same
 # `BacktestRunner` as `04_backtest_evaluation`. Thirteen on one instrument's bars: five of
 # Nautilus's own example strategies by string path (`EMACross`, `EMACrossLongOnly`,
 # `EMACrossBracket`, `BBMeanReversion` and `EMACrossTWAP` with its `TWAPExecAlgorithm`), three
@@ -24,8 +24,10 @@
 # `IndicatorSignalStrategy` runs (Bollinger, MACD, RSI, OBV and the fuzzy candle). Four on a Bybit
 # LINEAR instrument's liquidations: `LiquidationCascadeStrategy` following and fading liquidation
 # cascades, each short only and on both sides (Story 33.14; the derived quotes plus the archived
-# liquidations, `data="liquidations"`). The page shows them as a leaderboard and one overlaid
-# equity chart, then repeats
+# liquidations, `data="liquidations"`). Four `OFIStrategy` runs on the same instrument's 1 s
+# snapshots and liquidations (Story 33.13, `data="seconds_liquidations"`): the baseline, the
+# forced-flow filter (liquidations taken out of the cumulative delta) and the cascade `fade` and
+# `follow` gates. The page shows them as a leaderboard and one overlaid equity chart, then repeats
 # one of them across every simulated-exchange model Nautilus offers (11 fill models, 3 fee models,
 # three latency settings) to show how much of a result is the strategy and how much is a modelling
 # choice.
@@ -58,8 +60,11 @@
 #   and its four runs are left out;
 # - `CASCADE_PARAMS` -- overrides of any `LiquidationCascadeStrategyConfig` field for the four runs
 #   (`{}` for the strategy's defaults, a 1 % stop); the mode and sides are each run's own;
+# - `OFI_PARAMS` -- overrides of any `OFIStrategyConfig` field for the four OFI runs on
+#   `CASCADE_INSTRUMENT` (`{}` for the strategy's defaults); the forced-flow fields are each run's
+#   own;
 # - `STARTING_BALANCE` -- in the instrument's settlement currency;
-# - `AXIS_SPEC` -- the label of the gallery row §4 repeats across the execution models;
+# - `AXIS_SPEC` -- the label of the gallery row §5 repeats across the execution models;
 # - `SEED` -- the random seed of every fill model, so a rerun is identical.
 
 # %%
@@ -79,6 +84,7 @@ AXIS_SPEC = setting("AXIS_SPEC", "EMACross")
 SEED = setting("SEED", 42)
 CASCADE_INSTRUMENT = setting("CASCADE_INSTRUMENT", "BTCUSDT-LINEAR.BYBIT")
 CASCADE_PARAMS = setting("CASCADE_PARAMS", {})
+OFI_PARAMS = setting("OFI_PARAMS", {})
 runner = NodeRunner()
 bar_specs = gallery.default_specs(
     params.catalog_path,
@@ -100,9 +106,21 @@ cascade_specs = gallery.cascade_specs(
 sample = gallery.cascade_sample(
     params.catalog_path, CASCADE_INSTRUMENT, params.start, params.end, CASCADE_PARAMS
 )
-specs = [*bar_specs, *cascade_specs]
+ofi_specs = gallery.ofi_specs(
+    params.catalog_path,
+    CASCADE_INSTRUMENT,
+    params.start,
+    params.end,
+    OFI_PARAMS,
+    STARTING_BALANCE,
+)
+ofi_sample = gallery.ofi_sample(
+    params.catalog_path, CASCADE_INSTRUMENT, params.start, params.end, OFI_PARAMS
+)
+specs = [*bar_specs, *cascade_specs, *ofi_specs]
 print(f"{INSTRUMENT}, {DATA}, {params.start} -> {params.end}: {len(bar_specs)} strategies")
 print(f"{CASCADE_INSTRUMENT}, liquidations: {len(cascade_specs)} cascade runs; {sample}")
+print(f"{CASCADE_INSTRUMENT}, seconds_liquidations: {len(ofi_specs)} OFI runs; {ofi_sample}")
 print(f"sizes {PERIODS or 'each strategy default'}; execution axes repeat {AXIS_SPEC!r}")
 
 # %% [markdown]
@@ -167,7 +185,29 @@ cascade_fig.show()
 print(sample)
 
 # %% [markdown]
-# ## 4. Execution axes
+# ## 4. OFI and the forced flow
+#
+# The four `OFIStrategy` runs alone (`gallery.ofi_outcomes`), the baseline first: each other row
+# changes exactly one input against it. The forced-flow filter takes each second's liquidated size
+# out of the cumulative delta (`kernel.indicators.organic_delta_units`, the 33.6 formula); every
+# OFI row runs with the cumulative-delta gate on (`gallery.OFI_BASE_PARAMS`: `cum_delta_threshold`
+# 0, net flow must agree with the entry's side; `OFI_PARAMS` can change it), the one decision the
+# filter can change; `fade` and `follow`
+# gate OFI's own entries on the phase of the one `LiquidationCascade` detector (`follow` lets only
+# the forced side through while the cascade builds, `fade` only the other side in the window after
+# the rate fell back under its baseline, both suppress every other entry while a cascade runs).
+# **Read the sample first** (printed under the table): the window's days and the episodes of the
+# same detector with the same parameters -- replayed on whole seconds, while the strategy advances
+# it at each snapshot, so an episode's edges can differ by about a second (audit D-223). Nothing
+# here is claimed beyond that recorded window.
+
+# %%
+ofi_runs = gallery.ofi_outcomes(outcomes)
+print(gallery.leaderboard(ofi_runs).to_string(index=False))
+print(ofi_sample)
+
+# %% [markdown]
+# ## 5. Execution axes
 #
 # The `AXIS_SPEC` row repeated with exactly one thing changed (`gallery.execution_axes`): each of
 # the 11 fill models (probabilities 0.5 / 0.5, seeded with `SEED`), each of the 3 fee models (a flat
@@ -209,7 +249,7 @@ difference_fig.show()
 print(f"{len(differences)} matched fills across {len(axes)} settings")
 
 # %% [markdown]
-# ## 5. Reading guide
+# ## 6. Reading guide
 #
 # - **Copy a row into `04_backtest_evaluation`.** A row is a `RunSpec`: in notebook 04 set
 #   `STRATEGY` and `STRATEGY_CONFIG` to the string paths of the row's strategy (an upstream example
@@ -234,5 +274,10 @@ print(f"{len(differences)} matched fills across {len(axes)} settings")
 #   sample line says how many the window holds. They run on the derived 1 s quotes, so a fill is
 #   the next second's top of book; copy one into notebook 04 with `DATA` `"liquidations"` and
 #   `INSTRUMENT` a Bybit LINEAR id.
+# - **An OFI row differs from the baseline by one input.** A gap between the baseline and a
+#   variant is what the filter or the gate changed on this window's episodes, no more: with one or
+#   two episodes it is an anecdote. Copy one into notebook 04 with `DATA`
+#   `"seconds_liquidations"`, `INSTRUMENT` a Bybit LINEAR id and the row's `forced_flow_filter` /
+#   `liquidation_cascade_mode` in `PARAMS`.
 # - **One strategy per row, one position at a time.** Sizes are fixed (`trade_size` 0.01), there
 #   is no portfolio sizing, and the family strategies hold at most one position.

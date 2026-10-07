@@ -15,7 +15,8 @@
 """
 `research.application.gallery`'s cascade rows (Story 33.14): the four specs' labels and default
 stop, and `cascade_sample` on a tmp catalog -- a definition stored twice, a missing definition and
-a missing feed are each stated, never a crash.
+a missing feed are each stated, never a crash; and the four `OFIStrategy` forced-flow rows of Story
+33.13 with their sample.
 
 The sample catalog: `BTCUSDT-LINEAR.BYBIT` (price precision 2, size 3) and three LONG
 liquidations received at 10 s, 20 s and 30 s of one UTC day; the third, 0.00101 BTC (size precision
@@ -43,6 +44,8 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from research.application.gallery import CascadeSample
 from research.application.gallery import cascade_sample
 from research.application.gallery import cascade_specs
+from research.application.gallery import ofi_sample
+from research.application.gallery import ofi_specs
 from research.strategies.liquidation_cascade_strategy import DEFAULT_STOP_PCT
 
 
@@ -143,3 +146,39 @@ def test_the_cascade_rows_name_instrument_and_data_and_share_the_default_stop() 
     assert DEFAULT_STOP_PCT == 0.01
     atr = cascade_specs("/catalog", str(_IID), _DAY, _DAY + NS_PER_S, {"stop_atr_multiple": 2.0})
     assert all("stop_pct" not in s.spec.params for s in atr)
+
+
+def test_the_ofi_rows_differ_from_the_baseline_by_one_forced_flow_field() -> None:
+    # A params override of a forced-flow field never reaches a row: each row sets both.
+    params = {"ofi_threshold": 2.0, "forced_flow_filter": True}
+    specs = ofi_specs("/catalog", str(_IID), _DAY, _DAY + NS_PER_S, params)
+    assert [s.label for s in specs] == [
+        f"OFI {name} ({_IID}, seconds_liquidations)"
+        for name in ("baseline", "forced-flow filter", "cascade fade", "cascade follow")
+    ]
+    fields = [
+        (s.spec.params["forced_flow_filter"], s.spec.params["liquidation_cascade_mode"])
+        for s in specs
+    ]
+    assert fields == [(False, "off"), (True, "off"), (False, "fade"), (False, "follow")]
+    assert {s.spec.data for s in specs} == {"seconds_liquidations"}
+    assert {s.spec.params["ofi_threshold"] for s in specs} == {2.0}
+    # The cumulative-delta gate is on in every row, baseline included, so the filter can matter.
+    assert {s.spec.params["cum_delta_threshold"] for s in specs} == {0.0}
+    gated = ofi_specs("/c", str(_IID), _DAY, _DAY + NS_PER_S, {"cum_delta_threshold": 2.5})
+    assert {s.spec.params["cum_delta_threshold"] for s in gated} == {2.5}
+    assert {s.spec.fill_model for s in specs} == {None}  # the gallery's venue defaults
+
+
+def test_no_ofi_row_without_a_feed() -> None:
+    assert ofi_specs("/catalog", "BTC-USD-PERP.HYPERLIQUID", _DAY, _DAY + NS_PER_S, {}) == []
+
+
+def test_the_ofi_sample_reads_the_ofi_detector_fields(tmp_path: Path) -> None:
+    path = _catalog(tmp_path, definitions=1)
+    ofi = {f"cascade_{key}": value for key, value in _DETECTOR.items()}
+    error_ledger.reset()
+    try:
+        assert ofi_sample(path, str(_IID), _DAY, _DAY + 60 * NS_PER_S, ofi) == _sample(path)
+    finally:
+        error_ledger.reset()

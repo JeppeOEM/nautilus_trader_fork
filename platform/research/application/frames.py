@@ -19,7 +19,8 @@ Every read is time-bounded (MEM-01): the typed `ParquetDataCatalog.query` always
 `end=` (`research/tests/test_research_reads.py` fails an unbounded one), index prices come through
 `kernel.catalog_files.query_index_prices` (the catalog cannot decode them in the pinned Nautilus),
 and bars through the candle store's query service (`candles.application.queries.window`). The
-window is half-open `[start, end)` on `ts_event` for every frame.
+window is half-open `[start, end)` on `ts_event` for every frame. Liquidations (Story 33.13) come
+through `kernel.catalog_files.query_liquidations`, one UTC day at a time.
 """
 
 from pathlib import Path
@@ -31,17 +32,24 @@ from candles.application.queries import oldest_t
 from candles.application.queries import open_store
 from candles.application.queries import window
 from candles.domain.fold import BAR_SECONDS
+from kernel.catalog_files import LiquidationDuplicateError
 from kernel.catalog_files import query_index_prices
+from kernel.catalog_files import query_liquidations
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
+from kernel.clocks import NS_PER_DAY
 from kernel.clocks import NS_PER_MS
 from kernel.indicators import MultiLevelOBI
 from kernel.indicators import microprice
 from kernel.indicators import mid_price
 from kernel.indicators import spread
+from kernel.liquidation import Liquidation
+from kernel.liquidation import has_liquidation_feed
 from kernel.open_interest import OpenInterest
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import unit_float
 from kernel.venues import asset_key
 from kernel.venues import venue_of
+from observability import error_ledger
 
 from nautilus_trader.model.data import CustomData
 from nautilus_trader.model.data import FundingRateUpdate
@@ -78,6 +86,10 @@ SECONDS_COLUMNS = (
     "spread",
     "microprice",
     *(f"obi_{n}" for n in OBI_LEVELS),
+    # The exact integer trade volumes (Story 33.13), in `10^-size_precision` units, beside their
+    # decoded floats: the organic delta and the forced share are integer sums (DATA-04).
+    "buy_volume_units",
+    "sell_volume_units",
 )
 _NULLABLE_SECONDS_COLUMNS = (
     "open_price",
@@ -94,6 +106,37 @@ BARS_COLUMNS = ("ts_event", "t", "o", "h", "l", "c", "v", "seconds_observed", "p
 FUNDING_COLUMNS = ("ts_event", "rate", "interval", "next_funding_ns", "ts_init")
 OPEN_INTEREST_COLUMNS = ("ts_event", "open_interest", "ts_init")
 MARK_INDEX_COLUMNS = ("ts_event", "mark", "index", "ts_init")
+LIQUIDATIONS_COLUMNS = (
+    "ts_event",
+    "side",
+    "size_units",
+    "price_units",
+    "size_precision",
+    "price_precision",
+    "size",
+    "price",
+    "notional",
+    "price_kind",
+    "venue_event_id",
+    "ts_init",
+)
+# Every stored liquidation price is the venue's bankruptcy price (Bybit's `allLiquidation` `p`,
+# `docs/DATA_DICTIONARY.md` §1.26), so `price_kind` is this constant on every row.
+# Known limit: there is no stored kind column, and Hyperliquid (whose fills would be priced at the
+# mark) has no liquidation feed, so a mark-priced row cannot exist yet; upgrade path: a stored
+# `price_kind` column written by the capture of a venue whose rows are not bankruptcy-priced, read
+# here instead of this constant.
+PRICE_KIND = "bankruptcy"
+# `liquidations_frame`'s `attrs` key naming the rows' instrument (the frame has no id column, and
+# a consumer rebuilding `Liquidation` rows needs one).
+INSTRUMENT_ATTR = "instrument_id"
+# The error-ledger site of a liquidation stored twice with different values: `query_liquidations`
+# refuses it (`LiquidationDuplicateError`), the frame read records it here and raises (DATA-07),
+# never picks one copy.
+LIQUIDATION_DUPLICATE_SITE = "research.frames.liquidation_duplicate"
+# The error-ledger site of any other refused liquidation read (e.g. a listing that kept losing files
+# during a consolidation): recorded here and raised, never read as fewer rows.
+LIQUIDATION_READ_SITE = "research.frames.liquidation_read"
 
 
 def _frame(rows: list[dict], columns: tuple[str, ...]) -> pd.DataFrame:
@@ -103,6 +146,40 @@ def _frame(rows: list[dict], columns: tuple[str, ...]) -> pd.DataFrame:
     frame.index = pd.DatetimeIndex(
         pd.to_datetime(frame["ts_event"], unit="ns", utc=True), name="ts"
     )
+    return frame
+
+
+def liquidations_frame(instrument_id: str, rows: list[Liquidation]) -> pd.DataFrame:
+    """
+    Return `rows` as the liquidations frame (`LIQUIDATIONS_COLUMNS`), in the given order, with
+    `attrs[INSTRUMENT_ATTR] = instrument_id`: the stored integers and precisions as they are, then
+    `size`, `price` and `notional` (quote currency at the bankruptcy price) each decoded once from
+    the units (`kernel.second_snapshot.unit_float`), and the constant `price_kind`. An empty list
+    gives the empty frame with every column.
+    """
+    frame = _frame(
+        [
+            {
+                "ts_event": row.ts_event,
+                "side": row.side.value,
+                "size_units": row.size_units,
+                "price_units": row.price_units,
+                "size_precision": row.size_precision,
+                "price_precision": row.price_precision,
+                "size": unit_float(row.size_units, row.size_precision),
+                "price": unit_float(row.price_units, row.price_precision),
+                "notional": unit_float(
+                    row.notional_units(), row.price_precision + row.size_precision
+                ),
+                "price_kind": PRICE_KIND,
+                "venue_event_id": row.venue_event_id,
+                "ts_init": row.ts_init,
+            }
+            for row in rows
+        ],
+        LIQUIDATIONS_COLUMNS,
+    )
+    frame.attrs[INSTRUMENT_ATTR] = instrument_id
     return frame
 
 
@@ -172,6 +249,8 @@ class CatalogFrames:
             row["microprice"] = microprice(payload)
             for n, indicator in indicators.items():
                 row[f"obi_{n}"] = _obi(indicator, snapshot.bid_sizes, snapshot.ask_sizes)
+            row["buy_volume_units"] = snapshot.buy_volume_units
+            row["sell_volume_units"] = snapshot.sell_volume_units
             rows.append(row)
         frame = _frame(rows, SECONDS_COLUMNS)
         # None (no trade, an empty side) -> NaN, so a gap reads the same in a 1-row or n-row frame.
@@ -305,6 +384,17 @@ class CatalogFrames:
         same = {iid for iid in defined if asset_key(iid) == key} | {instrument_id}
         return sorted(same, key=lambda iid: (venue_of(iid), iid))
 
+    def definition_precisions(self, instrument_id: str) -> tuple[int, int] | None:
+        """
+        Return the definition's `(price_precision, size_precision)`; None without one. A
+        definition stored twice is one (the last read), as the backtest runner treats it.
+        """
+        found = {str(i.id): i for i in self._catalog.instruments(instrument_ids=[instrument_id])}
+        definition = found.get(instrument_id)
+        if definition is None:
+            return None
+        return definition.price_precision, definition.size_precision
+
     def funding(self, instrument_id: str, *, start: str | int, end: str | int) -> pd.DataFrame:
         """`FundingRateUpdate` rows; `rate` is the venue's decimal rate as a float."""
         return _frame(
@@ -367,6 +457,40 @@ class CatalogFrames:
         ]
         rows.sort(key=lambda row: row["ts_event"])
         return _frame(rows, MARK_INDEX_COLUMNS)
+
+    def liquidations(self, instrument_id: str, *, start: str | int, end: str | int) -> pd.DataFrame:
+        """
+        Return the instrument's archived `Liquidation` rows with `ts_event` in `[start, end)` as
+        `liquidations_frame` (`ts_event`, then `venue_event_id`, order; each venue event once),
+        read one UTC day at a time through `kernel.catalog_files.query_liquidations` (MEM-01).
+        An id without the feed (`has_liquidation_feed`: Bybit LINEAR only) reads nothing and is
+        the empty frame with every column -- no row is ever invented for it. Two stored copies of
+        one venue event that disagree are recorded at `LIQUIDATION_DUPLICATE_SITE`, any other
+        refused read at `LIQUIDATION_READ_SITE`, and the error raised (DATA-07).
+        """
+        start_ns, end_ns = window_ns(start, end)
+        rows: list[Liquidation] = []
+        day_start = start_ns if has_liquidation_feed(instrument_id) else end_ns
+        while day_start < end_ns:
+            day_end = min((day_start // NS_PER_DAY + 1) * NS_PER_DAY, end_ns)
+            try:
+                # `query_liquidations` bounds are inclusive: the day ends a nanosecond early.
+                rows += query_liquidations(
+                    self._catalog_path, instrument_id, day_start, day_end - 1
+                )
+            except LiquidationDuplicateError as exc:
+                error_ledger.record(
+                    LIQUIDATION_DUPLICATE_SITE, f"{instrument_id} liquidations not read", exc
+                )
+                raise
+            except ValueError as exc:
+                error_ledger.record(
+                    LIQUIDATION_READ_SITE, f"{instrument_id} liquidations not read", exc
+                )
+                raise
+            day_start = day_end
+        rows.sort(key=lambda row: (row.ts_event, row.venue_event_id))
+        return liquidations_frame(instrument_id, rows)
 
     def objects(
         self, data_cls: type, instrument_id: str, *, start: str | int, end: str | int

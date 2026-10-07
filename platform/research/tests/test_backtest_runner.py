@@ -275,6 +275,23 @@ def test_liquidations_kind_streams_derived_quotes_and_the_liquidation_rows(catal
     assert "bar_type" not in config.engine.strategies[0].config
 
 
+def test_seconds_liquidations_kind_streams_quotes_snapshots_and_liquidations(catalog: str) -> None:
+    # Story 33.13: `seconds` plus the archived liquidation rows, for OFI's forced-flow options.
+    spec = _spec(catalog, instrument_ids=("BTCUSDT-LINEAR.BYBIT",), data="seconds_liquidations")
+    instrument = ParquetDataCatalog(catalog).instruments(instrument_ids=[str(_IID)])
+    config = build_run_config(spec, instrument, dict(_PARAMS), "/quotes")
+    assert [d.data_type for d in config.data] == [QuoteTick, DydxSecondSnapshot, Liquidation]
+    assert [d.catalog_path for d in config.data] == ["/quotes", catalog, catalog]
+    assert config.data[1].client_id == "BYBIT"
+    assert config.data[2].client_id == LIQUIDATION_CLIENT_ID
+    assert all((d.start_time, d.end_time) == (_START, _END - 1) for d in config.data)
+
+
+def test_the_seconds_liquidations_kind_needs_a_liquidation_feed(catalog: str) -> None:
+    with pytest.raises(ValueError, match="needs ids with a liquidation feed"):
+        _spec(catalog, data="seconds_liquidations")  # a dYdX id
+
+
 def test_the_liquidations_kind_needs_a_liquidation_feed(catalog: str) -> None:
     with pytest.raises(ValueError, match="needs ids with a liquidation feed"):
         _spec(catalog, data="liquidations")  # a dYdX id

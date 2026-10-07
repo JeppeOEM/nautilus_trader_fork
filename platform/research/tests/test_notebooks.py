@@ -160,6 +160,7 @@ _FIXTURE_PERIODS = {
 # baseline, so the background (one liquidation every 5 s, two in a window) warms it within the
 # window and reads under the threshold, while the 30 s burst at 400 s is the one episode
 # (`test_the_fixture_holds_one_cascade_episode`); exits and re-entries that fit in what is left.
+_FIXTURE_DETECTOR = ("window_s", "baseline_s", "intensity_threshold", "decay_ratio")
 _FIXTURE_CASCADE = {
     "window_s": 10,
     "baseline_s": 120,
@@ -168,6 +169,19 @@ _FIXTURE_CASCADE = {
     "entry_timeout_s": 30,
     "cooldown_s": 30,
     "max_hold_s": 120,
+}
+# The OFI runs of 08 on the cascade instrument (Story 33.13): the OFI sizes that trade, and the
+# detector sized as `_FIXTURE_CASCADE`'s, so the gates see the planted episode.
+_FIXTURE_OFI_CASCADE = {
+    **_FIXTURE_OFI,
+    # The cumulative-delta gate on over a short window, so the forced-flow filter can change a
+    # decision on the fixture's burst.
+    "cum_delta_threshold": 0.0,
+    "cum_delta_seconds": 30,
+    "cascade_window_s": 10,
+    "cascade_baseline_s": 120,
+    "cascade_intensity_threshold": 3.0,
+    "cascade_decay_ratio": 0.5,
 }
 NOTEBOOK_ENV.update(
     {
@@ -193,6 +207,15 @@ NOTEBOOK_ENV.update(
             "NOTEBOOK_DATA": json.dumps("bars:1-MINUTE"),
             "NOTEBOOK_CASCADE_INSTRUMENT": json.dumps(CASCADE_INSTRUMENT),
             "NOTEBOOK_CASCADE_PARAMS": json.dumps(_FIXTURE_CASCADE),
+            "NOTEBOOK_OFI_PARAMS": json.dumps(_FIXTURE_OFI_CASCADE),
+        },
+        # The liquidation study (Story 33.13) of the cascade instrument over the fixture's data
+        # window with the detector sized as `_FIXTURE_CASCADE`'s: the burst is one episode.
+        "09_liquidations.py": {
+            "START": _iso(DATA_START_NS),
+            "END": _iso(DATA_END_NS),
+            "NOTEBOOK_INSTRUMENT": json.dumps(CASCADE_INSTRUMENT),
+            "NOTEBOOK_STUDY": json.dumps({key: _FIXTURE_CASCADE[key] for key in _FIXTURE_DETECTOR}),
         },
     }
 )
@@ -432,3 +455,30 @@ def test_the_strategy_gallery_runs_the_cascades_and_shows_their_sample(
     follow = cascades[0].result
     assert follow is not None
     assert len(follow.fills) >= 1  # the planted episode is traded
+
+
+def test_the_strategy_gallery_runs_the_four_ofi_rows_beside_their_sample(
+    fixture_archive: FixturePaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What 08 ran and printed for OFI (Story 33.13): the baseline and three variants, one sample."""
+    shown = _run(NOTEBOOKS_DIR / "08_strategy_gallery.py", fixture_archive, monkeypatch)
+    runs = shown["ofi_runs"]
+    assert [o.gallery.label for o in runs] == [
+        f"OFI {name} ({CASCADE_INSTRUMENT}, seconds_liquidations)"
+        for name in ("baseline", "forced-flow filter", "cascade fade", "cascade follow")
+    ]
+    assert all(o.error is None for o in runs)
+    sample = shown["ofi_sample"]
+    assert (sample.has_feed, sample.days, sample.episodes) == (True, 2, 1)
+
+
+def test_the_liquidations_notebook_reports_the_planted_episode(
+    fixture_archive: FixturePaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What 09 computed (its namespace): the fixture's liquidations and its one burst episode."""
+    shown = _run(NOTEBOOKS_DIR / "09_liquidations.py", fixture_archive, monkeypatch)
+    study = shown["study"]
+    assert study.liquidations == len(LIQUIDATION_BACKGROUND) + len(LIQUIDATION_BURST)
+    assert len(study.episodes) >= 1
+    assert study.episodes["direction"].tolist() == [-1]
+    assert study.cross_venue.reason is not None  # Hyperliquid has no liquidation feed

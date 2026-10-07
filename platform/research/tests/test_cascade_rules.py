@@ -17,6 +17,8 @@
 states. The base state is a follow entry that passes every rule: an initialized, active, rising,
 unspent episode of longs being liquidated (direction -1), 10 s old, 50 000 USDT of notional, flat,
 no entry yet, no exit ever, no loss today.
+
+Story 33.13: every transition of `next_phase` and every branch of `cascade_allows`.
 """
 
 from dataclasses import replace
@@ -32,11 +34,21 @@ from research.strategies.cascade_rules import EXIT_MAX_HOLD
 from research.strategies.cascade_rules import EXIT_SPENT
 from research.strategies.cascade_rules import EXIT_STOP
 from research.strategies.cascade_rules import EXIT_TAKE_PROFIT
+from research.strategies.cascade_rules import MODE_OFF
+from research.strategies.cascade_rules import PHASE_BUILDING
+from research.strategies.cascade_rules import PHASE_FADE_WINDOW
+from research.strategies.cascade_rules import PHASE_QUIET
+from research.strategies.cascade_rules import PHASE_UNWINDING
+from research.strategies.cascade_rules import QUIET
+from research.strategies.cascade_rules import CascadePhase
 from research.strategies.cascade_rules import CascadeState
+from research.strategies.cascade_rules import CascadeView
 from research.strategies.cascade_rules import PositionView
 from research.strategies.cascade_rules import RulesConfig
+from research.strategies.cascade_rules import cascade_allows
 from research.strategies.cascade_rules import daily_loss_breached
 from research.strategies.cascade_rules import entry_reason
+from research.strategies.cascade_rules import next_phase
 from research.strategies.cascade_rules import should_enter
 from research.strategies.cascade_rules import should_exit
 
@@ -269,3 +281,126 @@ def test_a_missing_quote_skips_only_the_price_exits() -> None:
     no_quote = _state(bid=None, ask=None, **_HELD)
     assert should_exit(no_quote, _SHORT, _config()) is None
     assert should_exit(replace(no_quote, spent=True), _SHORT, _config()) == EXIT_SPENT
+
+
+# --- Story 33.13: the cascade phase and gate -------------------------------------------------
+
+_WINDOW_S = 30
+
+
+def _view(**changes: Any) -> CascadeView:
+    """Return an open episode of longs being liquidated, rising, over a baseline of 10 (rate 100)."""
+    base = CascadeView(
+        episode_start_ns=_START,
+        episode_ended=False,
+        episode_direction=-1,
+        rising=True,
+        spent=False,
+        total_rate=100.0,
+        baseline=10.0,
+    )
+    return replace(base, **changes)
+
+
+_NO_EPISODE = {"episode_start_ns": None, "episode_direction": 0, "rising": False}
+
+
+def test_an_episode_start_moves_to_building_from_any_phase() -> None:
+    for previous in (
+        QUIET,
+        CascadePhase(PHASE_UNWINDING, 1, False, True, _START - 50 * _S),
+        CascadePhase(PHASE_FADE_WINDOW, 1, False, True, _START - 5 * _S),
+    ):
+        phase = next_phase(previous, _view(), _START, _WINDOW_S)
+        assert phase == CascadePhase(PHASE_BUILDING, -1, True, False, _START), previous
+
+
+def test_building_lasts_while_the_episode_is_open() -> None:
+    building = next_phase(QUIET, _view(), _START, _WINDOW_S)
+    later = next_phase(building, _view(rising=False, spent=True), _START + 5 * _S, _WINDOW_S)
+    assert later == CascadePhase(PHASE_BUILDING, -1, False, True, _START)
+
+
+def test_an_ended_episode_unwinds_while_the_rate_holds_at_or_above_the_baseline() -> None:
+    building = next_phase(QUIET, _view(), _START, _WINDOW_S)
+    ended = next_phase(
+        building, _view(episode_ended=True, spent=True, total_rate=10.0), _START + 9 * _S, _WINDOW_S
+    )
+    assert ended == CascadePhase(PHASE_UNWINDING, -1, True, True, _START + 9 * _S)
+    still = next_phase(ended, _view(**_NO_EPISODE, total_rate=12.0), _START + 10 * _S, _WINDOW_S)
+    assert (still.kind, still.since_ns) == (PHASE_UNWINDING, _START + 9 * _S)
+
+
+def test_the_first_update_under_the_baseline_opens_the_fade_window_then_quiet() -> None:
+    unwinding = CascadePhase(PHASE_UNWINDING, -1, False, True, _START)
+    fade = next_phase(unwinding, _view(**_NO_EPISODE, total_rate=9.0), _START + 20 * _S, _WINDOW_S)
+    assert fade == CascadePhase(PHASE_FADE_WINDOW, -1, False, True, _START + 20 * _S)
+    inside = next_phase(fade, _view(**_NO_EPISODE, total_rate=1.0), _START + 49 * _S, _WINDOW_S)
+    assert inside == fade
+    after = next_phase(inside, _view(**_NO_EPISODE, total_rate=1.0), _START + 50 * _S, _WINDOW_S)
+    assert after == QUIET
+
+
+def test_an_episode_ending_under_the_baseline_goes_straight_to_the_fade_window() -> None:
+    building = next_phase(QUIET, _view(), _START, _WINDOW_S)
+    ended = next_phase(
+        building, _view(episode_ended=True, spent=True, total_rate=5.0), _START + 9 * _S, _WINDOW_S
+    )
+    assert (ended.kind, ended.direction) == (PHASE_FADE_WINDOW, -1)
+
+
+def test_quiet_stays_quiet_without_an_episode() -> None:
+    assert next_phase(QUIET, _view(**_NO_EPISODE, total_rate=50.0), _START, _WINDOW_S) == QUIET
+
+
+_BUILDING = CascadePhase(PHASE_BUILDING, -1, True, False, _START)
+_FADE_WINDOW = CascadePhase(PHASE_FADE_WINDOW, -1, False, True, _START)
+_UNWINDING = CascadePhase(PHASE_UNWINDING, -1, False, True, _START)
+
+
+@pytest.mark.parametrize(
+    ("mode", "phase", "allowed"),
+    [
+        (MODE_OFF, _BUILDING, {OrderSide.BUY, OrderSide.SELL}),
+        (ENTER_FOLLOW, QUIET, {OrderSide.BUY, OrderSide.SELL}),
+        (ENTER_FADE, QUIET, {OrderSide.BUY, OrderSide.SELL}),
+        # follow: building, direction -1, rising, not spent -> only the forced SELL
+        (ENTER_FOLLOW, _BUILDING, {OrderSide.SELL}),
+        (ENTER_FOLLOW, replace(_BUILDING, rising=False), set()),
+        (ENTER_FOLLOW, replace(_BUILDING, spent=True), set()),
+        (ENTER_FOLLOW, replace(_BUILDING, direction=1), {OrderSide.BUY}),
+        (ENTER_FOLLOW, replace(_BUILDING, direction=0), set()),
+        (ENTER_FOLLOW, _UNWINDING, set()),
+        (ENTER_FOLLOW, _FADE_WINDOW, set()),
+        # fade: nothing while building or unwinding, only the opposite side in the fade window
+        (ENTER_FADE, _BUILDING, set()),
+        (ENTER_FADE, _UNWINDING, set()),
+        (ENTER_FADE, _FADE_WINDOW, {OrderSide.BUY}),
+        (ENTER_FADE, replace(_FADE_WINDOW, direction=1), {OrderSide.SELL}),
+    ],
+)
+def test_cascade_allows(mode: str, phase: CascadePhase, allowed: set[OrderSide]) -> None:
+    passed = {side for side in (OrderSide.BUY, OrderSide.SELL) if cascade_allows(mode, side, phase)}
+    assert passed == allowed
+
+
+def test_the_quiet_phase_names_no_direction() -> None:
+    assert (QUIET.kind, QUIET.direction, QUIET.since_ns) == (PHASE_QUIET, 0, None)
+
+
+def test_an_episode_already_ended_seen_from_quiet_unwinds() -> None:
+    ended = _view(episode_ended=True, spent=True, rising=False, total_rate=1.0)
+    phase = next_phase(QUIET, ended, _START + 5 * _S, _WINDOW_S)
+    assert phase == CascadePhase(PHASE_UNWINDING, -1, False, True, _START + 5 * _S)
+
+
+@pytest.mark.parametrize("mode", [ENTER_FOLLOW, ENTER_FADE])
+def test_a_phase_without_a_direction_blocks_every_entry_until_one_appears(mode: str) -> None:
+    for kind in (PHASE_BUILDING, PHASE_UNWINDING, PHASE_FADE_WINDOW):
+        phase = CascadePhase(kind, 0, True, False, _START)
+        assert not cascade_allows(mode, OrderSide.BUY, phase), kind
+        assert not cascade_allows(mode, OrderSide.SELL, phase), kind
+    building = next_phase(QUIET, _view(episode_direction=0), _START, _WINDOW_S)
+    assert building.direction == 0
+    later = next_phase(building, _view(episode_direction=-1), _START + _S, _WINDOW_S)
+    assert cascade_allows(ENTER_FOLLOW, OrderSide.SELL, later)

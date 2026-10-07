@@ -15,7 +15,8 @@
 """
 The strategy gallery service, behind `research/notebooks/08_strategy_gallery`: a fixed list of
 `RunSpec`s (upstream example strategies by string path, plus the two family strategies, plus the
-four liquidation cascade runs of Story 33.14 on a liquidation-feed id), each run
+four liquidation cascade runs of Story 33.14 and the four `OFIStrategy` forced-flow runs of Story
+33.13 on a liquidation-feed id), each run
 through the `BacktestRunner` port, as a leaderboard, an equity overlay and the same spec repeated
 across the execution models (fill, fee, latency). It runs nothing itself and computes no statistic:
 the numbers are `RunResult`'s, and a notebook copies a row's spec into `04_backtest_evaluation`.
@@ -80,6 +81,29 @@ CASCADE_RUNS = (
 )
 # The data kind every cascade run uses, also named in its label.
 CASCADE_DATA = "liquidations"
+_OFI = "research.strategies.ofi_strategy:OFIStrategy"
+# The four OFI runs (Story 33.13): (label, the forced-flow fields), each run setting both fields so
+# a `params` override never turns the baseline into a variant; they differ by exactly one input.
+OFI_RUNS = (
+    ("baseline", {"forced_flow_filter": False, "liquidation_cascade_mode": "off"}),
+    ("forced-flow filter", {"forced_flow_filter": True, "liquidation_cascade_mode": "off"}),
+    ("cascade fade", {"forced_flow_filter": False, "liquidation_cascade_mode": "fade"}),
+    ("cascade follow", {"forced_flow_filter": False, "liquidation_cascade_mode": "follow"}),
+)
+# The parameters every OFI run starts from, under `params` and each run's own fields: the
+# cumulative-delta gate on (net flow over `cum_delta_seconds` must agree with the entry's side),
+# the one OFI decision the forced-flow filter changes -- with the gate off, the filter run would
+# trade exactly as the baseline by construction.
+OFI_BASE_PARAMS: dict[str, object] = {"cum_delta_threshold": 0.0}
+# The data kind every OFI run uses (the snapshots plus the liquidations), also named in its label.
+OFI_DATA = "seconds_liquidations"
+# `OFIStrategyConfig`'s detector fields -> `LiquidationCascadeStrategyConfig`'s, for the sample.
+_OFI_DETECTOR_FIELDS = {
+    "cascade_window_s": "window_s",
+    "cascade_baseline_s": "baseline_s",
+    "cascade_intensity_threshold": "intensity_threshold",
+    "cascade_decay_ratio": "decay_ratio",
+}
 TRADE_SIZE = "0.01"
 BPS = 10_000.0
 LEADERBOARD_COUNTS = ("trades", "orders", "fills")
@@ -405,6 +429,71 @@ def cascade_sample(
     )
     days = (end_ns - 1) // NS_PER_DAY - start_ns // NS_PER_DAY + 1
     return CascadeSample(instrument, True, days, len(rows), len(episodes), episodes.unscalable_rows)
+
+
+def ofi_specs(
+    catalog_path: str,
+    instrument: str,
+    start: str | int,
+    end: str | int,
+    params: Mapping[str, object],
+    starting_balance: int = 10_000,
+) -> list[GallerySpec]:
+    """
+    Return the four `OFIStrategy` runs of Story 33.13 (`OFI_RUNS`: the baseline, the forced-flow
+    filter, the cascade fade and the cascade follow gates) on `instrument` with
+    `data="seconds_liquidations"`, `OFI_BASE_PARAMS` (the cumulative-delta gate on, so the filter
+    can change a decision) under `params` (any `OFIStrategyConfig` field) under each run's own
+    forced-flow fields; the execution models stay the venue defaults (the gallery's), so a row
+    differs from the baseline by its one field. Each label names the run, the instrument and the
+    data kind, e.g. `OFI cascade fade (BTCUSDT-LINEAR.BYBIT, seconds_liquidations)`.
+
+    Invariant: `[]` for an id without a liquidation feed (`has_liquidation_feed`) -- nothing is run
+    or faked; labels are distinct; nothing is run here.
+    """
+    if not has_liquidation_feed(instrument):
+        return []
+    base = {
+        "catalog_path": catalog_path,
+        "instrument_ids": (instrument,),
+        "start": start,
+        "end": end,
+        "starting_balance": starting_balance,
+        "data": OFI_DATA,
+    }
+    return [
+        GallerySpec(
+            f"OFI {name} ({instrument}, {OFI_DATA})",
+            _spec(base, _OFI, {**OFI_BASE_PARAMS, **params, **run}),
+        )
+        for name, run in OFI_RUNS
+    ]
+
+
+def ofi_sample(
+    catalog_path: str,
+    instrument: str,
+    start: str | int,
+    end: str | int,
+    params: Mapping[str, object],
+) -> CascadeSample:
+    """
+    Return the `cascade_sample` behind the OFI runs: the same window and liquidations, with the
+    detector fields of `params` (`cascade_window_s`, ... mapped to the cascade strategy's names,
+    else its defaults, which are `OFIStrategyConfig`'s too). The same detector with the same
+    parameters, but not the same clock: the sample advances it on every whole second
+    (`replay_cascade`, the cascade strategy's timer), `OFIStrategy` at each snapshot's `ts_init`
+    (~0.2 s after the second's close), so an episode's start and end can differ by up to a second
+    and a borderline episode can appear on one side only (audit D-223) -- a sample size, not the
+    gates' exact episodes.
+    """
+    detector = {_OFI_DETECTOR_FIELDS[k]: v for k, v in params.items() if k in _OFI_DETECTOR_FIELDS}
+    return cascade_sample(catalog_path, instrument, start, end, detector)
+
+
+def ofi_outcomes(outcomes: Sequence[Outcome]) -> list[Outcome]:
+    """Return the outcomes of the forced-flow OFI runs (`data="seconds_liquidations"`), in order."""
+    return [o for o in outcomes if o.gallery.spec.data == OFI_DATA]
 
 
 def cascade_outcomes(outcomes: Sequence[Outcome]) -> list[Outcome]:
