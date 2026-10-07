@@ -394,3 +394,67 @@ describe("the drawings_hidden key (Story 33.10)", () => {
     expect(errors).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("the time zone, session breaks, countdown and last-price keys (Story 33.12)", () => {
+  const { time_zone: _z, session_breaks: _s, bar_countdown: _c, last_price: _l, ...pre3312 } = BUILT_IN_LAYOUT;
+
+  it("defaults to UTC, no session breaks, the countdown on and both last-price parts shown", () => {
+    expect(BUILT_IN_LAYOUT.time_zone).toBe("utc");
+    expect(BUILT_IN_LAYOUT.session_breaks).toBe(false);
+    expect(BUILT_IN_LAYOUT.bar_countdown).toBe(true);
+    expect(BUILT_IN_LAYOUT.last_price).toEqual({ line: true, label: true });
+  });
+
+  it("loads a layout saved before them with the defaults, silently", () => {
+    const { layout, fallbacks } = normalizeLayout(pre3312);
+
+    expect(fallbacks).toEqual([]);
+    expect(errors).not.toHaveBeenCalled();
+    expect(layout).toEqual(BUILT_IN_LAYOUT);
+  });
+
+  it("keeps every valid value and round-trips it through the save", () => {
+    const saved = {
+      ...BUILT_IN_LAYOUT,
+      time_zone: "local",
+      session_breaks: true,
+      bar_countdown: false,
+      last_price: { line: false, label: true },
+    };
+    const { layout, fallbacks } = normalizeLayout(saved);
+
+    expect(fallbacks).toEqual([]);
+    expect(layoutForSave(layout)).toMatchObject({
+      time_zone: "local",
+      session_breaks: true,
+      bar_countdown: false,
+      last_price: { line: false, label: true },
+    });
+    expect(normalizeLayout({ ...BUILT_IN_LAYOUT, time_zone: "exchange" }).layout.time_zone).toBe("exchange");
+  });
+
+  it("falls back by name for an unknown zone, a non-boolean flag and a malformed last-price table", () => {
+    const { layout, fallbacks } = normalizeLayout({
+      ...BUILT_IN_LAYOUT,
+      time_zone: "Europe/Berlin",
+      session_breaks: "yes",
+      bar_countdown: 1,
+      last_price: { line: "on", label: false, colour: "red", constructor: true },
+    });
+
+    // `constructor` too: an inherited name is no last-price key.
+    expect(fallbacks).toEqual(["time_zone", "session_breaks", "bar_countdown", "last_price.colour", "last_price.constructor", "last_price.line"]);
+    expect(layout.time_zone).toBe("utc");
+    expect(layout.session_breaks).toBe(false);
+    expect(layout.bar_countdown).toBe(true);
+    expect(layout.last_price).toEqual({ line: true, label: false });
+    expect(errors).toHaveBeenCalledTimes(1);
+  });
+
+  it("replaces a last-price value that is not a table", () => {
+    const { layout, fallbacks } = normalizeLayout({ ...BUILT_IN_LAYOUT, last_price: true });
+
+    expect(fallbacks).toEqual(["last_price"]);
+    expect(layout.last_price).toEqual({ line: true, label: true });
+  });
+});

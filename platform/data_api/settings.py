@@ -73,6 +73,8 @@ CHART_LAYOUTS_PATH: str = str(Path(CHART_PREFERENCES_DIR) / "chart_layouts.toml"
 SCREENER_FILTER_PRESETS_PATH: str = str(
     Path(CHART_PREFERENCES_DIR) / "screener_filter_presets.toml"
 )
+# Story 33.12: the chart page's pinned instruments (the watchlist rail).
+CHART_WATCHLIST_PATH: str = str(Path(CHART_PREFERENCES_DIR) / "chart_watchlist.toml")
 
 
 def candles_db_path(venue: str) -> str:

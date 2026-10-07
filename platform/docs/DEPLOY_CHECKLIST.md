@@ -1792,6 +1792,50 @@ indicator list loads unchanged, and a `CandlePattern` saved before this story dr
 - [ ] After an hour, `curl -s localhost:9100/api/errors` shows no new `data_api` indicator site, and
       the browser's error bar is empty.
 
+### 33-12-symbol-search-watchlist-fullscreen-shortcuts-time-zone-countdown (commit: this story's)
+
+The chart page gains a symbol search (Ctrl+K, `/` or the symbol button, also the Compare picker), a
+watchlist rail saved server-side in `data/preferences/chart_watchlist.toml` (`GET`/`PUT
+/api/watchlist`; no new mount: the preferences directory is already mounted, and the file is created
+on the first PUT), a fullscreen chart, keyboard shortcuts (`?` lists them), and four optional
+`chart_layouts.toml` keys (`time_zone`, `session_breaks`, `bar_countdown`, `last_price`).
+`GET /api/markets` items gain `market` and `volume24h` (added fields). Only `data_api` changes (the
+routes, the validator, and the frontend built into its image). No config key, env var, mount or
+compose service changes, and nothing is migrated: a layout saved before this story loads with the
+defaults (`utc`, no session breaks, countdown on, last-price line and label on).
+
+- [ ] On the VPS, pull this commit and rebuild/restart the one service (the frontend is built into
+      its image): `cd ~/nautilus_trader_fork/platform && docker compose up -d --build data_api`.
+- [ ] Curl the watchlist route: `curl -s localhost:9100/api/watchlist` prints `{"instruments":[]}`
+      before any pin; a malformed PUT
+      `curl -s -X PUT -H 'content-type: application/json' -d '{"instruments":["BTCUSDT"]}' localhost:9100/api/watchlist`
+      prints a 422 detail starting `instruments[0]`, and no `data/preferences/chart_watchlist.toml`
+      was written by it.
+      Then a valid round trip:
+      `curl -s -X PUT -H 'content-type: application/json' -d '{"instruments":["BTCUSDT-LINEAR.BYBIT"]}' localhost:9100/api/watchlist`
+      prints `{"instruments":["BTCUSDT-LINEAR.BYBIT"]}`, the GET prints the same, and
+      `cat data/preferences/chart_watchlist.toml` shows `v = 1` and the id; restore an empty list
+      with the same PUT and `{"instruments":[]}`.
+- [ ] Check the markets list and an old layout:
+      `curl -s localhost:9100/api/markets | python3 -c 'import json,sys; print([(i["instrument_id"], i["market"], i["volume24h"]) for i in json.load(sys.stdin)["items"][:4]])'`
+      prints each id with `perp`/`spot` and a volume (`None` for an id the rankings do not list), and
+      `curl -s localhost:9100/api/coin/BTCUSDT-LINEAR.BYBIT/layout | python3 -c 'import json,sys; l=json.load(sys.stdin)["layout"]; print(l["time_zone"], l["session_breaks"], l["bar_countdown"], l["last_price"])'`
+      prints `utc False True {'line': True, 'label': True}` for a coin saved before this story.
+- [ ] In the browser, on a Bybit BTC chart: Ctrl+K opens the search (venue, market and 24 h volume
+      per row; Enter navigates); pin the coin to the watchlist, then open the page in a second
+      browser (or a private window): the same pin shows with a live price and 24 h %;
+      `cat data/preferences/chart_watchlist.toml` shows `v = 1` and the id. Unpin it.
+- [ ] In Lines mode the Replay button is disabled with the tooltip "Replay is available on candle
+      charts", and Alt+R does nothing (Replay is a candle-chart feature, operator 2026-10-07).
+- [ ] Shift+F enters fullscreen with the top bar, tool rail, every open pane and the tape inside,
+      the panes scaled to fit the screen with their relative heights (no scrolling to reach the
+      time axis); resize the window and they refit; Esc leaves it with the old pane heights back,
+      and a reload does not restore it nor any scaled height. Set the time zone to Local, turn session
+      breaks on at 1h and the last-price line off, reload: all three are restored, and the bar
+      times on the axis moved by the local offset while the candles did not move.
+- [ ] After an hour, `curl -s localhost:9100/api/errors` shows no new `data_api` watchlist,
+      `views.markets` or layout site, and the browser's error bar is empty.
+
 ### 33-14-liquidation-cascade-bot-shorts-into-a-long-liquidation-cascade-backtested-and-paper-run (commit: this story's)
 
 A new paper strategy, `liquidation_cascade` (`research/strategies/liquidation_cascade_strategy.py`,

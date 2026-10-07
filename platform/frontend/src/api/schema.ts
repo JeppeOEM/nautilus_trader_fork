@@ -305,6 +305,8 @@ export interface MarketItem {
   symbol: string;
   venue: string;
   same_asset: boolean;
+  market: string;
+  volume24h: number | null;
 }
 
 export interface MarketsResponse {
@@ -427,4 +429,8 @@ export interface TechnicalsValuesResponse {
 export interface TrendlineCrossCondition {
   kind: string;
   drawing_id: string;
+}
+
+export interface WatchlistResponse {
+  instruments: string[];
 }

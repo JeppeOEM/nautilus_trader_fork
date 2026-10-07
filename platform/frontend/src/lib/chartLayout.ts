@@ -5,6 +5,7 @@ import { DEFAULT_VOLUME_PROFILE_SETTINGS } from "./volumeProfile";
 import { type OutputStyle, LINE_STYLES } from "./indicatorStyle";
 import { TIMEFRAMES } from "../timeframes";
 import { CHART_TYPES, type ChartType, MAX_COMPARE_SYMBOLS, PRICE_SCALE_MODES, type PriceScaleModeName } from "./chartTypes";
+import { TIME_ZONES, type TimeZoneSetting } from "./time";
 
 // Story 32.6: one coin's chart layout, the shape of `GET/PUT /api/coin/{iid}/layout`
 // (`views.preferences.validate_layout`). The OpenAPI schema types the body as a free-form object,
@@ -75,6 +76,17 @@ export interface CompareLayout {
   /** The cross-venue Spread pane, drawn only with exactly one compare (kept as stored otherwise). */
   spread: boolean;
 }
+
+// Story 33.12: the main series' last-price line and its axis label, the optional `last_price` table of
+// the layout. Mirrored by `views/preferences.py`'s `LAST_PRICE_DEFAULTS`
+// (`test_time_zone_and_last_price_settings_mirror_the_frontend` reads the literal below, so keep it on
+// its one line).
+export interface LastPriceLayout {
+  line: boolean;
+  label: boolean;
+}
+
+export const DEFAULT_LAST_PRICE: LastPriceLayout = { line: true, label: true };
 
 export const DEFAULT_PRICE_SCALE: PriceScaleLayout = { mode: "normal", auto_scale: true, invert: false };
 export const DEFAULT_COMPARE: CompareLayout = { symbols: [], spread: false };
@@ -162,6 +174,16 @@ export interface ChartLayout {
   /** Story 33.10: the rail's "Hide all drawings": none is drawn or hit-tested, and the drawing tools
    * are off. Optional on the wire (absent = false); mirrored by `views.preferences`' layout key. */
   drawings_hidden: boolean;
+  /** Story 33.12: how every time on the chart page prints (formatting only; a bar's time stays UTC).
+   * Optional on the wire (absent = `utc`). */
+  time_zone: TimeZoneSetting;
+  /** Story 33.12: a dashed line at the first bar of each UTC day. Optional on the wire (absent = off). */
+  session_breaks: boolean;
+  /** Story 33.12: the time to the last bar's close under the last-price label. Optional on the wire
+   * (absent = on). */
+  bar_countdown: boolean;
+  /** Story 33.12: optional on the wire (absent = `DEFAULT_LAST_PRICE`). */
+  last_price: LastPriceLayout;
 }
 
 export const BUILT_IN_LAYOUT: ChartLayout = {
@@ -207,6 +229,10 @@ export const BUILT_IN_LAYOUT: ChartLayout = {
   price_scale: DEFAULT_PRICE_SCALE,
   compare: DEFAULT_COMPARE,
   drawings_hidden: false,
+  time_zone: "utc",
+  session_breaks: false,
+  bar_countdown: true,
+  last_price: DEFAULT_LAST_PRICE,
 };
 
 export const PROFILE_KINDS: readonly ProfileKind[] = ["off", "visible", "fixed", "session", "auto", "tpo"];
@@ -439,6 +465,42 @@ function drawingsHiddenOf(raw: unknown, present: boolean, fallbacks: string[]): 
   return BUILT_IN_LAYOUT.drawings_hidden;
 }
 
+/** Story 33.12: an optional boolean key (`session_breaks`, `bar_countdown`): absent (a layout saved
+ * before it) is the default, silently; a non-boolean falls back to it by name. */
+function flagOf(raw: Raw, key: "session_breaks" | "bar_countdown", fallbacks: string[]): boolean {
+  if (!(key in raw)) return BUILT_IN_LAYOUT[key];
+  if (typeof raw[key] === "boolean") return raw[key];
+  fallbacks.push(key);
+  return BUILT_IN_LAYOUT[key];
+}
+
+/** Story 33.12: the time zone: absent is `utc`, silently; an unknown zone falls back to it by name. */
+function timeZoneOf(raw: unknown, present: boolean, fallbacks: string[]): TimeZoneSetting {
+  if (!present) return BUILT_IN_LAYOUT.time_zone;
+  const zone = TIME_ZONES.find((z) => z === raw);
+  if (zone === undefined) fallbacks.push("time_zone");
+  return zone ?? BUILT_IN_LAYOUT.time_zone;
+}
+
+/** Story 33.12: the last-price table: absent is the default, silently; an unknown key or a non-boolean
+ * part falls back by name. */
+function lastPriceOf(raw: unknown, present: boolean, fallbacks: string[]): LastPriceLayout {
+  if (!present) return { ...DEFAULT_LAST_PRICE };
+  if (!isRecord(raw)) {
+    fallbacks.push("last_price");
+    return { ...DEFAULT_LAST_PRICE };
+  }
+  for (const key of Object.keys(raw)) {
+    if (!Object.hasOwn(DEFAULT_LAST_PRICE, key)) fallbacks.push(`last_price.${key}`);
+  }
+  const part = (key: "line" | "label"): boolean => {
+    if (typeof raw[key] === "boolean") return raw[key];
+    fallbacks.push(`last_price.${key}`);
+    return DEFAULT_LAST_PRICE[key];
+  };
+  return { line: part("line"), label: part("label") };
+}
+
 /** The price scale table: absent is the default, silently; each unusable field falls back by name. */
 function priceScaleOf(raw: unknown, present: boolean, fallbacks: string[]): PriceScaleLayout {
   if (!present) return { ...DEFAULT_PRICE_SCALE };
@@ -526,6 +588,10 @@ export function normalizeLayout(raw: unknown, instrumentId?: string): { layout: 
     price_scale: priceScaleOf(source.price_scale, "price_scale" in source, fallbacks),
     compare: compareOf(source.compare, "compare" in source, fallbacks, instrumentId),
     drawings_hidden: drawingsHiddenOf(source.drawings_hidden, "drawings_hidden" in source, fallbacks),
+    time_zone: timeZoneOf(source.time_zone, "time_zone" in source, fallbacks),
+    session_breaks: flagOf(source, "session_breaks", fallbacks),
+    bar_countdown: flagOf(source, "bar_countdown", fallbacks),
+    last_price: lastPriceOf(source.last_price, "last_price" in source, fallbacks),
   };
   if (fallbacks.length > 0) {
     console.error(

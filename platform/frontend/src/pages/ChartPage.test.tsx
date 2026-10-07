@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render as rtlRender, screen, within } from "@testing-library/react";
 import { CHART_TOKENS } from "../components/chart/chartTheme";
 import type { ReactElement } from "react";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PriceLineSpec } from "../components/chart/LightweightChart";
@@ -44,8 +44,17 @@ const liveDerivs = vi.hoisted(() => ({
 }));
 // Story 33.9: `GET /api/markets` for the Compare field's suggestions.
 const marketsApi = vi.hoisted(() => ({ get: vi.fn() }));
+// Story 33.12: the chart watchlist resource (`server` is what GET answers; every PUT recorded) and the
+// `rankings:live` message the rail prices its rows from.
+const watchlistApi = vi.hoisted(() => ({ server: [] as string[], save: vi.fn() }));
+const liveRanks = vi.hoisted(() => ({ latest: null as unknown }));
+vi.mock("../hooks/useLiveChannel", () => ({
+  useLiveChannel: () => ({ latest: liveRanks.latest, connected: liveRanks.latest !== null }),
+}));
 vi.mock("../api/client", () => ({
   fetchMarkets: (...args: unknown[]) => marketsApi.get(...args),
+  fetchWatchlist: () => Promise.resolve({ instruments: watchlistApi.server }),
+  saveWatchlist: (...args: unknown[]) => watchlistApi.save(...args),
   fetchCoinLayout: (...args: unknown[]) => layoutApi.get(...args),
   saveCoinLayout: (...args: unknown[]) => layoutApi.save(...args),
   saveLayoutAsDefault: (...args: unknown[]) => layoutApi.saveDefault(...args),
@@ -76,8 +85,13 @@ vi.mock("../api/client", () => ({
       },
     ]),
   ),
+  // The real class's constructor, so a test builds an `HttpError` exactly as the client does.
   HttpError: class extends Error {
-    status = 0;
+    status: number;
+    constructor(status: number, message: string) {
+      super(message);
+      this.status = status;
+    }
   },
   // IndicatorPicker (rendered by ChartPage) fetches the catalog on mount.
   fetchIndicatorCatalog: vi.fn().mockResolvedValue({
@@ -281,6 +295,11 @@ interface ChartStubProps {
   measureActive?: boolean;
   onMeasureEnd?: () => void;
   data?: { time: number }[];
+  timeZone?: string;
+  sessionBreaks?: boolean;
+  countdown?: { barSeconds: number; enabled: boolean } | null;
+  lastPrice?: { line: boolean; label: boolean };
+  fullscreen?: boolean;
   liveBar?: unknown;
   liveVolumeColor?: string;
   markerTime?: number | null;
@@ -421,13 +440,18 @@ beforeEach(() => {
   mocks.candlesByIid = {};
   mocks.failedIids = [];
   marketsApi.get.mockReset().mockResolvedValue({
-    items: [{ instrument_id: "BTC-USD-PERP.HYPERLIQUID", symbol: "BTC", venue: "HYPERLIQUID", same_asset: true }],
+    items: [
+      { instrument_id: "BTC-USD-PERP.HYPERLIQUID", symbol: "BTC", venue: "HYPERLIQUID", same_asset: true, market: "perp", volume24h: 2_500_000 },
+    ],
     stale_venues: [],
   });
   mocks.volume = [];
   mocks.venueMarket = null;
   mocks.precision = { price: 2, size: 3 };
   drawingsApi.server = [];
+  watchlistApi.server = [];
+  watchlistApi.save.mockReset().mockImplementation((instruments: string[]) => Promise.resolve({ instruments }));
+  liveRanks.latest = null;
   route.iid = IID;
   layoutApi.server = {};
   layoutApi.get.mockReset().mockImplementation((iid: string) =>
@@ -869,6 +893,7 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
       .getAllByRole("button")
       .map((b) => b.getAttribute("aria-label") ?? b.textContent);
     expect(names).toEqual([
+      "BTC-USD-PERP.DYDX", // Story 33.12: the symbol opens the symbol search
       ...["1m", "5m", "15m", "1H", "4H", "1D", "1W"].map((l) => `Timeframe ${l}`),
       "Candles",
       "Lines",
@@ -884,6 +909,13 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
       "Fit",
       "Latest",
       "Replay",
+      "Fullscreen",
+      "Watchlist",
+      "Keyboard shortcuts",
+      "Session breaks",
+      "Countdown",
+      "Last price line",
+      "Last price label",
     ]);
     expect(screen.getByRole("link", { name: /Rankings/ })).toHaveAttribute("href", "/");
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("BTC-USD-PERP.DYDX");
@@ -1468,11 +1500,13 @@ describe("ChartPage bar replay (Story 18.4)", () => {
     expect(lastChartProps.current!.drawings).toHaveLength(1);
   });
 
-  it("is disabled in Lines mode", () => {
+  it("is disabled in Lines mode, saying why (Story 33.12: Replay is a candle-chart feature)", () => {
     render(<ChartPage />);
+    expect(screen.getByRole("button", { name: "Replay" })).toHaveAttribute("title", "Bar Replay (Alt+R)");
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
 
     expect(screen.getByRole("button", { name: "Replay" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Replay" })).toHaveAttribute("title", "Replay is available on candle charts");
   });
 });
 
@@ -4556,13 +4590,14 @@ describe("chart type, price scale and compare (Story 33.9)", () => {
   const bar = (time: number, close: number) => ({ time, open: close, high: close, low: close, close });
   const comparePane = (iid = OTHER) => lastChartProps.current!.panes!.find((p) => p.id === `compare:${iid}`);
   const spreadPane = () => lastChartProps.current!.panes!.find((p) => p.id === "compare-spread");
+  // Story 33.12: the Compare button opens the symbol search in compare mode; Enter adds the highlighted
+  // market, or the typed id when none matches. A refused id keeps the search open with the reason.
+  const compareField = () => screen.queryByRole("searchbox", { name: "Search a market to compare" });
   async function addCompare(text: string): Promise<void> {
-    if (!screen.queryByRole("combobox", { name: "Compare instrument id" })) {
-      fireEvent.click(screen.getByRole("button", { name: "Compare" }));
-    }
+    if (!compareField()) fireEvent.click(screen.getByRole("button", { name: "Compare" }));
     await act(async () => {});
-    fireEvent.change(screen.getByRole("combobox", { name: "Compare instrument id" }), { target: { value: text } });
-    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    fireEvent.change(compareField()!, { target: { value: text } });
+    fireEvent.keyDown(compareField()!, { key: "Enter" });
   }
 
   it("feeds the chart type and the scale settings to the chart and saves them per coin", async () => {
@@ -4614,7 +4649,9 @@ describe("chart type, price scale and compare (Story 33.9)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Compare" }));
     await act(async () => {});
     expect(marketsApi.get).toHaveBeenCalledWith(IID);
-    expect(document.querySelector(`datalist option[value="${OTHER}"]`)).toHaveTextContent("BTC · HYPERLIQUID (same asset)");
+    expect(within(screen.getByRole("listbox", { name: "Markets" })).getByRole("option")).toHaveTextContent(
+      `BTC ${OTHER}HYPERLIQUID · perp · 24h 2.50M`,
+    );
 
     await addCompare(`  ${OTHER} `);
     await flushSave();
@@ -4678,11 +4715,11 @@ describe("chart type, price scale and compare (Story 33.9)", () => {
     marketsApi.get.mockRejectedValue(new Error("down"));
     render(page());
 
-    await addCompare(OTHER);
     fireEvent.click(screen.getByRole("button", { name: "Compare" }));
     await act(async () => {});
+    expect(screen.getByRole("status")).toHaveTextContent("could not be loaded; type an instrument id.");
 
-    expect(screen.getByRole("status")).toHaveTextContent("could not be loaded");
+    await addCompare(OTHER);
     expect(comparePane()).toBeDefined();
   });
 
@@ -4724,17 +4761,17 @@ describe("chart type, price scale and compare (Story 33.9)", () => {
     expect(lastSaved().compare).toEqual({ symbols: [OTHER], spread: false });
   });
 
-  it("adds a compare once for a double click on Add queued before a re-render", async () => {
+  it("adds a compare once for a double Enter queued before a re-render", async () => {
     vi.useFakeTimers();
     render(page());
     fireEvent.click(screen.getByRole("button", { name: "Compare" }));
     await act(async () => {});
-    fireEvent.change(screen.getByRole("combobox", { name: "Compare instrument id" }), { target: { value: OTHER } });
-    const add = screen.getByRole("button", { name: "Add" });
+    const field = compareField()!;
+    fireEvent.change(field, { target: { value: OTHER } });
 
     act(() => {
-      add.click();
-      add.click(); // the control still holds the render that had no compare
+      field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); // the search still holds the render that had no compare
     });
     await flushSave();
 
@@ -5142,5 +5179,339 @@ describe("ChartPage candle-pattern markers and catalog plot hints (Story 33.11)"
       placement: "overlay",
       groupLabel: "ZigZag (5) · repaints last leg",
     });
+  });
+});
+
+describe("symbol search, watchlist, shortcuts and chart settings (Story 33.12)", () => {
+  const ETH = "ETHUSDT-LINEAR.BYBIT";
+  const HL = "BTC-USD-PERP.HYPERLIQUID";
+  const SPOT = "BTCUSDT-SPOT.BYBIT";
+  const markets = [
+    { instrument_id: IID, symbol: "BTC", venue: "DYDX", same_asset: false, market: "perp", volume24h: 1_000_000 },
+    { instrument_id: HL, symbol: "BTC", venue: "HYPERLIQUID", same_asset: true, market: "perp", volume24h: 2_500_000 },
+    { instrument_id: ETH, symbol: "ETH", venue: "BYBIT", same_asset: false, market: "perp", volume24h: null },
+    { instrument_id: SPOT, symbol: "BTC", venue: "BYBIT", same_asset: false, market: "spot", volume24h: null },
+  ];
+  const press = (init: KeyboardEventInit) => fireEvent.keyDown(window, init);
+  const searchField = () => screen.getByRole("searchbox", { name: "Search markets" });
+  const rows = () =>
+    within(screen.getByRole("listbox", { name: "Markets" }))
+      .queryAllByRole("option")
+      .map((o) => o.textContent ?? "");
+
+  function LocationProbe() {
+    return <output aria-label="location">{useLocation().pathname}</output>;
+  }
+  const routed = () => (
+    <MemoryRouter initialEntries={[`/chart/${IID}`]}>
+      <Routes>
+        <Route
+          path="/chart/:iid"
+          element={
+            <>
+              <ChartPage />
+              <LocationProbe />
+            </>
+          }
+        />
+      </Routes>
+    </MemoryRouter>
+  );
+
+  it("opens the search from the symbol, / and Ctrl+K, listing every market with venue, market and 24 h volume", async () => {
+    marketsApi.get.mockResolvedValue({ items: markets, stale_venues: [] });
+    render(page());
+
+    fireEvent.click(screen.getByRole("button", { name: IID }));
+    await act(async () => {});
+    expect(marketsApi.get).toHaveBeenLastCalledWith(undefined);
+    expect(rows()).toHaveLength(4);
+    expect(rows()[1]).toContain("HYPERLIQUID · perp · 24h 2.50M");
+    expect(rows()[2]).toContain("24h —"); // no volume is never 0
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Symbol search" })).getByRole("button", { name: "Close" }));
+
+    press({ key: "/", code: "Slash" });
+    expect(screen.getByRole("dialog", { name: "Symbol search" })).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Symbol search" })).getByRole("button", { name: "Close" }));
+    press({ key: "k", code: "KeyK", ctrlKey: true });
+    expect(screen.getByRole("dialog", { name: "Symbol search" })).toBeInTheDocument();
+  });
+
+  it("filters by every token over symbol, venue and id in the server's order, and Enter opens the highlighted chart", async () => {
+    marketsApi.get.mockResolvedValue({ items: markets, stale_venues: [] });
+    render(routed());
+    press({ key: "/", code: "Slash" });
+    await act(async () => {});
+
+    fireEvent.change(searchField(), { target: { value: "btc by" } });
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toContain(SPOT);
+    fireEvent.change(searchField(), { target: { value: "BTC" } });
+    expect(rows().map((r) => r.includes(HL))).toEqual([false, true, false]);
+    fireEvent.keyDown(searchField(), { key: "ArrowDown" });
+    fireEvent.keyDown(searchField(), { key: "Enter" });
+
+    expect(screen.getByLabelText("location")).toHaveTextContent(`/chart/${HL}`);
+  });
+
+  it("says so when nothing matches, and Enter then does nothing", async () => {
+    marketsApi.get.mockResolvedValue({ items: markets, stale_venues: [] });
+    render(routed());
+    press({ key: "/", code: "Slash" });
+    await act(async () => {});
+
+    fireEvent.change(searchField(), { target: { value: "doge" } });
+    fireEvent.keyDown(searchField(), { key: "Enter" });
+
+    expect(screen.getByText("No market matches")).toBeInTheDocument();
+    expect(screen.getByLabelText("location")).toHaveTextContent(`/chart/${IID}`);
+  });
+
+  it("reports a market list that is down inline, without a crash", async () => {
+    const { HttpError } = await import("../api/client");
+    const unavailable = new HttpError(503, "no venue market list is live");
+    marketsApi.get.mockRejectedValue(unavailable);
+    render(page());
+    press({ key: "/", code: "Slash" });
+    await act(async () => {});
+
+    expect(within(screen.getByRole("dialog", { name: "Symbol search" })).getByRole("status")).toHaveTextContent(
+      "No venue's market list is live.",
+    );
+  });
+
+  it("opens the compare search with Alt+C in Candles mode only, by the physical key", async () => {
+    render(page());
+    press({ key: "ç", code: "KeyC", altKey: true });
+    expect(screen.getByRole("dialog", { name: "Compare symbol" })).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Compare symbol" })).getByRole("button", { name: "Close" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    press({ key: "ç", code: "KeyC", altKey: true });
+    expect(screen.queryByRole("dialog", { name: "Compare symbol" })).toBeNull();
+  });
+
+  it("arms the drawing tools from Alt+T / Alt+F / Alt+V / Alt+H, never a candles-only tool in Lines mode", async () => {
+    await renderReady(page());
+    press({ key: "†", code: "KeyT", altKey: true });
+    expect(screen.getByRole("button", { name: "Trendline tool" })).toHaveAttribute("aria-pressed", "true");
+    press({ key: "ƒ", code: "KeyF", altKey: true });
+    expect(lastChartProps.current!.fibActive).toBe(true);
+    press({ key: "√", code: "KeyV", altKey: true });
+    expect(screen.getByRole("button", { name: "Vertical line tool" })).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    press({ key: "˙", code: "KeyH", altKey: true });
+    expect(screen.queryByRole("button", { name: "Horizontal line tool", pressed: true })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Candles" }));
+    press({ key: "˙", code: "KeyH", altKey: true });
+    expect(screen.getByRole("button", { name: "Horizontal line tool" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("starts and exits a replay with Alt+R", () => {
+    mocks.candles = [1, 2].map((t) => ({ time: t, open: 1, high: 1, low: 1, close: 1 }));
+    render(page());
+    press({ key: "®", code: "KeyR", altKey: true });
+    expect(screen.getByRole("status")).toHaveTextContent("Click a candle to start the replay");
+    press({ key: "®", code: "KeyR", altKey: true });
+    expect(screen.queryByRole("group", { name: "Replay controls" })).toBeNull();
+  });
+
+  it("ignores Alt+R in Lines mode, where Replay is disabled", () => {
+    mocks.candles = [1, 2].map((t) => ({ time: t, open: 1, high: 1, low: 1, close: 1 }));
+    render(page());
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    press({ key: "®", code: "KeyR", altKey: true });
+    expect(screen.queryByRole("group", { name: "Replay controls" })).toBeNull();
+    expect(lastChartProps.current!.markerTime ?? null).toBeNull();
+    expect(screen.getByRole("button", { name: "Replay" })).toBeDisabled();
+  });
+
+  it("toggles the log scale with Shift+L, but not while a compare forces the percent scale", async () => {
+    vi.useFakeTimers();
+    render(page());
+    press({ key: "L", code: "KeyL", shiftKey: true });
+    expect(lastChartProps.current!.priceScale!.mode).toBe("log");
+    await flushSave();
+    expect(lastSaved().price_scale.mode).toBe("log");
+    press({ key: "L", code: "KeyL", shiftKey: true });
+    expect(lastChartProps.current!.priceScale!.mode).toBe("normal");
+
+    cleanup();
+    layoutApi.server[IID] = layoutOf({ compare: { symbols: [HL], spread: false } });
+    render(page());
+    press({ key: "L", code: "KeyL", shiftKey: true });
+    expect(lastChartProps.current!.priceScale!.mode).toBe("percent");
+    expect(screen.getByRole("combobox", { name: "Price scale" })).toHaveValue("percent");
+  });
+
+  it("switches timeframe from typed keys and Enter, showing the buffer; an unknown one changes nothing", () => {
+    vi.useFakeTimers();
+    render(page());
+    press({ key: "4", code: "Digit4" });
+    press({ key: "h", code: "KeyH" });
+    expect(screen.getByRole("status", { name: "Typed timeframe" })).toHaveTextContent("4h");
+    press({ key: "Enter", code: "Enter" });
+    expect(hooks.candlesBar.at(-1)).toBe(14400);
+    expect(screen.queryByRole("status", { name: "Typed timeframe" })).toBeNull();
+
+    for (const key of ["d", "Enter"]) press({ key, code: key === "d" ? "KeyD" : "Enter" });
+    expect(hooks.candlesBar.at(-1)).toBe(86400);
+    for (const key of ["7", "Enter"]) press({ key, code: key === "7" ? "Digit7" : "Enter" });
+    expect(hooks.candlesBar.at(-1)).toBe(86400);
+  });
+
+  it("drops a typed timeframe after 3 s idle and on Esc, and ignores digits in Lines mode", () => {
+    vi.useFakeTimers();
+    render(page());
+    press({ key: "1", code: "Digit1" });
+    act(() => vi.advanceTimersByTime(3001));
+    expect(screen.queryByRole("status", { name: "Typed timeframe" })).toBeNull();
+    press({ key: "1", code: "Digit1" });
+    press({ key: "Escape", code: "Escape" });
+    expect(screen.queryByRole("status", { name: "Typed timeframe" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    press({ key: "5", code: "Digit5" });
+    expect(screen.queryByRole("status", { name: "Typed timeframe" })).toBeNull();
+  });
+
+  it("clears a typed timeframe on the switch to Lines, and Enter there changes nothing", () => {
+    render(page());
+    const before = hooks.candlesBar.at(-1);
+    press({ key: "4", code: "Digit4" });
+    press({ key: "h", code: "KeyH" });
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    expect(screen.queryByRole("status", { name: "Typed timeframe" })).toBeNull();
+    press({ key: "Enter", code: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "Candles" }));
+    press({ key: "Enter", code: "Enter" });
+    expect(hooks.candlesBar.at(-1)).toBe(before);
+  });
+
+  it("does nothing while the operator types in a field or a dialog is open", () => {
+    render(page());
+    const zone = screen.getByRole("combobox", { name: "Time zone" });
+    fireEvent.keyDown(zone, { key: "/", code: "Slash" });
+    fireEvent.keyDown(zone, { key: "L", code: "KeyL", shiftKey: true });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(lastChartProps.current!.priceScale!.mode).toBe("normal");
+
+    press({ key: "?", code: "Slash", shiftKey: true });
+    expect(screen.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeInTheDocument();
+    press({ key: "L", code: "KeyL", shiftKey: true });
+    press({ key: "1", code: "Digit1" });
+    expect(lastChartProps.current!.priceScale!.mode).toBe("normal");
+    expect(screen.queryByRole("status", { name: "Typed timeframe" })).toBeNull();
+  });
+
+  it("lists exactly the shortcut table on the ? sheet", async () => {
+    const { SHORTCUTS } = await import("../lib/shortcuts");
+    render(page());
+    press({ key: "?", code: "Slash", shiftKey: true });
+
+    const sheet = screen.getByRole("dialog", { name: "Keyboard shortcuts" });
+    const listed = within(sheet)
+      .getAllByRole("row")
+      .map((r) => [within(r).getByRole("rowheader").textContent, within(r).getByRole("cell").textContent]);
+    expect(listed).toEqual(SHORTCUTS.map((row) => [row.keys, row.does]));
+  });
+
+  it("saves every new setting in the coin's layout and restores it on reload", async () => {
+    vi.useFakeTimers();
+    render(page());
+    expect(lastChartProps.current!).toMatchObject({
+      timeZone: "utc",
+      sessionBreaks: false,
+      countdown: { barSeconds: 60, enabled: true },
+      lastPrice: { line: true, label: true },
+      fullscreen: false,
+    });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Time zone" }), { target: { value: "local" } });
+    for (const name of ["Session breaks", "Countdown", "Last price line"]) fireEvent.click(screen.getByRole("button", { name }));
+    await flushSave();
+    const saved = lastSaved();
+    expect(saved).toMatchObject({ time_zone: "local", session_breaks: true, bar_countdown: false, last_price: { line: false, label: true } });
+    expect(saved).not.toHaveProperty("fullscreen");
+
+    cleanup();
+    layoutApi.server[IID] = saved;
+    render(page());
+    expect(lastChartProps.current!).toMatchObject({
+      timeZone: "local",
+      sessionBreaks: true,
+      countdown: { enabled: false },
+      lastPrice: { line: false, label: true },
+    });
+    expect(screen.getByRole("combobox", { name: "Time zone" })).toHaveValue("local");
+  });
+
+  it("hands the chart identical bar times in every time zone (formatting only)", () => {
+    mocks.candles = [60, 120].map((t) => ({ time: t, open: 1, high: 1, low: 1, close: 1 }));
+    render(page());
+    const utc = lastChartProps.current!.data;
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Time zone" }), { target: { value: "local" } });
+
+    expect(lastChartProps.current!.timeZone).toBe("local");
+    expect(lastChartProps.current!.data).toBe(utc);
+    expect(lastChartProps.current!.data!.map((d) => d.time)).toEqual([60, 120]);
+  });
+
+  it("hides the countdown in Lines mode and during a replay", () => {
+    mocks.candles = [1, 2].map((t) => ({ time: t, open: 1, high: 1, low: 1, close: 1 }));
+    render(page());
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    act(() => lastChartProps.current!.onPointClick!({ time: 1, price: 1 }));
+    expect(lastChartProps.current!.countdown!.enabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Exit" }));
+    expect(lastChartProps.current!.countdown!.enabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    expect(lastChartProps.current!.countdown!.enabled).toBe(false);
+  });
+
+  it("pins and unpins the chart on the server-side watchlist rail, priced from rankings:live, — where unranked", async () => {
+    watchlistApi.server = [HL, SPOT];
+    liveRanks.latest = {
+      mode: "volume",
+      updated_at: Date.now() * 1_000_000,
+      stale_instrument_ids: [],
+      ranks: [{ instrument_id: HL, symbol: "BTC", venue: "HYPERLIQUID", price: 61234.5, pct_24h: -1.234 }],
+    };
+    render(page());
+    fireEvent.click(screen.getByRole("button", { name: "Watchlist" }));
+    await act(async () => {});
+
+    const rail = screen.getByRole("complementary", { name: "Watchlist" });
+    const links = within(rail).getAllByRole("link");
+    expect(links.map((l) => l.textContent)).toEqual([`BTCHYPERLIQUID61234.5000-1.23%`, `${SPOT}———`]);
+    expect(links[0]).toHaveAttribute("href", `/chart/${HL}`);
+
+    fireEvent.click(within(rail).getByRole("button", { name: "Pin this chart" }));
+    await act(async () => {});
+    expect(watchlistApi.save).toHaveBeenLastCalledWith([HL, SPOT, IID]);
+    fireEvent.click(within(rail).getByRole("button", { name: `Unpin ${HL}` }));
+    await act(async () => {});
+    expect(watchlistApi.save).toHaveBeenLastCalledWith([SPOT, IID]);
+    expect(localStorage.length).toBe(0);
+  });
+
+  it("shows a refused watchlist save inline and the server's list again", async () => {
+    watchlistApi.server = [HL];
+    watchlistApi.save.mockRejectedValue(new Error("PUT /api/watchlist failed: 422"));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(page());
+    fireEvent.click(screen.getByRole("button", { name: "Watchlist" }));
+    await act(async () => {});
+
+    fireEvent.click(screen.getByRole("button", { name: "Pin this chart" }));
+    await act(async () => {});
+
+    const rail = screen.getByRole("complementary", { name: "Watchlist" });
+    expect(within(rail).getByRole("alert")).toHaveTextContent("Watchlist could not be saved: PUT /api/watchlist failed: 422");
+    expect(within(rail).getAllByRole("link")).toHaveLength(1);
+    expect(errors).toHaveBeenCalled();
+    errors.mockRestore();
   });
 });

@@ -10,6 +10,7 @@ import {
   type SessionPreset,
   type SessionProfileSettings,
 } from "../../lib/sessionProfile";
+import { type TimeZoneSetting, formatDateTime, timeZoneLabel } from "../../lib/time";
 import { MAX_IB_MINUTES, MIN_IB_MINUTES } from "../../lib/tpo";
 import type { VolumeProfileSettings } from "../../lib/volumeProfile";
 import SettingsDialogShell from "./SettingsDialogShell";
@@ -74,6 +75,8 @@ interface FrvpProps {
 interface Props {
   /** Every volume overlay profiles candle bars, so each draws in Candles mode only. */
   candlesMode: boolean;
+  /** Story 33.12: the zone a fixed range's edges print in (the layout's `time_zone`). */
+  timeZone: TimeZoneSetting;
   vrvp: VrvpProps;
   session: SessionProps;
   frvp: FrvpProps;
@@ -93,14 +96,6 @@ const ANCHOR_LABELS: Record<AutoAnchorPreset, string> = {
   auto: "Auto (by bar size)",
 };
 
-/** A range edge as the operator reads it: the bar's UTC date and time to the second, so two ranges on
- * sub-minute bars never read alike. */
-function utcTime(timeSec: number): string {
-  const date = new Date(timeSec * 1000);
-  // A time Date cannot hold would throw in toISOString and take the dialog down with it.
-  return Number.isNaN(date.getTime()) ? "invalid time" : date.toISOString().slice(0, 19).replace("T", " ");
-}
-
 /**
  * The Volume overlays dialog: the chart-only volume overlays' add list on top, and below it the
  * overlays on the chart, each with its settings and a Remove -- the counterpart of the Indicators
@@ -111,7 +106,7 @@ function utcTime(timeSec: number): string {
  * Anchored share ONE session-type slot, so adding one while another is on switches the slot; FRVPs
  * are drawn on the chart with the rail's tool, as many as wanted, under one shared settings set.
  */
-export default function VolumeOverlaysDialog({ candlesMode, vrvp, session, frvp, onClose }: Props) {
+export default function VolumeOverlaysDialog({ candlesMode, timeZone, vrvp, session, frvp, onClose }: Props) {
   const showFrvp = frvp.ranges.length > 0 || frvp.armed;
   const nothingOn = !vrvp.active && session.active === null && !showFrvp;
   return (
@@ -130,12 +125,12 @@ export default function VolumeOverlaysDialog({ candlesMode, vrvp, session, frvp,
           &times;
         </button>
       </div>
-      <AddList candlesMode={candlesMode} vrvp={vrvp} session={session} frvp={frvp} onClose={onClose} />
+      <AddList candlesMode={candlesMode} timeZone={timeZone} vrvp={vrvp} session={session} frvp={frvp} onClose={onClose} />
       <h3>On the chart</h3>
       {nothingOn && <p className="indicator-dialog-empty">Nothing added yet</p>}
       {vrvp.active && <VrvpEntry candlesMode={candlesMode} vrvp={vrvp} />}
       {session.active && <SessionEntry candlesMode={candlesMode} active={session.active} session={session} />}
-      {showFrvp && <FrvpEntry candlesMode={candlesMode} frvp={frvp} />}
+      {showFrvp && <FrvpEntry candlesMode={candlesMode} timeZone={timeZone} frvp={frvp} />}
       </div>
     </SettingsDialogShell>
   );
@@ -417,7 +412,9 @@ function SessionEntry({ candlesMode, active, session }: { candlesMode: boolean; 
   );
 }
 
-function FrvpEntry({ candlesMode, frvp }: { candlesMode: boolean; frvp: FrvpProps }) {
+/** A range's edges as the operator reads them: date and time to the second (two ranges on sub-minute
+ * bars never read alike), in the chart's time zone (`lib/time.ts`). */
+function FrvpEntry({ candlesMode, timeZone, frvp }: { candlesMode: boolean; timeZone: TimeZoneSetting; frvp: FrvpProps }) {
   return (
     <section className="volume-overlay" aria-label={FRVP_LABEL}>
       <div className="volume-overlay-head">
@@ -431,7 +428,7 @@ function FrvpEntry({ candlesMode, frvp }: { candlesMode: boolean; frvp: FrvpProp
           {frvp.ranges.map((range) => (
             <li key={range.id}>
               <span>
-                {utcTime(range.startTime)} to {utcTime(range.endTime)} UTC
+                {formatDateTime(range.startTime, timeZone)} to {formatDateTime(range.endTime, timeZone)} {timeZoneLabel(timeZone)}
               </span>
               <button type="button" aria-label={`Remove volume profile ${range.id}`} onClick={() => frvp.onRemove(range.id)}>
                 Remove

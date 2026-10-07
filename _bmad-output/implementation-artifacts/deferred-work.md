@@ -2251,6 +2251,16 @@ source_spec: `_bmad-output/implementation-artifacts/spec-32-8-volume-footprint-b
 reason: `kernel.catalog_files.query_second_ohlc` and the other pre-existing catalog readers behind `candle_page` let a truncated or corrupt Parquet file's `pyarrow.ArrowInvalid`/`OSError` escape unmapped, so the chart request fails as a bare 500 that no `error_ledger.record` site counts (DATA-07). evidence: Only the new `query_trade_columns` (Story 32.8 second follow-up review) maps an unreadable file to a ledgered error; `query_second_ohlc` and its siblings call `pq.read_table`/`pq.read_schema` with no handler, and `data_api/routes/candles.py` maps only `ImpossibleCandle`.
 status: open
 
+### DW-290: Epic 33.12's "Bar Replay works in Lines mode too" is retracted by the operator: Replay is a candle-chart feature, Lines-mode replay is not planned
+
+origin: operator decision 2026-10-07 (17:20 UTC, clarified 17:25 UTC) during Story 33.12
+location: platform/frontend/src/pages/ChartPage.tsx, platform/frontend/src/hooks/useReplay.ts
+source_spec: `_bmad-output/implementation-artifacts/spec-33-12-symbol-search-watchlist-fullscreen-shortcuts-time-zone-countdown.md`
+reason: The epic's Story 33.12 AC sentence "Bar Replay works in **Lines mode** too (the five snapshot series cut at the replay time like the candles)" is retracted, not deferred: Bar Replay is supported only on candle charts (candles mode, every `CHART_TYPES` entry incl. Line/Area), and Lines mode (the snapshot-seconds view) never gets Replay. Nothing is to be built. evidence: the Replay button is disabled in Lines mode with the visible reason "Replay is available on candle charts", Alt+R is a no-op there (`ChartPage.test.tsx`: "is disabled in Lines mode, saying why", "ignores Alt+R in Lines mode"); `useReplay.ts` is unchanged from the baseline; `epics.md` Story 33.12 carries the dated `[amended 2026-10-07: operator]` strike-through.
+status: done 2026-10-07
+resolution: closed by human decision: Retracted by the operator; Lines-mode replay is not planned (Replay is a candle-chart feature)
+decision: 2026-10-07 Operator: Bar Replay only on candle charts; Lines mode never gets Replay
+
 - source_spec: `_bmad-output/implementation-artifacts/spec-33-1-bybit-liquidations-captured-over-a-second-socket-into-one-shared-liquidation-type.md`
   summary: Story 33.2's planned `price_kind` (`dictionary<int8,string>`) and nullable `confirmed` (`bool`) columns on `kernel.liquidation.Liquidation` will leave `custom_liquidation/` holding Bybit files written under 33.1's 9-column schema beside files with the extended schema, so 33.2 must prove `ParquetDataCatalog` reads and consolidates the mixed-schema directory, or rewrite the 33.1 files (`price_kind="bankruptcy"`, `confirmed=null`) in the same story.
   evidence: The epic assigns both columns to 33.2 ("added to the type in this story"); 33.1's `Liquidation.schema()` has neither, and `register_arrow` binds one schema per class, so files written before and after 33.2 differ in column set. Raised by the 33.1 Blind Hunter review (finding 10).

@@ -19,7 +19,7 @@ The backend captures far more than the frontend shows. This epic adds Bybit line
 - Story 33.8: Alert conditions beyond a price cross, and an Alerts page that creates and edits (done)
 - Story 33.9: Price-scale modes, chart types, and a compare symbol on the percent scale (done)
 - Story 33.10: Drawing tools II, with magnet snapping, undo/redo, lock and hide-all (done)
-- Story 33.11: Missing indicators, candle patterns as markers, dead code removed
+- Story 33.11: Missing indicators, candle patterns as markers, dead code removed (done)
 - Story 33.12: Symbol search, watchlist, fullscreen chart with its panes, shortcuts, time zone, session breaks, countdown, last-price label
 - Story 33.13: Liquidation and forced-flow research and the strategy filter
 
@@ -32,8 +32,8 @@ The backend captures far more than the frontend shows. This epic adds Bybit line
 - **Added fields only (AD-D12):** messages, stored schemas, TOML stores and API items only gain keys; existing stored data loads unchanged and `rankings:live` replay bytes still pass.
 - **Boundaries:** no new dependency (NFR12: dialogs, shortcut sheet and SVG hand-rolled). `nautilus_trader/` and `crates/` untouchable (FORK-01). Check `nautilus_trader.indicators` before any custom indicator.
 - **Every story (MR4, OPS-01, DESIGN-03):**
-  - Wrong-data risks go in `docs/DATA_INTEGRITY_AUDIT.md`; it runs to D-213, so the next row is **D-214**.
-  - New types and read models go in `docs/DATA_DICTIONARY.md`. Existing: §1.26 liquidations, §1.27 `derivs:raw`, §2.4 footprint (removed in 33.4), §2.6 book features, §2.10 ranking columns, §2.11 alerts, §2.12 research, §2.15 per-bar aggregates, §2.16 derivatives read models, §2.17 scale/chart types/compare, §2.18 drawings. The next new section is **§2.19**.
+  - Wrong-data risks go in `docs/DATA_INTEGRITY_AUDIT.md`; it runs to D-217, so the next row is **D-218**.
+  - New types and read models go in `docs/DATA_DICTIONARY.md`. Existing: §1.26 liquidations, §1.27 `derivs:raw`, §2.4 footprint (removed in 33.4), §2.6 book features, §2.10 ranking columns, §2.11 alerts, §2.12 research, §2.15 per-bar aggregates, §2.16 derivatives read models, §2.17 scale/chart types/compare, §2.18 drawings, §2.19 `kernel/ta.py` indicators and candle-pattern markers. The next new section is **§2.20**.
   - VPS steps go in `docs/DEPLOY_CHECKLIST.md` as deferred operator actions; the Docs page (`kbData.ts`) stays truthful.
 - **Verification:**
   - Backend: `cd platform && python3 -m pytest <touched>/tests -q` (system `nautilus_trader`, no Rust build).
@@ -50,16 +50,15 @@ The backend captures far more than the frontend shows. This epic adds Bybit line
 - **Persistence:** durable preferences (filter presets, watchlist, layouts, drawings) are TOML in `views/preferences.py`'s one preferences directory, never `localStorage`. `localStorage` is only for per-viewer conveniences.
 - **Indicators (33.11):** custom streaming `Indicator`s in `kernel/ta.py` (O(1), `update_raw`, `initialized`) only where Nautilus lacks one; ADX reuses `DirectionalMovement`. Register each in `views/indicator_picker.py`'s catalog and, where a direction exists, the `IndicatorSignalStrategy` signal table.
 - **Charts never fabricate (AD-F6):** chart-type transforms (Heikin Ashi, Hollow, Line/Area/Baseline) feed only the main series; indicators, drawings, alerts and profiles stay on real OHLC. Compare aligns on bar time with gaps, no interpolation. Time zone changes display only; bar `t` stays UTC.
-- **Dead code (33.11):** a dead-module boundary test over `views/`, `kernel/` and `frontend/src/hooks` requires every export to have a non-test importer; exports added by 33.9/33.10 must pass it by having real callers.
+- **Dead code (33.11, shipped):** `platform/tests/test_boundaries.py` has a dead-module check over `views/`, `kernel/` and `frontend/src/hooks`: every export needs a non-test importer. New hooks/functions in 33.12/33.13 (watchlist, search, `lib/time.ts`, research frames) must ship with real callers.
 
 ## UX & Interaction Patterns
 
-- **Spec amendments:** the original chart/screener spec excluded much of what 33.8–33.12 build. Each story amends `spec-multi-exchange-screener-chart.md` in place with a dated `[amended <date>: Story 33.x]` note citing the operator's 2026-10-05 review (precedents: 33.7's screener sections, 33.8's alerts section, 33.9's §A2 and exclusions entries, 33.10's §A3 and "Extra drawing tools" entry). Still un-amended and owned by remaining stories:
-  - 33.11: the "Candlestick pattern auto-recognition" exclusion (markers on candles).
+- **Spec amendments:** the original chart/screener spec excluded much of what 33.8–33.12 build. Each story amends `spec-multi-exchange-screener-chart.md` in place with a dated `[amended <date>: Story 33.x]` note citing the operator's 2026-10-05 review (precedents: 33.7's screener sections, 33.8's alerts section, 33.9's §A2 and exclusions entries, 33.10's §A3 and "Extra drawing tools" entry, 33.11's candle-pattern exclusion). Still un-amended and owned by the remaining story:
   - 33.12: §A1/§A9, the "Right sidebar" and "Watchlist and Screener" exclusions (watchlist rail), recording that multi-chart grids, synced crosshair and CSV export were dropped. Still excluded: candle colour customisation, Volume candles, Renko/Kagi/P&F/Range bars, order entry, pitchforks/Gann/Elliott, object tree.
 - **TradingView operation parity** (pan, zoom, legend gear/eye/×, Esc cancels a tool, replay controls) stays binding; visual style is the app's own retro theme.
 - **Panes:** new panes reuse the existing pane mechanism (per-pane gap painter, persisted heights, per-coin layouts, cursor pagination, live-bar follow, Bar Replay cut).
-- **Markers:** liquidation and candle-pattern markers use lightweight-charts 5's series-markers plugin, merged per bar.
+- **Markers:** liquidation (`components/chart/LiquidationMarkers.ts`) and candle-pattern (`lib/patternMarkers.ts`) markers share lightweight-charts 5's series-markers plugin, merged per bar.
 - **Tool rail:** declared as data in `lib/chartTools.ts`, grouped like TradingView (Cursor, Lines, Fibonacci, Projection, Shapes/Annotation, Measure, Volume-based); new tools join a group, never a flat button. Magnet, undo/redo, Hide all and Delete all are rail actions.
 - **Dialogs:** reuse `SettingsDialogShell`; no second dialog system.
 - **Shortcuts:** already taken: Esc (disarm tool), Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redo, Shift angle-snap while drawing; keys do nothing while typing in a field or a dialog is open. 33.12's map (digits+Enter timeframes, Alt+T/H/F/V/R/C, Shift+L, Shift+F, `/`, `?`, Ctrl+K) must not collide and follows the same focus rule. Every shortcut is listed on the Docs page.
@@ -67,7 +66,6 @@ The backend captures far more than the frontend shows. This epic adds Bybit line
 
 ## Cross-Story Dependencies
 
-- **Remaining order:** 33.11 → 33.12 → 33.13. Every other story is done; Epic 32 is merged into `epic-33`.
-- **33.11:** candle-pattern markers share the series-markers plugin with 33.5's liquidation markers; the `CandlePattern` pane display stays an option.
-- **33.12:** symbol search should become 33.9's compare picker (compare currently a text field; `GET /api/markets`, `lib/compare.ts`, `lib/heikinAshi.ts` exist). `Alt+C`/`Shift+L` drive 33.9's compare and log scale. Watchlist live price/24h % come from `rankings:live`. Bar Replay in Lines mode cuts the snapshot series like the candles. Settings persist in the per-coin layout (`lib/chartLayout.ts`, `data_api/routes/layout.py`).
+- **Remaining order:** 33.12 → 33.13. Every other story is done; Epic 32 is merged into `epic-33`.
+- **33.12:** symbol search should become 33.9's compare picker (compare is currently a text field; `GET /api/markets`, `lib/compare.ts`, `lib/heikinAshi.ts` exist; `lib/time.ts` does not yet). `Alt+C`/`Shift+L` drive 33.9's compare and log scale. Watchlist live price/24h % come from `rankings:live`. ~~Bar Replay in Lines mode cuts the snapshot series like the candles.~~ **[amended 2026-10-07: operator]** Bar Replay is a candle-chart feature only; Lines mode keeps it disabled ("Replay is available on candle charts"), DW-290. Settings persist in the per-coin layout (`lib/chartLayout.ts`, `data_api/routes/layout.py`).
 - **33.13:** builds on 33.3's per-bar columns, 33.6's organic delta, 33.14's `LiquidationCascade` (reused by `cascade_episodes` and `OFIStrategy`'s cascade mode) and 33.1's `Liquidation` rows via `BacktestDataConfig` for `custom_liquidation`; notebook 08's sweep keeps the fill/fee/latency models unchanged.

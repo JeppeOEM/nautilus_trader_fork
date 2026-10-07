@@ -183,6 +183,20 @@ type IndicatorFn = (candles: Candle[], params: Record<string, number>) =>
 
 No right sidebar, ever, in this build (see §A9).
 
+> **[amended 2026-10-07: Story 33.12]** The operator's 2026-10-05 review lifts
+> part of this exclusion. A **watchlist rail** sits right of the chart while
+> its top-bar toggle is on: the operator's pinned chart instruments, saved
+> server-side (`GET`/`PUT /api/watchlist`, `chart_watchlist.toml`), each row
+> priced live from `rankings:live` (price, 24 h %, `—` where unranked). The
+> symbol in the top bar opens a **symbol search** (also `/` and Ctrl/Cmd+K;
+> the same dialog is the Compare picker), and a **Fullscreen** button (or
+> Shift+F) puts the whole chart stage on the screen: the top bar, the replay
+> controls, the tool rail, the chart with every pane and the Liquidation
+> tape (the rail stays outside). The same review **dropped** multi-chart grid
+> layouts, a synced crosshair and CSV/data export: fullscreen replaces them,
+> and they stay excluded (§A9). No alerts-manager panel, news or idea stream,
+> DOM or order entry is added to the rail.
+
 > **Grounded in this project:** the main chart pane + volume pane + stacked
 > indicator pane(s) stack already exists in `LightweightChart.tsx` and
 > `ChartPage.tsx` (Stories 15.3–15.4). The top toolbar and left toolbar in
@@ -736,6 +750,8 @@ doc, so it reads as one checklist:
 | Step through replay | Step-forward/back buttons move exactly one bar; Play/Pause runs it at the selected speed | §A5 |
 | Change replay start point mid-session | "Go to…" re-enters picker mode without losing replay state | §A5 |
 | Create an alert | Click the alert icon → condition builder → set frequency/expiration/webhook → save | §A6 |
+| Open another market **[amended 2026-10-07: Story 33.12]** | Click the symbol, `/` or Ctrl/Cmd+K → type (every word matched in symbol, venue or id) → ↑/↓ → Enter opens it | §A1 amendment |
+| Keyboard shortcuts **[amended 2026-10-07: Story 33.12]** | `?` lists them all (`lib/shortcuts.ts`, the one table): typed timeframe (`1`, `5`, `15`, `1h`, `4h`, `d`, `w` then Enter), Alt+T/H/F/V tools, Alt+R replay (candle charts only), Alt+C compare, Shift+L log scale, Shift+F fullscreen; none act while typing in a field or with a dialog open | §A1 amendment |
 
 Anything not in this table (visual styling, spacing, exact colors, fonts)
 is not part of "operates the same" and is entirely your call.
@@ -745,10 +761,17 @@ is not part of "operates the same" and is entirely your call.
 This is the explicit "do not build" list for the LLM — call this out loud in
 the code review if any of these sneak back in:
 
-- **Right sidebar** — no watchlist, no alerts-manager panel, no community
-  idea stream, no news feed, no DOM/order-entry panel. This entire vertical
-  strip does not exist in this build.
-- **Watchlist and Screener** — excluded entirely this round; different task.
+- **Right sidebar** — no ~~watchlist,~~ alerts-manager panel, no community
+  idea stream, no news feed, no DOM/order-entry panel. ~~This entire vertical
+  strip does not exist in this build.~~ **[amended 2026-10-07: Story 33.12]**
+  The operator's 2026-10-05 review adds one rail: the watchlist (§A1
+  amendment), pinned instruments with a live price and 24 h %. Everything
+  else in this item stays excluded, and the alerts are a page of their own
+  (Story 33.8), not a sidebar.
+- **Watchlist and Screener** — ~~excluded entirely this round; different
+  task.~~ **[amended 2026-10-07: Story 33.12]** The screener is Part B's
+  Rankings page; the chart gains the server-side watchlist rail and a symbol
+  search (§A1 amendment), per the operator's 2026-10-05 review.
 - **Candle customization** — no body/border/wick color pickers, no
   "color based on previous close" toggle, no hollow-candle or volume-candle
   variants. One fixed up/down color pair, period. **[amended 2026-10-07:
@@ -792,7 +815,12 @@ the code review if any of these sneak back in:
   none after the Bar Replay cursor. A standalone pattern scanner page stays
   excluded (the Technicals tab's pattern columns are the screener view).
 - **Multi-chart grid layouts** — no 2/4/6/8-pane workspace of different
-  symbols/timeframes; this build is a single chart.
+  symbols/timeframes; this build is a single chart. **[amended 2026-10-07:
+  Story 33.12]** Confirmed by the operator's 2026-10-05 review, which dropped
+  multi-chart layouts, a synced crosshair and CSV/data export: a fullscreen
+  single chart (§A1 amendment) is built instead. Also still excluded: candle
+  colour customisation, Volume candles, Renko/Kagi/Point & Figure/Range bars,
+  order entry, pitchforks/Gann/Elliott tools and an object tree.
 - ~~**Anchored Volume Profile** — the one Volume Profile variant we don't
   build (§A7 builds all the others). No "click one bar and grow forward
   indefinitely" mode.~~ **[amended 2026-10-05: Story 32.7]** Built: Anchored

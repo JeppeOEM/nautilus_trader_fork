@@ -1,4 +1,5 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import CompareControl from "./CompareControl";
@@ -6,90 +7,125 @@ import CompareControl from "./CompareControl";
 const marketsApi = vi.hoisted(() => ({ get: vi.fn() }));
 vi.mock("../../api/client", () => ({
   HttpError: class HttpError extends Error {
-    status = 0;
+    status: number;
+    constructor(status: number, message: string) {
+      super(message);
+      this.status = status;
+    }
   },
   fetchMarkets: (...args: unknown[]) => marketsApi.get(...args),
 }));
 
+const { HttpError } = await import("../../api/client");
+
 const MAIN = "BTCUSDT-LINEAR.BYBIT";
+const HL = "BTC-USD-PERP.HYPERLIQUID";
+const ETH = "ETHUSDT-LINEAR.BYBIT";
+const market = (iid: string, volume24h: number | null = 12_345_678) => ({
+  instrument_id: iid,
+  symbol: iid.split("-")[0],
+  venue: iid.split(".")[1],
+  same_asset: false,
+  market: "perp",
+  volume24h,
+});
+
+/** The page's side of the control: it holds `open`, as `Alt+C` opens the same search. */
+function Harness({ symbols = [], disabled = false, onAdd }: { symbols?: string[]; disabled?: boolean; onAdd: (iid: string) => void }) {
+  const [open, setOpen] = useState(false);
+  return <CompareControl instrumentId={MAIN} symbols={symbols} disabled={disabled} open={open} onOpenChange={setOpen} onAdd={onAdd} />;
+}
+
+const dialog = (): HTMLElement => screen.getByRole("dialog", { name: "Compare symbol" });
+const field = (): HTMLInputElement => within(dialog()).getByRole("searchbox") as HTMLInputElement;
+const listed = (): string[] =>
+  within(dialog())
+    .queryAllByRole("option")
+    .map((o) => o.textContent ?? "");
 
 beforeEach(() => {
-  marketsApi.get.mockResolvedValue({ items: [], stale_venues: [] });
+  marketsApi.get.mockReset().mockResolvedValue({ items: [], stale_venues: [] });
 });
 afterEach(cleanup);
 
-const field = (): HTMLInputElement => screen.getByRole("combobox", { name: "Compare instrument id" }) as HTMLInputElement;
-
-function refuseOne(): void {
-  fireEvent.click(screen.getByRole("button", { name: "Compare" }));
-  fireEvent.change(field(), { target: { value: "BTCUSDT" } });
-  fireEvent.keyDown(field(), { key: "Enter" });
-  expect(screen.getByRole("alert")).toHaveTextContent("suffix");
-}
-
-describe("CompareControl (Story 33.9)", () => {
-  it("forgets the text and the refusal when Escape closes it", () => {
-    render(<CompareControl instrumentId={MAIN} symbols={[]} disabled={false} onAdd={vi.fn()} />);
-    refuseOne();
-
-    fireEvent.keyDown(field(), { key: "Escape" });
-    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
-
-    expect(field().value).toBe("");
-    expect(screen.queryByRole("alert")).toBeNull();
-  });
-
-  it("forgets the text and the refusal when the button closes it", () => {
-    render(<CompareControl instrumentId={MAIN} symbols={[]} disabled={false} onAdd={vi.fn()} />);
-    refuseOne();
-
-    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
-    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
-
-    expect(field().value).toBe("");
-    expect(screen.queryByRole("alert")).toBeNull();
-  });
-
-  it("closes when disabled (Lines mode) and stays closed when enabled again", () => {
-    const { rerender } = render(<CompareControl instrumentId={MAIN} symbols={[]} disabled={false} onAdd={vi.fn()} />);
-    refuseOne();
-
-    rerender(<CompareControl instrumentId={MAIN} symbols={[]} disabled onAdd={vi.fn()} />);
-    rerender(<CompareControl instrumentId={MAIN} symbols={[]} disabled={false} onAdd={vi.fn()} />);
-
-    expect(screen.queryByRole("combobox", { name: "Compare instrument id" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Compare" })).toHaveAttribute("aria-expanded", "false");
-    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
-    expect(field().value).toBe("");
-    expect(screen.queryByRole("alert")).toBeNull();
-  });
-
-  const HL = "BTC-USD-PERP.HYPERLIQUID";
-  const ETH = "ETHUSDT-LINEAR.BYBIT";
-  const listed = (container: HTMLElement): string[] =>
-    Array.from(container.querySelectorAll("datalist option")).map((o) => (o as HTMLOptionElement).value);
-  const market = (iid: string) => ({ instrument_id: iid, symbol: iid.split("-")[0], venue: iid.split(".")[1], same_asset: false });
-
-  it("does not suggest a market already compared", async () => {
+describe("CompareControl (Story 33.9, the symbol search since 33.12)", () => {
+  it("opens the symbol search in compare mode, asking the server with the chart's id", async () => {
     marketsApi.get.mockResolvedValue({ items: [market(HL), market(ETH)], stale_venues: [] });
-    const { container } = render(<CompareControl instrumentId={MAIN} symbols={[HL]} disabled={false} onAdd={vi.fn()} />);
+    render(<Harness onAdd={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Compare" }));
 
-    await waitFor(() => expect(listed(container)).toEqual([ETH]));
+    await waitFor(() => expect(listed()).toHaveLength(2));
+    expect(marketsApi.get).toHaveBeenCalledWith(MAIN);
+    expect(screen.queryByRole("combobox")).toBeNull(); // the 33.9 datalist field is gone
   });
 
-  it("drops an earlier list when a later fetch fails", async () => {
-    marketsApi.get.mockResolvedValueOnce({ items: [market(HL)], stale_venues: ["BYBIT"] });
-    const { container } = render(<CompareControl instrumentId={MAIN} symbols={[]} disabled={false} onAdd={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
-    await waitFor(() => expect(listed(container)).toEqual([HL]));
+  it("does not offer a market already compared", async () => {
+    marketsApi.get.mockResolvedValue({ items: [market(HL), market(ETH)], stale_venues: [] });
+    render(<Harness symbols={[HL]} onAdd={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Compare" }));
 
-    marketsApi.get.mockRejectedValueOnce(new Error("down"));
-    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+    await waitFor(() => expect(listed()).toHaveLength(1));
+    expect(listed()[0]).toContain(ETH);
+  });
 
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("could not be loaded"));
-    expect(listed(container)).toEqual([]);
-    expect(screen.queryByText(/Market list stale/)).toBeNull();
+  it("adds the highlighted market on Enter and closes", async () => {
+    marketsApi.get.mockResolvedValue({ items: [market(HL), market(ETH)], stale_venues: [] });
+    const onAdd = vi.fn();
+    render(<Harness onAdd={onAdd} />);
+    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+    await waitFor(() => expect(listed()).toHaveLength(2));
+
+    fireEvent.keyDown(field(), { key: "ArrowDown" });
+    fireEvent.keyDown(field(), { key: "Enter" });
+
+    expect(onAdd).toHaveBeenCalledWith(ETH);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("still accepts a typed id while the market list is down, saying so", async () => {
+    marketsApi.get.mockRejectedValue(new HttpError(503, "down"));
+    const onAdd = vi.fn();
+    render(<Harness onAdd={onAdd} />);
+    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+    await waitFor(() => expect(within(dialog()).getByRole("status")).toHaveTextContent("No venue's market list is live"));
+
+    fireEvent.change(field(), { target: { value: HL } });
+    fireEvent.keyDown(field(), { key: "Enter" });
+
+    expect(onAdd).toHaveBeenCalledWith(HL);
+  });
+
+  it("refuses an id the chart cannot compare, inline, and saves nothing", async () => {
+    marketsApi.get.mockRejectedValue(new Error("down"));
+    const onAdd = vi.fn();
+    render(<Harness onAdd={onAdd} />);
+    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+    await waitFor(() => expect(within(dialog()).getByRole("status")).toHaveTextContent("could not be loaded"));
+
+    fireEvent.change(field(), { target: { value: "BTCUSDT" } });
+    fireEvent.keyDown(field(), { key: "Enter" });
+
+    expect(within(dialog()).getByRole("alert")).toHaveTextContent("suffix");
+    expect(onAdd).not.toHaveBeenCalled();
+  });
+
+  it("refuses a fourth compare symbol picked from the list", async () => {
+    marketsApi.get.mockResolvedValue({ items: [market(ETH)], stale_venues: [] });
+    const onAdd = vi.fn();
+    render(<Harness symbols={["A.X", "B.X", "C.X"]} onAdd={onAdd} />);
+    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+    await waitFor(() => expect(listed()).toHaveLength(1));
+
+    fireEvent.keyDown(field(), { key: "Enter" });
+
+    expect(within(dialog()).getByRole("alert")).toHaveTextContent("At most 3");
+    expect(onAdd).not.toHaveBeenCalled();
+  });
+
+  it("shows no search while disabled (Lines mode)", () => {
+    render(<Harness disabled onAdd={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: "Compare" })).toBeDisabled();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

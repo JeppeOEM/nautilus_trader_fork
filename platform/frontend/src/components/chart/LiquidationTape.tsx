@@ -1,4 +1,5 @@
 import type { LiquidationItem } from "../../api/schema";
+import { type TimeZoneSetting, formatClock, timeZoneLabel } from "../../lib/time";
 import { formatUnits } from "../../lib/units";
 import { safeText } from "./derivativePanes";
 
@@ -11,11 +12,8 @@ interface Props {
   noFeed: boolean;
   /** Operator-facing load failure, else null. */
   error: string | null;
-}
-
-/** `ts_event` (ns) as UTC `HH:MM:SS`. */
-function clock(tsNs: number): string {
-  return new Date(Math.floor(tsNs / 1_000_000)).toISOString().slice(11, 19);
+  /** Story 33.12: the zone the `time` column prints `ts_event` in (`HH:MM:SS`, `lib/time.ts`). */
+  timeZone: TimeZoneSetting;
 }
 
 /**
@@ -25,7 +23,7 @@ function clock(tsNs: number): string {
  * print exactly, a notional past 2^53, reads `—`, logged once). An id whose
  * first page came back empty has no feed (only Bybit linear has one) and says so.
  */
-export default function LiquidationTape({ rows, loaded, noFeed, error }: Props) {
+export default function LiquidationTape({ rows, loaded, noFeed, error, timeZone }: Props) {
   const newestFirst = [...rows].reverse();
   return (
     <aside className="liquidation-tape" aria-label="Liquidation tape">
@@ -39,7 +37,7 @@ export default function LiquidationTape({ rows, loaded, noFeed, error }: Props) 
           <table>
             <thead>
               <tr>
-                <th>time</th>
+                <th>time ({timeZoneLabel(timeZone)})</th>
                 <th>side</th>
                 <th>size</th>
                 <th>price</th>
@@ -49,7 +47,7 @@ export default function LiquidationTape({ rows, loaded, noFeed, error }: Props) 
             <tbody>
               {newestFirst.map((row) => (
                 <tr key={row.venue_event_id} className={row.side === "long" ? "liquidation-tape-long" : "liquidation-tape-short"}>
-                  <td>{clock(row.ts_event)}</td>
+                  <td>{formatClock(row.ts_event, timeZone)}</td>
                   <td>{row.side}</td>
                   <td>{safeText(() => formatUnits(row.size_units, row.size_precision))}</td>
                   <td title={row.price_kind}>{safeText(() => formatUnits(row.price_units, row.price_precision))}</td>

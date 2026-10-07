@@ -13,10 +13,12 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Story 33.9: `GET /api/markets`, every live venue's market names for the chart's Compare picker,
-served from `buses.markets_bus` (the process's one `markets:live` subscriber). The listing --
-validation, staleness, expiry and the same-asset ordering -- is `views.markets_bus.MarketsBus`'s;
-this route only transports it.
+Story 33.9: `GET /api/markets`, every live venue's market names for the chart's Compare picker
+(and, Story 33.12, its symbol search), served from `buses.markets_bus` (the process's one
+`markets:live` subscriber). The listing -- validation, staleness, expiry and the same-asset
+ordering -- is `views.markets_bus.MarketsBus`'s, each item's market type and 24 h volume
+`MarketsBus.with_market_details` over `buses.bus`'s cached `rankings:live`; this route only
+transports it.
 """
 
 import time
@@ -38,6 +40,11 @@ class MarketItem(BaseModel):
     symbol: str
     venue: str
     same_asset: bool
+    # Story 33.12 (added fields): `kernel.venues.market_kind` (`perp`/`spot`/`unknown`), and the USD
+    # 24 h volume from the cached `rankings:live` row, None when that id has no row or no value, the
+    # message marks it stale, or the message is older than the listing's staleness horizon.
+    market: str
+    volume24h: float | None
 
 
 class MarketsResponse(BaseModel):
@@ -66,4 +73,6 @@ def get_markets(instrument_id: str | None = None) -> MarketsResponse:
     listing = buses.markets_bus.listing(instrument_id, time.monotonic())
     if listing is None:
         raise HTTPException(status_code=503, detail="No venue's market list is live")
-    return MarketsResponse.model_validate(listing)
+    return MarketsResponse.model_validate(
+        buses.markets_bus.with_market_details(listing, buses.bus.latest, time.time_ns())
+    )

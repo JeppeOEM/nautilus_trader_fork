@@ -1,6 +1,6 @@
 import { CrosshairMode, type IChartApi, type Time } from "lightweight-charts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useParams } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
 
 import { fetchCoinIndicatorConfig, fetchIndicatorCatalog, saveCoinIndicatorConfig } from "../api/client";
 import AlertDialog from "../components/chart/AlertDialog";
@@ -8,6 +8,9 @@ import IndicatorPicker, { type IndicatorPickerHandle } from "../components/chart
 import IndicatorSettingsDialog, { type SettingsOutput, type SettingsPatch } from "../components/chart/IndicatorSettingsDialog";
 import LiquidationTape from "../components/chart/LiquidationTape";
 import CompareControl from "../components/chart/CompareControl";
+import ShortcutSheet from "../components/chart/ShortcutSheet";
+import SymbolSearch from "../components/chart/SymbolSearch";
+import WatchlistRail from "../components/chart/WatchlistRail";
 import CompareFeed, { type CompareFeedState } from "../components/chart/CompareFeed";
 import { comparePaneSpecs, mainSlots, spreadPaneSpec } from "../components/chart/comparePanes";
 import { DERIVATIVE_OUTPUT_TOKENS, DERIVATIVE_PANE_IDS, MARK_INDEX_GROUP } from "../components/chart/derivativePanes";
@@ -24,6 +27,16 @@ import LightweightChart, {
   type PriceLineSpec,
   type PriceScalePatch,
 } from "../components/chart/LightweightChart";
+import {
+  type ShortcutAction,
+  TIMEFRAME_BUFFER_IDLE_MS,
+  TIMEFRAME_BUFFER_MAX,
+  isTypingContext,
+  shortcutFor,
+  timeframeFromBuffer,
+} from "../lib/shortcuts";
+import { TIME_ZONES, TIME_ZONE_LABELS, type TimeZoneSetting } from "../lib/time";
+import { type Fullscreen, useFullscreen } from "../hooks/useFullscreen";
 import type { TrendlineAnchor } from "../components/chart/primitives/TrendlinePrimitive";
 import { type MagnetMode, nextDragGesture, nextMagnetMode, replaceDrawing } from "../lib/drawingKit";
 import ToolRail from "../components/chart/ToolRail";
@@ -108,6 +121,7 @@ import {
   type VolumeColorMode,
   type VolumeProfileLayout,
   type CompareLayout,
+  type LastPriceLayout,
   type PriceScaleLayout,
 } from "../lib/chartLayout";
 import { CHART_TYPES, CHART_TYPE_LABELS, type ChartType, PRICE_SCALE_LABELS, PRICE_SCALE_MODES, type PriceScaleModeName } from "../lib/chartTypes";
@@ -413,6 +427,9 @@ function withFlag(d: Drawing, flag: "locked" | "hidden", on: boolean): Drawing {
 /** Story 18.4's replay control bar. DW-146: a click that would do nothing is never silently
  * ignored -- a pick on a data gap says so, Play/Step forward at the newest loaded bar are disabled
  * with "End of loaded data" shown, Step back at the start marker is disabled with a tooltip. */
+/** Story 33.12: why the Replay button is disabled in Lines mode (the operator's rule, 2026-10-07). */
+const REPLAY_LINES_REASON = "Replay is available on candle charts";
+
 function ReplayControls({ replay, onGoTo }: { replay: ReturnType<typeof useReplay>; onGoTo: () => void }) {
   if (replay.mode === "picking") {
     return (
@@ -472,6 +489,10 @@ interface ChartInnerProps {
   /** Story 33.10: the drawing magnet, held beside `toolMemory` (view state, never persisted). */
   magnet: MagnetMode;
   onMagnet: (mode: MagnetMode) => void;
+  /** Story 33.12: the stage's fullscreen, held above the timeframe remount (the stage element is). */
+  fullscreen: Fullscreen;
+  watchlistOpen: boolean;
+  onWatchlistToggle: () => void;
 }
 
 function ChartInner({
@@ -491,6 +512,9 @@ function ChartInner({
   onToolUsed,
   magnet,
   onMagnet,
+  fullscreen,
+  watchlistOpen,
+  onWatchlistToggle,
 }: ChartInnerProps) {
   const [chart, setChart] = useState<IChartApi | null>(null);
   const patchLayout = useCallback(
@@ -1042,6 +1066,35 @@ function ChartInner({
     });
   }, []);
 
+  // Story 33.12: how times print, the session breaks, the bar countdown and the last-price line and
+  // label, each a field of the coin's layout (fullscreen is not: it is view state, never saved).
+  const [timeZone, setTimeZone] = useState<TimeZoneSetting>(initialLayout.time_zone);
+  useEffect(() => patchLayout({ time_zone: timeZone }), [timeZone, patchLayout]);
+  const [sessionBreaks, setSessionBreaks] = useState(initialLayout.session_breaks);
+  useEffect(() => patchLayout({ session_breaks: sessionBreaks }), [sessionBreaks, patchLayout]);
+  const [barCountdownOn, setBarCountdownOn] = useState(initialLayout.bar_countdown);
+  useEffect(() => patchLayout({ bar_countdown: barCountdownOn }), [barCountdownOn, patchLayout]);
+  const [lastPrice, setLastPrice] = useState<LastPriceLayout>(initialLayout.last_price);
+  useEffect(() => patchLayout({ last_price: lastPrice }), [lastPrice, patchLayout]);
+  // The countdown counts the forming bar: there is none in Lines mode or under a replay.
+  const countdown = useMemo(
+    () => ({ barSeconds, enabled: barCountdownOn && mode === "candles" && replay.mode !== "active" }),
+    [barSeconds, barCountdownOn, mode, replay.mode],
+  );
+
+  // Story 33.12: the symbol search (navigate), the compare search (`CompareControl`, Alt+C) and the
+  // `?` sheet, and the timeframe typed on the keyboard so far (shown in a chip until Enter).
+  const navigate = useNavigate();
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [compareSearchOpen, setCompareSearchOpen] = useState(false);
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [timeframeBuffer, setTimeframeBuffer] = useState("");
+  useEffect(() => {
+    if (timeframeBuffer === "") return;
+    const id = setTimeout(() => setTimeframeBuffer(""), TIMEFRAME_BUFFER_IDLE_MS);
+    return () => clearTimeout(id);
+  }, [timeframeBuffer]);
+
   const chartPanes = useMemo(
     () =>
       derivativesData.panes.length === 0 && comparePanes.length === 0
@@ -1134,6 +1187,7 @@ function ChartInner({
         setActiveTool("cursor");
         setPlacement(null);
         cancelReplayPick();
+        setTimeframeBuffer("");
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -1143,23 +1197,34 @@ function ChartInner({
   // Story 33.10: undo and redo act only on drawings the operator can see and edit: loaded, not all
   // hidden, and no placement half done (its points would refer to a list that just changed).
   const historyActive = drawingsStatus === "ready" && !drawingsHidden && placement === null;
-  useEffect(() => {
-    // Ctrl/Cmd+Z undoes a drawing edit, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redoes it -- never while the
-    // operator types (an input, select or textarea keeps its own undo) or a dialog is open.
-    if (!historyActive) return;
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      const key = event.key.toLowerCase();
-      if (!(event.ctrlKey || event.metaKey) || event.altKey || (key !== "z" && key !== "y")) return;
-      const target = event.target instanceof Element ? event.target : null;
-      if (target?.closest("input, select, textarea, [contenteditable='true']")) return;
-      if (document.querySelector("dialog[open]")) return;
+  // Story 33.12: the page's one shortcut handler (`lib/shortcuts.ts`), drawing undo / redo included,
+  // subscribed once and reading the latest render through this ref. Nothing acts while the operator
+  // types in a field or a dialog is open (`isTypingContext`); Esc keeps its own handler above.
+  const shortcutRef = useRef<(event: KeyboardEvent) => void>(() => {});
+  shortcutRef.current = (event: KeyboardEvent): void => {
+    if (isTypingContext(event)) return;
+    const key = event.key.toLowerCase();
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && (key === "z" || key === "y")) {
+      // Ctrl/Cmd+Z undoes a drawing edit, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redoes it.
+      if (!historyActive) return;
       event.preventDefault();
       if (key === "y" || event.shiftKey) redoDrawings();
       else undoDrawings();
-    };
+      return;
+    }
+    const action = shortcutFor(event);
+    if (action === null) return;
+    if (action.kind === "timeframe_enter" && timeframeBuffer === "") return; // Enter on a button stays a click
+    event.preventDefault();
+    // A held key's auto-repeat is one press: it must not flip fullscreen, log or replay back and forth.
+    if (event.repeat) return;
+    runShortcut(action);
+  };
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => shortcutRef.current(event);
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [historyActive, undoDrawings, redoDrawings]);
+  }, []);
 
   // useCallback (not inline arrows) so LightweightChart's interaction effects don't
   // tear down and re-attach their subscriptions on every render of this page -- the
@@ -1761,6 +1826,50 @@ function ChartInner({
     (tool.placesDrawing === true && (drawingsStatus !== "ready" || drawingsHidden)) ||
     (tool.needsPrecision === true && precision === null);
 
+  // Story 33.12: what a shortcut (`lib/shortcuts.ts`) does, each exactly what its button does, and
+  // nothing where its button would be disabled.
+  const runShortcut = (action: ShortcutAction): void => {
+    switch (action.kind) {
+      case "tool":
+        if (!isToolDisabled(toolDef(action.tool))) selectTool(action.tool);
+        return;
+      case "replay":
+        // Replay is a candle-chart feature: Alt+R in Lines mode does nothing, like the disabled button.
+        if (mode === "lines") return;
+        if (replay.mode === "off") startReplayPick();
+        else replay.exit();
+        return;
+      case "log_scale":
+        // A compare forces the percent scale: Normal and Log are locked (`scaleLockReason`).
+        if (scaleLockReason === null) patchPriceScale({ mode: priceScale.mode === "log" ? "normal" : "log" });
+        return;
+      case "fullscreen":
+        fullscreen.toggle();
+        return;
+      case "compare":
+        if (mode === "candles") setCompareSearchOpen(true);
+        return;
+      case "search":
+        setSearchOpen(true);
+        return;
+      case "sheet":
+        setSheetOpen(true);
+        return;
+      case "timeframe_char":
+        // The timeframe buttons are disabled in Lines mode; so is typing one.
+        if (mode === "candles") setTimeframeBuffer((buffer) => (buffer + action.char).slice(-TIMEFRAME_BUFFER_MAX));
+        return;
+      case "timeframe_enter": {
+        const seconds = timeframeFromBuffer(timeframeBuffer);
+        setTimeframeBuffer("");
+        // Lines mode has no timeframe: a buffer typed before the switch is dropped, never applied.
+        if (mode !== "candles") return;
+        if (seconds !== null && seconds !== barSeconds) onTimeframeChange(seconds);
+        return;
+      }
+    }
+  };
+
   return (
     <div>
       {/* Spec §A8.1 top toolbar, clusters left to right: [symbol + timeframe] [chart type]
@@ -1769,7 +1878,12 @@ function ChartInner({
       <div className="chart-topbar" role="toolbar" aria-label="Chart controls">
         <div className="chart-cluster">
           <Link to="/">&larr; Rankings</Link>
-          <h1>{instrumentId}</h1>
+          {/* Story 33.12: the symbol opens the symbol search (also `/` and Ctrl/Cmd+K). */}
+          <h1>
+            <button type="button" className="chart-symbol" aria-haspopup="dialog" title="Search markets (/ or Ctrl+K)" onClick={() => setSearchOpen(true)}>
+              {instrumentId}
+            </button>
+          </h1>
           {venueMarket && (
             <span className="venue-badge" aria-label="Venue and market">
               {venueMarket.venue} · {venueMarket.market}
@@ -1788,6 +1902,11 @@ function ChartInner({
               {tf.label}
             </button>
           ))}
+          {timeframeBuffer !== "" && (
+            <span className="chart-timeframe-buffer" role="status" aria-label="Typed timeframe">
+              {timeframeBuffer}
+            </span>
+          )}
         </div>
         <div className="chart-cluster">
         <button
@@ -1809,6 +1928,8 @@ function ChartInner({
             setMode("lines");
             selectTool("cursor");
             replay.exit();
+            setCompareSearchOpen(false);
+            setTimeframeBuffer("");
           }}
         >
           Lines
@@ -1860,6 +1981,8 @@ function ChartInner({
           instrumentId={instrumentId}
           symbols={compare.symbols}
           disabled={mode === "lines"}
+          open={compareSearchOpen}
+          onOpenChange={setCompareSearchOpen}
           onAdd={addCompare}
         />
         <button
@@ -1932,14 +2055,86 @@ function ChartInner({
           <button type="button" onClick={() => chart?.timeScale().scrollToRealTime()}>
             Latest
           </button>
-          {/* Story 18.4 (AC #1): candles-only, like the tools that need the candle array. */}
+          {/* Story 18.4 (AC #1): candles-only, like the tools that need the candle array. Story 33.12
+              (operator, 2026-10-07): Replay steps whole bars, so it runs on every candle chart type
+              and never in Lines mode, where the disabled button says why. */}
           <button
             id="btn-replay"
             type="button"
             disabled={mode === "lines" || replay.mode !== "off"}
+            title={mode === "lines" ? REPLAY_LINES_REASON : "Bar Replay (Alt+R)"}
             onClick={startReplayPick}
           >
             Replay
+          </button>
+          <button
+            type="button"
+            className={fullscreen.active ? "tabbtn active" : "tabbtn"}
+            aria-pressed={fullscreen.active}
+            title="The chart with every pane, the tools and this bar (Shift+F; Esc leaves)"
+            onClick={fullscreen.toggle}
+          >
+            Fullscreen
+          </button>
+          {fullscreen.error !== null && (
+            <span role="alert" className="chart-load-error">
+              {fullscreen.error}
+            </span>
+          )}
+          <button
+            type="button"
+            className={watchlistOpen ? "tabbtn active" : "tabbtn"}
+            aria-pressed={watchlistOpen}
+            onClick={onWatchlistToggle}
+          >
+            Watchlist
+          </button>
+          <button type="button" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)" onClick={() => setSheetOpen(true)}>
+            ?
+          </button>
+        </div>
+        {/* Story 33.12: how times print and what the price pane adds, saved in the coin's layout. */}
+        <div className="chart-cluster" role="group" aria-label="Chart settings">
+          <select aria-label="Time zone" value={timeZone} onChange={(e) => setTimeZone(e.target.value as TimeZoneSetting)}>
+            {TIME_ZONES.map((z) => (
+              <option key={z} value={z}>
+                {TIME_ZONE_LABELS[z]}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className={sessionBreaks ? "tabbtn active" : "tabbtn"}
+            aria-pressed={sessionBreaks}
+            title="A dashed line at the first bar of each UTC day (intraday bars)"
+            onClick={() => setSessionBreaks((on) => !on)}
+          >
+            Session breaks
+          </button>
+          <button
+            type="button"
+            className={barCountdownOn ? "tabbtn active" : "tabbtn"}
+            aria-pressed={barCountdownOn}
+            title="Time to the bar's close under the last price (Candles mode, not during a replay)"
+            onClick={() => setBarCountdownOn((on) => !on)}
+          >
+            Countdown
+          </button>
+          <button
+            type="button"
+            className={lastPrice.line ? "tabbtn active" : "tabbtn"}
+            aria-pressed={lastPrice.line}
+            onClick={() => setLastPrice((prev) => ({ ...prev, line: !prev.line }))}
+          >
+            Last price line
+          </button>
+          <button
+            type="button"
+            className={lastPrice.label ? "tabbtn active" : "tabbtn"}
+            aria-pressed={lastPrice.label}
+            onClick={() => setLastPrice((prev) => ({ ...prev, label: !prev.label }))}
+          >
+            Last price label
           </button>
         </div>
       </div>
@@ -2039,13 +2234,19 @@ function ChartInner({
             priceScale={{ mode: effectiveScaleMode, autoScale: priceScale.auto_scale, invert: priceScale.invert }}
             onPriceScale={patchPriceScale}
             scaleModesLocked={scaleLockReason}
+            timeZone={timeZone}
+            sessionBreaks={sessionBreaks}
+            barSeconds={barSeconds}
+            countdown={countdown}
+            lastPrice={lastPrice}
+            fullscreen={fullscreen.active}
           />
           {mode === "candles" &&
             compare.symbols.map((iid) => (
               <CompareFeed key={iid} instrumentId={iid} chart={chart} barSeconds={barSeconds} onState={onCompareFeed} />
             ))}
         </div>
-        {tapeOn && derivativesData.available && <LiquidationTape {...derivativesData.tape} />}
+        {tapeOn && derivativesData.available && <LiquidationTape {...derivativesData.tape} timeZone={timeZone} />}
       </div>
       <VolumeOverlayNotices
         candlesMode={mode === "candles"}
@@ -2127,6 +2328,7 @@ function ChartInner({
       {overlaysDialogOpen && (
         <VolumeOverlaysDialog
           candlesMode={mode === "candles"}
+          timeZone={timeZone}
           onClose={() => setOverlaysDialogOpen(false)}
           vrvp={{
             active: vrvpActive,
@@ -2159,6 +2361,15 @@ function ChartInner({
           }}
         />
       )}
+      {searchOpen && (
+        <SymbolSearch
+          mode="navigate"
+          instrumentId={instrumentId}
+          onPick={(iid) => navigate(`/chart/${encodeURIComponent(iid)}`)}
+          onClose={() => setSearchOpen(false)}
+        />
+      )}
+      {sheetOpen && <ShortcutSheet onClose={() => setSheetOpen(false)} />}
       <AlertDialog
         open={alertDialogOpen}
         onClose={() => setAlertDialogOpen(false)}
@@ -2210,16 +2421,25 @@ export default function ChartPage() {
   // Story 33.10: the drawing magnet follows the operator from coin to coin like the tool memory. Not
   // persisted (the spec's choice): a reload starts with it off.
   const [magnet, setMagnet] = useState<MagnetMode>("off");
+  // Story 33.12: the watchlist rail, beside the per-coin chart rather than inside it, so it stays open
+  // (and keeps its list and socket) when a row opens another coin. View state, not persisted.
+  const [watchlistOpen, setWatchlistOpen] = useState(false);
+  const toggleWatchlist = useCallback((): void => setWatchlistOpen((open) => !open), []);
   if (!iid) return <p>No instrument specified.</p>;
   return (
-    <ChartForCoin
-      key={iid}
-      instrumentId={iid}
-      toolMemory={toolMemory}
-      onToolUsed={rememberTool}
-      magnet={magnet}
-      onMagnet={setMagnet}
-    />
+    <div className="chart-page">
+      <ChartForCoin
+        key={iid}
+        instrumentId={iid}
+        toolMemory={toolMemory}
+        onToolUsed={rememberTool}
+        magnet={magnet}
+        onMagnet={setMagnet}
+        watchlistOpen={watchlistOpen}
+        onWatchlistToggle={toggleWatchlist}
+      />
+      {watchlistOpen && <WatchlistRail instrumentId={iid} />}
+    </div>
   );
 }
 
@@ -2229,13 +2449,23 @@ function ChartForCoin({
   onToolUsed,
   magnet,
   onMagnet,
+  watchlistOpen,
+  onWatchlistToggle,
 }: {
   instrumentId: string;
   toolMemory: Partial<Record<string, ChartTool>>;
   onToolUsed: (groupId: string, tool: ChartTool) => void;
   magnet: MagnetMode;
   onMagnet: (mode: MagnetMode) => void;
+  watchlistOpen: boolean;
+  onWatchlistToggle: () => void;
 }) {
+  // Story 33.12: the one fullscreen element, `.chart-stage`: the top bar (so the button that leaves
+  // stays on screen), the replay controls, the tool rail, the chart with every pane and its legends,
+  // and the Liquidation tape. Held here, above the per-timeframe remount of ChartInner, so a timeframe
+  // change (a click or a typed one) keeps fullscreen. The watchlist rail stays outside it.
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const fullscreen = useFullscreen(stageRef);
   // Story 32.6: the coin's saved layout (timeframe, volume, mode, crosshair, pane heights, zoom, volume
   // profile) is loaded BEFORE the chart mounts, so its first candle request already uses the saved
   // timeframe. Held here, not in ChartInner (remounted on every timeframe change).
@@ -2284,12 +2514,16 @@ function ChartForCoin({
   }, [instrumentId, resetToDefault]);
 
   if (layout === null) {
-    return layoutStore.status === "failed" ? (
-      <p role="alert" className="chart-load-error">
-        The layout of {instrumentId} could not be loaded, so the chart is not drawn (see the error bar). A server or network failure is retried every few seconds.
-      </p>
-    ) : (
-      <p>Loading the layout of {instrumentId}...</p>
+    return (
+      <div className="chart-stage" ref={stageRef}>
+        {layoutStore.status === "failed" ? (
+          <p role="alert" className="chart-load-error">
+            The layout of {instrumentId} could not be loaded, so the chart is not drawn (see the error bar). A server or network failure is retried every few seconds.
+          </p>
+        ) : (
+          <p>Loading the layout of {instrumentId}...</p>
+        )}
+      </div>
     );
   }
 
@@ -2297,7 +2531,7 @@ function ChartForCoin({
   // (coin, timeframe), rather than trying to re-point one long-lived chart instance (see
   // LightweightChart's own docstring -- lightweight-charts has no supported API for that).
   return (
-    <>
+    <div className="chart-stage" ref={stageRef}>
       <ChartInner
         // `revision` is bumped by Reset to default in the same render as the reset layout: ChartInner
         // remounts once and re-reads every field (and its picker refetches the reset indicator list).
@@ -2318,6 +2552,9 @@ function ChartForCoin({
         onToolUsed={onToolUsed}
         magnet={magnet}
         onMagnet={onMagnet}
+        fullscreen={fullscreen}
+        watchlistOpen={watchlistOpen}
+        onWatchlistToggle={onWatchlistToggle}
       />
       {layoutStore.saveError !== null && (
         <p role="alert" className="chart-load-error">
@@ -2329,6 +2566,6 @@ function ChartForCoin({
           {actionError}
         </p>
       )}
-    </>
+    </div>
   );
 }

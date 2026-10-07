@@ -3912,6 +3912,28 @@ and `lib/chartLayout.ts`, pinned by `views/tests/test_chart_layouts.py`):
 
 **Ledger sites.** `views.markets` (a malformed or unparseable `markets:live` message).
 
+`[amended 2026-10-07: Story 33.12]` **Four more layout keys** (same file, same rules: optional, a
+layout saved before them loads with the defaults, a present value of the wrong type or outside the
+set is a 422 naming the key, never dropped; mirrored by `frontend/src/lib/time.ts`'s
+`TimeZoneSetting` and `lib/chartLayout.ts`'s `BUILT_IN_LAYOUT`, pinned by
+`views/tests/test_chart_layouts.py`'s `test_time_zone_and_last_price_settings_mirror_the_frontend`):
+- `time_zone`: one of `TIME_ZONES` -- `utc`, `local` (the viewer's browser zone), `exchange` (the
+  venue's). Default `utc`. Display only: the chart page's printed times (the time-axis ticks, the
+  crosshair label, the Liquidation tape and the Volume overlays' fixed-range edges) go through
+  `frontend/src/lib/time.ts`; a bar's or point's `t` handed to the chart stays UTC seconds under
+  every zone (audit D-218). `exchange` prints UTC: every collected venue runs on UTC (a `Known
+  limit:` in `lib/time.ts`, upgrade path a venue -> IANA zone map).
+- `session_breaks`: boolean, default `false`. A dashed vertical line at the first bar of each **UTC**
+  day, whatever the display zone; none at a bar of a day or wider.
+- `bar_countdown`: boolean, default `true`. The time to the last bar's close under the last-price
+  label, from the viewer's clock (audit D-219); hidden in Lines mode, during Bar Replay or with no
+  bars.
+- `last_price`: `{line, label}`, two required booleans (a present table carries both and refuses
+  any other key), default `{line: true, label: true}`: the main series' last-price line and its
+  price-axis label.
+
+The `/api/markets` items gained `market` and `volume24h` in the same story (§2.20).
+
 ---
 
 ### 2.18 Chart drawings: the sixteen kinds; Hide all (Story 33.10)
@@ -4071,6 +4093,75 @@ chart type, Heikin Ashi included (AD-F6, D-216).
 **Research signals.** `IndicatorSignalStrategy` gains six (`supertrend`, `parabolic_sar`, `adx`,
 `mfi`, `cmf`, `awesome_oscillator`, the table in its module docstring); ZigZag (it repaints) and the
 non-directional pivot levels are deliberately not signals.
+
+### 2.20 Chart watchlist and symbol search (Story 33.12)
+
+`[added 2026-10-07: Story 33.12]` Not market data: the operator's pinned chart instruments, one
+server-side list, and two added fields on the markets list the chart's symbol search reads.
+
+**Naming.** The *chart watchlist* is a third, UI-only concept: the instruments the operator pinned
+to the chart page's rail. It is not `research/watchlist.py`'s `fetch_watchlist` (§2.9, the research
+helper over `/api/rankings`), and not the Collection Plan or the Coin Ranking, which the DDD
+glossary forbids calling "watchlist" (`ARCHITECTURE-SPINE.md`'s ubiquitous language). Files and types
+therefore say `chart_watchlist` / `WatchlistError`; only the route keeps the epic's `/api/watchlist`.
+
+**Store.** `chart_watchlist.toml` in the preferences directory (`CHART_PREFERENCES_DIR`,
+`data_api/settings.py`'s `CHART_WATCHLIST_PATH`; no new mount, SSOT-06), `v = 1` and one flat
+`instruments` array of ids in the operator's order:
+
+```toml
+v = 1
+instruments = [
+    "BTCUSDT-LINEAR.BYBIT",
+    "SOL-USD-PERP.HYPERLIQUID",
+]
+```
+
+`views.preferences`' `load_watchlist`/`save_watchlist`, a full atomic rewrite (`_write_atomic`)
+under data_api's `PREFERENCES_LOCK`; created on the first PUT, and a missing file reads as `[]`.
+`validate_watchlist` refuses, naming the entry (`WatchlistError.field`, e.g. `instruments[3]`), and
+never drops or deduplicates (DATA-07): a body other than exactly `{"instruments": [...]}`, a
+non-list, a non-string, an id without a `.VENUE` suffix (`kernel.venues.venue_of`), an id over
+`MAX_INSTRUMENT_ID_LENGTH` (512) characters, a duplicate, more than `MAX_WATCHLIST` (200) entries. A
+file of another version, with a stray top-level key or a malformed entry, fails the load loudly. An
+id is not checked against the live market list, so a delisted market or a venue that is down never
+makes the file unloadable; the rail shows such an id with `—`.
+
+**Routes** (`data_api/routes/watchlist.py`, the filter-presets contract of §2.10):
+- `GET /api/watchlist` -> `WatchlistResponse {instruments: [str]}`; a corrupt or unreadable file is
+  a **500** `chart_watchlist.toml is corrupt: ...` / `failed to read ...`, never an empty list.
+- `PUT /api/watchlist` with `{"instruments": [...]}` replaces the whole list and returns what is
+  stored: invalid JSON 400, an unstorable body 422 naming the entry, nothing written unless all of
+  it passes; a corrupt stored file is a 500 and is left as it is. `Known limit:` whole-list
+  last-write-wins with no version, so two tabs pinning at once overwrite each other (the later save
+  wins), and the lock is in-process only; upgrade path: a `version` returned by the GET and sent
+  back by the PUT, a 409 on a mismatch.
+- The rail's live price and 24 h % are each id's `price`/`pct_24h` from `rankings:live` (§3.3)
+  verbatim; an id absent from the ranks, or with a null value, shows `—`, never 0; so does every
+  row while the `/ws/live` socket is disconnected or the last message's `updated_at` is more than
+  15 s old (the Rankings page's own heartbeat threshold, `RANKING_STALE_MS`: the ranking engine down
+  while `data_api` stays up), and an id in the message's `stale_instrument_ids` (DATA-01: never a
+  frozen value posing as live).
+- The client (`useWatchlist`) sends its PUTs one after another, so the stored list is the last
+  edit's; a failed first GET is retried after 2, 5, 10 and then every 30 s, the rail saying so. A
+  failed newest PUT shows the last list the server confirmed at once (an edit made before the reload
+  answers builds on it, never on the failed pin), and an edit cancels a pending GET retry: the PUT's
+  own answer is the server's list.
+
+**`GET /api/markets` added fields** (§2.17, AD-D12 added only; `views.markets_bus.MarketsBus.with_market_details`):
+- `market`: `kernel.venues.market_kind(instrument_id)`, `perp` / `spot` / `unknown` (never raises).
+- `volume24h`: the USD 24 h volume of that id's row in the cached `rankings:live` message
+  (`buses.bus.latest`, the ranking engine's one computation, SSOT-02), or `null` when no message has
+  arrived, the message is stale, the message lists the id in `stale_instrument_ids` (the same `—`
+  the watchlist rail shows for it), the id has no row (volume mode leaves a volume-less row out) or
+  the value is null. **Stale** is the listing's own horizon, `STALE_AFTER_SECONDS` (180 s): the
+  message's `updated_at` (the ranking engine's `time.time_ns()` at publish, §3.3) more than that
+  behind `data_api`'s wall clock (same host) serves every volume `null`, never a frozen number
+  (DATA-01). A present value that is not a finite number is the publisher's bug: ledgered at
+  `views.markets` once per `rankings:live` message (the bus remembers the last `updated_at` it
+  read, so repeated GETs do not re-ledger it) and served `null`, never as a number.
+
+**Ledger sites.** `views.markets` (a non-numeric `volume24h` in a ranks row, once per message, beside §2.17's).
 
 ---
 

@@ -37,11 +37,13 @@ route answers 503, never an empty list posing as "no markets".
 import asyncio
 import json
 import logging
+import math
 import time
 from typing import Any
 
 import redis.asyncio as aioredis
 from kernel.venues import has_venue
+from kernel.venues import market_kind
 from kernel.venues import same_asset
 from kernel.venues import venue_of
 from observability import error_ledger
@@ -60,6 +62,10 @@ STALE_AFTER_SECONDS = 180.0
 # Fifteen missed polls (bot_tui's `MARKETS_EXPIRE_SECONDS`): the venue is dropped from the listing.
 EXPIRE_AFTER_SECONDS = 900.0
 _POLL_SECONDS = 5.0
+# Story 33.12: a `rankings:live` message older than the listing's own staleness horizon gives no
+# volumes. `updated_at` is the ranking engine's `time.time_ns()` at publish (`RankingBoard
+# .build_message`), compared with this process's wall clock: both run on the one host.
+_RANKINGS_FRESH_NS = int(STALE_AFTER_SECONDS * 1_000_000_000)
 
 
 def validated_markets(message: object) -> tuple[str, list[tuple[str, str]]] | None:
@@ -84,6 +90,35 @@ def validated_markets(message: object) -> tuple[str, list[tuple[str, str]]] | No
     return venue, markets
 
 
+def _volume_24h(row: dict[str, Any], ledger: bool) -> float | None:
+    """
+    Return the row's USD 24 h volume, None when null. Anything else that is not a finite number is
+    the ranking engine's bug: ledgered when `ledger` (DATA-07) and shown as unknown, never as a
+    number.
+    """
+    volume = row.get("volume24h")
+    if volume is None:
+        return None
+    if isinstance(volume, bool) or not isinstance(volume, int | float) or not math.isfinite(volume):
+        if ledger:
+            error_ledger.record(
+                _LEDGER_SITE, f"rankings:live row has a non-numeric volume24h: {row!r:.300}"
+            )
+        return None
+    return float(volume)
+
+
+def _stale_ids(rankings: dict[str, Any]) -> frozenset[str]:
+    """
+    Return the message's `stale_instrument_ids`. `RankingsBus.handle_message` does not validate that
+    key, so a missing or non-list value is no stale set, and a non-string entry names no id.
+    """
+    stale = rankings.get("stale_instrument_ids")
+    if not isinstance(stale, list):
+        return frozenset()
+    return frozenset(iid for iid in stale if isinstance(iid, str))
+
+
 def _sort_key(item: dict[str, Any]) -> tuple[bool, str, str]:
     return (not item["same_asset"], item["venue"], item["instrument_id"])
 
@@ -99,6 +134,10 @@ class MarketsBus:
     def __init__(self) -> None:
         self._markets: dict[str, list[tuple[str, str]]] = {}
         self._received_at: dict[str, float] = {}
+        # Story 33.12: the `updated_at` of the last `rankings:live` message whose volumes were read,
+        # so a bad volume is ledgered once per message, not once per `GET /api/markets`. Messages
+        # arrive in order, so the newest one is the whole memo.
+        self._volumes_read_for: int | None = None
 
     def handle_message(self, message: object, now: float | None = None) -> None:
         validated = validated_markets(message)
@@ -153,6 +192,44 @@ class MarketsBus:
         ]
         stale = sorted(venue for venue, at in live if now - at > STALE_AFTER_SECONDS)
         return {"items": sorted(items, key=_sort_key), "stale_venues": stale}
+
+    def with_market_details(
+        self, listing: dict[str, Any], rankings: dict[str, Any] | None, now_ns: int
+    ) -> dict[str, Any]:
+        """
+        Return `listing` (`listing`'s) with each item's `market` (`kernel.venues.market_kind`:
+        `perp`/`spot`/`unknown`) and `volume24h`, the USD 24 h volume of that id's row in the cached
+        `rankings:live` message (`RankingsBus.latest`, verbatim: the ranking engine is its one
+        computer, SSOT-02), or None when no message has arrived, the message is older than
+        `STALE_AFTER_SECONDS` by `now_ns` (wall clock: a stale volume is never served, DATA-01),
+        the message lists the id in `stale_instrument_ids`, the id has no row (volatility mode keeps a volume-less row; volume mode leaves it out) or
+        the row's value is null -- never 0. Story 33.12: the symbol search shows both.
+        """
+        volumes = self._fresh_volumes(rankings, now_ns)
+        items = [
+            {
+                **item,
+                "market": market_kind(item["instrument_id"]),
+                "volume24h": volumes.get(item["instrument_id"]),
+            }
+            for item in listing["items"]
+        ]
+        return {**listing, "items": items}
+
+    def _fresh_volumes(
+        self, rankings: dict[str, Any] | None, now_ns: int
+    ) -> dict[Any, float | None]:
+        if rankings is None or now_ns - rankings["updated_at"] > _RANKINGS_FRESH_NS:
+            return {}
+        updated_at = rankings["updated_at"]
+        ledger = updated_at != self._volumes_read_for
+        self._volumes_read_for = updated_at
+        # An id the ranking engine marks stale has no fresh market data: its volume is not served,
+        # the same `—` the chart's watchlist rail shows for it (DATA-01).
+        # Every row's value is still read, so a bad one is ledgered whether or not it is shown.
+        stale = _stale_ids(rankings)
+        volumes = {row.get("instrument_id"): _volume_24h(row, ledger) for row in rankings["ranks"]}
+        return {iid: volume for iid, volume in volumes.items() if iid not in stale}
 
     async def run(self, redis_url: str) -> None:
         """Subscribe forever, reconnecting 2 s after any error (`ArchiveStatusBus.run`'s)."""

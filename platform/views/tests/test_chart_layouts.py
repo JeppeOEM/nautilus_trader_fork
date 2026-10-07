@@ -34,6 +34,7 @@ from views.preferences import DERIVATIVES_DEFAULTS
 from views.preferences import FOOTPRINT_DEFAULT_IMBALANCE_RATIO
 from views.preferences import FOOTPRINT_DEFAULTS
 from views.preferences import FOOTPRINT_MODES
+from views.preferences import LAST_PRICE_DEFAULTS
 from views.preferences import LAYOUT_BAR_SECONDS
 from views.preferences import LIQUIDATION_MEASURES
 from views.preferences import MAX_COMPARE_SYMBOLS
@@ -51,6 +52,7 @@ from views.preferences import PRICE_SCALE_MODES
 from views.preferences import PROFILE_ANCHORS
 from views.preferences import PROFILE_KINDS
 from views.preferences import PROFILE_SESSIONS
+from views.preferences import TIME_ZONES
 from views.preferences import VOLUME_COLOR_MODES
 from views.preferences import ChartLayouts
 from views.preferences import IndicatorEntry
@@ -917,3 +919,134 @@ def test_a_bad_drawings_hidden_is_refused_naming_it(hidden: Any) -> None:
     with pytest.raises(LayoutError) as raised:
         validate_layout(_layout(drawings_hidden=hidden))
     assert raised.value.key == "drawings_hidden"
+
+
+# -- Story 33.12: time_zone, session_breaks, bar_countdown and last_price ---------------------------
+
+_STORY_33_12_KEYS = ("time_zone", "session_breaks", "bar_countdown", "last_price")
+
+
+def test_a_layout_saved_before_story_33_12_loads_with_the_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    path.write_text(_PRE_32_8_FILE)  # none of the four keys
+    layout = load_chart_layouts(path).layouts[_IID]
+    assert {key: layout[key] for key in _STORY_33_12_KEYS} == {
+        "time_zone": "utc",
+        "session_breaks": False,
+        "bar_countdown": True,
+        "last_price": {"line": True, "label": True},
+    }
+
+
+def test_a_default_template_saved_before_story_33_12_loads_with_the_defaults(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    # The coin table re-headed as `[default]`, the strict read.
+    path.write_text(re.sub(r"\[(\"?)" + re.escape(_IID) + r"\1", "[default", _PRE_32_8_FILE))
+    loaded = load_chart_layouts(path).default
+    assert loaded is not None
+    assert {key: loaded[key] for key in _STORY_33_12_KEYS} == {
+        key: BUILTIN_DEFAULT_LAYOUT[key] for key in _STORY_33_12_KEYS
+    }
+
+
+def test_the_builtin_default_carries_the_story_33_12_defaults() -> None:
+    assert BUILTIN_DEFAULT_LAYOUT["time_zone"] == TIME_ZONES[0] == "utc"
+    assert BUILTIN_DEFAULT_LAYOUT["session_breaks"] is False
+    assert BUILTIN_DEFAULT_LAYOUT["bar_countdown"] is True
+    assert (
+        BUILTIN_DEFAULT_LAYOUT["last_price"] == LAST_PRICE_DEFAULTS == {"line": True, "label": True}
+    )
+
+
+def test_the_story_33_12_settings_round_trip_through_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    layout = _layout(
+        time_zone="local",
+        session_breaks=True,
+        bar_countdown=False,
+        last_price={"line": True, "label": False},
+    )
+    save_chart_layouts(ChartLayouts({_IID: layout}, default=layout), path)
+    table = tomllib.loads(path.read_text())[_IID]
+    assert {key: table[key] for key in _STORY_33_12_KEYS} == {
+        key: layout[key] for key in _STORY_33_12_KEYS
+    }
+    loaded = load_chart_layouts(path)
+    for got in (loaded.layouts[_IID], loaded.default):
+        assert got is not None
+        assert {key: got[key] for key in _STORY_33_12_KEYS} == {
+            key: layout[key] for key in _STORY_33_12_KEYS
+        }
+
+
+@pytest.mark.parametrize("zone", ["UTC", "Europe/Copenhagen", "", None, 0, True, ["utc"]])
+def test_a_bad_time_zone_is_refused_naming_it(zone: Any) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(time_zone=zone))
+    assert raised.value.key == "time_zone"
+
+
+@pytest.mark.parametrize("key", ["session_breaks", "bar_countdown"])
+@pytest.mark.parametrize("flag", [None, "true", 1, 0, [True]])
+def test_a_bad_session_breaks_or_countdown_flag_is_refused_naming_it(key: str, flag: Any) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(**{key: flag}))
+    assert raised.value.key == key
+
+
+@pytest.mark.parametrize(
+    ("last_price", "key"),
+    [
+        (True, "last_price"),
+        (None, "last_price"),
+        ([True, True], "last_price"),
+        ({"line": True}, "last_price.label"),
+        ({"label": True}, "last_price.line"),
+        ({}, "last_price.label"),
+        ({"line": True, "label": True, "color": "#ffffff"}, "last_price.color"),
+        ({"line": 1, "label": True}, "last_price.line"),
+        ({"line": True, "label": None}, "last_price.label"),
+    ],
+)
+def test_a_bad_last_price_is_refused_naming_the_key(last_price: Any, key: str) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(last_price=last_price))
+    assert raised.value.key == key
+
+
+def test_every_time_zone_is_accepted() -> None:
+    assert [validate_layout(_layout(time_zone=z))["time_zone"] for z in TIME_ZONES] == list(
+        TIME_ZONES
+    )
+
+
+def _built_in_layout_source() -> str:
+    source = (_FRONTEND / "lib/chartLayout.ts").read_text()
+    start = source.index("export const BUILT_IN_LAYOUT")
+    return source[start : source.index("\n};", start)]
+
+
+def _ts_bool_table(block: str, key: str) -> dict[str, bool]:
+    """Parse `key: { a: true, b: false }` (inline or a named constant) into a dict of booleans."""
+    match = re.search(rf"\b{key}\s*:\s*(\{{[^}}]*\}}|\w+)", block)
+    assert match is not None, f"{key} not found"
+    literal = match.group(1)
+    if not literal.startswith("{"):
+        literal = _ts_block("lib/chartLayout.ts", f"const {literal}") + "}"
+    return {
+        name: value == "true" for name, value in re.findall(r"(\w+)\s*:\s*(true|false)", literal)
+    }
+
+
+def test_time_zone_and_last_price_settings_mirror_the_frontend() -> None:
+    time_source = (_FRONTEND / "lib/time.ts").read_text()
+    zones = re.search(r"export type TimeZoneSetting\s*=\s*([^;]+);", time_source)
+    assert zones is not None
+    assert tuple(re.findall(r'"(\w+)"', zones.group(1))) == TIME_ZONES
+    block = _built_in_layout_source()
+    assert _ts_value(block, "time_zone") == BUILTIN_DEFAULT_LAYOUT["time_zone"]
+    assert _ts_value(block, "session_breaks") == "false"
+    assert _ts_value(block, "bar_countdown") == "true"
+    assert _ts_bool_table(block, "last_price") == LAST_PRICE_DEFAULTS

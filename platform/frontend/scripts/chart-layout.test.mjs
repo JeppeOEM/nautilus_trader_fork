@@ -14,7 +14,9 @@ test("chart box fills the workspace row next to the tool rail", () => {
 
 // Story 32.2: panes grow the page, so nothing between the chart container and <body> may clip
 // or fix its height -- the operator scrolls the page. jsdom has no layout, so pin the CSS.
-const CHART_ANCESTORS = new Set(["html", "body", "#root", ".chart-workspace", ".term-box"]);
+// Story 33.12 added the page row and the stage (its windowed rules; `.chart-stage:fullscreen` scrolls
+// inside the screen by design and is a different selector).
+const CHART_ANCESTORS = new Set(["html", "body", "#root", ".chart-page", ".chart-stage", ".chart-workspace", ".term-box"]);
 
 test("no ancestor of the chart clips overflow or fixes a height", () => {
   for (const file of ["../src/index.css", "../src/theme.css"]) {

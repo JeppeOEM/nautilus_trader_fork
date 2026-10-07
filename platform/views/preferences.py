@@ -16,8 +16,8 @@
 The UI preference files, and their one loader/saver each (Story 24.2 merged
 the `chart_indicator_config` and `screener_columns_config` modules here, bodies verbatim; Story 32.5
 added `chart_drawings.toml`, Story 32.6 `chart_layouts.toml`, Story 33.7
-`screener_filter_presets.toml`). All five live in one directory (`CHART_PREFERENCES_DIR`, Story
-32.5):
+`screener_filter_presets.toml`, Story 33.12 `chart_watchlist.toml`). All six live in one directory
+(`CHART_PREFERENCES_DIR`, Story 32.5):
 
 - `chart_indicators.toml`: per-instrument chart indicator
   selections (Story 10.5), a table keyed by instrument_id, each holding a list of
@@ -63,7 +63,10 @@ added `chart_drawings.toml`, Story 32.6 `chart_layouts.toml`, Story 33.7
   loaded tolerantly for `bar_seconds` and `mode` only (a value outside the supported set is returned as stored, so a
   timeframe retired later never fails the GET; the frontend falls back with one `console.error`),
   while the PUT validation and the `[default]` table stay strict. Drawings are never part of it;
-  only the optional `drawings_hidden` (bool, default false; Story 33.10) hides them all.
+  only the optional `drawings_hidden` (bool, default false; Story 33.10) hides them all. Story 33.12
+  added the optional `time_zone` (one of `TIME_ZONES`, default `utc`; display only, a bar's `t`
+  stays UTC), `session_breaks` (bool, default false), `bar_countdown` (bool, default true) and
+  `last_price` (a `{line, label}` table of two required booleans, default both true).
 - `screener_columns.toml`: the screener-wide Technicals column
   selection (Story 17.5), one flat top-level `columns` array of
   `{name, params, category, bar_seconds}` tables in display order, applied to every row of the
@@ -74,6 +77,11 @@ added `chart_drawings.toml`, Story 32.6 `chart_layouts.toml`, Story 33.7
   `=` only) -- `load_filter_presets`/`save_filter_presets`. Every preset is checked by
   `validate_filter_presets`, which names the offending field (`FilterPresetError`); a condition's
   display precision is never stored (the page re-derives it from its field list on recall).
+- `chart_watchlist.toml`: the chart page's pinned instruments (Story 33.12), `v = 1` and one flat
+  `instruments` array of distinct instrument ids in the operator's order, at most `MAX_WATCHLIST`
+  -- `load_watchlist`/`save_watchlist`, checked by `validate_watchlist` (`WatchlistError` names the
+  entry, `instruments[3]`). A UI-only list: neither `research/watchlist.py`'s research watchlist
+  nor the collection plan or the coin ranking (the DDD glossary forbids "watchlist" for those).
 
 All are tomllib to read, tomli_w to write, and a full rewrite (not a patch). Key sets frozen
 (AD-D12): these files are bind-mounted and hand-editable, so a renamed or dropped key would silently
@@ -829,6 +837,16 @@ COMPARE_DEFAULTS: dict[str, Any] = {"symbols": [], "spread": False}
 # Story 33.10: the optional `drawings_hidden` key, the tool rail's "Hide all drawings" (every drawing
 # of the coin neither drawn nor hit-tested, and the drawing tools off). A layout saved before it
 # loads with `False`; the drawings themselves are never part of a layout.
+# Story 33.12: the optional `time_zone` (how the chart page prints a time: `utc`, the viewer's
+# `local` zone or the `exchange`'s; formatting only, a bar's `t` stays UTC, audit D-218),
+# `session_breaks` (a dashed line at the first bar of each UTC day), `bar_countdown` (the time to
+# the last bar's close under the last-price label, from the viewer's clock, audit D-219) and
+# `last_price` (`{line, label}`: the main series' last-price line and its axis label). Mirror the
+# frontend's `TimeZoneSetting` (`lib/time.ts`) and `BUILT_IN_LAYOUT` (`lib/chartLayout.ts`);
+# `test_time_zone_and_last_price_settings_mirror_the_frontend` pins them. A layout saved before them
+# loads with `utc`, no session breaks, the countdown on and both last-price parts shown.
+TIME_ZONES = ("utc", "local", "exchange")
+LAST_PRICE_DEFAULTS: dict[str, bool] = {"line": True, "label": True}
 _OPTIONAL_LAYOUT_KEYS = frozenset(
     {
         "footprint",
@@ -838,6 +856,10 @@ _OPTIONAL_LAYOUT_KEYS = frozenset(
         "price_scale",
         "compare",
         "drawings_hidden",
+        "time_zone",
+        "session_breaks",
+        "bar_countdown",
+        "last_price",
     }
 )
 
@@ -865,6 +887,10 @@ BUILTIN_DEFAULT_LAYOUT: dict[str, Any] = {
     "price_scale": dict(PRICE_SCALE_DEFAULTS),
     "compare": copy.deepcopy(COMPARE_DEFAULTS),
     "drawings_hidden": False,
+    "time_zone": TIME_ZONES[0],
+    "session_breaks": False,
+    "bar_countdown": True,
+    "last_price": dict(LAST_PRICE_DEFAULTS),
 }
 
 
@@ -1086,7 +1112,8 @@ def validate_layout(layout: Any, *, tolerant: bool = False) -> dict[str, Any]:
     likewise the optional `derivatives` table, `DERIVATIVES_DEFAULTS` when absent, and the optional
     `volume_color_by`, `direction` when absent; Story 33.9's `chart_type`, `price_scale` and
     `compare`, `candles`, `PRICE_SCALE_DEFAULTS` and `COMPARE_DEFAULTS` when absent; Story 33.10's
-    `drawings_hidden`, `False` when absent),
+    `drawings_hidden`, `False` when absent; Story 33.12's `time_zone`, `session_breaks`,
+    `bar_countdown` and `last_price`, `utc`, `False`, `True` and `LAST_PRICE_DEFAULTS` when absent),
     else raise `LayoutError` naming the key. Strict by design (DATA-07): an unknown or missing key
     or a wrong type is refused rather than dropped or defaulted.
 
@@ -1123,7 +1150,11 @@ def validate_layout(layout: Any, *, tolerant: bool = False) -> dict[str, Any]:
         "chart_type": _validate_chart_type(layout.get("chart_type", CHART_TYPES[0])),
         "price_scale": _validate_price_scale(layout.get("price_scale", PRICE_SCALE_DEFAULTS)),
         "compare": _validate_compare(layout.get("compare", COMPARE_DEFAULTS)),
-        "drawings_hidden": _validate_drawings_hidden(layout.get("drawings_hidden", False)),
+        "drawings_hidden": _validate_flag("drawings_hidden", layout.get("drawings_hidden", False)),
+        "time_zone": _validate_time_zone(layout.get("time_zone", TIME_ZONES[0])),
+        "session_breaks": _validate_flag("session_breaks", layout.get("session_breaks", False)),
+        "bar_countdown": _validate_flag("bar_countdown", layout.get("bar_countdown", True)),
+        "last_price": _validate_last_price(layout.get("last_price", LAST_PRICE_DEFAULTS)),
     }
 
 
@@ -1137,11 +1168,36 @@ def _validate_volume_color_by(mode: Any) -> str:
     return str(mode)
 
 
-def _validate_drawings_hidden(hidden: Any) -> bool:
-    """Return the hide-all flag (`False` passed when absent), else raise: a null is refused."""
-    if not isinstance(hidden, bool):
-        raise LayoutError("drawings_hidden", "must be a boolean")
-    return hidden
+def _validate_time_zone(zone: Any) -> str:
+    """Return the display time zone (`utc` passed when absent), else raise: a null is refused."""
+    if zone not in TIME_ZONES:
+        raise LayoutError("time_zone", f"must be one of {list(TIME_ZONES)}")
+    return str(zone)
+
+
+def _validate_flag(key: str, flag: Any) -> bool:
+    """
+    Return an optional boolean key (its default passed when absent), else raise naming `key`: a
+    null is refused.
+    """
+    if not isinstance(flag, bool):
+        raise LayoutError(key, "must be a boolean")
+    return flag
+
+
+def _validate_last_price(last_price: Any) -> dict[str, bool]:
+    """
+    Return the last-price settings (the caller passes `LAST_PRICE_DEFAULTS` when the table is
+    absent), else raise `LayoutError` naming `last_price.<key>`: a present table carries both `line`
+    and `label`, booleans, and an explicit null is a wrong value, refused (strict by design).
+    """
+    if not isinstance(last_price, dict):
+        raise LayoutError("last_price", "must be an object")
+    keys = frozenset(LAST_PRICE_DEFAULTS)
+    _check_keys(last_price, keys, keys, "last_price.")
+    return {
+        key: _validate_flag(f"last_price.{key}", last_price[key]) for key in LAST_PRICE_DEFAULTS
+    }
 
 
 def _validate_chart_type(chart_type: Any) -> str:
@@ -1441,4 +1497,91 @@ def save_filter_presets(presets: list[FilterPreset], path: Path) -> None:
     """
     raw = {"v": FILTER_PRESETS_VERSION, "presets": [_preset_table(p) for p in presets]}
     validate_filter_presets({"presets": raw["presets"]})
+    _write_atomic(path, tomli_w.dumps(raw).encode())
+
+
+# -- chart watchlist --------------------------------------------------------------------------------
+
+# `chart_watchlist.toml` (Story 33.12): the chart page's pinned instruments, one list for the whole
+# UI. An id is checked only for its `.VENUE` suffix and length (`_check_compare_symbol`'s rule), not
+# against the live market list: a market delisted or a venue down later must not make the file
+# unloadable, and the rail shows such an id with `—` values.
+WATCHLIST_VERSION = 1
+MAX_WATCHLIST = 200
+
+
+class WatchlistError(ValueError):
+    """A watchlist (or the watchlist file) that is not storable; `field` names what is wrong."""
+
+    def __init__(self, field_name: str, message: str) -> None:
+        super().__init__(f"{field_name}: {message}")
+        self.field = field_name
+
+
+def _check_watchlist_id(where: str, instrument_id: Any) -> str:
+    if (
+        not isinstance(instrument_id, str)
+        or not 1 <= len(instrument_id) <= MAX_INSTRUMENT_ID_LENGTH
+    ):
+        raise WatchlistError(where, f"must be a string of 1..{MAX_INSTRUMENT_ID_LENGTH} characters")
+    try:
+        venue_of(instrument_id)
+    except MalformedInstrumentId as exc:
+        raise WatchlistError(where, "must be an instrument id with a .VENUE suffix") from exc
+    return instrument_id
+
+
+def validate_watchlist(body: Any) -> list[str]:
+    """
+    Return the ids of an `{"instruments": [...]}` body in order, else raise `WatchlistError` naming
+    the entry (`instruments[3]`). Strict (DATA-07): an unknown key, a wrong type, a malformed or
+    over-long id, a duplicate or a list over `MAX_WATCHLIST` is refused, never dropped or
+    deduplicated.
+    """
+    if not isinstance(body, dict) or set(body) != {"instruments"}:
+        raise WatchlistError("instruments", 'the body must be exactly {"instruments": [...]}')
+    entries = body["instruments"]
+    if not isinstance(entries, list):
+        raise WatchlistError("instruments", "must be a list of instrument ids")
+    if len(entries) > MAX_WATCHLIST:
+        raise WatchlistError("instruments", f"must hold at most {MAX_WATCHLIST} instruments")
+    ids: list[str] = []
+    for index, entry in enumerate(entries):
+        instrument_id = _check_watchlist_id(f"instruments[{index}]", entry)
+        if instrument_id in ids:
+            raise WatchlistError(f"instruments[{index}]", f"{instrument_id!r} appears twice")
+        ids.append(instrument_id)
+    return ids
+
+
+def load_watchlist(path: Path) -> list[str]:
+    """
+    Load the pinned ids. A missing file (none pinned yet) is `[]`; a file of another version, a
+    stray top-level key or a malformed entry raises (`WatchlistError`, or `TOMLDecodeError`) -- the
+    file is hand-editable and a pinned id is never silently skipped.
+    """
+    if not path.exists():
+        return []
+    with path.open("rb") as f:
+        raw = tomllib.load(f)
+    version = raw.get("v")
+    if (
+        type(version) is not int
+        or version != WATCHLIST_VERSION
+        or not set(raw) <= {"v", "instruments"}
+    ):
+        raise WatchlistError(
+            "v", f"is not a v = {WATCHLIST_VERSION} watchlist file (only `v` and `instruments`)"
+        )
+    return validate_watchlist({"instruments": raw.get("instruments", [])})
+
+
+def save_watchlist(instrument_ids: list[str], path: Path) -> None:
+    """
+    Persist the whole list (`v = 1`, `instruments = [...]`), a full rewrite: validated and
+    serialized before the file is touched, then published atomically (`_write_atomic`). Callers
+    serialize concurrent writers (data_api's `PREFERENCES_LOCK`).
+    """
+    ids = validate_watchlist({"instruments": instrument_ids})
+    raw = {"v": WATCHLIST_VERSION, "instruments": ids}
     _write_atomic(path, tomli_w.dumps(raw).encode())

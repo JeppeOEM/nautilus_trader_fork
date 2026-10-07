@@ -237,3 +237,124 @@ def test_receive_ingests_a_message_before_its_silence_check(
     with pytest.raises(ConnectionError):
         asyncio.run(bus._receive(pubsub))  # type: ignore[arg-type]
     assert bus._markets == {"BYBIT": [(_BYBIT_BTC, "BTCUSDT")]}
+
+
+# -- Story 33.12: each listed market's type and ranked 24 h volume -----------------------------------
+
+
+_UPDATED_AT = 1_759_800_000_000_000_000
+_NOW_NS = _UPDATED_AT + 1_000_000_000  # one second after the message
+
+
+def _rankings(*rows: dict[str, Any], updated_at: int = _UPDATED_AT) -> dict[str, Any]:
+    return {"mode": "volatility", "updated_at": updated_at, "ranks": list(rows)}
+
+
+def with_market_details(
+    listing: dict[str, Any], rankings: dict[str, Any] | None, now_ns: int = _NOW_NS
+) -> dict[str, Any]:
+    return MarketsBus().with_market_details(listing, rankings, now_ns)
+
+
+def test_market_details_add_the_market_type_and_the_ranked_volume() -> None:
+    listing = _bus().listing(None, 100.0)
+    assert listing is not None
+    rankings = _rankings(
+        {"instrument_id": _BYBIT_BTC, "volume24h": 5_000_000},
+        {"instrument_id": _HL_SOL, "volume24h": None},
+    )
+
+    items = with_market_details(listing, rankings)["items"]
+
+    assert [(i["instrument_id"], i["market"], i["volume24h"]) for i in items] == [
+        (_BYBIT_BTC, "perp", 5_000_000.0),
+        (_BYBIT_BTC_SPOT, "spot", None),
+        (_BYBIT_ETH, "perp", None),
+        (_HL_BTC, "perp", None),
+        (_HL_SOL, "perp", None),
+    ]
+
+
+def test_market_details_keep_the_listing_and_its_stale_venues() -> None:
+    listing = _bus().listing(_BYBIT_BTC, 100.0)
+    assert listing is not None
+
+    detailed = with_market_details(listing, None)
+
+    assert detailed["stale_venues"] == listing["stale_venues"]
+    assert [{k: i[k] for k in listing["items"][0]} for i in detailed["items"]] == listing["items"]
+
+
+@pytest.mark.parametrize("volume", ["1000", True, float("nan"), float("inf"), [1]])
+def test_a_non_numeric_ranked_volume_is_ledgered_and_shown_as_unknown(volume: Any) -> None:
+    listing = _bus().listing(None, 100.0)
+    assert listing is not None
+    before = _ledger_count()
+
+    items = with_market_details(listing, _rankings({"instrument_id": _HL_BTC, "volume24h": volume}))
+
+    assert {i["instrument_id"]: i["volume24h"] for i in items["items"]}[_HL_BTC] is None
+    assert _ledger_count() == before + 1
+
+
+def test_a_bad_ranked_volume_is_ledgered_once_per_rankings_message_not_per_request() -> None:
+    bus = _bus()
+    listing = bus.listing(None, 100.0)
+    assert listing is not None
+    bad = {"instrument_id": _HL_BTC, "volume24h": "1000"}
+    before = _ledger_count()
+
+    for _ in range(3):
+        bus.with_market_details(listing, _rankings(bad), _NOW_NS)
+    assert _ledger_count() == before + 1
+
+    bus.with_market_details(listing, _rankings(bad, updated_at=_UPDATED_AT + 1), _NOW_NS)
+    assert _ledger_count() == before + 2
+
+
+def test_a_rankings_message_older_than_the_staleness_horizon_gives_no_volume() -> None:
+    listing = _bus().listing(None, 100.0)
+    assert listing is not None
+    rankings = _rankings({"instrument_id": _BYBIT_BTC, "volume24h": 5_000_000})
+    horizon_ns = int(STALE_AFTER_SECONDS * 1_000_000_000)
+
+    fresh = with_market_details(listing, rankings, _UPDATED_AT + horizon_ns)
+    stale = with_market_details(listing, rankings, _UPDATED_AT + horizon_ns + 1)
+
+    assert {i["instrument_id"]: i["volume24h"] for i in fresh["items"]}[_BYBIT_BTC] == 5_000_000.0
+    assert {i["volume24h"] for i in stale["items"]} == {None}
+
+
+@pytest.mark.parametrize("stale", [[_BYBIT_BTC], [_BYBIT_BTC, 7]])
+def test_an_instrument_the_ranking_marks_stale_gives_no_volume(stale: list[Any]) -> None:
+    listing = _bus().listing(None, 100.0)
+    assert listing is not None
+    rankings = {
+        **_rankings(
+            {"instrument_id": _BYBIT_BTC, "volume24h": 5_000_000},
+            {"instrument_id": _HL_SOL, "volume24h": 7_000_000},
+        ),
+        "stale_instrument_ids": stale,
+    }
+
+    volumes = {
+        i["instrument_id"]: i["volume24h"] for i in with_market_details(listing, rankings)["items"]
+    }
+
+    assert (volumes[_BYBIT_BTC], volumes[_HL_SOL]) == (None, 7_000_000.0)
+
+
+@pytest.mark.parametrize("stale", [None, "BTCUSDT-LINEAR.BYBIT"])
+def test_a_missing_or_malformed_stale_list_marks_nothing_stale(stale: Any) -> None:
+    listing = _bus().listing(None, 100.0)
+    assert listing is not None
+    rankings = {
+        **_rankings({"instrument_id": _BYBIT_BTC, "volume24h": 5_000_000}),
+        "stale_instrument_ids": stale,
+    }
+
+    volumes = {
+        i["instrument_id"]: i["volume24h"] for i in with_market_details(listing, rankings)["items"]
+    }
+
+    assert volumes[_BYBIT_BTC] == 5_000_000.0

@@ -691,3 +691,159 @@ table {
   border: 0;
   border-top: 1px solid var(--color-border);
 }
+
+/* Story 33.12: the chart page is the per-coin stage beside the optional watchlist rail. Neither
+   clips nor fixes a height (chart-layout.test.mjs): the page scrolls, as with the panes. */
+.chart-page {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.chart-stage {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The fullscreen element: the top bar, the replay controls, the tool rail, the chart with every pane
+   and the Liquidation tape. LightweightChart scales the panes so the chart fits this element's height
+   (refitting on a viewport resize). Known limit: a message under the chart (a load error, an overlay
+   notice) is not in that budget, so it sits below the screen edge and the stage scrolls to it.
+   Upgrade path: subtract the content under the chart from the budget and refit when it changes. */
+.chart-stage:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  padding: 8px;
+  overflow: auto;
+  background: var(--color-bg);
+}
+
+.chart-stage::backdrop {
+  background: var(--color-bg);
+}
+
+/* The symbol in the top bar is the symbol search's button: it reads as the heading it replaced. */
+.chart-symbol {
+  padding: 0;
+  font: inherit;
+  color: var(--color-text-strong);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.chart-symbol:hover,
+.chart-symbol:focus-visible {
+  color: var(--color-link);
+  text-decoration: underline;
+}
+
+/* The timeframe typed so far, until Enter, Esc or 3 s idle. */
+.chart-timeframe-buffer {
+  padding: 0 6px;
+  color: var(--color-active);
+  border: 1px solid var(--color-active);
+}
+
+.symbol-search {
+  width: min(560px, 92vw);
+}
+
+.symbol-search-results {
+  max-height: 50vh;
+}
+
+.symbol-search-active {
+  color: var(--color-active);
+  background: var(--color-active-bg);
+}
+
+.shortcut-sheet-table {
+  border-collapse: collapse;
+}
+
+.shortcut-sheet-table th,
+.shortcut-sheet-table td {
+  padding: 2px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.shortcut-sheet-table kbd {
+  color: var(--color-text-strong);
+  white-space: nowrap;
+}
+
+/* The watchlist rail: a narrow column right of the stage, in the terminal palette. */
+.watchlist-rail {
+  flex: none;
+  width: 260px;
+  padding: 6px;
+  border: 1px solid var(--color-border);
+  font-size: 12px;
+}
+
+.watchlist-rail-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.watchlist-rail-note {
+  color: var(--color-text-dim);
+}
+
+.watchlist-rail-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.watchlist-rail-list li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.watchlist-rail-list a {
+  display: grid;
+  flex: 1;
+  grid-template-columns: 1fr auto;
+  gap: 0 8px;
+  padding: 2px 4px;
+  color: var(--color-text);
+  text-decoration: none;
+}
+
+.watchlist-rail-list a:hover {
+  background: var(--color-active-bg);
+}
+
+.watchlist-rail-current a {
+  color: var(--color-text-strong);
+}
+
+.watchlist-rail-symbol {
+  font-weight: bold;
+}
+
+.watchlist-rail-venue {
+  color: var(--color-text-dim);
+  text-align: right;
+}
+
+.watchlist-rail-price {
+  font-variant-numeric: tabular-nums;
+}
+
+.watchlist-rail-up {
+  color: var(--color-up);
+  text-align: right;
+}
+
+.watchlist-rail-down {
+  color: var(--color-down);
+  text-align: right;
+}

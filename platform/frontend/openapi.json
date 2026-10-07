@@ -1683,6 +1683,52 @@
         }
       }
     },
+    "/api/watchlist": {
+      "get": {
+        "summary": "Get Watchlist",
+        "description": "Return the pinned ids; none pinned yet is `[]`, a corrupt file a 500.",
+        "operationId": "get_watchlist_api_watchlist_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchlistResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Put Watchlist",
+        "description": "Replace the whole list with the body's `{\"instruments\": [...]}` and return what is stored.\n\nInvalid JSON is a 400; a body that is not a storable list a 422 naming the entry\n(`instruments[3]: ...`), and nothing is written unless all of it passes. A corrupt stored file\nis a 500 and is left as it is. The write is a full rewrite under `PREFERENCES_LOCK`, published\natomically.\n\nKnown limit: whole-list last-write-wins with no version, so two tabs or browsers pinning at once\noverwrite each other (the later save wins), and the lock is in-process only. Upgrade path: a\n`version` returned by the GET and sent back by the PUT, a 409 on a mismatch.",
+        "operationId": "put_watchlist_api_watchlist_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WatchlistResponse"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchlistResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/metrics/history/{symbol}": {
       "get": {
         "summary": "Get Metrics History",
@@ -3789,6 +3835,21 @@
           "same_asset": {
             "type": "boolean",
             "title": "Same Asset"
+          },
+          "market": {
+            "type": "string",
+            "title": "Market"
+          },
+          "volume24h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volume24H"
           }
         },
         "type": "object",
@@ -3796,7 +3857,9 @@
           "instrument_id",
           "symbol",
           "venue",
-          "same_asset"
+          "same_asset",
+          "market",
+          "volume24h"
         ],
         "title": "MarketItem",
         "description": "One market; `same_asset` is `kernel.venues.same_asset` against the request's id."
@@ -4638,6 +4701,23 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "WatchlistResponse": {
+        "properties": {
+          "instruments": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Instruments"
+          }
+        },
+        "type": "object",
+        "required": [
+          "instruments"
+        ],
+        "title": "WatchlistResponse",
+        "description": "The pinned instrument ids, in the operator's order."
       }
     }
   }

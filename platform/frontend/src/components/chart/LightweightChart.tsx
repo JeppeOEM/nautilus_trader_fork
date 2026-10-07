@@ -7,6 +7,7 @@ import {
   LineSeries,
   createChart,
   createSeriesMarkers,
+  type CandlestickData,
   type IChartApi,
   type IPaneApi,
   type IPriceLine,
@@ -61,6 +62,16 @@ import {
 import { attachRangeDrag, localPoint, plotPoint, timeAtX } from "./rangeDrag";
 import { VolumeProfilePrimitive, type VolumeProfileRenderSpec } from "./primitives/VolumeProfilePrimitive";
 import { VerticalMarkerPrimitive } from "./primitives/VerticalMarkerPrimitive";
+import { SessionBreaksPrimitive } from "./primitives/SessionBreaksPrimitive";
+import { CountdownPrimitive } from "./primitives/CountdownPrimitive";
+import {
+  type TimeZoneSetting,
+  barCountdown,
+  formatChartTime,
+  formatCountdown,
+  sessionBreakTimes,
+  tickMarkFormatter,
+} from "../../lib/time";
 import { GapPrimitive } from "./primitives/GapPrimitive";
 import { type LineOptions, TrendlinePrimitive, type TrendlineAnchor } from "./primitives/TrendlinePrimitive";
 import { FibPrimitive } from "./primitives/FibPrimitive";
@@ -597,7 +608,40 @@ interface LightweightChartProps {
   scaleModesLocked?: string | null;
   /** Story 33.9: the read-only legend row shown while Heikin Ashi is the chart type. */
   heikinLabel?: string;
+  /** Story 33.12: the zone every time on the chart prints in (the crosshair label and the time axis,
+   * through `lib/time.ts`). Formatting only: no bar's `time` is ever changed by it. Default UTC. */
+  timeZone?: TimeZoneSetting;
+  /** Story 33.12: a dashed line at the first bar of each UTC day (none at bars of a day or longer). */
+  sessionBreaks?: boolean;
+  /** Story 33.12: the candle bar size in seconds (Candles mode), which the session breaks and the
+   * crosshair's time label read (a bar of a day or longer prints its UTC date). Independent of the
+   * countdown setting. Omitted = no session breaks in Candles mode. */
+  barSeconds?: number | null;
+  /** Story 33.12: the countdown's bar size and whether the countdown to the last bar's close shows
+   * under the last-price label. The page turns it off in Lines mode and during a replay; with no bars
+   * it shows nothing. Omitted = no countdown. */
+  countdown?: CountdownSettings | null;
+  /** Story 33.12: the main series' last-price line and its axis label (Lines mode: the `price` line's).
+   * Default both shown. */
+  lastPrice?: LastPriceSettings;
+  /** Story 33.12: the page's stage is the browser's fullscreen element. Entering scales every pane's
+   * height so the whole chart fits the stage (relative heights kept), leaving restores the stored
+   * heights; both re-apply the container's width at once. View state only: never reported through
+   * `onPaneHeights` as a layout change. */
+  fullscreen?: boolean;
 }
+
+export interface CountdownSettings {
+  barSeconds: number;
+  enabled: boolean;
+}
+
+export interface LastPriceSettings {
+  line: boolean;
+  label: boolean;
+}
+
+const DEFAULT_LAST_PRICE_SETTINGS: LastPriceSettings = { line: true, label: true };
 
 /** DW-145: after a replay `setData`, bring the newest bar back into view when its time changed
  * and it lies outside the visible logical range: the range keeps its width and ends half a bar
@@ -851,6 +895,85 @@ function layoutPaneHeights(
   return axisPx > 0;
 }
 
+/** A pane group's default height: the price pane, the Volume pane, or any other pane. */
+function defaultPanePx(group: string): number {
+  if (group === "price") return PRICE_PANE_PX;
+  return group === VOLUME_PANE_ID ? VOLUME_PANE_PX : INDICATOR_PANE_PX;
+}
+
+/** A group -> px map in `snapshotPaneHeights`' shape, so `layoutPaneHeights` pins exactly those
+ * heights (a pane's own height outranks every other source there). */
+function snapshotOf(registry: Map<string, PaneEntry>, heights: Record<string, number>): ReturnType<typeof snapshotPaneHeights> {
+  const panes = new Map<IPaneApi<Time>, number>();
+  for (const entry of registry.values()) {
+    if (entry.pane && heights[entry.group] !== undefined) panes.set(entry.pane, heights[entry.group]);
+  }
+  return { price: heights.price ?? null, panes };
+}
+
+/** Story 33.12: the fullscreen fit -- the stored (unscaled) height of every pane group and the factor
+ * the shown heights are scaled by. View state only, never a layout value. */
+interface FullscreenFit {
+  stored: Record<string, number>;
+  scale: number;
+}
+
+/** `stored` scaled by one factor so the panes fill `panesPx`: relative heights kept, each floored, at
+ * least 1 px. The 1 px floor can lift a tiny budget's sum over it, so the excess is taken back off the
+ * tallest panes: the sum never exceeds `panesPx` while it holds a pixel per pane. Null when nothing can
+ * be laid out. */
+function fitPaneHeights(stored: Record<string, number>, panesPx: number): { heights: Record<string, number>; scale: number } | null {
+  const total = Object.values(stored).reduce((sum, px) => sum + px, 0);
+  if (total <= 0 || panesPx <= 0) return null;
+  const scale = panesPx / total;
+  const heights = Object.fromEntries(Object.entries(stored).map(([group, px]) => [group, Math.max(1, Math.floor(px * scale))]));
+  let excess = Object.values(heights).reduce((sum, px) => sum + px, 0) - panesPx;
+  while (excess > 0) {
+    const [tallest, px] = Object.entries(heights).reduce((a, b) => (b[1] > a[1] ? b : a));
+    if (px <= 1) break; // every pane at 1 px: more panes than pixels, nothing left to take
+    const take = Math.min(excess, px - 1);
+    heights[tallest] = px - take;
+    excess -= take;
+  }
+  return { heights, scale };
+}
+
+/** The px the chart may take inside the fullscreen element: from the container's top to the element's
+ * bottom, less its bottom padding and the chart box's own chrome under the chart (the top bar, the
+ * replay controls and the legend rows above it are on screen already). Null when the container is
+ * not inside the fullscreen element. */
+function fullscreenBudget(container: HTMLElement): number | null {
+  const host = document.fullscreenElement;
+  if (!(host instanceof HTMLElement) || !host.contains(container)) return null;
+  const box = container.getBoundingClientRect();
+  const top = box.top - host.getBoundingClientRect().top + host.scrollTop;
+  const parentBottom = container.parentElement?.getBoundingClientRect().bottom ?? box.bottom;
+  const padding = parseFloat(getComputedStyle(host).paddingBottom) || 0;
+  return host.clientHeight - padding - top - Math.max(0, parentBottom - box.bottom);
+}
+
+/**
+ * Story 33.12: scales every laid-out pane so the whole chart (panes, separators, time axis) fits the
+ * fullscreen element. A pane first seen in fullscreen (added there, or the chart mounted there by a
+ * timeframe change) is stored at its layout or default height, so the fit stays proportional to
+ * what the page shows outside fullscreen. Idempotent: the heights come from `fit.stored`, never from
+ * the measured (already scaled) ones, so a resize-observer round trip settles.
+ */
+function refitFullscreen(chart: IChartApi, container: HTMLElement, registry: Map<string, PaneEntry>, fit: FullscreenFit, known: Map<string, number>): void {
+  const budget = fullscreenBudget(container);
+  if (budget === null) return;
+  const stored: Record<string, number> = {};
+  for (const group of Object.keys(currentPaneHeights(chart, registry))) {
+    fit.stored[group] ??= known.get(group) ?? defaultPanePx(group);
+    stored[group] = fit.stored[group];
+  }
+  const separators = Math.max(0, Object.keys(stored).length - 1);
+  const fitted = fitPaneHeights(stored, budget - separators - chart.timeScale().height());
+  if (fitted === null) return;
+  fit.scale = fitted.scale;
+  layoutPaneHeights(chart, registry, snapshotOf(registry, fitted.heights), true, new Map(), known);
+}
+
 /** Adds or removes a series' dashed zero line to match its spec (Story 33.5's Basis pane). */
 function syncZeroLine(entry: PaneEntry): void {
   const wanted = entry.spec.zeroLine === true;
@@ -956,6 +1079,38 @@ function overPriceLine(param: MouseEventParams, series: MainSeriesApi | null): b
 // The measurement index before the first history arrives; the effect replaces it.
 const EMPTY_MEASUREMENT_INDEX: MeasurementIndex = buildMeasurementIndex([], []);
 const NO_MARKERS: readonly MarkerSpec[] = [];
+const NO_TIMES: readonly number[] = [];
+
+interface LastBar {
+  time: number;
+  open: number;
+  close: number;
+}
+
+/**
+ * Story 33.12: the newest bar as the main series draws it -- the forming one when it is newer than
+ * history -- for the last-price line's colour and the countdown's place, so both sit on the drawn
+ * last-price label. Under Heikin Ashi that is the HA row, not the real bar; a close-only type (Line,
+ * Area, Baseline) draws the real close, so its direction is the real bar's. Indicators and every
+ * other reader keep the real OHLC (AD-F6).
+ */
+function drawnLastBar(
+  type: ChartType,
+  data: readonly ChartDatum[],
+  rows: readonly MainRow[],
+  liveBar: LiveBar | null,
+  colors: UpDownColors,
+): LastBar | null {
+  let index = data.length - 1;
+  while (index >= 0 && !("open" in data[index])) index--;
+  const history = index >= 0 ? (data[index] as CandlestickData<Time>) : null;
+  const live = liveBar && (history === null || (liveBar.time as number) >= (history.time as number)) ? liveBar : null;
+  const real = live ?? history;
+  if (real === null) return null;
+  const row = live ? liveSeriesRow(type, data, rows, live, colors) : rows[index];
+  const drawn = row !== undefined && "open" in row ? row : real;
+  return { time: real.time as number, open: drawn.open, close: drawn.close };
+}
 
 /**
  * Owns the one `lightweight-charts` `createChart()` call for a coin's chart page
@@ -1024,6 +1179,12 @@ export default function LightweightChart({
   onPriceScale,
   scaleModesLocked = null,
   heikinLabel = "Heikin Ashi (derived)",
+  timeZone = "utc",
+  sessionBreaks = false,
+  barSeconds = null,
+  countdown = null,
+  lastPrice = DEFAULT_LAST_PRICE_SETTINGS,
+  fullscreen = false,
 }: LightweightChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -1044,6 +1205,17 @@ export default function LightweightChart({
   // Story 32.6: last known pane heights by group id ("price" included): the saved layout's at mount,
   // then whatever the operator dragged to. A ref read at mount, so a later prop change re-pins nothing.
   const knownHeightsRef = useRef<Map<string, number>>(new Map(Object.entries(initialPaneHeights ?? {})));
+  // Story 33.12: the fullscreen fit while the page is fullscreen (null otherwise), the resize observer
+  // that also watches the fullscreen element then, and the element it watches.
+  const fullscreenFitRef = useRef<FullscreenFit | null>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const observedHostRef = useRef<Element | null>(null);
+  const refitNow = useCallback((): void => {
+    const chart = chartRef.current;
+    const container = containerRef.current;
+    const fit = fullscreenFitRef.current;
+    if (chart && container && fit) refitFullscreen(chart, container, panesRef.current, fit, knownHeightsRef.current);
+  }, []);
   const paneHeightsCallbackRef = useRef(onPaneHeights);
   paneHeightsCallbackRef.current = onPaneHeights;
   const visibleBarsCallbackRef = useRef(onVisibleBars);
@@ -1232,6 +1404,24 @@ export default function LightweightChart({
   // a close-only line) exists; read by its `setData`/`update` and the Baseline's base value only.
   const upDown = useMemo<UpDownColors>(() => ({ up: chartVar("--chart-up"), down: chartVar("--chart-down") }), []);
   const mainRows = useMemo<MainRow[]>(() => seriesRows(chartType, data, upDown), [chartType, data, upDown]);
+  // Story 33.12: the newest bar as the main series draws it (the Heikin Ashi row under Heikin Ashi),
+  // whose close the last-price line is coloured by and the countdown sits at (null with no bars).
+  const lastBar = useMemo(
+    () => (mode === "candles" ? drawnLastBar(chartType, data, mainRows, liveBar ?? null, upDown) : null),
+    [mode, chartType, data, mainRows, liveBar, upDown],
+  );
+  // Story 33.12: the session breaks over the real bars (Lines mode: the snapshot seconds), always at
+  // UTC day boundaries whatever the display zone. The forming bar counts, so a new day's first bar
+  // that arrives live gets its break without a history refetch.
+  const breakBarSeconds = mode === "candles" ? barSeconds : 1;
+  const breakTimes = useMemo(() => {
+    if (!sessionBreaks || breakBarSeconds === null) return NO_TIMES;
+    const source: readonly { time: Time }[] = mode === "candles" ? data.filter((d) => "open" in d) : (linesData?.price ?? []).filter((d) => "value" in d);
+    const times = source.map((d) => d.time as number);
+    const liveTime = mode === "candles" && liveBar ? (liveBar.time as number) : null;
+    if (liveTime !== null && (times.length === 0 || liveTime > times[times.length - 1])) times.push(liveTime);
+    return sessionBreakTimes(times, breakBarSeconds);
+  }, [sessionBreaks, breakBarSeconds, mode, data, linesData, liveBar]);
   const [scaleMenu, setScaleMenu] = useState<{ x: number; y: number } | null>(null);
   // The scale menu's measured height, so its `top` keeps it inside the viewport like `right` does.
   const scaleMenuRef = useRef<HTMLDivElement | null>(null);
@@ -1317,12 +1507,16 @@ export default function LightweightChart({
             knownHeightsRef.current,
           );
         }
+        // Story 33.12: in fullscreen a new viewport size, or a pane added there, refits every pane.
+        refitNow();
       });
     };
     // ResizeObserver, not window "resize": catches layout-only reflows and a container that
     // was hidden (clientWidth 0) at mount. Fires once on observe, so it also does the first sync.
+    // In fullscreen it watches the fullscreen element too, whose height is the viewport's.
     const resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(container);
+    resizeObserverRef.current = resizeObserver;
     const panes = panesRef.current;
     const collapsedHeights = collapsedHeightsRef.current;
     // Captured to a local for the cleanup below, same as `panes` -- reading
@@ -1334,6 +1528,8 @@ export default function LightweightChart({
     return () => {
       cancelled = true;
       resizeObserver.disconnect();
+      resizeObserverRef.current = null;
+      observedHostRef.current = null;
       cancelAnimationFrame(resizeFrame);
       chartRef.current = null;
       seriesRef.current = null;
@@ -1383,8 +1579,20 @@ export default function LightweightChart({
       if (!start || !chart) return;
       const now = currentPaneHeights(chart, panesRef.current);
       if (!Object.keys(now).some((id) => id in start && Math.abs(now[id] - start[id]) >= 1)) return;
-      for (const [id, px] of Object.entries(now)) knownHeightsRef.current.set(id, px);
-      paneHeightsCallbackRef.current?.(now);
+      // Story 33.12: a drag in fullscreen moved scaled panes; the layout keeps the stored scale, so
+      // the heights are unscaled first (and the fit keeps them, so leaving restores the drag).
+      const fit = fullscreenFitRef.current;
+      // Only a pane the drag resized is unscaled: the others keep their stored height exactly, since
+      // floor-then-round would move each of them by a pixel on every drag.
+      const unscaled = (id: string, px: number): number => {
+        const kept = fit?.stored[id];
+        const moved = !(id in start) || Math.abs(px - start[id]) >= 1;
+        return kept !== undefined && !moved ? kept : Math.round(px / (fit?.scale ?? 1));
+      };
+      const stored = fit === null ? now : Object.fromEntries(Object.entries(now).map(([id, px]) => [id, unscaled(id, px)]));
+      if (fit !== null) Object.assign(fit.stored, stored);
+      for (const [id, px] of Object.entries(stored)) knownHeightsRef.current.set(id, px);
+      paneHeightsCallbackRef.current?.(stored);
     };
     // A press the browser cancels (a touch turned into a scroll, a lost pointer) moved no divider:
     // forgetting it keeps a later, unrelated pointerup from reporting a relayout as a drag.
@@ -1583,6 +1791,20 @@ export default function LightweightChart({
     if (followNewestRef.current && chart) followNewestBar(chart, data, prevNewest);
     // `mainRows` changes with `data` and `chartType`; `mainKind` re-runs it on a fresh series.
   }, [data, mainRows, mode, mainKind]);
+
+  useEffect(() => {
+    // Story 33.12: the last-price line and label of the main series (Lines mode: the `price` line), the
+    // line in the up / down colour of the last bar (close against open), as the candle is drawn.
+    // Declared before the Baseline's base-value effect, so a new series takes these first and the
+    // base value stays its latest option.
+    const host = mode === "candles" ? seriesRef.current : (lineSeriesRef.current?.price ?? null);
+    if (!host) return;
+    const wanted: Record<string, unknown> = { priceLineVisible: lastPrice.line, lastValueVisible: lastPrice.label };
+    if (mode === "candles" && lastBar !== null) wanted.priceLineColor = lastBar.close >= lastBar.open ? upDown.up : upDown.down;
+    const current = host.options() as unknown as Record<string, unknown>;
+    const changed = Object.fromEntries(Object.entries(wanted).filter(([key, value]) => current[key] !== value));
+    if (Object.keys(changed).length > 0) host.applyOptions(changed);
+  }, [lastPrice.line, lastPrice.label, lastBar, mode, mainKind, upDown]);
 
   // Story 33.9: the Baseline's base value is the close of the first visible bar, re-applied whenever
   // the visible range moves (TradingView's baseline follows the left edge the same way).
@@ -2054,6 +2276,105 @@ export default function LightweightChart({
     if (viewCommand.kind === "fit") timeScale.fitContent();
     else timeScale.scrollToRealTime();
   }, [viewCommand]);
+
+  const labelBarSeconds = mode === "candles" ? barSeconds : null;
+  useEffect(() => {
+    // Story 33.12: the zone the crosshair label and the time axis print in. Formatters only: the data
+    // every series holds keeps its UTC `time` (audit D-218).
+    chartRef.current?.applyOptions({
+      // A daily or weekly candle prints its UTC date (its bucket is a UTC day); Lines-mode seconds and
+      // intraday bars print in the zone.
+      localization: { timeFormatter: (time: Time) => formatChartTime(time as number, timeZone, labelBarSeconds) },
+      timeScale: { tickMarkFormatter: tickMarkFormatter(timeZone) },
+    });
+  }, [timeZone, labelBarSeconds]);
+
+  // False at mount, so a chart mounted in fullscreen (a timeframe change there remounts it) fits too.
+  const fullscreenSeenRef = useRef(false);
+  useEffect(() => {
+    // Story 33.12: entering fullscreen scales the panes to fit the stage (relative heights kept) and
+    // watches the fullscreen element for viewport resizes; leaving restores the stored heights. Both
+    // apply the container's new width at once (the resize observer would follow a frame later). View
+    // only: nothing here reports `onPaneHeights`, so the layout never saves a scaled height.
+    if (fullscreenSeenRef.current === fullscreen) return;
+    fullscreenSeenRef.current = fullscreen;
+    const chart = chartRef.current;
+    const container = containerRef.current;
+    if (!chart || !container) return;
+    chart.applyOptions({ width: container.clientWidth });
+    const observer = resizeObserverRef.current;
+    if (fullscreen) {
+      fullscreenFitRef.current = { stored: currentPaneHeights(chart, panesRef.current), scale: 1 };
+      const host = document.fullscreenElement;
+      if (observer && host) observer.observe(host);
+      observedHostRef.current = host;
+      refitNow();
+      return;
+    }
+    if (observer && observedHostRef.current) observer.unobserve(observedHostRef.current);
+    observedHostRef.current = null;
+    const fit = fullscreenFitRef.current;
+    fullscreenFitRef.current = null;
+    if (fit === null) return;
+    const registry = panesRef.current;
+    layoutPaneHeights(chart, registry, snapshotOf(registry, fit.stored), true, new Map(), knownHeightsRef.current);
+  }, [fullscreen, refitNow]);
+
+  const sessionBreaksRef = useRef<{ host: MainSeriesApi | MainLineSeriesApi; primitive: SessionBreaksPrimitive } | null>(null);
+  useEffect(() => {
+    // Story 33.12: the session breaks, one primitive on the current price host while they are on.
+    const host = mode === "candles" ? seriesRef.current : (lineSeriesRef.current?.price ?? null);
+    const held = sessionBreaksRef.current;
+    if (held && (held.host !== host || !sessionBreaks)) {
+      // A host replaced by a mode or type switch took its primitives with it: nothing to detach.
+      if (held.host === host) held.host.detachPrimitive(held.primitive);
+      sessionBreaksRef.current = null;
+    }
+    if (!host || !sessionBreaks) return;
+    if (sessionBreaksRef.current) {
+      sessionBreaksRef.current.primitive.setTimes(breakTimes);
+      return;
+    }
+    const primitive = new SessionBreaksPrimitive(breakTimes);
+    host.attachPrimitive(primitive);
+    sessionBreaksRef.current = { host, primitive };
+  }, [sessionBreaks, breakTimes, mode, mainKind]);
+
+  const countdownRef = useRef<{ host: MainSeriesApi; primitive: CountdownPrimitive } | null>(null);
+  const countdownOn = mode === "candles" && countdown !== null && countdown.enabled;
+  useEffect(() => {
+    // Story 33.12: the countdown label lives on the candle-mode main series while it is on.
+    const host = mode === "candles" ? seriesRef.current : null;
+    const held = countdownRef.current;
+    if (held && (held.host !== host || !countdownOn)) {
+      if (held.host === host) held.host.detachPrimitive(held.primitive);
+      countdownRef.current = null;
+    }
+    if (!host || !countdownOn || countdownRef.current) return;
+    const primitive = new CountdownPrimitive();
+    host.attachPrimitive(primitive);
+    countdownRef.current = { host, primitive };
+  }, [countdownOn, mode, mainKind]);
+
+  const countdownSeconds = countdown?.barSeconds ?? null;
+  useEffect(() => {
+    // Story 33.12: re-labelled every second from the viewer's clock (audit D-219), and at once on a new
+    // bar or tick. No bars, no label.
+    const primitive = countdownRef.current?.primitive;
+    if (!primitive || !countdownOn || countdownSeconds === null) return;
+    const tick = (): void => {
+      if (lastBar === null) {
+        primitive.setLabel(null);
+        return;
+      }
+      const left = barCountdown(lastBar.time, countdownSeconds, Date.now() / 1000);
+      const color = lastBar.close >= lastBar.open ? upDown.up : upDown.down;
+      primitive.setLabel({ price: lastBar.close, text: formatCountdown(left), color });
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [countdownOn, countdownSeconds, lastBar, upDown, mainKind]);
 
   useEffect(() => {
     // Story 18.4 (AC #2/#6): add/move/remove the replay start marker.

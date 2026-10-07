@@ -36,7 +36,7 @@ import { buildGroups, COLUMN_TIMEFRAMES, columnBarSeconds, reorder } from "./tec
 // whole message is old); stale_instrument_ids is ranking_engine's own per-instrument
 // market-data-staleness judgment, already computed into the message itself. Both are
 // real and both get their own visible marker (Design Notes: "do not conflate").
-const RANKING_STALE_MS = 15_000;
+export const RANKING_STALE_MS = 15_000;
 
 // One bulk indicator recompute for every ranked coin per poll -- slow by design.
 const TECHNICALS_POLL_MS = 60_000;

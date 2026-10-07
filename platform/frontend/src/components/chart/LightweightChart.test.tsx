@@ -35,6 +35,9 @@ import type { MarkerSpec } from "./LiquidationMarkers";
 import type { ChartType } from "../../lib/chartTypes";
 import type { ChartTool } from "../../lib/chartTools";
 import { ChannelPrimitive } from "./primitives/ChannelPrimitive";
+import { SessionBreaksPrimitive } from "./primitives/SessionBreaksPrimitive";
+import { CountdownPrimitive } from "./primitives/CountdownPrimitive";
+import { formatChartTime, tickMarkFormatter } from "../../lib/time";
 
 const addSeriesMock = vi.fn();
 const seriesUpdateMock = vi.fn();
@@ -3513,5 +3516,282 @@ describe("plot hints, markers-only series and pattern markers (Story 33.11)", ()
     const handler = subscribeCrosshairMoveMock.mock.calls.at(-1)![0];
     act(() => handler({ time: 60, point: { x: 10, y: 20 }, seriesData: new Map(), hoveredObjectId: "pat:CandlePattern_x:60" }));
     expect(screen.getByRole("tooltip")).toHaveTextContent("Evening starbearish");
+  });
+});
+
+describe("time zone, session breaks, countdown, last price and fullscreen (Story 33.12)", () => {
+  const HOUR = 3600;
+  const DAY = 86_400;
+  // Hourly bars from 22:00 to 02:00 UTC across one midnight; the last one closed below its open.
+  const bars = [22, 23, 24, 25, 26].map((h, i) => ({
+    time: (h * HOUR) as Time,
+    open: 100,
+    high: 101,
+    low: 99,
+    close: i === 4 ? 99.5 : 100.5,
+  }));
+  const mainSeries = () => {
+    const index = addSeriesMock.mock.calls.findIndex((c) => c[0] === "CandlestickSeries-sentinel");
+    return addSeriesMock.mock.results[index].value as ReturnType<typeof makeSeriesMock>;
+  };
+  const attached = <T,>(type: new (...args: never[]) => T): T[] =>
+    attachPrimitiveMock.mock.calls.map((c) => c[0]).filter((p): p is T => p instanceof type);
+  const localization = () =>
+    applyOptionsMock.mock.calls
+      .map((c) => c[0] as { localization?: { timeFormatter: (t: number) => string }; timeScale?: { tickMarkFormatter: unknown } })
+      .filter((o) => o.localization !== undefined)
+      .at(-1);
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("prints times in the chosen zone through lib/time.ts and never re-sends the bars for it", () => {
+    const { rerender } = render(chartElement({ data: bars }));
+    expect(localization()!.localization!.timeFormatter(bars[0].time as number)).toBe(formatChartTime(22 * HOUR, "utc"));
+    const setDataCalls = setDataMock.mock.calls.length;
+
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} timeZone="local" />);
+    const applied = localization()!;
+    expect(applied.localization!.timeFormatter(22 * HOUR)).toBe(formatChartTime(22 * HOUR, "local"));
+    const tick = applied.timeScale!.tickMarkFormatter as ReturnType<typeof tickMarkFormatter>;
+    expect(tick(23 * HOUR, 3)).toBe(tickMarkFormatter("local")(23 * HOUR, 3));
+    // Formatting only: the zone change hands the series no data at all.
+    expect(setDataMock.mock.calls.length).toBe(setDataCalls);
+  });
+
+  it("applies the last-price line and label switches, the line in the last bar's direction colour", () => {
+    const { rerender } = render(chartElement({ data: bars }));
+    expect(mainSeries().options()).toMatchObject({ priceLineVisible: true, lastValueVisible: true, priceLineColor: CHART_TOKENS["--chart-down"] });
+
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} lastPrice={{ line: false, label: true }} />);
+    expect(mainSeries().options()).toMatchObject({ priceLineVisible: false, lastValueVisible: true });
+
+    const up = [...bars.slice(0, 4), { ...bars[4], close: 100.5 }];
+    rerender(<LightweightChart data={up} onChartApi={() => {}} lastPrice={{ line: true, label: false }} />);
+    expect(mainSeries().options()).toMatchObject({ priceLineVisible: true, lastValueVisible: false, priceLineColor: CHART_TOKENS["--chart-up"] });
+  });
+
+  it("draws a session break at the first bar of each UTC day, none at daily bars, and removes it when turned off", () => {
+    const { rerender } = render(chartElement({ data: bars }));
+    expect(attached(SessionBreaksPrimitive)).toHaveLength(0);
+
+    // The breaks read their own bar size, never the countdown's: no countdown is passed at all.
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} sessionBreaks barSeconds={HOUR} />);
+    const [primitive] = attached(SessionBreaksPrimitive);
+    expect((primitive as unknown as { times: readonly number[] }).times).toEqual([DAY]);
+
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} sessionBreaks barSeconds={DAY} countdown={{ barSeconds: HOUR, enabled: true }} />);
+    expect((primitive as unknown as { times: readonly number[] }).times).toEqual([]);
+
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} barSeconds={HOUR} />);
+    expect(detachPrimitiveMock).toHaveBeenCalledWith(primitive);
+  });
+
+  it("breaks at a new UTC day's first bar arriving on the live feed, without a history refetch", () => {
+    const sameDay = bars.slice(0, 2); // 22:00 and 23:00, both on day 0
+    const { rerender } = render(<LightweightChart data={sameDay} onChartApi={() => {}} sessionBreaks barSeconds={HOUR} />);
+    const [primitive] = attached(SessionBreaksPrimitive);
+    expect((primitive as unknown as { times: readonly number[] }).times).toEqual([]);
+
+    const live = { time: DAY as Time, open: 100, high: 101, low: 99, close: 100, volume: 1 };
+    rerender(<LightweightChart data={sameDay} onChartApi={() => {}} sessionBreaks barSeconds={HOUR} liveBar={live} />);
+    expect((primitive as unknown as { times: readonly number[] }).times).toEqual([DAY]);
+  });
+
+  it("prints a daily or weekly bar's crosshair time as its UTC date, intraday bars and Lines seconds in the zone", () => {
+    const { rerender } = render(<LightweightChart data={bars} onChartApi={() => {}} timeZone="local" barSeconds={DAY} />);
+    expect(localization()!.localization!.timeFormatter(DAY)).toBe("1970-01-02");
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} timeZone="local" barSeconds={HOUR} />);
+    expect(localization()!.localization!.timeFormatter(DAY)).toBe(formatChartTime(DAY, "local"));
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} timeZone="local" barSeconds={DAY} mode="lines" />);
+    expect(localization()!.localization!.timeFormatter(DAY)).toBe(formatChartTime(DAY, "local"));
+  });
+
+  it("colours the last-price line and places the countdown by the drawn Heikin Ashi bar, not the real one", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime((26 * HOUR + 15 * 60) * 1000);
+    // The real last bar closes up (100 -> 100.5); its Heikin Ashi bar opens at the previous HA body's
+    // middle and closes at the bar's OHLC mean, below that open: drawn down.
+    const rising = [
+      { time: (24 * HOUR) as Time, open: 110, high: 111, low: 109, close: 110 },
+      { time: (25 * HOUR) as Time, open: 100, high: 101, low: 99, close: 100.5 },
+    ];
+    render(<LightweightChart data={rising} onChartApi={() => {}} chartType="heikin_ashi" countdown={{ barSeconds: HOUR, enabled: true }} />);
+    const series = addSeriesMock.mock.results.at(-1)!.value as ReturnType<typeof makeSeriesMock>;
+    expect(series.options()).toMatchObject({ priceLineColor: CHART_TOKENS["--chart-down"] });
+
+    const [primitive] = attached(CountdownPrimitive);
+    const asked: number[] = [];
+    const priceToCoordinate = (p: number) => {
+      asked.push(p);
+      return p;
+    };
+    primitive.attached({ series: { priceToCoordinate }, requestUpdate: () => {} } as never);
+    primitive.updateAllViews();
+    expect(asked.at(-1)).toBe((100 + 101 + 99 + 100.5) / 4); // the HA close, not the real 100.5
+  });
+
+  it("counts down to the forming bar's close under the last price, by the viewer's clock, in Candles mode only", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime((26 * HOUR + 15 * 60) * 1000); // 15 min into the 02:00 bar
+    const countdown = { barSeconds: HOUR, enabled: true };
+    render(<LightweightChart data={bars} onChartApi={() => {}} countdown={countdown} />);
+    const [primitive] = attached(CountdownPrimitive);
+    primitive.attached({ series: { priceToCoordinate: (p: number) => p }, requestUpdate: () => {} } as never);
+    primitive.updateAllViews();
+    expect(primitive.shown()?.text).toBe("45:00");
+
+    act(() => vi.advanceTimersByTime(1000));
+    primitive.updateAllViews();
+    expect(primitive.shown()?.text).toBe("44:59");
+    cleanup();
+    attachPrimitiveMock.mockReset();
+
+    render(<LightweightChart data={bars} onChartApi={() => {}} mode="lines" countdown={countdown} />);
+    expect(attached(CountdownPrimitive)).toHaveLength(0);
+  });
+
+  describe("fullscreen fit", () => {
+    const STAGE_PX = 900;
+    let host: HTMLElement;
+    beforeEach(() => {
+      host = document.body;
+      Object.defineProperty(host, "clientHeight", { configurable: true, get: () => STAGE_PX });
+    });
+    afterEach(() => {
+      delete (host as { clientHeight?: number }).clientHeight;
+      delete (document as { fullscreenElement?: Element | null }).fullscreenElement;
+    });
+    const setFullscreenElement = (element: Element | null) =>
+      Object.defineProperty(document, "fullscreenElement", { configurable: true, get: () => element });
+    const volumeOnly = [makePaneSpec("volume", { kind: "Histogram" })];
+    const el = (fullscreen: boolean, onPaneHeights = vi.fn()) => (
+      <LightweightChart data={bars} onChartApi={() => {}} panes={volumeOnly} fullscreen={fullscreen} onPaneHeights={onPaneHeights} />
+    );
+
+    it("scales every pane to fit the stage on entry, keeping their relative heights, and restores them on exit", () => {
+      const onPaneHeights = vi.fn();
+      const { rerender } = render(el(false, onPaneHeights));
+      pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX);
+      addedPane(0).getHeight.mockReturnValue(VOLUME_PANE_PX);
+
+      setFullscreenElement(host);
+      rerender(el(true, onPaneHeights));
+      // 900 px of stage less one separator and the time axis, split 500 : 120.
+      const scale = (STAGE_PX - 1 - TIME_AXIS_PX) / (PRICE_PANE_PX + VOLUME_PANE_PX);
+      const price = Math.floor(PRICE_PANE_PX * scale);
+      const volume = Math.floor(VOLUME_PANE_PX * scale);
+      expect(pricePaneMock.setStretchFactor).toHaveBeenLastCalledWith(price);
+      expect(addedPane(0).setStretchFactor).toHaveBeenLastCalledWith(volume);
+      expect(lastChartHeight()).toBe(price + volume + 1 + TIME_AXIS_PX);
+      expect(lastChartHeight()).toBeLessThanOrEqual(STAGE_PX);
+      expect(price / volume).toBeCloseTo(PRICE_PANE_PX / VOLUME_PANE_PX, 1);
+
+      setFullscreenElement(null);
+      rerender(el(false, onPaneHeights));
+      expect(pricePaneMock.setStretchFactor).toHaveBeenLastCalledWith(PRICE_PANE_PX);
+      expect(addedPane(0).setStretchFactor).toHaveBeenLastCalledWith(VOLUME_PANE_PX);
+      expect(lastChartHeight()).toBe(PRICE_PANE_PX + VOLUME_PANE_PX + 1 + TIME_AXIS_PX);
+      // View state only: neither transition is reported as a layout change.
+      expect(onPaneHeights).not.toHaveBeenCalled();
+    });
+
+    it("saves a divider drag made in fullscreen at the stored scale, never the scaled heights", () => {
+      const onPaneHeights = vi.fn();
+      const { rerender, container } = render(el(false, onPaneHeights));
+      pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX);
+      addedPane(0).getHeight.mockReturnValue(VOLUME_PANE_PX);
+      setFullscreenElement(host);
+      rerender(el(true, onPaneHeights));
+      const scale = (STAGE_PX - 1 - TIME_AXIS_PX) / (PRICE_PANE_PX + VOLUME_PANE_PX);
+      pricePaneMock.getHeight.mockReturnValue(Math.floor(PRICE_PANE_PX * scale));
+      addedPane(0).getHeight.mockReturnValue(Math.floor(VOLUME_PANE_PX * scale));
+
+      fireEvent.pointerDown(container.firstElementChild as HTMLElement);
+      pricePaneMock.getHeight.mockReturnValue(600);
+      addedPane(0).getHeight.mockReturnValue(270);
+      fireEvent.pointerUp(window);
+
+      expect(onPaneHeights).toHaveBeenCalledTimes(1);
+      expect(onPaneHeights).toHaveBeenCalledWith({ price: Math.round(600 / scale), volume: Math.round(270 / scale) });
+      setFullscreenElement(null);
+      rerender(el(false, onPaneHeights));
+      expect(pricePaneMock.setStretchFactor).toHaveBeenLastCalledWith(Math.round(600 / scale));
+    });
+
+    it("keeps a pane the fullscreen drag did not resize at its stored height exactly, never re-rounded", () => {
+      const onPaneHeights = vi.fn();
+      const { rerender, container } = render(el(false, onPaneHeights));
+      pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX);
+      addedPane(0).getHeight.mockReturnValue(VOLUME_PANE_PX);
+      // A stage where floor-then-round does move the volume pane (400 px: 71.8 shown as 71, back as 119).
+      const stagePx = 400;
+      Object.defineProperty(host, "clientHeight", { configurable: true, get: () => stagePx });
+      setFullscreenElement(host);
+      rerender(el(true, onPaneHeights));
+      const scale = (stagePx - 1 - TIME_AXIS_PX) / (PRICE_PANE_PX + VOLUME_PANE_PX);
+      const volumeShown = Math.floor(VOLUME_PANE_PX * scale);
+      pricePaneMock.getHeight.mockReturnValue(Math.floor(PRICE_PANE_PX * scale));
+      addedPane(0).getHeight.mockReturnValue(volumeShown);
+
+      fireEvent.pointerDown(container.firstElementChild as HTMLElement);
+      pricePaneMock.getHeight.mockReturnValue(600);
+      fireEvent.pointerUp(window);
+
+      expect(Math.round(volumeShown / scale)).not.toBe(VOLUME_PANE_PX); // what re-rounding would save
+      expect(onPaneHeights).toHaveBeenCalledWith({ price: Math.round(600 / scale), volume: VOLUME_PANE_PX });
+    });
+
+    it("never lays the panes out taller than a tiny stage's budget when the 1 px floor lifts several", () => {
+      const panes = [makePaneSpec("volume", { kind: "Histogram" }), makePaneSpec("a"), makePaneSpec("b")];
+      const { rerender } = render(<LightweightChart data={bars} onChartApi={() => {}} panes={panes} fullscreen={false} />);
+      pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX);
+      [VOLUME_PANE_PX, INDICATOR_PANE_PX, INDICATOR_PANE_PX].forEach((px, i) => addedPane(i).getHeight.mockReturnValue(px));
+      const panesPx = 4;
+      Object.defineProperty(host, "clientHeight", { configurable: true, get: () => panesPx + 3 + TIME_AXIS_PX });
+      setFullscreenElement(host);
+      rerender(<LightweightChart data={bars} onChartApi={() => {}} panes={panes} fullscreen />);
+
+      const shown = [pricePaneMock, addedPane(0), addedPane(1), addedPane(2)].map((pane) => pane.setStretchFactor.mock.lastCall?.[0] as number);
+      expect(shown.every((px) => px >= 1)).toBe(true);
+      expect(shown.reduce((sum, px) => sum + px, 0)).toBe(panesPx);
+    });
+
+    it("watches the fullscreen element for viewport resizes while fullscreen only", () => {
+      const observed: Element[] = [];
+      const unobserved: Element[] = [];
+      const Original = globalThis.ResizeObserver;
+      globalThis.ResizeObserver = class {
+        observe(target: Element): void {
+          observed.push(target);
+        }
+        unobserve(target: Element): void {
+          unobserved.push(target);
+        }
+        disconnect(): void {}
+      };
+      try {
+        const { rerender } = render(el(false));
+        setFullscreenElement(host);
+        rerender(el(true));
+        expect(observed).toContain(host);
+        setFullscreenElement(null);
+        rerender(el(false));
+        expect(unobserved).toEqual([host]);
+      } finally {
+        globalThis.ResizeObserver = Original;
+      }
+    });
+  });
+
+  it("re-applies the container's width on entering and on leaving fullscreen", () => {
+    const widthCalls = () => applyOptionsMock.mock.calls.filter((c) => Object.keys(c[0] as object).join() === "width").length;
+    const { rerender } = render(chartElement({ data: bars }));
+    const before = widthCalls();
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} fullscreen />);
+    expect(widthCalls()).toBe(before + 1);
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} fullscreen={false} />);
+    expect(widthCalls()).toBe(before + 2);
   });
 });

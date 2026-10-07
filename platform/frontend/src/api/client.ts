@@ -40,6 +40,7 @@ import type {
   SnapshotSeriesResponse,
   TechnicalsColumn,
   TechnicalsValuesResponse,
+  WatchlistResponse,
 } from "./schema";
 
 export type {
@@ -75,6 +76,7 @@ export type {
   RankingsResponse,
   SnapshotSeriesResponse,
   TechnicalsColumn,
+  WatchlistResponse,
 };
 
 /** A non-2xx response, with its status so callers can tell a proxy hiccup (502/503/504) from a
@@ -353,6 +355,28 @@ export async function saveFilterPresets(presets: FilterPresetItem[]): Promise<Fi
     throw new Error(`PUT /api/rankings/filter-presets failed: ${res.status} ${JSON.stringify(body)}`);
   }
   return ((await res.json()) as FilterPresetsResponse).presets;
+}
+
+// Story 33.12: the chart page's pinned instruments (the watchlist rail) -- one server-side list
+// (`chart_watchlist.toml`), so a pin made in one browser shows in every other.
+export async function fetchWatchlist(): Promise<WatchlistResponse> {
+  const res = await fetch("/api/watchlist");
+  if (!res.ok) throw new HttpError(res.status, `GET /api/watchlist failed: ${res.status}`);
+  return (await res.json()) as WatchlistResponse;
+}
+
+/** Replace the whole list; resolves to what the server stored. A 422 names the refused entry. */
+export async function saveWatchlist(instruments: string[]): Promise<WatchlistResponse> {
+  const res = await fetch("/api/watchlist", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ instruments }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new HttpError(res.status, `PUT /api/watchlist failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return (await res.json()) as WatchlistResponse;
 }
 
 // Latest value of every requested indicator for every ranked instrument, keyed

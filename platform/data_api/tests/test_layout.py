@@ -52,6 +52,10 @@ _LAYOUT_KEYS = {
     "price_scale",
     "compare",
     "drawings_hidden",  # likewise (Story 33.10)
+    "time_zone",  # likewise (Story 33.12)
+    "session_breaks",
+    "bar_countdown",
+    "last_price",
 }
 
 
@@ -484,3 +488,52 @@ def test_put_roundtrips_footprint_settings(client: TestClient) -> None:
     }
     client.put(f"/api/coin/{_IID}/layout", json={"layout": _layout(footprint=footprint)})
     assert client.get(f"/api/coin/{_IID}/layout").json()["layout"]["footprint"] == footprint
+
+
+# -- Story 33.12: time zone, session breaks, countdown and last price ------------------------------
+
+
+def test_put_roundtrips_the_story_33_12_settings(client: TestClient) -> None:
+    settings_33_12 = {
+        "time_zone": "exchange",
+        "session_breaks": True,
+        "bar_countdown": False,
+        "last_price": {"line": False, "label": True},
+    }
+    saved = client.put(f"/api/coin/{_IID}/layout", json={"layout": _layout(**settings_33_12)})
+    assert saved.status_code == 200
+    served = client.get(f"/api/coin/{_IID}/layout").json()["layout"]
+    assert {key: served[key] for key in settings_33_12} == settings_33_12
+
+
+@pytest.mark.parametrize(
+    ("over", "key"),
+    [
+        ({"time_zone": "Europe/Copenhagen"}, "time_zone"),
+        ({"session_breaks": "on"}, "session_breaks"),
+        ({"bar_countdown": None}, "bar_countdown"),
+        ({"last_price": {"line": True}}, "last_price.label"),
+        ({"last_price": {"line": True, "label": True, "color": "#fff"}}, "last_price.color"),
+    ],
+)
+def test_put_with_a_bad_story_33_12_setting_is_a_422_naming_it(
+    client: TestClient, tmp_path: Path, over: dict[str, object], key: str
+) -> None:
+    response = client.put(f"/api/coin/{_IID}/layout", json={"layout": _layout(**over)})
+    assert response.status_code == 422
+    assert response.json()["detail"].startswith(f"{key}:")
+    assert not (tmp_path / "chart_layouts.toml").exists()
+
+
+def test_put_without_the_story_33_12_settings_serves_their_defaults(client: TestClient) -> None:
+    layout = _layout()
+    for key in ("time_zone", "session_breaks", "bar_countdown", "last_price"):
+        del layout[key]
+    client.put(f"/api/coin/{_IID}/layout", json={"layout": layout})
+    served = client.get(f"/api/coin/{_IID}/layout").json()["layout"]
+    assert (
+        served["time_zone"],
+        served["session_breaks"],
+        served["bar_countdown"],
+        served["last_price"],
+    ) == ("utc", False, True, {"line": True, "label": True})
