@@ -1,3 +1,5 @@
+import type { InstrumentPrecision, NewDrawingContext } from "../../lib/drawings";
+
 // Story 32.4 (quick-dev, 2026-10-01): the classic light chart inside the dark terminal app.
 //
 // Everything the chart draws takes its colour from the `--chart-*` tokens declared on
@@ -119,4 +121,19 @@ const FIB_LEVEL_TOKENS: Record<number, ChartToken> = {
 /** A Fibonacci ratio's default colour, for the placed drawing and its drag preview alike. */
 export function fibLevelColor(ratio: number): string {
   return chartVar(FIB_LEVEL_TOKENS[ratio] ?? "--chart-drawing");
+}
+
+/**
+ * Story 33.10: the chart tokens a new drawing is made with (`buildDrawing`), resolved now: the page's
+ * placement and the chart's preview of it read this one function, so the preview is the drawing.
+ */
+export function newDrawingContext(precision: InstrumentPrecision | null): NewDrawingContext {
+  return {
+    precision,
+    color: chartVar("--chart-drawing"),
+    upColor: chartVar("--chart-up"),
+    downColor: chartVar("--chart-down"),
+    bandColor: chartVar("--chart-pane-4"),
+    fibColor: fibLevelColor,
+  };
 }

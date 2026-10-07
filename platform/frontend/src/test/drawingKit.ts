@@ -8,6 +8,9 @@ export function fakeContext() {
   const rects: { x: number; y: number; w: number; h: number; style: unknown; lineWidth: number }[] = [];
   const fills: { x: number; y: number; w: number; h: number; alpha: number; style: unknown }[] = [];
   const strokes: { from: [number, number]; to: [number, number]; style: unknown }[] = [];
+  // Story 33.10: a filled path (a channel's band), with the dash pattern each stroke was drawn in.
+  const polygons: { points: [number, number][]; alpha: number; style: unknown }[] = [];
+  const dashes: number[][] = [];
   let path: [number, number][] = [];
   const context = {
     globalAlpha: 1,
@@ -27,7 +30,11 @@ export function fakeContext() {
     stroke: () => {
       if (path.length >= 2) strokes.push({ from: path[0], to: path[path.length - 1], style: context.strokeStyle });
     },
-    setLineDash: vi.fn(),
+    closePath: vi.fn(),
+    fill: () => polygons.push({ points: [...path], alpha: context.globalAlpha, style: context.fillStyle }),
+    setLineDash: vi.fn((pattern: number[]) => {
+      dashes.push(pattern);
+    }),
     fillRect: (x: number, y: number, w: number, h: number) =>
       fills.push({ x, y, w, h, alpha: context.globalAlpha, style: context.fillStyle }),
     strokeRect: (x: number, y: number, w: number, h: number) =>
@@ -36,7 +43,7 @@ export function fakeContext() {
     // A fixed 6 px per character: enough to tell a text that fits its box from one that does not.
     measureText: (text: string) => ({ width: text.length * 6 }),
   };
-  return { context, texts, fills, strokes, rects };
+  return { context, texts, fills, strokes, rects, polygons, dashes };
 }
 
 /** Run the primitive's renderer into a fake pane `width` bitmap pixels wide (1:1 pixel ratio). */

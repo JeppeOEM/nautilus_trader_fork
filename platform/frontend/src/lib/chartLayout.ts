@@ -159,6 +159,9 @@ export interface ChartLayout {
   price_scale: PriceScaleLayout;
   /** Story 33.9: optional on the wire (absent = `DEFAULT_COMPARE`). */
   compare: CompareLayout;
+  /** Story 33.10: the rail's "Hide all drawings": none is drawn or hit-tested, and the drawing tools
+   * are off. Optional on the wire (absent = false); mirrored by `views.preferences`' layout key. */
+  drawings_hidden: boolean;
 }
 
 export const BUILT_IN_LAYOUT: ChartLayout = {
@@ -203,6 +206,7 @@ export const BUILT_IN_LAYOUT: ChartLayout = {
   chart_type: "candles",
   price_scale: DEFAULT_PRICE_SCALE,
   compare: DEFAULT_COMPARE,
+  drawings_hidden: false,
 };
 
 export const PROFILE_KINDS: readonly ProfileKind[] = ["off", "visible", "fixed", "session", "auto", "tpo"];
@@ -426,6 +430,15 @@ function chartTypeOf(raw: unknown, present: boolean, fallbacks: string[]): Chart
   return type ?? BUILT_IN_LAYOUT.chart_type;
 }
 
+/** Story 33.10: Hide all drawings: absent (a layout saved before it) is off, silently; a non-boolean
+ * falls back to off by name. */
+function drawingsHiddenOf(raw: unknown, present: boolean, fallbacks: string[]): boolean {
+  if (!present) return BUILT_IN_LAYOUT.drawings_hidden;
+  if (typeof raw === "boolean") return raw;
+  fallbacks.push("drawings_hidden");
+  return BUILT_IN_LAYOUT.drawings_hidden;
+}
+
 /** The price scale table: absent is the default, silently; each unusable field falls back by name. */
 function priceScaleOf(raw: unknown, present: boolean, fallbacks: string[]): PriceScaleLayout {
   if (!present) return { ...DEFAULT_PRICE_SCALE };
@@ -512,6 +525,7 @@ export function normalizeLayout(raw: unknown, instrumentId?: string): { layout: 
     chart_type: chartTypeOf(source.chart_type, "chart_type" in source, fallbacks),
     price_scale: priceScaleOf(source.price_scale, "price_scale" in source, fallbacks),
     compare: compareOf(source.compare, "compare" in source, fallbacks, instrumentId),
+    drawings_hidden: drawingsHiddenOf(source.drawings_hidden, "drawings_hidden" in source, fallbacks),
   };
   if (fallbacks.length > 0) {
     console.error(

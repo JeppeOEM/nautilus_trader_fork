@@ -14,6 +14,7 @@
 """
 `views.preferences`' drawings resource (Story 32.5): the TOML round trip of every kind, and the
 strict validation that names the offending field (a malformed item is refused, never dropped).
+Story 33.10 adds the second drawing set, the optional `locked`/`hidden` and the line look.
 """
 
 import copy
@@ -25,7 +26,12 @@ from typing import Any
 import pytest
 
 from views.preferences import ANCHORED_VWAP_SOURCES
+from views.preferences import DERIVATIVE_LINE_STYLES
 from views.preferences import DRAWING_KINDS
+from views.preferences import LINE_STYLES
+from views.preferences import MAX_DRAWING_FONT_SIZE
+from views.preferences import MAX_DRAWING_TEXT_LENGTH
+from views.preferences import MIN_DRAWING_FONT_SIZE
 from views.preferences import VWAP_SOURCES
 from views.preferences import DrawingError
 from views.preferences import load_chart_drawings
@@ -99,6 +105,67 @@ def _anchored_vwap() -> dict[str, Any]:
         "color": "#2962ff",
         "band_color": "#b26a00",
     }
+
+
+_THREE = [*_ANCHORS, {"time": 1_800_007_200, "price": 95.25}]
+
+
+def _two_point(kind: str) -> dict[str, Any]:
+    return {"kind": kind, "id": f"{kind}-1", "anchors": copy.deepcopy(_ANCHORS)}
+
+
+def _vline() -> dict[str, Any]:
+    return {"kind": "vline", "id": "vline-1", "time": 1_800_000_000}
+
+
+def _rect() -> dict[str, Any]:
+    return {**_two_point("rect"), "fill_opacity": 0.2}
+
+
+def _channel() -> dict[str, Any]:
+    return {**_two_point("channel"), "offset": -4.5}
+
+
+def _text() -> dict[str, Any]:
+    return {
+        "kind": "text",
+        "id": "text-1",
+        "anchor": {"time": 1_800_000_000, "price": 100.0},
+        "text": "breakout\nretest",
+        "font_size": 14,
+        "color": "#ffffff",
+    }
+
+
+def _fib_extension() -> dict[str, Any]:
+    return {
+        **_fib(),
+        "kind": "fib_extension",
+        "id": "fib_extension-1",
+        "anchors": copy.deepcopy(_THREE),
+    }
+
+
+def _all_kinds() -> list[dict[str, Any]]:
+    """One item of each of the 16 kinds, in `DRAWING_KINDS` order."""
+    return [
+        _hline(),
+        _trendline(),
+        _fib(),
+        _position(),
+        _anchored_vp(),
+        _anchored_vwap(),
+        _two_point("ray"),
+        _two_point("extended"),
+        _vline(),
+        _rect(),
+        _channel(),
+        _text(),
+        _two_point("arrow"),
+        _fib_extension(),
+        _two_point("price_range"),
+        _two_point("date_range"),
+    ]
 
 
 def test_every_kind_round_trips_through_the_file_unchanged(tmp_path: Path) -> None:
@@ -306,3 +373,166 @@ def test_an_old_file_of_the_four_original_kinds_loads_unchanged(tmp_path: Path) 
     items = [_hline(), _trendline(), _fib(), _position()]
     save_chart_drawings({_IID: items}, path)
     assert load_chart_drawings(path) == {_IID: items}
+
+
+# -- Story 33.10: the second drawing set, lock / hide and the line look ----------------------------
+
+
+def test_every_story_33_10_kind_round_trips_through_the_file_unchanged(tmp_path: Path) -> None:
+    path = tmp_path / "chart_drawings.toml"
+    items = _all_kinds()
+    assert [item["kind"] for item in items] == list(DRAWING_KINDS)
+    save_chart_drawings({_IID: items}, path)
+    assert load_chart_drawings(path) == {_IID: items}
+
+
+def test_lock_hide_and_the_line_look_round_trip_on_the_kinds_that_take_them(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chart_drawings.toml"
+    look = {"line_width": 3, "line_style": "dotted", "locked": True, "hidden": False}
+    items = [
+        {**_hline(), **look},
+        {**_trendline(), **look},
+        {**_two_point("ray"), "line_style": "dashed"},
+        {**_vline(), "line_width": 4},
+        {**_rect(), **look},
+        {**_channel(), "hidden": True},
+        {**_text(), "locked": True, "hidden": True},
+        {**_fib_extension(), "locked": False},
+        {**_position(), "hidden": True},
+        {**_anchored_vwap(), "locked": True},
+    ]
+    save_chart_drawings({_IID: items}, path)
+    assert load_chart_drawings(path) == {_IID: items}
+
+
+def test_an_old_file_of_the_six_pre_33_10_kinds_loads_unchanged(tmp_path: Path) -> None:
+    path = tmp_path / "chart_drawings.toml"
+    items = _all_kinds()[:6]
+    save_chart_drawings({_IID: items}, path)
+    assert load_chart_drawings(path) == {_IID: items}
+    assert all("locked" not in item and "hidden" not in item for item in items)
+
+
+def test_a_text_of_the_maximum_length_and_the_font_bounds_are_kept() -> None:
+    for font_size in (MIN_DRAWING_FONT_SIZE, MAX_DRAWING_FONT_SIZE):
+        item = {**_text(), "text": "x" * MAX_DRAWING_TEXT_LENGTH, "font_size": font_size}
+        assert validate_drawing(item) == item
+
+
+def test_a_rect_takes_an_opacity_of_zero_or_one_and_a_channel_any_finite_offset() -> None:
+    for opacity in (0, 1, 0.5):
+        assert validate_drawing({**_rect(), "fill_opacity": opacity})["fill_opacity"] == opacity
+    for offset in (0, 12.5, -0.001):
+        assert validate_drawing({**_channel(), "offset": offset})["offset"] == offset
+
+
+@pytest.mark.parametrize(
+    ("item", "field"),
+    [
+        ({**_two_point("ray"), "anchors": _THREE}, "anchors"),
+        ({**_two_point("extended"), "anchors": _ANCHORS[:1]}, "anchors"),
+        (_without(_two_point("arrow"), "anchors"), "anchors"),
+        (
+            {**_two_point("price_range"), "anchors": [{"time": 1, "price": "1"}, _ANCHORS[1]]},
+            "anchors",
+        ),
+        ({**_two_point("date_range"), "anchors": [{"time": 1}, _ANCHORS[1]]}, "anchors"),
+        ({**_fib_extension(), "anchors": copy.deepcopy(_ANCHORS)}, "anchors"),
+        (_without(_fib_extension(), "levels"), "levels"),
+        ({**_fib_extension(), "line_width": 0}, "line_width"),
+        ({**_fib_extension(), "line_style": "dashed"}, "line_style"),  # not a fib field
+        ({**_two_point("ray"), "offset": 1.0}, "offset"),  # not a field of a ray
+        ({**_text(), "line_width": 2}, "line_width"),  # a text has no line look
+        ({**_position(), "line_style": "solid"}, "line_style"),
+        ({**_anchored_vp(), "line_width": 1}, "line_width"),
+        ({**_hline(), "line_width": 0}, "line_width"),
+        ({**_hline(), "line_width": 5}, "line_width"),
+        ({**_trendline(), "line_width": True}, "line_width"),
+        ({**_trendline(), "line_width": 1.5}, "line_width"),
+        ({**_two_point("arrow"), "line_style": "wavy"}, "line_style"),
+        ({**_two_point("arrow"), "line_style": None}, "line_style"),
+        ({**_trendline(), "locked": "yes"}, "locked"),
+        ({**_fib(), "locked": 1}, "locked"),
+        ({**_vline(), "hidden": None}, "hidden"),
+        (_without(_vline(), "time"), "time"),
+        ({**_vline(), "time": 1.5}, "time"),
+        ({**_vline(), "anchors": _ANCHORS}, "anchors"),  # not a field of a vline
+        (_without(_rect(), "fill_opacity"), "fill_opacity"),
+        ({**_rect(), "fill_opacity": -0.1}, "fill_opacity"),
+        ({**_rect(), "fill_opacity": 1.5}, "fill_opacity"),
+        ({**_rect(), "fill_opacity": True}, "fill_opacity"),
+        ({**_rect(), "fill_opacity": float("nan")}, "fill_opacity"),
+        ({**_rect(), "anchors": _THREE}, "anchors"),
+        (_without(_channel(), "offset"), "offset"),
+        ({**_channel(), "offset": "1"}, "offset"),
+        ({**_channel(), "offset": float("inf")}, "offset"),
+        ({**_channel(), "offset": False}, "offset"),
+        (_without(_text(), "anchor"), "anchor"),
+        ({**_text(), "anchor": {"time": 1}}, "anchor"),
+        ({**_text(), "anchor": {"time": 1.5, "price": 1.0}}, "anchor"),
+        ({**_text(), "anchor": {"time": 1, "price": float("nan")}}, "anchor"),
+        ({**_text(), "anchor": [1, 2]}, "anchor"),
+        ({**_text(), "anchors": _ANCHORS}, "anchors"),  # a text has one `anchor`
+        (_without(_text(), "text"), "text"),
+        ({**_text(), "text": ""}, "text"),
+        ({**_text(), "text": "   \n"}, "text"),
+        ({**_text(), "text": 5}, "text"),
+        ({**_text(), "text": "x" * (MAX_DRAWING_TEXT_LENGTH + 1)}, "text"),
+        # A lone surrogate: no UTF-8 for the file.
+        ({**_text(), "text": "half \ud83d emoji"}, "text"),
+        (_without(_text(), "font_size"), "font_size"),
+        ({**_text(), "font_size": MIN_DRAWING_FONT_SIZE - 1}, "font_size"),
+        ({**_text(), "font_size": MAX_DRAWING_FONT_SIZE + 1}, "font_size"),
+        ({**_text(), "font_size": 12.0}, "font_size"),
+        ({**_text(), "font_size": True}, "font_size"),
+        ({"kind": "zigzag", "id": "zigzag-1"}, "kind"),
+    ],
+)
+def test_a_malformed_story_33_10_item_is_refused_naming_the_field(
+    item: dict[str, Any], field: str
+) -> None:
+    with pytest.raises(DrawingError) as raised:
+        validate_drawing(item)
+    assert raised.value.field == field
+
+
+def test_a_malformed_new_kind_in_a_list_names_the_item_and_its_field() -> None:
+    with pytest.raises(DrawingError, match=r"items\[1\]\.fill_opacity"):
+        validate_drawings([_hline(), {**_rect(), "fill_opacity": 2}])
+
+
+def test_line_styles_mirror_the_frontend() -> None:
+    root = Path(__file__).parents[2] / "frontend/src/lib"
+    style = (root / "indicatorStyle.ts").read_text()
+    styles = re.search(r"LINE_STYLES: readonly LineStyleName\[\] = \[([^\]]*)\]", style)
+    assert styles is not None
+    assert tuple(re.findall(r'"(\w+)"', styles.group(1))) == LINE_STYLES
+    # The drawings re-export the one frontend definition rather than declaring a second list:
+    # `export { LINE_STYLES } from "./indicatorStyle"`, or an import of it plus an `export { }`.
+    drawings = (root / "drawings.ts").read_text()
+    reexported = re.search(
+        r'export\s*\{[^}]*\bLINE_STYLES\b[^}]*\}\s*from\s*"\./indicatorStyle"', drawings
+    )
+    imported = re.search(
+        r'import\s*\{[^}]*\bLINE_STYLES\b[^}]*\}\s*from\s*"\./indicatorStyle"', drawings
+    )
+    exported = re.search(r"export\s*\{[^}]*\bLINE_STYLES\b[^}]*\}", drawings)
+    assert reexported or (imported and exported)
+    assert not re.search(r"\bLINE_STYLES\b[^=\n]*=", drawings)
+    # One backend constant too: the derivatives' styles alias the drawings' set.
+    assert DERIVATIVE_LINE_STYLES is LINE_STYLES
+
+
+def test_text_and_font_bounds_mirror_the_frontend() -> None:
+    drawings = (Path(__file__).parents[2] / "frontend/src/lib/drawings.ts").read_text()
+
+    def constant(name: str) -> int:
+        match = re.search(rf"export const {name} = (\d+);", drawings)
+        assert match is not None, f"{name} not found"
+        return int(match.group(1))
+
+    assert constant("MAX_TEXT_LENGTH") == MAX_DRAWING_TEXT_LENGTH
+    assert constant("MIN_FONT_SIZE") == MIN_DRAWING_FONT_SIZE
+    assert constant("MAX_FONT_SIZE") == MAX_DRAWING_FONT_SIZE

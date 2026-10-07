@@ -40,15 +40,18 @@ export class AnchoredVpPrimitive implements DrawingPrimitive {
   private handlesVisible = false;
   private time: number;
   private anchorPrice: number | null;
+  /** Story 33.10: a locked drawing draws no handle. */
+  private locked: boolean;
   private readonly grid: BarGrid;
   private readonly view: IPrimitivePaneView = {
     renderer: (): IPrimitivePaneRenderer | null => this.renderer(),
   };
 
-  constructor(time: number, anchorPrice: number | null, grid: BarGrid = new BarGrid()) {
+  constructor(time: number, anchorPrice: number | null, grid: BarGrid = new BarGrid(), locked = false) {
     this.time = time;
     this.anchorPrice = anchorPrice;
     this.grid = grid;
+    this.locked = locked;
   }
 
   attached(param: SeriesAttachedParameter<Time>): void {
@@ -64,10 +67,11 @@ export class AnchoredVpPrimitive implements DrawingPrimitive {
     this.geometry = null;
   }
 
-  update(time: number, anchorPrice: number | null): void {
-    if (time === this.time && anchorPrice === this.anchorPrice) return;
+  update(time: number, anchorPrice: number | null, locked = false): void {
+    if (time === this.time && anchorPrice === this.anchorPrice && locked === this.locked) return;
     this.time = time;
     this.anchorPrice = anchorPrice;
+    this.locked = locked;
     this.requestUpdate?.();
   }
 
@@ -114,7 +118,7 @@ export class AnchoredVpPrimitive implements DrawingPrimitive {
   private renderer(): IPrimitivePaneRenderer | null {
     const g = this.geometry;
     if (!g) return null;
-    const handles = this.handlesVisible && g.y !== null;
+    const handles = this.handlesVisible && !this.locked && g.y !== null;
     const color = chartVar("--chart-drawing");
     const bg = chartVar("--chart-bg");
     return {

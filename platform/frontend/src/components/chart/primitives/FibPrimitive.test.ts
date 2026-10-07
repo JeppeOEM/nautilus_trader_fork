@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { type FibDrawing, defaultFibLevels } from "../../../lib/drawings";
+import { type FibDrawing, type FibExtensionDrawing, defaultFibLevels } from "../../../lib/drawings";
 import { BarGrid } from "./drawingPrimitive";
 import { attachTo, drawPrimitive } from "../../../test/drawingKit";
 import { FibPrimitive } from "./FibPrimitive";
@@ -146,5 +146,58 @@ describe("FibPrimitive (Story 32.5)", () => {
     expect([onMinutes.screen()?.a.x, onMinutes.screen()?.b.x]).toEqual([at(12, 37), at(14, 5)]);
     expect([onHours.screen()?.a.x, onHours.screen()?.b.x]).toEqual([at(12), at(14)]);
     expect(drawing.anchors[0].time).toBe(at(12, 37));
+  });
+});
+
+describe("FibPrimitive as a Fibonacci extension (Story 33.10)", () => {
+  // A 100 -> B 90 (a 10 down move), projected from C 95: ratio r at 95 - 10 r.
+  function extension(overrides: Partial<FibExtensionDrawing> = {}): FibPrimitive {
+    const drawing: FibExtensionDrawing = {
+      kind: "fib_extension",
+      id: "fib_extension-1",
+      anchors: [
+        { time: 100, price: 100 },
+        { time: 200, price: 90 },
+        { time: 300, price: 95 },
+      ],
+      levels: [
+        { ratio: 0, enabled: true, color: "#112233" },
+        { ratio: 1, enabled: true, color: "#112233" },
+        { ratio: 1.618, enabled: true, color: "#112233" },
+      ],
+      extend_right: false,
+      label_side: "left",
+      line_width: 1,
+      ...overrides,
+    };
+    const primitive = new FibPrimitive(drawing, 2, grid());
+    attachTo(primitive);
+    return primitive;
+  }
+
+  it("draws each level at C + (B - A) x ratio, labelled at the instrument precision", () => {
+    expect(drawPrimitive(extension()).texts.map((t) => t.text)).toEqual(["0 (95.00)", "1 (85.00)", "1.618 (78.82)"]);
+  });
+
+  it("starts the levels at C and runs them as far right as the A-B move", () => {
+    const g = extension().screen()!;
+    expect([g.left, g.right]).toEqual([300, 400]);
+    expect(extension({ extend_right: true }).screen()!.right).toBeNull();
+  });
+
+  it("hits three handles and draws the A-B-C path", () => {
+    const primitive = extension();
+    expect(primitive.hit(301, 906)).toMatchObject({ handle: "c" });
+    expect(primitive.hit(250, 907.5)).toMatchObject({ handle: null }); // on the B-C leg
+    primitive.setHandlesVisible(true);
+    const { strokes } = drawPrimitive(primitive);
+    expect(strokes.some((s) => s.from[0] === 200 && s.to[0] === 300)).toBe(true);
+    expect(drawPrimitive(primitive).rects).toHaveLength(3);
+  });
+
+  it("draws no handles while locked", () => {
+    const locked = extension({ locked: true });
+    locked.setHandlesVisible(true);
+    expect(drawPrimitive(locked).rects).toHaveLength(0);
   });
 });

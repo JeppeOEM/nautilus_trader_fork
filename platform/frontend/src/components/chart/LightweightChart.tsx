@@ -35,7 +35,7 @@ import {
   renderLegends,
 } from "./legend";
 import { DEFAULT_LINE_STYLE, DEFAULT_LINE_WIDTH, type LineStyleName } from "../../lib/indicatorStyle";
-import { chartVar, chartVarAlpha, fibLevelColor } from "./chartTheme";
+import { chartVar, chartVarAlpha, fibLevelColor, newDrawingContext } from "./chartTheme";
 import {
   type ChartType,
   type MainRow,
@@ -61,8 +61,13 @@ import { attachRangeDrag, localPoint, plotPoint, timeAtX } from "./rangeDrag";
 import { VolumeProfilePrimitive, type VolumeProfileRenderSpec } from "./primitives/VolumeProfilePrimitive";
 import { VerticalMarkerPrimitive } from "./primitives/VerticalMarkerPrimitive";
 import { GapPrimitive } from "./primitives/GapPrimitive";
-import { TrendlinePrimitive, type TrendlineAnchor } from "./primitives/TrendlinePrimitive";
+import { type LineOptions, TrendlinePrimitive, type TrendlineAnchor } from "./primitives/TrendlinePrimitive";
 import { FibPrimitive } from "./primitives/FibPrimitive";
+import { VlinePrimitive } from "./primitives/VlinePrimitive";
+import { RectPrimitive } from "./primitives/RectPrimitive";
+import { ChannelPrimitive } from "./primitives/ChannelPrimitive";
+import { TextPrimitive } from "./primitives/TextPrimitive";
+import { RangePrimitive } from "./primitives/RangePrimitive";
 import { PositionPrimitive } from "./primitives/PositionPrimitive";
 import { AnchoredVpPrimitive } from "./primitives/AnchoredVpPrimitive";
 import { AnchoredVwapPrimitive } from "./primitives/AnchoredVwapPrimitive";
@@ -76,12 +81,26 @@ import {
   type Anchor,
   type AnchoredVpDrawing,
   type AnchoredVwapDrawing,
+  type ChannelDrawing,
+  DEFAULT_DRAWING_LINE_WIDTH,
   type DragPoint,
   type FibDrawing,
+  type FibExtensionDrawing,
   type InstrumentPrecision,
   type PositionDrawing,
+  type RangeDrawing,
+  type RayDrawing,
+  type RectDrawing,
+  type TextDrawing,
+  type TrendlineDrawing,
+  type VlineDrawing,
   defaultFibLevels,
+  extendOf,
+  placementOf,
+  previewDrawing,
 } from "../../lib/drawings";
+import { type MagnetBar, type MagnetMode, constrainAngle, constrainsAngle, magnetPrice } from "../../lib/drawingKit";
+import type { ChartTool } from "../../lib/chartTools";
 
 export type PaneSeriesKind = "Line" | "Histogram";
 
@@ -178,17 +197,19 @@ export interface PriceLineSpec {
   price: number;
   color: string;
   title?: string;
+  /** Story 33.10: the horizontal line's stored look (absent = 1 px, solid). */
+  lineWidth?: number;
+  lineStyle?: LineStyleName;
+  /** Story 33.10: no drag (its menu still opens). */
+  locked?: boolean;
 }
 
 // Story 18.2: a tool-drawn custom-primitive drawing. A tagged union so Story 18.3's
 // measurement joins as another `kind`; kept separate from PriceLineSpec because a
 // two-anchor primitive and a native single-value price line are different mechanisms.
-export interface TrendlineSpec {
-  id: string;
-  kind: "trendline";
-  anchors: [Anchor, Anchor];
-  color: string;
-}
+// Story 33.10: the ray, extended line and arrow are trendlines drawn further (`TrendlinePrimitive`'s
+// `LineOptions`), so they share the spec; the colour is resolved by the page.
+export type TrendlineSpec = (TrendlineDrawing | RayDrawing) & { color: string };
 // Story 32.5: the Fibonacci retracement and the Long/Short position are the same kind of drawing
 // (anchors in time + price, a series primitive); their specs are `lib/drawings.ts`'s own types.
 // Story 32.7: the Anchored VP (its anchor marker and handle; the profile itself is a `volumeProfiles`
@@ -200,31 +221,87 @@ export interface AnchoredVpSpec extends AnchoredVpDrawing {
 export interface AnchoredVwapSpec extends AnchoredVwapDrawing {
   points: readonly VwapPoint[];
 }
-export type DrawingSpec = TrendlineSpec | FibDrawing | PositionDrawing | AnchoredVpSpec | AnchoredVwapSpec;
+// Story 33.10: the vertical line, rectangle, channel, text, Fibonacci extension and the two ranges
+// join them as their `lib/drawings.ts` types (absent colour = the drawing token).
+export type DrawingSpec =
+  | TrendlineSpec
+  | FibDrawing
+  | FibExtensionDrawing
+  | PositionDrawing
+  | AnchoredVpSpec
+  | AnchoredVwapSpec
+  | VlineDrawing
+  | RectDrawing
+  | ChannelDrawing
+  | TextDrawing
+  | RangeDrawing;
 type DrawingPrimitiveOf =
   | TrendlinePrimitive
   | FibPrimitive
   | PositionPrimitive
   | AnchoredVpPrimitive
-  | AnchoredVwapPrimitive;
+  | AnchoredVwapPrimitive
+  | VlinePrimitive
+  | RectPrimitive
+  | ChannelPrimitive
+  | TextPrimitive
+  | RangePrimitive;
 
-/** A drawing's primitive, new. */
+/** Story 33.10: a click-placed tool in progress -- the points clicked so far (`placementOf(tool)` in
+ * all), drawn with the pointer as the next one until the last click. */
+export interface Placement {
+  tool: ChartTool;
+  points: Anchor[];
+}
+
+/** Story 33.10: a reported chart click; `shift` when Shift constrained it to 0/45/90 degrees. */
+export type ChartPoint = TrendlineAnchor & { shift?: boolean };
+
+/** A line kind's look and extension, from its spec. */
+function lineOptionsOf(spec: TrendlineSpec): LineOptions {
+  return {
+    extend: extendOf(spec.kind),
+    arrow: spec.kind === "arrow",
+    lineWidth: spec.line_width ?? DEFAULT_DRAWING_LINE_WIDTH,
+    lineStyle: spec.line_style,
+    locked: spec.locked === true,
+  };
+}
+
+/** A drawing's primitive, new. `measure` reads the chart's candle/volume index (the ranges' numbers),
+ * null while the axis is not the candles' (Lines mode). */
 function createDrawingPrimitive(
   spec: DrawingSpec,
   precision: InstrumentPrecision | null,
   grid: BarGrid,
+  measure: () => MeasurementIndex | null,
 ): DrawingPrimitiveOf {
   switch (spec.kind) {
     case "trendline":
-      return new TrendlinePrimitive(spec.anchors, spec.color, grid);
+    case "ray":
+    case "extended":
+    case "arrow":
+      return new TrendlinePrimitive(spec.anchors, spec.color, grid, lineOptionsOf(spec));
     case "fib":
+    case "fib_extension":
       return new FibPrimitive(spec, precision?.price ?? null, grid);
     case "position":
       return new PositionPrimitive(spec, precision, grid);
     case "anchored_vp":
-      return new AnchoredVpPrimitive(spec.time, spec.anchorPrice, grid);
+      return new AnchoredVpPrimitive(spec.time, spec.anchorPrice, grid, spec.locked === true);
     case "anchored_vwap":
       return new AnchoredVwapPrimitive(spec, spec.points);
+    case "vline":
+      return new VlinePrimitive(spec, grid);
+    case "rect":
+      return new RectPrimitive(spec, precision?.price ?? null, grid);
+    case "channel":
+      return new ChannelPrimitive(spec, grid);
+    case "text":
+      return new TextPrimitive(spec, grid);
+    case "price_range":
+    case "date_range":
+      return new RangePrimitive(spec, precision, measure, grid);
   }
 }
 
@@ -232,25 +309,47 @@ function createDrawingPrimitive(
 function updateDrawingPrimitive(primitive: DrawingPrimitiveOf, spec: DrawingSpec, precision: InstrumentPrecision | null): void {
   switch (spec.kind) {
     case "trendline":
-      (primitive as TrendlinePrimitive).update(spec.anchors, spec.color);
+    case "ray":
+    case "extended":
+    case "arrow":
+      (primitive as TrendlinePrimitive).update(spec.anchors, spec.color, lineOptionsOf(spec));
       break;
     case "fib":
+    case "fib_extension":
       (primitive as FibPrimitive).update(spec, precision?.price ?? null);
       break;
     case "position":
       (primitive as PositionPrimitive).update(spec, precision);
       break;
     case "anchored_vp":
-      (primitive as AnchoredVpPrimitive).update(spec.time, spec.anchorPrice);
+      (primitive as AnchoredVpPrimitive).update(spec.time, spec.anchorPrice, spec.locked === true);
       break;
     case "anchored_vwap":
       (primitive as AnchoredVwapPrimitive).update(spec, spec.points);
+      break;
+    case "vline":
+      (primitive as VlinePrimitive).update(spec);
+      break;
+    case "rect":
+      (primitive as RectPrimitive).update(spec, precision?.price ?? null);
+      break;
+    case "channel":
+      (primitive as ChannelPrimitive).update(spec);
+      break;
+    case "text":
+      (primitive as TextPrimitive).update(spec);
+      break;
+    case "price_range":
+    case "date_range":
+      (primitive as RangePrimitive).update(spec, precision);
       break;
   }
 }
 interface DrawingEntry {
   kind: DrawingSpec["kind"];
   primitive: DrawingPrimitiveOf;
+  /** Story 33.10: a locked drawing is hit by its body alone (no handle, so no grab). */
+  locked: boolean;
 }
 
 /** What the pointer grabbed: a drawing and the named handle of it (null: only its body). */
@@ -339,16 +438,26 @@ interface LightweightChartProps {
   /** Story 18.2: reports a chart click as a `{time, price}` point (same click subscription
    * and grab-suppression as `onPriceClick`; a click with no resolvable time -- past the
    * last bar's coordinate space -- is not reported). Works in both modes. */
-  onPointClick?: (point: TrendlineAnchor) => void;
-  /** Trendline first click, previewed as a line following the cursor until the second. */
-  pendingAnchor?: TrendlineAnchor | null;
+  onPointClick?: (point: ChartPoint) => void;
+  /** Story 33.10: a click-placed tool in progress (replacing 18.2's pending trendline anchor): its
+   * drawing is previewed to the pointer, Shift and the magnet applied, by the primitive that draws
+   * the finished one (`previewDrawing`), until the last click; null/omitted draws none. */
+  placement?: Placement | null;
+  /** Story 33.10: snap every reported point (a click, a handle drag, the Fibonacci drag) to the
+   * nearest O/H/L/C of the real bar under it (`data`, never Heikin Ashi rows; nothing in Lines mode). */
+  magnet?: MagnetMode;
+  /** Story 33.10: a drawing's handle (or a horizontal line) was grabbed: the drag that follows is
+   * one gesture, one undo step. */
+  onDrawingDragStart?: (id: string) => void;
+  /** Story 33.10: the menu's Lock / Unlock and Hide. */
+  onDrawingLock?: (id: string, locked: boolean) => void;
+  onDrawingHide?: (id: string) => void;
   /** True while no tool is armed: a click on a drawn line then opens its edit menu. */
   drawEditable?: boolean;
   /** Edit-menu actions; `id` is a `PriceLineSpec` or `DrawingSpec` id. */
   onDrawingColor?: (id: string, color: string) => void;
   onDrawingDelete?: (id: string) => void;
-  /** Story 32.5: the menu's "Settings..." entry, shown for the kinds that have a modal (Fibonacci,
-   * position). */
+  /** Story 32.5: the menu's "Settings..." entry; Story 33.10: shown for every kind (each has a modal). */
   onDrawingSettings?: (id: string) => void;
   /** Story 33.8: the menu's "Add alert…" entry, on a horizontal line (a `price_cross` at its price)
    * or a trendline (a `trendline_cross` naming it); the page opens its alert dialog prefilled. */
@@ -733,9 +842,16 @@ function priceGapRuns(
   return findGapRuns(linesData?.bid ?? [], (d) => "value" in d);
 }
 
-// Story 18.1: one fixed width for every tool-drawn price line -- no per-line width in
-// PriceLineSpec until a drawing tool actually needs one (YAGNI).
-const PRICE_LINE_WIDTH = 1;
+// Story 18.1: a tool-drawn price line is 1 px solid; Story 33.10: unless the horizontal line stores
+// its own width and style (a hand-edited width is clamped to the library's 1..4).
+function priceLineWidth(spec: PriceLineSpec): LineWidth {
+  const width = spec.lineWidth ?? DEFAULT_DRAWING_LINE_WIDTH;
+  return (Number.isInteger(width) ? Math.min(4, Math.max(1, width)) : DEFAULT_DRAWING_LINE_WIDTH) as LineWidth;
+}
+
+function priceLineStyle(spec: PriceLineSpec): LineStyle {
+  return (spec.lineStyle && LINE_STYLE_OF[spec.lineStyle]) ?? LineStyle.Solid;
+}
 
 // Drag grab tolerance in pixels, close enough to the library's own price-line hit
 // radius that a hover the library reports as "custom-price-line" is also the line this
@@ -764,7 +880,8 @@ function findDrawingHit(
   for (const [id, entry] of options.primitives ? drawings : []) {
     const hit = (entry.primitive as DrawingPrimitive).hit(point.x, point.y);
     if (!hit) continue;
-    if (hit.handle !== null) {
+    // Story 33.10: a locked drawing's handle counts as its body: no grab starts, its menu still opens.
+    if (hit.handle !== null && !entry.locked) {
       if (handleHit === null || hit.distance < handleHit.distance) handleHit = { id, handle: hit.handle, distance: hit.distance };
     } else if (bodyHit === null || hit.distance < bodyHit.distance) {
       bodyHit = { id, handle: null, distance: hit.distance };
@@ -774,7 +891,10 @@ function findDrawingHit(
     const y = series?.priceToCoordinate(spec.price);
     if (y === null || y === undefined) continue;
     const distance = Math.abs(point.y - y);
-    if (distance <= PRICE_LINE_GRAB_TOLERANCE_PX && (handleHit === null || distance < handleHit.distance)) {
+    if (distance > PRICE_LINE_GRAB_TOLERANCE_PX) continue;
+    if (spec.locked) {
+      if (bodyHit === null || distance < bodyHit.distance) bodyHit = { id: spec.id, handle: null, distance };
+    } else if (handleHit === null || distance < handleHit.distance) {
       handleHit = { id: spec.id, handle: "price", distance };
     }
   }
@@ -812,7 +932,11 @@ export default function LightweightChart({
   onPriceLineDrag,
   onPriceClick,
   drawings = [],
-  pendingAnchor = null,
+  placement = null,
+  magnet = "off",
+  onDrawingDragStart,
+  onDrawingLock,
+  onDrawingHide,
   drawEditable = false,
   onDrawingColor,
   onDrawingDelete,
@@ -901,10 +1025,11 @@ export default function LightweightChart({
   const dragIdRef = useRef<GrabTarget | null>(null);
   const suppressNextClickRef = useRef(false);
   const dragMovedRef = useRef(false);
-  const previewRef = useRef<TrendlinePrimitive | null>(null);
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
-  const editRef = useRef({ priceLines, drawEditable, onDrawingDrag });
-  editRef.current = { priceLines, drawEditable, onDrawingDrag };
+  // Story 33.10: the pointer the placement preview last saw, which seeds the next preview.
+  const lastPreviewParamRef = useRef<MouseEventParams | null>(null);
+  const editRef = useRef({ priceLines, drawEditable, onDrawingDrag, drawings, onDrawingDragStart });
+  editRef.current = { priceLines, drawEditable, onDrawingDrag, drawings, onDrawingDragStart };
   // Filled by the effect below before any drag can read it; the forming bar is read per move.
   const measureIndexRef = useRef<MeasurementIndex>(EMPTY_MEASUREMENT_INDEX);
   const liveBarRef = useRef(liveBar);
@@ -956,6 +1081,95 @@ export default function LightweightChart({
     return times;
   }, [mode, data, linesData, liveTime]);
   gridRef.current.set(barTimes);
+  // Story 33.10: the real bars by time -- what the magnet snaps to, never the Heikin Ashi rows the
+  // main series may draw (AD-F6) -- and the latest magnet and placement, read by the click, drag and
+  // preview handlers without re-subscribing them.
+  const barByTime = useMemo(() => {
+    const bars = new Map<number, MagnetBar>();
+    for (const d of data) if ("open" in d) bars.set(d.time as number, d);
+    return bars;
+  }, [data]);
+  const pointerRef = useRef({ magnet, mode, barByTime, liveBar, placement });
+  pointerRef.current = { magnet, mode, barByTime, liveBar, placement };
+
+  /**
+   * The magnet's price for a point at `time` and `price`. Only a real bar at exactly `time` (a loaded
+   * one or the forming one) snaps: a whitespace slot, or a time past the newest bar, has no OHLC of
+   * its own and keeps the raw price (`BarGrid.snap` would clamp it onto the last bar's).
+   */
+  const snapPrice = useCallback((time: number | null, price: number): number => {
+    const { magnet: strength, mode: chartMode, barByTime: bars, liveBar: live } = pointerRef.current;
+    const host = seriesRef.current;
+    // Lines mode has no OHLC to snap to: the magnet does nothing there.
+    if (strength === "off" || chartMode !== "candles" || time === null || !host) return price;
+    const bar = bars.get(time) ?? (live && (live.time as number) === time ? live : null);
+    const y = host.priceToCoordinate(price);
+    return y === null ? price : magnetPrice(price, y, bar, (p) => host.priceToCoordinate(p), strength);
+  }, []);
+
+  /** The bar time at a logical index inside the loaded bars, or null past the newest or before the
+   * oldest (where `BarGrid.timeAtLogical` would clamp). */
+  const loadedBarAt = useCallback((logical: number): number | null => {
+    const index = Math.round(logical);
+    const times = gridRef.current.times;
+    return index < 0 || index >= times.length ? null : times[index];
+  }, []);
+
+  /**
+   * Shift: the pointer pixel `to` constrained to 0/45/90 degrees from `from`'s pixel, back in time (via
+   * the logical index, so past the last bar too) and price; null when either end has no position.
+   */
+  const constrainedPoint = useCallback(
+    (from: Anchor, to: { x: number; y: number }): { time: number; price: number; logical: number } | null => {
+      const chart = chartRef.current;
+      const host = seriesRef.current ?? lineSeriesRef.current?.price;
+      const slot = gridRef.current.snap(from.time);
+      const x = slot === null || !chart ? null : chart.timeScale().timeToCoordinate(slot as Time);
+      const y = host?.priceToCoordinate(from.price) ?? null;
+      if (!chart || !host || x === null || y === null) return null;
+      const at = constrainAngle({ x, y }, to);
+      const logical = chart.timeScale().coordinateToLogical(at.x);
+      // A constrained point past the loaded bars has no bar of its own: clamping its time while
+      // keeping its price would bend the angle, so the caller keeps the unconstrained point.
+      if (logical === null || loadedBarAt(logical) === null) return null;
+      const time = gridRef.current.timeAtLogical(logical);
+      const price = host.coordinateToPrice(at.y);
+      return time === null || price === null ? null : { time, price, logical };
+    },
+    [loadedBarAt],
+  );
+
+  /**
+   * The point a placement click (or its preview) means: Shift on a line tool's second point
+   * constrains it from the first; otherwise the bar under the pointer and its price, magnet applied.
+   * Null where no time or price resolves (past the last bar's coordinate space).
+   */
+  const pointerPoint = useCallback(
+    (param: MouseEventParams): ChartPoint | null => {
+      const chart = chartRef.current;
+      const host = seriesRef.current ?? lineSeriesRef.current?.price;
+      if (!chart || !host || !param.point) return null;
+      const placing = pointerRef.current.placement;
+      if (param.sourceEvent?.shiftKey && placing && placing.points.length === 1 && constrainsAngle(placing.tool)) {
+        const constrained = constrainedPoint(placing.points[0], param.point);
+        if (constrained) return { time: constrained.time as Time, price: constrained.price, shift: true };
+      }
+      const raw = host.coordinateToPrice(param.point.y);
+      // `param.time` is only set over an existing bar; the time scale converts the empty area right of it.
+      const time = param.time ?? chart.timeScale().coordinateToTime(param.point.x);
+      if (raw === null || time === null || time === undefined) return null;
+      return { time, price: snapPrice(time as number, raw) };
+    },
+    [constrainedPoint, snapPrice],
+  );
+
+  /** The anchor a dragged line handle is constrained from with Shift: its line's other anchor. */
+  const otherAnchor = useCallback((target: GrabTarget): Anchor | null => {
+    const spec = editRef.current.drawings.find((d) => d.id === target.id);
+    if (!spec || !constrainsAngle(spec.kind) || !("anchors" in spec)) return null;
+    if (target.handle === "a") return spec.anchors[1];
+    return target.handle === "b" ? spec.anchors[0] : null;
+  }, []);
   // False until a layout has sized the chart with the time axis measured: before that the price
   // pane's own height is not the 500 px budget (the library took the axis out of the initial 500).
   const laidOutRef = useRef(false);
@@ -1712,8 +1926,8 @@ export default function LightweightChart({
             id: spec.id,
             price: spec.price,
             color: spec.color,
-            lineWidth: PRICE_LINE_WIDTH,
-            lineStyle: LineStyle.Solid,
+            lineWidth: priceLineWidth(spec),
+            lineStyle: priceLineStyle(spec),
             axisLabelVisible: true,
             title: spec.title,
           }),
@@ -1728,6 +1942,8 @@ export default function LightweightChart({
       if (current.price !== spec.price) line.applyOptions({ price: spec.price });
       if (current.color !== spec.color) line.applyOptions({ color: spec.color });
       if (current.title !== (spec.title ?? "")) line.applyOptions({ title: spec.title ?? "" });
+      if (current.lineWidth !== priceLineWidth(spec)) line.applyOptions({ lineWidth: priceLineWidth(spec) });
+      if (current.lineStyle !== priceLineStyle(spec)) line.applyOptions({ lineStyle: priceLineStyle(spec) });
     }
   }, [priceLines, mode, mainKind]);
 
@@ -2032,8 +2248,12 @@ export default function LightweightChart({
     if (!container || !chart || !host || !fibActive) return;
 
     let preview: FibPrimitive | null = null;
+    // Story 33.10: both ends land on the magnet's price, the preview as the placed drawing.
+    const snapped = (p: TrendlineAnchor): TrendlineAnchor => ({ time: p.time, price: snapPrice(p.time as number, p.price) });
     const stopDrag = attachRangeDrag(container, chart, host, gridRef.current, {
-      onMove: (start, end) => {
+      onMove: (rawStart, rawEnd) => {
+        const start = snapped(rawStart);
+        const end = snapped(rawEnd);
         const shape: FibDrawing = {
           kind: "fib",
           id: "fib-preview",
@@ -2057,14 +2277,14 @@ export default function LightweightChart({
         if (!last || !preview) return;
         host.detachPrimitive(preview);
         preview = null;
-        onFibPlace?.(last.start, last.end);
+        onFibPlace?.(snapped(last.start), snapped(last.end));
       },
     });
     return () => {
       stopDrag();
       if (preview) host.detachPrimitive(preview);
     };
-  }, [fibActive, onFibPlace, mode, mainKind]);
+  }, [fibActive, onFibPlace, mode, mainKind, snapPrice]);
 
   useEffect(() => {
     // Story 18.2 (AC #4): the drawings prop's registry-diff effect -- same per-id
@@ -2074,8 +2294,11 @@ export default function LightweightChart({
     const host = seriesRef.current ?? lineSeriesRef.current?.price;
     if (!host) return;
     const registry = drawingRegistryRef.current;
-    const specsById = new Map(drawings.map((spec) => [spec.id, spec] as const));
+    // Story 33.10: a hidden drawing is neither drawn nor hit-tested: it is not in the registry at all.
+    const shown = drawings.filter((spec) => spec.hidden !== true);
+    const specsById = new Map(shown.map((spec) => [spec.id, spec] as const));
     const grid = gridRef.current;
+    const measure = (): MeasurementIndex | null => (pointerRef.current.mode === "candles" ? measureIndexRef.current : null);
 
     for (const [id, entry] of [...registry]) {
       if (specsById.get(id)?.kind !== entry.kind) {
@@ -2084,16 +2307,17 @@ export default function LightweightChart({
       }
     }
 
-    for (const spec of drawings) {
+    for (const spec of shown) {
       const entry = registry.get(spec.id);
       if (entry) {
         updateDrawingPrimitive(entry.primitive, spec, precision);
+        entry.locked = spec.locked === true;
         continue;
       }
-      const created = createDrawingPrimitive(spec, precision, grid);
+      const created = createDrawingPrimitive(spec, precision, grid, measure);
       created.setHandlesVisible(editRef.current.drawEditable);
       host.attachPrimitive(created);
-      registry.set(spec.id, { kind: spec.kind, primitive: created });
+      registry.set(spec.id, { kind: spec.kind, primitive: created, locked: spec.locked === true });
     }
   }, [drawings, mode, mainKind, precision]);
 
@@ -2129,22 +2353,31 @@ export default function LightweightChart({
       if (dragged === null) return;
       if (!param.point || param.paneIndex !== 0) return;
       const host = seriesRef.current ?? lineSeriesRef.current?.price;
-      const price = host?.coordinateToPrice(param.point.y);
-      if (price === null || price === undefined) return;
+      const raw = host?.coordinateToPrice(param.point.y);
+      if (raw === null || raw === undefined) return;
       dragMovedRef.current = true;
+      const grid = gridRef.current;
+      const pointerLogical = param.logical ?? chart.timeScale().coordinateToLogical(param.point.x);
+      const pointerTime = pointerLogical === null ? null : grid.timeAtLogical(pointerLogical);
+      // The magnet's bar is the one under the pointer: none past the newest or before the oldest bar
+      // (where the reported time is clamped), so the price stays raw there.
+      const barTime = pointerLogical === null ? null : loadedBarAt(pointerLogical);
       if (dragged.handle === "price") {
-        onPriceLineDrag?.(dragged.id, price);
+        onPriceLineDrag?.(dragged.id, snapPrice(barTime, raw));
         return;
       }
-      const grid = gridRef.current;
-      const logical = param.logical ?? chart.timeScale().coordinateToLogical(param.point.x);
+      // Story 33.10: Shift constrains a line's dragged end from its other anchor; else the magnet.
+      const from = param.sourceEvent?.shiftKey ? otherAnchor(dragged) : null;
+      const constrained = from ? constrainedPoint(from, param.point) : null;
+      const logical = constrained ? constrained.logical : pointerLogical;
       onDrawingDrag?.(dragged.id, dragged.handle ?? "", {
-        price,
-        time: logical === null ? null : grid.timeAtLogical(logical),
+        price: constrained ? constrained.price : snapPrice(barTime, raw),
+        time: constrained ? constrained.time : pointerTime,
         barsSince: (time) => {
-          const from = grid.indexOf(time);
-          return from === null || logical === null ? null : Math.round(logical) - from;
+          const start = grid.indexOf(time);
+          return start === null || logical === null ? null : Math.round(logical) - start;
         },
+        ...(constrained ? { shift: true } : {}),
       });
     };
 
@@ -2155,7 +2388,7 @@ export default function LightweightChart({
       // this lifetime must never be able to start a drag in the next one.
       lastCrosshairRef.current = null;
     };
-  }, [onPriceLineDrag, onDrawingDrag, mode]);
+  }, [onPriceLineDrag, onDrawingDrag, mode, snapPrice, otherAnchor, constrainedPoint, loadedBarAt]);
 
   // Story 33.5: a hovered liquidation marker (the library reports its id as `hoveredObjectId`) shows
   // its tooltip lines beside the pointer; read on the legend's own crosshair subscription.
@@ -2224,6 +2457,7 @@ export default function LightweightChart({
       suppressNextClickRef.current = false;
       if (grabbedId === null) return;
       event.stopPropagation();
+      editRef.current.onDrawingDragStart?.(grabbedId);
     };
 
     const handleMouseUp = (): void => {
@@ -2291,37 +2525,53 @@ export default function LightweightChart({
       const host = seriesRef.current ?? lineSeriesRef.current?.price;
       const price = host?.coordinateToPrice(param.point.y);
       if (price === null || price === undefined) return;
-      if (wantsPrice) onPriceClick(price);
       // Story 18.2: `param.time` is only set over an existing bar; fall back to the
       // time scale's own x->time conversion for the empty area right of the last bar.
       const time = param.time ?? chart.timeScale().coordinateToTime(param.point.x);
-      if (time !== null && time !== undefined) onPointClick?.({ time, price });
+      if (wantsPrice) onPriceClick(snapPrice((time ?? null) as number | null, price));
+      // Story 33.10: the same point with the magnet (or Shift) applied, `pointerPoint`.
+      const point = pointerPoint(param);
+      if (point) onPointClick?.(point);
     };
 
     chart.subscribeClick(handleClick);
     return () => chart.unsubscribeClick(handleClick);
-  }, [onPriceClick, onPointClick, drawEditable, mode]);
+  }, [onPriceClick, onPointClick, drawEditable, mode, snapPrice, pointerPoint]);
 
   useEffect(() => {
-    // Trendline preview: the pending first anchor drawn to the cursor until the second click.
+    // Story 33.10: the placement preview -- the tool's own drawing (`previewDrawing`, drawn by the
+    // primitive of the finished one) from the points clicked so far to the pointer, Shift and the
+    // magnet applied, until the last click. Esc / disarm (placement null) removes it with no residue.
     const chart = chartRef.current;
     const host = seriesRef.current ?? lineSeriesRef.current?.price;
-    if (!chart || !host || !pendingAnchor) return;
-    const preview = new TrendlinePrimitive([pendingAnchor, pendingAnchor], chartVar("--chart-drawing"));
-    host.attachPrimitive(preview);
-    previewRef.current = preview;
+    if (!chart || !host || !placement || placement.points.length === 0 || placementOf(placement.tool) < 2) return;
+    const ctx = newDrawingContext(precisionRef.current);
+    let preview: DrawingPrimitiveOf | null = null;
     const move = (param: MouseEventParams): void => {
-      const price = param.point ? host.coordinateToPrice(param.point.y) : null;
-      const time = param.point ? (param.time ?? chart.timeScale().coordinateToTime(param.point.x)) : null;
-      if (price !== null && time !== null) preview.update([pendingAnchor, { time, price }], chartVar("--chart-drawing"));
+      if (param.point) lastPreviewParamRef.current = param;
+      const cursor = pointerPoint(param);
+      const shape = cursor && previewDrawing(placement.tool, placement.points, { time: cursor.time as number, price: cursor.price }, ctx);
+      if (!shape) return;
+      const spec = shape as DrawingSpec; // a placed tool's drawing is one of the chart's kinds, its colour set
+      if (preview) {
+        updateDrawingPrimitive(preview, spec, precisionRef.current);
+        return;
+      }
+      preview = createDrawingPrimitive(spec, precisionRef.current, gridRef.current, () =>
+        pointerRef.current.mode === "candles" ? measureIndexRef.current : null,
+      );
+      host.attachPrimitive(preview);
     };
     chart.subscribeCrosshairMove(move);
+    // A placement that just gained a point is previewed at once from where the pointer last was (it
+    // has not moved since the click), never blank until the next move.
+    const seed = lastCrosshairRef.current ?? lastPreviewParamRef.current;
+    if (seed) move(seed);
     return () => {
       chart.unsubscribeCrosshairMove(move);
-      host.detachPrimitive(preview);
-      previewRef.current = null;
+      if (preview) host.detachPrimitive(preview);
     };
-  }, [pendingAnchor, mode, mainKind]);
+  }, [placement, mode, mainKind, pointerPoint]);
 
   useEffect(() => {
     // Story 33.5: the bar spacing, on mount and after every zoom (the visible range changes with it).
@@ -2341,10 +2591,9 @@ export default function LightweightChart({
   }, []);
 
   const menuSpec = menu ? (priceLines.find((l) => l.id === menu.id) ?? drawings.find((d) => d.id === menu.id)) : undefined;
-  const menuHasSettings =
-    !!menuSpec &&
-    "kind" in menuSpec &&
-    (menuSpec.kind === "fib" || menuSpec.kind === "position" || menuSpec.kind === "anchored_vp" || menuSpec.kind === "anchored_vwap");
+  // Story 33.10: every kind has a settings dialog, and every drawing can be locked and hidden.
+  const menuHasSettings = !!menuSpec;
+  const menuLocked = menuSpec?.locked === true;
   // An Anchored VP has no single colour: the menu's one colour is its up colour.
   const specColor = menuSpec && "kind" in menuSpec && menuSpec.kind === "anchored_vp" ? menuSpec.up_color : menuSpec?.color;
   const menuColor = /^#[0-9a-f]{6}$/i.test(specColor ?? "") ? specColor! : chartVar("--chart-drawing");
@@ -2468,6 +2717,30 @@ export default function LightweightChart({
               }}
             >
               Add alert…
+            </button>
+          )}
+          {onDrawingLock && (
+            <button
+              type="button"
+              className="tabbtn"
+              onClick={() => {
+                onDrawingLock(menu.id, !menuLocked);
+                setMenu(null);
+              }}
+            >
+              {menuLocked ? "Unlock" : "Lock"}
+            </button>
+          )}
+          {onDrawingHide && (
+            <button
+              type="button"
+              className="tabbtn"
+              onClick={() => {
+                onDrawingHide(menu.id);
+                setMenu(null);
+              }}
+            >
+              Hide
             </button>
           )}
           <button

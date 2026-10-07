@@ -51,6 +51,7 @@ _LAYOUT_KEYS = {
     "chart_type",  # likewise (Story 33.9)
     "price_scale",
     "compare",
+    "drawings_hidden",  # likewise (Story 33.10)
 }
 
 
@@ -238,6 +239,42 @@ def test_put_with_a_bad_volume_color_by_is_a_422_naming_it(client: TestClient) -
         f"/api/coin/{_IID}/layout", json={"layout": _layout(volume_color_by="delta")}
     )
     assert saved.json()["layout"]["volume_color_by"] == "delta"
+
+
+def test_put_with_a_bad_drawings_hidden_is_a_422_naming_it(client: TestClient) -> None:
+    """Story 33.10: the optional hide-all flag is a boolean; it round-trips through the PUT."""
+    response = client.put(f"/api/coin/{_IID}/layout", json={"layout": _layout(drawings_hidden=1)})
+    assert response.status_code == 422
+    assert "drawings_hidden" in response.json()["detail"]
+    saved = client.put(f"/api/coin/{_IID}/layout", json={"layout": _layout(drawings_hidden=True)})
+    assert saved.json()["layout"]["drawings_hidden"] is True
+
+
+def test_hide_all_never_travels_through_the_default_template(client: TestClient) -> None:
+    """
+    Story 33.10: Hide all is one coin's view of its own drawings. Save as default stores it off, a
+    coin opened for the first time starts with it off, and a reset keeps the coin's own value.
+    """
+    _put(client, _IID, _layout(drawings_hidden=True, bar_seconds=300))
+    default = client.post(f"/api/coin/{_IID}/layout/save-as-default").json()["default"]
+    assert (default["drawings_hidden"], default["bar_seconds"]) == (False, 300)
+    assert client.get(f"/api/coin/{_ETH}/layout").json()["layout"]["drawings_hidden"] is False
+    reset = client.post(f"/api/coin/{_IID}/layout/reset-to-default").json()["layout"]
+    assert (reset["drawings_hidden"], reset["bar_seconds"]) == (True, 300)
+
+
+def test_a_hand_edited_template_with_hide_all_on_seeds_and_resets_with_it_off(
+    client: TestClient,
+) -> None:
+    path = Path(settings.CHART_LAYOUTS_PATH)
+    layouts = preferences.ChartLayouts(default=_layout(drawings_hidden=True))
+    preferences.save_chart_layouts(layouts, path)
+
+    assert client.get(f"/api/coin/{_ETH}/layout").json()["layout"]["drawings_hidden"] is False
+    reset = client.post(f"/api/coin/{_ETH}/layout/reset-to-default").json()["layout"]
+    assert reset["drawings_hidden"] is False
+    stored = preferences.load_chart_layouts(path)
+    assert stored.layouts[_ETH]["drawings_hidden"] is False
 
 
 def test_put_with_a_missing_body_key_or_bad_json(client: TestClient) -> None:

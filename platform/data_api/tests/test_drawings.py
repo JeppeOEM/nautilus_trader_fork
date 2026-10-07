@@ -98,6 +98,27 @@ def test_a_malformed_item_is_a_422_naming_the_field_and_writes_nothing(
     assert not (tmp_path / "chart_drawings.toml").exists()
 
 
+def test_a_story_33_10_kind_survives_a_put_and_a_malformed_one_is_a_422_naming_the_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+    channel = {
+        "kind": "channel",
+        "id": "channel-1",
+        "anchors": _FIB["anchors"],
+        "offset": -2.5,
+        "line_style": "dashed",
+        "locked": True,
+    }
+    assert client.put(f"/api/coin/{_IID}/drawings", json={"items": [channel]}).status_code == 200
+    assert client.get(f"/api/coin/{_IID}/drawings").json() == {"items": [channel]}
+    bad = {**channel, "id": "channel-2", "offset": "wide"}
+    resp = client.put(f"/api/coin/{_IID}/drawings", json={"items": [channel, bad]})
+    assert resp.status_code == 422
+    assert "items[1].offset" in resp.json()["detail"]
+    assert client.get(f"/api/coin/{_IID}/drawings").json() == {"items": [channel]}
+
+
 def test_a_body_without_items_is_a_422_and_invalid_json_a_400(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

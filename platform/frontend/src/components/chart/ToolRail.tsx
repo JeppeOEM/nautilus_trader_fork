@@ -8,6 +8,8 @@ import {
   type ToolGroupDef,
   shownTool,
 } from "../../lib/chartTools";
+import { MAGNET_RADIUS_PX, type MagnetMode } from "../../lib/drawingKit";
+import { safeDecimal } from "../../lib/drawings";
 
 interface GroupButtonProps {
   group: ToolGroupDef;
@@ -140,6 +142,91 @@ function ToolGroupButton({ group, activeTool, lastUsed, open, isDisabled, onPick
   );
 }
 
+/** Story 33.10: the rail's drawing actions after the groups (magnet, undo/redo, hide, delete). */
+export interface DrawingActions {
+  magnet: MagnetMode;
+  /** Cycles the magnet off -> weak -> strong -> off. */
+  onMagnet: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
+  onUndo: () => void;
+  onRedo: () => void;
+  /** Hide all drawings (the layout's `drawings_hidden`). */
+  allHidden: boolean;
+  onHideAll: () => void;
+  /** Drawings hidden one by one from their menu; "Show hidden (n)" shows them all again. */
+  hiddenCount: number;
+  onShowHidden: () => void;
+  /** Delete all drawings (the page confirms first); off while there are none or they cannot be edited. */
+  deleteAllDisabled: boolean;
+  /** Why Show hidden and Delete all are off while Hide all is on (nothing on screen to act on); null
+   * while it is off. */
+  hiddenAllReason: string | null;
+  onDeleteAll: () => void;
+}
+
+const MAGNET_TITLES: Record<MagnetMode, string> = {
+  off: "Magnet off: points land where clicked",
+  weak: `Weak magnet: a point within ${MAGNET_RADIUS_PX} px of the bar's open, high, low or close snaps to it`,
+  strong: "Strong magnet: every point snaps to the nearest open, high, low or close of its bar",
+};
+
+/** Story 33.10: the drawing actions, after the groups. */
+function DrawingActionButtons({ actions }: { actions: DrawingActions }) {
+  return (
+    <>
+      <hr className="chart-toolbar-divider" />
+      <button
+        type="button"
+        className={actions.magnet === "off" ? "tabbtn" : "tabbtn active"}
+        aria-pressed={actions.magnet !== "off"}
+        aria-label="Magnet"
+        title={`${MAGNET_TITLES[actions.magnet]} (click: off, weak, strong)`}
+        onClick={actions.onMagnet}
+      >
+        {`Mag ${actions.magnet}`}
+      </button>
+      <button type="button" className="tabbtn" aria-label="Undo" title="Undo (Ctrl+Z)" disabled={!actions.canUndo} onClick={actions.onUndo}>
+        Undo
+      </button>
+      <button type="button" className="tabbtn" aria-label="Redo" title="Redo (Ctrl+Shift+Z)" disabled={!actions.canRedo} onClick={actions.onRedo}>
+        Redo
+      </button>
+      <button
+        type="button"
+        className={actions.allHidden ? "tabbtn active" : "tabbtn"}
+        aria-pressed={actions.allHidden}
+        aria-label="Hide all drawings"
+        title={actions.allHidden ? "Drawings hidden (the drawing tools are off): click to show them" : "Hide all drawings"}
+        onClick={actions.onHideAll}
+      >
+        Hide all
+      </button>
+      {actions.hiddenCount > 0 && (
+        <button
+          type="button"
+          className="tabbtn"
+          title={actions.hiddenAllReason ?? "Show every drawing hidden from its menu"}
+          disabled={actions.hiddenAllReason !== null}
+          onClick={actions.onShowHidden}
+        >
+          {`Show hidden (${safeDecimal(actions.hiddenCount, 0)})`}
+        </button>
+      )}
+      <button
+        type="button"
+        className="tabbtn"
+        aria-label="Delete all drawings"
+        title={actions.hiddenAllReason ?? "Delete all drawings of this coin (asks first; undoable)"}
+        disabled={actions.deleteAllDisabled || actions.hiddenAllReason !== null}
+        onClick={actions.onDeleteAll}
+      >
+        Del all
+      </button>
+    </>
+  );
+}
+
 interface ToolRailProps {
   activeTool: ChartTool;
   /** The tool each group last armed, by group id: the group's button shows it. */
@@ -149,11 +236,14 @@ interface ToolRailProps {
   onPick: (tool: ChartTool) => void;
   crosshairOn: boolean;
   onCrosshairToggle: () => void;
+  /** Story 33.10: absent = no drawing actions (a rail of tools alone). */
+  actions?: DrawingActions;
 }
 
 /** The chart's left rail (Story 18.1, grouped TradingView-style): cursor, crosshair toggle, divider,
- * then the drawing groups. At most one group's menu is open at a time. */
-export default function ToolRail({ activeTool, lastUsed, isDisabled, onPick, crosshairOn, onCrosshairToggle }: ToolRailProps) {
+ * then the drawing groups, then (Story 33.10) a divider and the drawing actions. At most one group's
+ * menu is open at a time. */
+export default function ToolRail({ activeTool, lastUsed, isDisabled, onPick, crosshairOn, onCrosshairToggle, actions }: ToolRailProps) {
   const [openGroup, setOpenGroup] = useState<string | null>(null);
   const renderGroup = (group: ToolGroupDef) => (
     <ToolGroupButton
@@ -181,6 +271,7 @@ export default function ToolRail({ activeTool, lastUsed, isDisabled, onPick, cro
       </button>
       <hr className="chart-toolbar-divider" />
       {DRAWING_GROUPS.map(renderGroup)}
+      {actions && <DrawingActionButtons actions={actions} />}
     </div>
   );
 }

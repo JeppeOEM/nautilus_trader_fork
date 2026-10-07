@@ -17,7 +17,7 @@ The backend captures far more than the frontend shows. This epic adds Bybit line
 - Story 33.6: Order-flow indicators from the stored per-bar aggregates (done)
 - Story 33.7: Rankings sorts every column, gains derivatives/flow/range columns and saved filter presets (done)
 - Story 33.8: Alert conditions beyond a price cross, and an Alerts page that creates and edits (done)
-- Story 33.9: Price-scale modes, chart types, and a compare symbol on the percent scale
+- Story 33.9: Price-scale modes, chart types, and a compare symbol on the percent scale (done)
 - Story 33.10: Drawing tools II, with magnet snapping, undo/redo, lock and hide-all
 - Story 33.11: Missing indicators, candle patterns as markers, dead code removed
 - Story 33.12: Symbol search, watchlist, fullscreen chart with its panes, shortcuts, time zone, session breaks, countdown, last-price label
@@ -32,8 +32,8 @@ The backend captures far more than the frontend shows. This epic adds Bybit line
 - **Added fields only (AD-D12):** messages, stored schemas, TOML stores and API items only gain keys. Existing stored data must load unchanged (for example, an alert without `condition` reads as `price_cross`). `rankings:live` replay bytes must still pass.
 - **Boundaries:** no new dependency (NFR12; dialogs, shortcuts and SVG are hand-rolled inline). `nautilus_trader/` and `crates/` are untouchable (FORK-01). Check `nautilus_trader.indicators` before any custom indicator.
 - **Every story (MR4, OPS-01, DESIGN-03):**
-  - Add risks to `docs/DATA_INTEGRITY_AUDIT.md`. It runs to D-205, so the next row is **D-206**.
-  - Register types and read models in `docs/DATA_DICTIONARY.md`: §1.26 liquidations, §1.27 `derivs:raw`, §2.10 ranking columns, §2.11 alerts, §2.12 research, §2.15 per-bar aggregates, §2.16 derivatives read models.
+  - Add risks to `docs/DATA_INTEGRITY_AUDIT.md`. It runs to D-209, so the next row is **D-210**.
+  - Register types and read models in `docs/DATA_DICTIONARY.md`: §1.26 liquidations, §1.27 `derivs:raw`, §2.10 ranking columns, §2.11 alerts, §2.12 research, §2.15 per-bar aggregates, §2.16 derivatives read models, §2.17 scale modes/chart types/compare (33.9); a new story takes the next free section.
   - Put VPS steps in `docs/DEPLOY_CHECKLIST.md` as deferred operator actions, and keep the Docs page truthful.
 - **Verification:**
   - Backend: `cd platform && python3 -m pytest <touched>/tests -q` (system `nautilus_trader`, no Rust build).
@@ -96,11 +96,12 @@ The backend captures far more than the frontend shows. This epic adds Bybit line
 
 ## Cross-Story Dependencies
 
-- **Remaining order:** 33.9 → 33.10 → 33.11 → 33.12 → 33.13. Every other story is done, and Epic 32 is merged into `epic-33`.
+- **Remaining order:** 33.10 → 33.11 → 33.12 → 33.13. Every other story is done, and Epic 32 is merged into `epic-33`.
 - **What feeds what:**
   - 33.4's routes, channels and ranking fields fed 33.8's derivatives conditions (done).
   - 33.3's per-bar columns and 33.6's organic delta feed 33.13.
   - 33.14's `LiquidationCascade` is reused by 33.13's `cascade_episodes` and the OFI strategy's cascade mode.
 - **Frontend extends Epic 32's work:** the settings modal (32.3), the left rail, context menu and preferences dir (32.5), pane heights and layouts (32.6), and drawings persistence via `PUT /api/coin/{iid}/drawings`.
-- **33.9 compare:** uses 33.12's symbol search if it has landed, otherwise a text field. Its same-asset venues come from `kernel.venues.same_asset` via `GET /api/markets`.
-- **33.12:** its `Alt+C`/`Shift+L` shortcuts drive 33.9's compare and log scale.
+- **33.9 (done) → 33.12:** compare currently takes a text field; 33.12's symbol search should become its picker. `GET /api/markets` (same-asset venues via `kernel.venues.same_asset`) and `lib/compare.ts`/`lib/heikinAshi.ts` already exist.
+- **33.12:** its `Alt+C`/`Shift+L` shortcuts drive 33.9's compare and log scale; its fullscreen must include 33.9's compare/spread panes. Bar Replay in Lines mode cuts the snapshot series like the candles.
+- **33.11:** candle-pattern markers share the series-markers plugin with 33.5's liquidation markers; the dead-module check must not flag exports added by 33.9/33.10.

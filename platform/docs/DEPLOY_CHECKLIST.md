@@ -1732,6 +1732,34 @@ a layout saved before this story loads with the defaults (`candles`, normal scal
       its legend row: the scale returns to Log. Reset the type and scale afterwards.
 - [ ] After an hour, `curl -s localhost:9100/api/errors` shows no `views.markets` site.
 
+### 33-10-drawing-tools-two-ray-vline-rectangle-channel-text-arrow-magnet-undo-lock (commit: this story's)
+
+The chart gains ten drawing kinds (ray, extended line, vertical line, parallel channel, Fibonacci
+extension, rectangle, text, arrow, price range, date range), a magnet, Shift angle snapping,
+undo/redo, per-drawing lock and hide, Hide all and Delete all. `chart_drawings.toml` gains the ten
+kinds and the optional `locked`/`hidden`/`line_width`/`line_style` keys, `chart_layouts.toml` the
+optional `drawings_hidden`. Only `data_api` changes (the validator, and the frontend built into its
+image). No config key, env var, mount or compose service changes, and neither file needs a
+migration: a file saved before this story loads unchanged.
+
+- [ ] On the VPS, pull this commit and rebuild/restart the one service:
+      `cd ~/nautilus_trader_fork/platform && docker compose up -d --build data_api`.
+- [ ] Check the stored drawings and layouts still load:
+      `curl -s localhost:9100/api/coin/BTCUSDT-LINEAR.BYBIT/drawings | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["items"]))'`
+      prints the coin's drawing count (no 4xx/5xx), and
+      `curl -s localhost:9100/api/coin/BTCUSDT-LINEAR.BYBIT/layout | python3 -c 'import json,sys; print(json.load(sys.stdin)["layout"]["drawings_hidden"])'`
+      prints `False` for a coin saved before this story.
+- [ ] In the browser, on a Bybit BTC chart, place one of each new tool from the rail: Ray, Ext,
+      VLine, Chan (three clicks), FibExt (three clicks), Rect, Text (type a note in its dialog),
+      Arrow, PRange and DRange. Reload: all ten are restored with their handles in Cursor mode.
+- [ ] Lock one (its menu then offers Unlock and it no longer drags), Hide one (the rail shows
+      `Show hidden (1)`; click it to bring it back), turn Hide all on and reload (the drawings stay
+      hidden and the drawing tools are off; turn it off again), and press Ctrl+Z / Ctrl+Shift+Z
+      after an edit (the drawing steps back and forward). Delete the test drawings (Del all, then
+      confirm).
+- [ ] After an hour, `curl -s localhost:9100/api/errors` shows no new `data_api` drawings or layout
+      error site, and the browser's error bar shows no `drawings.unknown_kind`.
+
 ### 33-14-liquidation-cascade-bot-shorts-into-a-long-liquidation-cascade-backtested-and-paper-run (commit: this story's)
 
 A new paper strategy, `liquidation_cascade` (`research/strategies/liquidation_cascade_strategy.py`,

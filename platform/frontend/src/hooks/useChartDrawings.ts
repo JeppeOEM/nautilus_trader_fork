@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
 import { fetchCoinDrawings, saveCoinDrawings } from "../api/client";
-import { type Drawing, importLegacyHlines } from "../lib/drawings";
+import { EMPTY_HISTORY, drawingsReducer } from "../lib/drawingKit";
+import { type Drawing, UnknownDrawingKindError, importLegacyHlines } from "../lib/drawings";
 
 /** One PUT per burst of edits: a drag changes the drawing on every mouse move. */
 export const SAVE_DEBOUNCE_MS = 600;
@@ -40,7 +41,18 @@ export type DrawingsStatus = "loading" | "ready" | "failed";
 
 export interface ChartDrawings {
   drawings: Drawing[];
-  setDrawings: (update: (all: Drawing[]) => Drawing[]) => void;
+  /**
+   * Story 33.10: an edit, one undo step -- or, with a `gesture` (a handle drag's `drag:<n>`), merged
+   * into the previous edit of that gesture, so one drag is one step. An update returning the list it
+   * was given changes nothing and records nothing.
+   */
+  setDrawings: (update: (all: Drawing[]) => Drawing[], gesture?: string) => void;
+  /** Story 33.10: step back / forward through at most `HISTORY_LIMIT` lists; a no-op with none. The
+   * restored list is saved like any edit. */
+  undo: () => void;
+  redo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
   /** Edits are only allowed once the server's list has loaded, or a save would overwrite it. */
   status: DrawingsStatus;
   /** Why the latest save failed (shown to the operator), or null: the drawings on screen are not saved. */
@@ -68,12 +80,19 @@ export interface ChartDrawings {
  * the same body can only fail again) stops until the next edit. After unmount or `pagehide`
  * nothing is retried.
  *
+ * Story 33.10: the list lives in an undo history (`drawingsReducer`): page state of this coin, held
+ * here above the timeframe remount, never persisted, reset by the load (which is not undoable). A
+ * load that meets a kind this client does not know (`UnknownDrawingKindError`) fails for good: it
+ * is logged `drawings.unknown_kind`, not retried, and nothing is ever saved over the server's list.
+ *
  * Known limit: the PUT replaces the whole list with no version, so two browsers editing one coin
- * overwrite each other (last write wins). Upgrade path: a version field on the GET, echoed by the
- * PUT, a 409 on a mismatch and a client-side merge (see `data_api/routes/drawings.py`).
+ * overwrite each other (last write wins), and an undo restores this browser's list over another's
+ * save the same way (audit D-212). Upgrade path: a version field on the GET, echoed by the PUT, a 409
+ * on a mismatch and a client-side merge (see `data_api/routes/drawings.py`).
  */
 export function useChartDrawings(instrumentId: string): ChartDrawings {
-  const [drawings, setDrawings] = useState<Drawing[]>([]);
+  const [history, dispatch] = useReducer(drawingsReducer, EMPTY_HISTORY);
+  const drawings = history.drawings;
   const [status, setStatus] = useState<DrawingsStatus>("loading");
   const [saveError, setSaveError] = useState<string | null>(null);
   const latestRef = useRef<Drawing[]>(drawings);
@@ -115,14 +134,19 @@ export function useChartDrawings(instrumentId: string): ChartDrawings {
           }
           savedRef.current = server;
           statusRef.current = "ready";
-          setDrawings(loaded);
+          dispatch({ type: "load", drawings: loaded });
           setStatus("ready");
         })
         .catch((err: unknown) => {
           if (cancelled) return;
-          console.error(`useChartDrawings: failed to load the drawings of ${instrumentId}`, err);
           statusRef.current = "failed";
           setStatus("failed");
+          if (err instanceof UnknownDrawingKindError) {
+            // Permanent: the same list fails the same way, so it is not retried (and never saved over).
+            console.error(`drawings.unknown_kind: ${err.message} in the drawings of ${instrumentId}`, err);
+            return;
+          }
+          console.error(`useChartDrawings: failed to load the drawings of ${instrumentId}`, err);
           // A transient failure (data_api restarting) must not leave the chart without its drawings
           // until a reload: the load is retried while this coin's chart lives. A 4xx (a malformed
           // id) would fail identically, so it is not.
@@ -226,6 +250,21 @@ export function useChartDrawings(instrumentId: string): ChartDrawings {
     [flush],
   );
 
-  const update = useCallback((fn: (all: Drawing[]) => Drawing[]): void => setDrawings(fn), []);
-  return { drawings, setDrawings: update, status, saveError, saveNow };
+  const update = useCallback(
+    (fn: (all: Drawing[]) => Drawing[], gesture?: string): void => dispatch({ type: "edit", update: fn, gesture }),
+    [],
+  );
+  const undo = useCallback((): void => dispatch({ type: "undo" }), []);
+  const redo = useCallback((): void => dispatch({ type: "redo" }), []);
+  return {
+    drawings,
+    setDrawings: update,
+    undo,
+    redo,
+    canUndo: history.past.length > 0,
+    canRedo: history.future.length > 0,
+    status,
+    saveError,
+    saveNow,
+  };
 }

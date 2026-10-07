@@ -366,3 +366,31 @@ describe("the chart type, price scale and compare keys (Story 33.9)", () => {
     expect(template.compare.symbols).toEqual([IID, "BTC-USD-PERP.HYPERLIQUID"]);
   });
 });
+
+describe("the drawings_hidden key (Story 33.10)", () => {
+  const { drawings_hidden: _h, ...pre3310 } = BUILT_IN_LAYOUT;
+
+  it("loads a layout saved before it with the drawings shown, silently", () => {
+    const { layout, fallbacks } = normalizeLayout(pre3310);
+
+    expect(fallbacks).toEqual([]);
+    expect(errors).not.toHaveBeenCalled();
+    expect(layout.drawings_hidden).toBe(false);
+  });
+
+  it("round-trips through the save, and a change is a change", () => {
+    const { layout, fallbacks } = normalizeLayout({ ...BUILT_IN_LAYOUT, drawings_hidden: true });
+
+    expect(fallbacks).toEqual([]);
+    expect(layoutForSave(layout)).toMatchObject({ drawings_hidden: true });
+    expect(sameLayout(layout, { ...layout, drawings_hidden: false })).toBe(false);
+  });
+
+  it("falls back to shown by name for a non-boolean", () => {
+    const { layout, fallbacks } = normalizeLayout({ ...BUILT_IN_LAYOUT, drawings_hidden: "yes" });
+
+    expect(fallbacks).toEqual(["drawings_hidden"]);
+    expect(layout.drawings_hidden).toBe(false);
+    expect(errors).toHaveBeenCalledTimes(1);
+  });
+});

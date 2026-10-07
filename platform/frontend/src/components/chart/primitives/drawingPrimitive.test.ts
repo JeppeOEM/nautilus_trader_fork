@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { BarGrid, distanceToSegment, nearestHandle } from "./drawingPrimitive";
+import { fakeContext } from "../../../test/drawingKit";
+import { ARROW_MAX_PX, BarGrid, distanceToSegment, drawArrowHead, nearestHandle } from "./drawingPrimitive";
 
 describe("BarGrid (Story 32.5)", () => {
   const grid = new BarGrid();
@@ -42,5 +43,18 @@ describe("hit helpers (Story 32.5)", () => {
     ];
     expect(nearestHandle(handles, 5, 0)).toMatchObject({ handle: "b" });
     expect(nearestHandle(handles, 50, 50)).toBeNull();
+  });
+});
+
+describe("arrow head (Story 33.10)", () => {
+  const sideLengths = (lineWidth: number): number[] => {
+    const { context, strokes } = fakeContext();
+    drawArrowHead(context as unknown as CanvasRenderingContext2D, { x: 0, y: 0 }, { x: 100, y: 0 }, lineWidth, 1, 1);
+    return strokes.map((s) => Math.hypot(s.to[0] - s.from[0], s.to[1] - s.from[1]));
+  };
+
+  it("grows with the line width up to a cap, so a 4 px arrow's head stays an arrow head", () => {
+    expect(sideLengths(1).map((l) => Math.round(l))).toEqual([10, 10]);
+    expect(sideLengths(4).map((l) => Math.round(l))).toEqual([ARROW_MAX_PX, ARROW_MAX_PX]);
   });
 });

@@ -14,7 +14,9 @@ import { DERIVATIVE_OUTPUT_TOKENS, DERIVATIVE_PANE_IDS, MARK_INDEX_GROUP } from 
 import type { LegendAction } from "../components/chart/legend";
 import LightweightChart, {
   type ChartMode,
+  type ChartPoint,
   type DrawingSpec,
+  type Placement,
   type LegendExtra,
   type VolumeProfileSpec,
   type IndicatorPaneSpec,
@@ -22,6 +24,7 @@ import LightweightChart, {
   type PriceScalePatch,
 } from "../components/chart/LightweightChart";
 import type { TrendlineAnchor } from "../components/chart/primitives/TrendlinePrimitive";
+import { type MagnetMode, nextDragGesture, nextMagnetMode, replaceDrawing } from "../lib/drawingKit";
 import ToolRail from "../components/chart/ToolRail";
 import type { AlertCondition } from "../lib/alertConditions";
 import { type ChartTool, type ChartToolDef, groupOfTool, toolDef } from "../lib/chartTools";
@@ -61,22 +64,24 @@ import {
   type SessionProfileEntry,
   type SessionProfileSettings,
 } from "../lib/sessionProfile";
-import { chartVar, fibLevelColor } from "../components/chart/chartTheme";
+import { chartVar, fibLevelColor, newDrawingContext } from "../components/chart/chartTheme";
 import DrawingSettingsDialog from "../components/chart/DrawingSettingsDialog";
 import FootprintSettingsDialog from "../components/chart/FootprintSettingsDialog";
 import VolumeSettingsDialog from "../components/chart/VolumeSettingsDialog";
 import type { FootprintRenderSpec } from "../components/chart/primitives/FootprintPrimitive";
 import {
+  type Anchor,
   type Drawing,
   type DragPoint,
   type InstrumentPrecision,
-  type PositionSide,
   applyHandleDrag,
+  buildDrawing,
+  channelPlaceable,
   defaultFibLevels,
+  isLineDrawing,
+  kindOfTool,
   nextDrawingId,
-  newAnchoredVp,
-  newAnchoredVwap,
-  newPosition,
+  placementOf,
   safeDecimal,
   snapIndex,
   storedTime,
@@ -369,6 +374,17 @@ function DerivativeSettingsDialog({
   );
 }
 const NONE: never[] = [];
+// Story 33.10: the drawings on screen while all are hidden (a stable empty list, so no memo churns).
+const NONE_DRAWN: Drawing[] = [];
+
+/** A drawing with its `locked` / `hidden` flag set; a cleared flag is removed (absent = false), so an
+ * unlocked drawing stores exactly what it did before it was ever locked. */
+function withFlag(d: Drawing, flag: "locked" | "hidden", on: boolean): Drawing {
+  if ((d[flag] === true) === on) return d;
+  if (on) return { ...d, [flag]: true };
+  const { [flag]: _cleared, ...rest } = d;
+  return rest as Drawing;
+}
 
 /** Story 18.4's replay control bar. DW-146: a click that would do nothing is never silently
  * ignored -- a pick on a data gap says so, Play/Step forward at the newest loaded bar are disabled
@@ -429,6 +445,9 @@ interface ChartInnerProps {
   /** The tool each rail group last armed, by group id: held above the timeframe and coin remounts. */
   toolMemory: Partial<Record<string, ChartTool>>;
   onToolUsed: (groupId: string, tool: ChartTool) => void;
+  /** Story 33.10: the drawing magnet, held beside `toolMemory` (view state, never persisted). */
+  magnet: MagnetMode;
+  onMagnet: (mode: MagnetMode) => void;
 }
 
 function ChartInner({
@@ -446,6 +465,8 @@ function ChartInner({
   onResetToDefault,
   toolMemory,
   onToolUsed,
+  magnet,
+  onMagnet,
 }: ChartInnerProps) {
   const [chart, setChart] = useState<IChartApi | null>(null);
   const patchLayout = useCallback(
@@ -471,17 +492,45 @@ function ChartInner({
   const {
     drawings: allDrawings,
     setDrawings: setAllDrawings,
+    undo: undoDrawings,
+    redo: redoDrawings,
+    canUndo,
+    canRedo,
     status: drawingsStatus,
     saveError: drawingsSaveError,
     saveNow: saveDrawingsNow,
   } = drawingStore;
   const [settingsId, setSettingsId] = useState<string | null>(null);
+  const allDrawingsRef = useRef(allDrawings);
+  useEffect(() => {
+    allDrawingsRef.current = allDrawings;
+  }, [allDrawings]);
+  // Story 33.10: Hide all drawings, persisted as the layout's `drawings_hidden`; while on, no drawing
+  // is drawn or hit-tested and the drawing tools are off.
+  const [drawingsHidden, setDrawingsHidden] = useState(initialLayout.drawings_hidden);
+  useEffect(() => patchLayout({ drawings_hidden: drawingsHidden }), [drawingsHidden, patchLayout]);
+  // The drawings on screen: none while all are hidden, and never one hidden from its menu.
+  const shownDrawings = useMemo(
+    () => (drawingsHidden ? NONE_DRAWN : allDrawings.filter((d) => d.hidden !== true)),
+    [allDrawings, drawingsHidden],
+  );
   const priceLines = useMemo<PriceLineSpec[]>(
     () =>
-      allDrawings.flatMap((d) =>
-        d.kind === "hline" ? [{ id: d.id, price: d.price, color: d.color ?? chartVar("--chart-drawing") }] : [],
+      shownDrawings.flatMap((d) =>
+        d.kind === "hline"
+          ? [
+              {
+                id: d.id,
+                price: d.price,
+                color: d.color ?? chartVar("--chart-drawing"),
+                ...(d.line_width === undefined ? {} : { lineWidth: d.line_width }),
+                ...(d.line_style === undefined ? {} : { lineStyle: d.line_style }),
+                ...(d.locked ? { locked: true } : {}),
+              },
+            ]
+          : [],
       ),
-    [allDrawings],
+    [shownDrawings],
   );
   const [crosshairOn, setCrosshairOn] = useState(initialLayout.crosshair);
   useEffect(() => patchLayout({ crosshair: crosshairOn }), [crosshairOn, patchLayout]);
@@ -495,9 +544,9 @@ function ChartInner({
     setAlertDialogOpen(true);
   }, []);
   const [catalog, setCatalog] = useState<Record<string, IndicatorCatalogEntry>>({});
-  // Story 18.2: the trendline's first click, held until the second click completes it
-  // (or Esc / a tool change discards it); `drawings` is the placed set.
-  const [pendingAnchor, setPendingAnchor] = useState<TrendlineAnchor | null>(null);
+  // Story 18.2 / 33.10: a click-placed tool's points so far (`placementOf(tool)` in all), held until
+  // the last click places the drawing (or Esc / a tool change discards them).
+  const [placement, setPlacement] = useState<Placement | null>(null);
   const savedProfile = initialLayout.volume_profile;
   // A saved fixed range comes back with an empty profile that the first loaded candles fill (below).
   const [frvps, setFrvps] = useState<FrvpEntry[]>(() =>
@@ -600,10 +649,12 @@ function ChartInner({
   const anchoredLive = replay.mode === "active" ? null : liveBar;
   // Story 33.6: a stored-source Anchored VWAP's line is the server's (`AnchoredStoredVWAP`, the bars'
   // exact stored `pv` / volume), fetched by its own values hook: never a picker pane.
-  const storedVwap = useStoredAnchoredVwap(instrumentId, chart, allDrawings, barSeconds, mode === "candles");
+  // Story 33.10: only the drawings on screen: a hidden stored-source VWAP fetches nothing.
+  const storedVwap = useStoredAnchoredVwap(instrumentId, chart, shownDrawings, barSeconds, mode === "candles");
   const anchored = useMemo(() => {
-    // A coin with no anchored drawing (nearly every one) skips the per-tick copy of its bars.
-    if (mode !== "candles" || !allDrawings.some((d) => d.kind === "anchored_vp" || d.kind === "anchored_vwap")) {
+    // A coin with no anchored drawing (nearly every one) skips the per-tick copy of its bars. Story
+    // 33.10: a hidden one (or every one, while all are hidden) draws neither its profile nor its line.
+    if (mode !== "candles" || !shownDrawings.some((d) => d.kind === "anchored_vp" || d.kind === "anchored_vwap")) {
       return { specs: NONE, profiles: NONE, legend: NONE };
     }
     const specs: DrawingSpec[] = [];
@@ -616,7 +667,7 @@ function ChartInner({
     const times: number[] = [];
     for (const c of chartBars) if ("open" in c) times.push(c.time as number);
     const lastTime = times.at(-1);
-    for (const d of allDrawings) {
+    for (const d of shownDrawings) {
       if (d.kind !== "anchored_vp" && d.kind !== "anchored_vwap") continue;
       // An anchor after the newest displayed bar (a replay cut before it) is omitted, not snapped back.
       if (lastTime !== undefined && d.time > lastTime) continue;
@@ -674,14 +725,16 @@ function ChartInner({
     // Shared empty arrays: a coin with none (nearly every one) must not hand the chart a fresh
     // array, hence a "changed" prop, on every bar.
     return { specs: specs.length > 0 ? specs : NONE, profiles: profiles.length > 0 ? profiles : NONE, legend: legend.length > 0 ? legend : NONE };
-  }, [allDrawings, mode, replay.displayed, volume, anchoredLive, precision, storedVwap, cutoffTime]);
+  }, [shownDrawings, mode, replay.displayed, volume, anchoredLive, precision, storedVwap, cutoffTime]);
   const plainDrawings = useMemo<DrawingSpec[]>(
     () =>
-      allDrawings.flatMap((d): DrawingSpec[] => {
+      shownDrawings.flatMap((d): DrawingSpec[] => {
         if (d.kind === "hline" || d.kind === "anchored_vp" || d.kind === "anchored_vwap") return [];
-        return [d.kind === "trendline" ? { ...d, color: d.color ?? chartVar("--chart-drawing") } : d];
+        // The line kinds' spec carries its colour resolved (the trendline's since 18.2).
+        if (isLineDrawing(d)) return [{ ...d, color: d.color ?? chartVar("--chart-drawing") }];
+        return [d];
       }),
-    [allDrawings],
+    [shownDrawings],
   );
   const drawings = useMemo<DrawingSpec[]>(
     () => (anchored.specs.length === 0 ? plainDrawings : [...plainDrawings, ...anchored.specs]),
@@ -1021,13 +1074,34 @@ function ChartInner({
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (event.key === "Escape") {
         setActiveTool("cursor");
-        setPendingAnchor(null);
+        setPlacement(null);
         cancelReplayPick();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [cancelReplayPick]);
+
+  // Story 33.10: undo and redo act only on drawings the operator can see and edit: loaded, not all
+  // hidden, and no placement half done (its points would refer to a list that just changed).
+  const historyActive = drawingsStatus === "ready" && !drawingsHidden && placement === null;
+  useEffect(() => {
+    // Ctrl/Cmd+Z undoes a drawing edit, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redoes it -- never while the
+    // operator types (an input, select or textarea keeps its own undo) or a dialog is open.
+    if (!historyActive) return;
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      const key = event.key.toLowerCase();
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || (key !== "z" && key !== "y")) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("input, select, textarea, [contenteditable='true']")) return;
+      if (document.querySelector("dialog[open]")) return;
+      event.preventDefault();
+      if (key === "y" || event.shiftKey) redoDrawings();
+      else undoDrawings();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [historyActive, undoDrawings, redoDrawings]);
 
   // useCallback (not inline arrows) so LightweightChart's interaction effects don't
   // tear down and re-attach their subscriptions on every render of this page -- the
@@ -1057,65 +1131,55 @@ function ChartInner({
     [activeTool, roundPrice, setAllDrawings],
   );
 
+  // Story 33.10: places a finished click placement's drawing (`buildDrawing`) and reports whether it
+  // did: a degenerate one (the second point on the first) or a position before the precision is
+  // known places nothing. A text note opens its dialog at once, to be typed.
+  const placeDrawing = useCallback(
+    (tool: ChartTool, points: Anchor[]): boolean => {
+      const kind = kindOfTool(tool);
+      if (kind === null) return false;
+      const id = nextDrawingId(allDrawingsRef.current, kind);
+      const drawing = buildDrawing(tool, id, points, newDrawingContext(precisionRef.current));
+      if (drawing === null) return false;
+      setAllDrawings((all) => [...all, drawing]);
+      if (drawing.kind === "text") setSettingsId(id);
+      return true;
+    },
+    [setAllDrawings],
+  );
+
   const handlePointClick = useCallback(
-    (point: TrendlineAnchor): void => {
-      // Story 18.2 (AC #2/#5): first click stores the start anchor, the second completes
-      // the line and disarms the tool. A second click on the exact same point would make
-      // an invisible zero-length line, so it is ignored (the tool stays armed).
+    (clicked: ChartPoint): void => {
       // Story 18.4 (AC #2): while picking a replay start, a click selects that bar and
       // nothing else -- drawing tools are disarmed on entry, this guards the same click.
       // A click on a gap slot stays in picking; the hook's `pickMissed` drives the hint (DW-146).
       if (replayMode === "picking") {
-        pickReplayBar(point.time as number);
+        pickReplayBar(clicked.time as number);
         return;
       }
-      if (activeTool === "long" || activeTool === "short") {
-        // Story 32.5: one click places a position at the clicked price on the clicked bar. Its
-        // prices sit on the instrument's grid, so the tool is off until that precision is known.
-        const places = precisionRef.current?.price;
-        if (places === undefined) return;
-        const side: PositionSide = activeTool;
-        setAllDrawings((all) => [
-          ...all,
-          newPosition(nextDrawingId(all, "position"), side, point.time as number, point.price, places),
-        ]);
-        setActiveTool("cursor");
+      // Story 18.2 / 33.10: a click-placed tool collects `placementOf(tool)` points; the last one
+      // places the drawing and disarms the tool. A point on the previous one (time and price, on the
+      // grid) would make a zero-size drawing, so it is ignored and the tool stays armed.
+      const need = placementOf(activeTool);
+      if (need === 0) return;
+      const point: Anchor = { time: clicked.time as number, price: clicked.price };
+      const points = placement?.tool === activeTool ? placement.points : [];
+      const previous = points.at(-1);
+      if (previous && storedTime(previous.time) === storedTime(point.time) && roundPrice(previous.price) === roundPrice(point.price)) {
         return;
       }
-      if (activeTool === "avp" || activeTool === "avwap") {
-        // Story 32.7: one click at a bar places an anchored drawing; its colours are chart tokens.
-        const time = point.time as number;
-        setAllDrawings((all) => [
-          ...all,
-          activeTool === "avp"
-            ? newAnchoredVp(nextDrawingId(all, "anchored_vp"), time, chartVar("--chart-up"), chartVar("--chart-down"))
-            : newAnchoredVwap(nextDrawingId(all, "anchored_vwap"), time, chartVar("--chart-drawing"), chartVar("--chart-pane-4")),
-        ]);
-        setActiveTool("cursor");
+      const next = [...points, point];
+      // A channel's B on A's bar (vertical) or a C giving it no width is ignored the same way.
+      if (activeTool === "channel" && !channelPlaceable(next, precisionRef.current?.price ?? null)) return;
+      if (next.length < need) {
+        setPlacement({ tool: activeTool, points: next });
         return;
       }
-      if (activeTool !== "trendline") return;
-      if (!pendingAnchor) {
-        setPendingAnchor(point);
-        return;
-      }
-      if (pendingAnchor.time === point.time && pendingAnchor.price === point.price) return;
-      setAllDrawings((all) => [
-        ...all,
-        {
-          kind: "trendline",
-          id: nextDrawingId(all, "trendline"),
-          anchors: [
-            { time: storedTime(pendingAnchor.time as number), price: roundPrice(pendingAnchor.price) },
-            { time: storedTime(point.time as number), price: roundPrice(point.price) },
-          ],
-          color: chartVar("--chart-drawing"),
-        },
-      ]);
-      setPendingAnchor(null);
+      if (!placeDrawing(activeTool, next)) return;
+      setPlacement(null);
       setActiveTool("cursor");
     },
-    [activeTool, pendingAnchor, replayMode, pickReplayBar, roundPrice, setAllDrawings],
+    [activeTool, placement, replayMode, pickReplayBar, roundPrice, placeDrawing],
   );
 
   // Story 32.5: the Fibonacci drag's release. Anchor A is the press, B the release; a drag whose
@@ -1512,28 +1576,27 @@ function ChartInner({
     const group = groupOfTool(tool);
     if (group && group.tools.length > 1) onToolUsed(group.id, tool);
     setActiveTool(tool);
-    setPendingAnchor(null);
+    setPlacement(null);
     replay.cancelPick();
   };
 
   const startReplayPick = (): void => {
     setActiveTool("cursor");
-    setPendingAnchor(null);
+    setPlacement(null);
     replay.startPicking();
   };
 
   const handleDrawingColor = useCallback(
     (id: string, color: string): void => {
-      // A Fibonacci has a colour per level: the menu's one colour recolours them all.
+      // A Fibonacci has a colour per level: the menu's one colour recolours them all. The colour it
+      // already has is no edit (`replaceDrawing`).
       setAllDrawings((all) =>
-        all.map((d) =>
-          d.id !== id
-            ? d
-            : d.kind === "fib"
-              ? { ...d, color, levels: d.levels.map((l) => ({ ...l, color })) }
-              : d.kind === "anchored_vp"
-                ? { ...d, up_color: color } // a profile has no single colour: the menu's is its up colour
-                : { ...d, color },
+        replaceDrawing(all, id, (d) =>
+          d.kind === "fib" || d.kind === "fib_extension"
+            ? { ...d, color, levels: d.levels.map((l) => ({ ...l, color })) }
+            : d.kind === "anchored_vp"
+              ? { ...d, up_color: color } // a profile has no single colour: the menu's is its up colour
+              : { ...d, color },
         ),
       );
     },
@@ -1550,14 +1613,25 @@ function ChartInner({
     [setAllDrawings],
   );
 
+  // Story 33.10: every move of one handle drag is one gesture (`drag:<n>`, a fresh n per grab), so
+  // the whole drag is one undo step; `nextDragGesture` keeps n unique across this component's
+  // timeframe remounts.
+  const dragGestureRef = useRef<string | undefined>(undefined);
+  const handleDragStart = useCallback((): void => {
+    dragGestureRef.current = nextDragGesture();
+  }, []);
   const applyDrag = useCallback(
     (id: string, handle: string, point: DragPoint): void => {
       // Story 18.1 (AC #3) / 32.5: LightweightChart only reports the drag (it never mutates this
       // state); `applyHandleDrag` decides what the pointer means for each kind, and the updater
-      // form needs no closure state, so these callbacks stay identity-stable.
-      setAllDrawings((all) =>
-        all.map((d) => (d.id === id ? applyHandleDrag(d, handle, point, precisionRef.current?.price ?? null) : d)),
-      );
+      // form needs no closure state, so these callbacks stay identity-stable. A drag that changes
+      // nothing (a locked drawing, a refused move) returns the list itself: no edit, no undo step.
+      setAllDrawings((all) => {
+        const index = all.findIndex((d) => d.id === id);
+        if (index === -1) return all;
+        const moved = applyHandleDrag(all[index], handle, point, precisionRef.current?.price ?? null);
+        return moved === all[index] ? all : all.map((d, i) => (i === index ? moved : d));
+      }, dragGestureRef.current);
     },
     [setAllDrawings],
   );
@@ -1567,20 +1641,58 @@ function ChartInner({
   );
 
   const settingsDrawing = allDrawings.find((d) => d.id === settingsId);
-  const allDrawingsRef = useRef(allDrawings);
-  useEffect(() => {
-    allDrawingsRef.current = allDrawings;
-  }, [allDrawings]);
+  // Story 33.10: an undo or redo that took the dialog's drawing away closes the dialog (adjusting
+  // state during render): a later redo bringing it back must not pop the dialog open again.
+  if (settingsId !== null && settingsDrawing === undefined && drawingsStatus === "ready") setSettingsId(null);
   const requestSettings = useCallback((id: string): void => {
-    // No dialog without the instrument's precision (its fields are labelled and rounded by it):
-    // the request is dropped, not parked to pop open when the precision arrives. The Anchored VP's
-    // and VWAP's dialogs print no price, so they open without one.
+    // No position dialog without the instrument's precision (its fields are labelled and rounded by
+    // it): the request is dropped, not parked to pop open when the precision arrives. Every other
+    // kind's dialog prints no price, so it opens without one.
     const kind = allDrawingsRef.current.find((d) => d.id === id)?.kind;
-    if (precisionRef.current === null && kind !== "anchored_vp" && kind !== "anchored_vwap") return;
+    if (precisionRef.current === null && kind === "position") return;
     setSettingsId(id);
   }, []);
+
+  // Story 33.10: the menu's Lock / Unlock and Hide, and the rail's Show hidden and Delete all. Each
+  // is one edit (one undo step), saved like any other.
+  const handleDrawingLock = useCallback(
+    (id: string, locked: boolean): void =>
+      setAllDrawings((all) => replaceDrawing(all, id, (d) => withFlag(d, "locked", locked))),
+    [setAllDrawings],
+  );
+  const handleDrawingHide = useCallback(
+    (id: string): void => {
+      setSettingsId((open) => (open === id ? null : open));
+      setAllDrawings((all) => replaceDrawing(all, id, (d) => withFlag(d, "hidden", true)));
+    },
+    [setAllDrawings],
+  );
+  const hiddenCount = useMemo(() => allDrawings.filter((d) => d.hidden === true).length, [allDrawings]);
+  const showHidden = useCallback(
+    (): void => setAllDrawings((all) => (all.some((d) => d.hidden) ? all.map((d) => withFlag(d, "hidden", false)) : all)),
+    [setAllDrawings],
+  );
+  const deleteAllDrawings = (): void => {
+    const count = allDrawings.length;
+    if (count === 0) return;
+    const ok = window.confirm(
+      `Delete all ${safeDecimal(count, 0)} drawing${count === 1 ? "" : "s"} of ${instrumentId}? Ctrl+Z (Undo) brings them back while this page is open.`,
+    );
+    if (!ok) return;
+    setSettingsId(null);
+    setAllDrawings((all) => (all.length === 0 ? all : []));
+  };
+  const toggleDrawingsHidden = (): void => {
+    // Hiding every drawing turns the drawing tools off: an armed one is disarmed with its points.
+    if (!drawingsHidden) {
+      setActiveTool("cursor");
+      setPlacement(null);
+    }
+    setDrawingsHidden((hidden) => !hidden);
+  };
+  // A dialog's Apply with nothing changed records no undo step and sends no save (`replaceDrawing`).
   const applyDrawing = useCallback(
-    (next: Drawing): void => setAllDrawings((all) => all.map((d) => (d.id === next.id ? next : d))),
+    (next: Drawing): void => setAllDrawings((all) => replaceDrawing(all, next.id, () => next)),
     [setAllDrawings],
   );
 
@@ -1588,7 +1700,7 @@ function ChartInner({
 
   const isToolDisabled = (tool: ChartToolDef): boolean =>
     (mode === "lines" && tool.candlesOnly) ||
-    (tool.placesDrawing === true && drawingsStatus !== "ready") ||
+    (tool.placesDrawing === true && (drawingsStatus !== "ready" || drawingsHidden)) ||
     (tool.needsPrecision === true && precision === null);
 
   return (
@@ -1791,6 +1903,21 @@ function ChartInner({
           onPick={selectTool}
           crosshairOn={crosshairOn}
           onCrosshairToggle={() => setCrosshairOn((on) => !on)}
+          actions={{
+            magnet,
+            onMagnet: () => onMagnet(nextMagnetMode(magnet)),
+            canUndo: canUndo && historyActive,
+            canRedo: canRedo && historyActive,
+            onUndo: undoDrawings,
+            onRedo: redoDrawings,
+            allHidden: drawingsHidden,
+            onHideAll: toggleDrawingsHidden,
+            hiddenCount,
+            onShowHidden: showHidden,
+            deleteAllDisabled: drawingsStatus !== "ready" || allDrawings.length === 0,
+            hiddenAllReason: drawingsHidden ? "Drawings are hidden (Hide all): show them first" : null,
+            onDeleteAll: deleteAllDrawings,
+          }}
         />
         <div className="term-box" data-label={instrumentId}>
           {loadFailed && (
@@ -1807,7 +1934,11 @@ function ChartInner({
             priceLines={priceLines}
             onPriceClick={handlePriceClick}
             drawings={drawings}
-            pendingAnchor={pendingAnchor}
+            placement={placement}
+            magnet={magnet}
+            onDrawingDragStart={handleDragStart}
+            onDrawingLock={handleDrawingLock}
+            onDrawingHide={handleDrawingHide}
             drawEditable={activeTool === "cursor" && replayMode !== "picking"}
             onDrawingColor={handleDrawingColor}
             onDrawingDelete={handleDrawingDelete}
@@ -1876,7 +2007,7 @@ function ChartInner({
           {drawingsSaveError}
         </p>
       )}
-      {settingsDrawing && settingsDrawing.kind !== "hline" && settingsDrawing.kind !== "trendline" && (precision || settingsDrawing.kind === "anchored_vp" || settingsDrawing.kind === "anchored_vwap") && (
+      {settingsDrawing && (precision || settingsDrawing.kind !== "position") && (
         <DrawingSettingsDialog
           key={settingsDrawing.id}
           drawing={settingsDrawing}
@@ -2017,18 +2148,34 @@ export default function ChartPage() {
       setToolMemory((prev) => (prev[groupId] === tool ? prev : { ...prev, [groupId]: tool })),
     [],
   );
+  // Story 33.10: the drawing magnet follows the operator from coin to coin like the tool memory. Not
+  // persisted (the spec's choice): a reload starts with it off.
+  const [magnet, setMagnet] = useState<MagnetMode>("off");
   if (!iid) return <p>No instrument specified.</p>;
-  return <ChartForCoin key={iid} instrumentId={iid} toolMemory={toolMemory} onToolUsed={rememberTool} />;
+  return (
+    <ChartForCoin
+      key={iid}
+      instrumentId={iid}
+      toolMemory={toolMemory}
+      onToolUsed={rememberTool}
+      magnet={magnet}
+      onMagnet={setMagnet}
+    />
+  );
 }
 
 function ChartForCoin({
   instrumentId,
   toolMemory,
   onToolUsed,
+  magnet,
+  onMagnet,
 }: {
   instrumentId: string;
   toolMemory: Partial<Record<string, ChartTool>>;
   onToolUsed: (groupId: string, tool: ChartTool) => void;
+  magnet: MagnetMode;
+  onMagnet: (mode: MagnetMode) => void;
 }) {
   // Story 32.6: the coin's saved layout (timeframe, volume, mode, crosshair, pane heights, zoom, volume
   // profile) is loaded BEFORE the chart mounts, so its first candle request already uses the saved
@@ -2110,6 +2257,8 @@ function ChartForCoin({
         onResetToDefault={handleResetToDefault}
         toolMemory={toolMemory}
         onToolUsed={onToolUsed}
+        magnet={magnet}
+        onMagnet={onMagnet}
       />
       {layoutStore.saveError !== null && (
         <p role="alert" className="chart-load-error">

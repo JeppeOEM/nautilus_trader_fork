@@ -3917,6 +3917,67 @@ and `lib/chartLayout.ts`, pinned by `views/tests/test_chart_layouts.py`):
 
 ---
 
+### 2.18 Chart drawings: the sixteen kinds; Hide all (Story 33.10)
+
+`[added 2026-10-07: Story 33.10]` Not market data: the operator's drawings, one list per instrument
+in `chart_drawings.toml` (`v = 1`, a tagged `items` array) behind `GET`/`PUT
+/api/coin/{iid}/drawings`, and one chart-layout key.
+
+**Validation.** `views.preferences.validate_drawing` checks each item and refuses a malformed one
+with a `DrawingError` naming the field (a 422 on the PUT, a load error on a hand-edited file), never
+dropping it (DATA-07): an unknown kind, an unknown key, a wrong type or an out-of-range value. The
+client's mirror is `frontend/src/lib/drawings.ts` (`DRAWING_KIND_NAMES`, the `Drawing` union,
+`MAX_TEXT_LENGTH`, `MIN_FONT_SIZE`, `MAX_FONT_SIZE`, and `LINE_STYLES` re-exported from
+`lib/indicatorStyle.ts`), pinned by `views/tests/test_chart_drawings.py`'s
+`test_the_closed_sets_mirror_the_frontend`, `test_line_styles_mirror_the_frontend` and
+`test_text_and_font_bounds_mirror_the_frontend`. The client refuses a kind it does not know on load
+(`UnknownDrawingKindError`, logged `drawings.unknown_kind`, never retried and never saved over:
+audit D-211).
+
+**Kinds** (`DRAWING_KINDS`, in this order; a point is `{time, price}`, `time` integer UTC seconds in
+`[0, 10^11]`, `price` a finite number):
+- `hline`: `price` (> 0). `trendline`, `ray` (extended past B), `extended` (past both anchors),
+  `arrow` (a head at B), `price_range` and `date_range`: `anchors`, exactly 2 points. The extension
+  comes from the kind, never a stored field.
+- `vline`: `time`. `rect`: 2 `anchors` (opposite corners) and `fill_opacity` (a number in
+  `[0, 1]`). `channel`: 2 `anchors` and `offset` (a finite price distance of the parallel from the
+  A-B line, any sign; placed as C's price minus the A-B line's price at C's time). The client never
+  places or drags a channel whose A and B share a bar (vertical) or whose offset is 0 on the price
+  grid (`channelPlaceable`); the server accepts any finite offset.
+- `text`: `anchor` (one point, the box's top-left corner), `text` (not blank by Python's
+  `str.strip()`, at most `MAX_DRAWING_TEXT_LENGTH` = 500 characters counted as code points; the
+  client's `isBlankText`/`textLength` match, stricter only on U+FEFF; a lone UTF-16 surrogate,
+  which the file cannot encode, is refused on both sides) and `font_size` (integer
+  `MIN_DRAWING_FONT_SIZE`..`MAX_DRAWING_FONT_SIZE` = 8..72).
+- `fib` (2 `anchors`) and `fib_extension` (3 `anchors`, each level at `C + (B - A) * ratio`): the
+  required `levels` (`{ratio >= 0, enabled, color}`, no ratio twice), `extend_right`, `label_side`
+  (`left`/`right`) and `line_width` (1..4).
+- `position`, `anchored_vp`, `anchored_vwap`: unchanged (Stories 32.5, 32.7, 33.6).
+- Every kind may carry `color` (a string) and the optional `locked` and `hidden` (booleans; absent =
+  false). The line-like kinds (`hline`, `trendline`, `ray`, `extended`, `vline`, `rect`,
+  `channel`, `arrow`, `price_range`, `date_range`) may carry the optional `line_width` (integer
+  1..`MAX_DRAWING_LINE_WIDTH` = 4; absent = 1) and `line_style` (one of `LINE_STYLES` = `solid`,
+  `dashed`, `dotted`; absent = `solid`). A file saved before this story loads unchanged (AD-D12).
+
+Prices are stored on the instrument's `price_precision` grid and times as whole seconds by the
+client (`buildDrawing`, `applyHandleDrag`, which also refuse a placement or drag putting two anchors
+of one drawing on the same point); the labels of the rectangle and the ranges are computed
+on read, never stored (`rectLabel`, `rangeLabels`, through `lib/units.ts`). The undo history is page
+state, never stored (audit D-212).
+
+**Layout key** (`chart_layouts.toml`, `views.preferences.validate_layout`, optional):
+`drawings_hidden`, a boolean, default `false` (absent loads as `false`; a null or non-boolean is a
+422 naming the key). True hides every drawing of the coin (none drawn or hit-tested, the drawing
+tools off); the drawings themselves stay stored, and a hidden trendline or line still drives its
+alert (audit D-213). It is one coin's view flag: Save as default stores it `false`, and a seed or
+reset from `[default]` never copies it (a first open starts `false`, a reset keeps the coin's own),
+whatever a hand-edited template holds (`data_api/routes/layout.py`'s `_template`). Mirrored by `frontend/src/lib/chartLayout.ts`.
+
+**Ledger sites.** None server-side (a refused item is the PUT's 422); the client's
+`drawings.unknown_kind` goes to the error bar.
+
+---
+
 ## 3. Ranking engine (`platform/ranking/`, the `ranking_engine` service)
 
 `[amended 2026-09-26: Story 25.2 -- moved from `ranking_engine/engine.py`'s module globals to the

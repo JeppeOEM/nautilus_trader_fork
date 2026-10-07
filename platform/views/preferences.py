@@ -30,7 +30,10 @@ added `chart_drawings.toml`, Story 32.6 `chart_layouts.toml`, Story 33.7
   regenerated fresh on every load.
 - `chart_drawings.toml`: per-instrument chart drawings (Story 32.5), a table per instrument id
   holding `v = 1` and an `items` array of tables, each tagged with a `kind` (`hline`,
-  `trendline`, `fib`, `position`, `anchored_vp`, `anchored_vwap`) --
+  `trendline`, `fib`, `position`, `anchored_vp`, `anchored_vwap`; Story 33.10 added `ray`,
+  `extended`, `vline`, `rect`, `channel`, `text`, `arrow`, `fib_extension`, `price_range` and
+  `date_range`, plus the optional `locked`/`hidden` on every kind and `line_width`/`line_style` on
+  the line-like kinds, absent = false / 1 px solid) --
   `load_chart_drawings`/`save_chart_drawings`. Each item is
   checked by `validate_drawing`, which names the offending field (`DrawingError`): a malformed
   item is refused, never dropped, so a saved drawing is never silently lost on a round trip.
@@ -59,7 +62,8 @@ added `chart_drawings.toml`, Story 32.6 `chart_layouts.toml`, Story 33.7
   `show_value_area` (bool, default true). Unknown keys are refused, never dropped. Coin tables are
   loaded tolerantly for `bar_seconds` and `mode` only (a value outside the supported set is returned as stored, so a
   timeframe retired later never fails the GET; the frontend falls back with one `console.error`),
-  while the PUT validation and the `[default]` table stay strict. Drawings are never part of it.
+  while the PUT validation and the `[default]` table stay strict. Drawings are never part of it;
+  only the optional `drawings_hidden` (bool, default false; Story 33.10) hides them all.
 - `screener_columns.toml`: the screener-wide Technicals column
   selection (Story 17.5), one flat top-level `columns` array of
   `{name, params, category, bar_seconds}` tables in display order, applied to every row of the
@@ -86,6 +90,7 @@ import math
 import os
 import re
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
@@ -99,8 +104,27 @@ from kernel.venues import venue_of
 DEFAULT_BAR_SECONDS = 3600
 
 # `chart_drawings.toml` (Story 32.5): the table layout version and the closed set of item kinds.
+# Story 33.10 appends the ten kinds of the second drawing set; mirrors the frontend's
+# `DRAWING_KIND_NAMES` (`lib/drawings.ts`; `test_the_closed_sets_mirror_the_frontend`).
 DRAWINGS_VERSION = 1
-DRAWING_KINDS = ("hline", "trendline", "fib", "position", "anchored_vp", "anchored_vwap")
+DRAWING_KINDS = (
+    "hline",
+    "trendline",
+    "fib",
+    "position",
+    "anchored_vp",
+    "anchored_vwap",
+    "ray",
+    "extended",
+    "vline",
+    "rect",
+    "channel",
+    "text",
+    "arrow",
+    "fib_extension",
+    "price_range",
+    "date_range",
+)
 # Story 32.7: mirrors of the frontend's `VWAP_SOURCES` (`lib/anchoredVwap.ts`); the Anchored VP's
 # row bounds are the layout's `MIN_PROFILE_ROWS`..`MAX_PROFILE_ROWS` (one engine, one row limit).
 # `test_*_mirror_the_frontend` in `views/tests/test_chart_drawings.py` pins the pair.
@@ -112,6 +136,15 @@ ANCHORED_VWAP_SOURCES = (*VWAP_SOURCES, "stored")
 FIB_LABEL_SIDES = ("left", "right")
 POSITION_SIDES = ("long", "short")
 MAX_DRAWING_LINE_WIDTH = 4
+# Story 33.10: the optional `line_width`/`line_style` of the line-like kinds and the text drawing's
+# bounds. `LINE_STYLES` is also the derivatives' (`DERIVATIVE_LINE_STYLES` aliases it). Mirror the
+# frontend's `LINE_STYLES` (`lib/indicatorStyle.ts`, re-exported by
+# `lib/drawings.ts`), `MAX_TEXT_LENGTH`, `MIN_FONT_SIZE` and `MAX_FONT_SIZE` (`lib/drawings.ts`);
+# `test_line_styles_mirror_the_frontend` and `test_text_and_font_bounds_mirror_the_frontend` pin them.
+LINE_STYLES = ("solid", "dashed", "dotted")
+MAX_DRAWING_TEXT_LENGTH = 500
+MIN_DRAWING_FONT_SIZE = 8
+MAX_DRAWING_FONT_SIZE = 72
 
 _log = logging.getLogger(__name__)
 
@@ -343,17 +376,22 @@ def _check_time(value: Any, field_name: str) -> None:
         raise DrawingError(field_name, f"time must be between 0 and {MAX_DRAWING_TIME}")
 
 
-def _check_anchors(item: dict[str, Any]) -> None:
-    """`anchors` is exactly two `{time, price}` points: UTC seconds (an integer) and a price."""
+def _check_point(point: Any, field_name: str) -> None:
+    """Check one `{time, price}` point: UTC seconds (an integer) and a finite price."""
+    if not isinstance(point, dict) or set(point) != {"time", "price"}:
+        raise DrawingError(field_name, "each point must be exactly {time, price}")
+    _check_time(point["time"], field_name)
+    if not _is_number(point["price"]):
+        raise DrawingError(field_name, "price must be a finite number")
+
+
+def _check_anchors(item: dict[str, Any], count: int = 2) -> None:
+    """`anchors` is exactly `count` `{time, price}` points (two, or a Fib extension's three)."""
     anchors = item.get("anchors")
-    if not isinstance(anchors, list) or len(anchors) != 2:
-        raise DrawingError("anchors", "must be a list of exactly two {time, price} points")
+    if not isinstance(anchors, list) or len(anchors) != count:
+        raise DrawingError("anchors", f"must be a list of exactly {count} {{time, price}} points")
     for anchor in anchors:
-        if not isinstance(anchor, dict) or set(anchor) != {"time", "price"}:
-            raise DrawingError("anchors", "each point must be exactly {time, price}")
-        _check_time(anchor["time"], "anchors")
-        if not _is_number(anchor["price"]):
-            raise DrawingError("anchors", "price must be a finite number")
+        _check_point(anchor, "anchors")
 
 
 def _check_fib_options(item: dict[str, Any]) -> None:
@@ -432,17 +470,141 @@ def _check_anchored_vwap(item: dict[str, Any]) -> None:
         raise DrawingError("band_color", "must be a string")
 
 
-# Per kind: the keys beyond `kind`/`id`/`color` it may carry; any other key is refused.
+def _check_two_anchors(item: dict[str, Any]) -> None:
+    _check_anchors(item, 2)
+
+
+def _check_hline(item: dict[str, Any]) -> None:
+    _require_number(item, "price", positive=True)
+
+
+def _check_fib(item: dict[str, Any]) -> None:
+    _check_anchors(item, 2)
+    _check_fib_options(item)
+
+
+def _check_fib_extension(item: dict[str, Any]) -> None:
+    """Check a trend-based Fibonacci extension: A, B, C, each level at `C + (B - A) * ratio`."""
+    _check_anchors(item, 3)
+    _check_fib_options(item)
+
+
+def _check_vline(item: dict[str, Any]) -> None:
+    _check_time(item.get("time"), "time")
+
+
+def _check_rect(item: dict[str, Any]) -> None:
+    """Check a rectangle: two opposite corners and the fill's opacity, a number in [0, 1]."""
+    _check_anchors(item, 2)
+    _require_number(item, "fill_opacity")
+    if not 0 <= item["fill_opacity"] <= 1:
+        raise DrawingError("fill_opacity", "must be between 0 and 1")
+
+
+def _check_channel(item: dict[str, Any]) -> None:
+    """Check a channel: the base line A-B and the parallel's price offset (any sign, finite)."""
+    _check_anchors(item, 2)
+    _require_number(item, "offset")
+
+
+def _check_text(item: dict[str, Any]) -> None:
+    """Check a text: one `{time, price}` anchor, a non-blank bounded text and a font size in px."""
+    if "anchor" not in item:
+        raise DrawingError("anchor", "is required")
+    _check_point(item["anchor"], "anchor")
+    text = item.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise DrawingError("text", "must be a non-empty string")
+    if len(text) > MAX_DRAWING_TEXT_LENGTH:
+        raise DrawingError("text", f"must be at most {MAX_DRAWING_TEXT_LENGTH} characters")
+    # A lone UTF-16 surrogate (a half-pasted emoji, sent as a `\udXXX` JSON escape) parses into a
+    # str the TOML file cannot encode: refused here, never a 500 from the save.
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise DrawingError("text", "must be valid Unicode (no lone surrogate)") from None
+    _require_int(item, "font_size", MIN_DRAWING_FONT_SIZE, MAX_DRAWING_FONT_SIZE)
+
+
+def _check_flags(item: dict[str, Any]) -> None:
+    """Check the optional `locked`/`hidden` of every kind (absent = false): booleans if present."""
+    for key in ("locked", "hidden"):
+        if key in item and not isinstance(item[key], bool):
+            raise DrawingError(key, "must be a boolean")
+
+
+def _check_line_look(item: dict[str, Any]) -> None:
+    """Check a line-like kind's optional `line_width` (1..4) and `line_style` (absent: 1, solid)."""
+    if "line_width" in item:
+        _require_int(item, "line_width", 1, MAX_DRAWING_LINE_WIDTH)
+    if "line_style" in item and item["line_style"] not in LINE_STYLES:
+        raise DrawingError("line_style", f"must be one of {list(LINE_STYLES)}")
+
+
+_FIB_KEYS = frozenset({"anchors", "levels", "extend_right", "label_side", "line_width"})
+# The kinds drawn as lines, which may carry the optional `line_width`/`line_style`.
+_LINE_LIKE_KINDS = frozenset(
+    {
+        "hline",
+        "trendline",
+        "ray",
+        "extended",
+        "vline",
+        "rect",
+        "channel",
+        "arrow",
+        "price_range",
+        "date_range",
+    }
+)
+_LINE_LOOK_KEYS = frozenset({"line_width", "line_style"})
+# Per kind: the keys beyond `kind`/`id`/`color`/`locked`/`hidden` it may carry (the line-like kinds
+# also `_LINE_LOOK_KEYS`); any other key is refused.
 _DRAWING_KEYS: dict[str, frozenset[str]] = {
     "hline": frozenset({"price"}),
     "trendline": frozenset({"anchors"}),
-    "fib": frozenset({"anchors", "levels", "extend_right", "label_side", "line_width"}),
+    "fib": _FIB_KEYS,
     "position": frozenset(
         {"side", "time", "entry", "stop", "target", "width_bars", "account", "risk_pct"}
     ),
     "anchored_vp": frozenset({"time", "rows", "value_area_pct", "up_color", "down_color"}),
     "anchored_vwap": frozenset({"time", "source", "bands", "band_color"}),
+    "ray": frozenset({"anchors"}),
+    "extended": frozenset({"anchors"}),
+    "vline": frozenset({"time"}),
+    "rect": frozenset({"anchors", "fill_opacity"}),
+    "channel": frozenset({"anchors", "offset"}),
+    "text": frozenset({"anchor", "text", "font_size"}),
+    "arrow": frozenset({"anchors"}),
+    "fib_extension": _FIB_KEYS,
+    "price_range": frozenset({"anchors"}),
+    "date_range": frozenset({"anchors"}),
 }
+# Per kind: the check of its own fields (the shared ones are checked by `validate_drawing`).
+_DRAWING_CHECKS: dict[str, Callable[[dict[str, Any]], None]] = {
+    "hline": _check_hline,
+    "trendline": _check_two_anchors,
+    "fib": _check_fib,
+    "position": _check_position,
+    "anchored_vp": _check_anchored_vp,
+    "anchored_vwap": _check_anchored_vwap,
+    "ray": _check_two_anchors,
+    "extended": _check_two_anchors,
+    "vline": _check_vline,
+    "rect": _check_rect,
+    "channel": _check_channel,
+    "text": _check_text,
+    "arrow": _check_two_anchors,
+    "fib_extension": _check_fib_extension,
+    "price_range": _check_two_anchors,
+    "date_range": _check_two_anchors,
+}
+
+
+def _allowed_keys(kind: str) -> frozenset[str]:
+    shared = frozenset({"kind", "id", "color", "locked", "hidden"})
+    look = _LINE_LOOK_KEYS if kind in _LINE_LIKE_KINDS else frozenset()
+    return shared | look | _DRAWING_KEYS[kind]
 
 
 def validate_drawing(item: Any) -> dict[str, Any]:
@@ -460,22 +622,13 @@ def validate_drawing(item: Any) -> dict[str, Any]:
         raise DrawingError("id", "must be a non-empty string")
     if "color" in item and not isinstance(item["color"], str):
         raise DrawingError("color", "must be a string")
-    unknown = set(item) - {"kind", "id", "color"} - _DRAWING_KEYS[kind]
+    unknown = set(item) - _allowed_keys(kind)
     if unknown:
         raise DrawingError(sorted(unknown)[0], f"is not a field of a {kind}")
-    if kind == "hline":
-        _require_number(item, "price", positive=True)
-    elif kind == "trendline":
-        _check_anchors(item)
-    elif kind == "fib":
-        _check_anchors(item)
-        _check_fib_options(item)
-    elif kind == "position":
-        _check_position(item)
-    elif kind == "anchored_vp":
-        _check_anchored_vp(item)
-    else:
-        _check_anchored_vwap(item)
+    _check_flags(item)
+    if kind in _LINE_LIKE_KINDS:
+        _check_line_look(item)
+    _DRAWING_CHECKS[kind](item)
     return item
 
 
@@ -639,7 +792,8 @@ DERIVATIVE_OUTPUTS: dict[str, tuple[str, ...]] = {
     "liquidations": ("liquidations",),
 }
 LIQUIDATION_MEASURES = ("size", "notional")
-DERIVATIVE_LINE_STYLES = ("solid", "dashed", "dotted")
+# The one line-style set (Story 33.10's `LINE_STYLES`, the drawings' too): an alias, never a copy.
+DERIVATIVE_LINE_STYLES = LINE_STYLES
 MAX_DERIVATIVE_LINE_WIDTH = 4
 _DERIVATIVE_STYLE_COLORS = frozenset({"color", "up_color", "down_color"})
 _DERIVATIVE_STYLE_KEYS = _DERIVATIVE_STYLE_COLORS | {"line_width", "line_style"}
@@ -672,8 +826,19 @@ MAX_COMPARE_SYMBOLS = 3
 MAX_INSTRUMENT_ID_LENGTH = 512
 PRICE_SCALE_DEFAULTS: dict[str, Any] = {"mode": "normal", "auto_scale": True, "invert": False}
 COMPARE_DEFAULTS: dict[str, Any] = {"symbols": [], "spread": False}
+# Story 33.10: the optional `drawings_hidden` key, the tool rail's "Hide all drawings" (every drawing
+# of the coin neither drawn nor hit-tested, and the drawing tools off). A layout saved before it
+# loads with `False`; the drawings themselves are never part of a layout.
 _OPTIONAL_LAYOUT_KEYS = frozenset(
-    {"footprint", "derivatives", "volume_color_by", "chart_type", "price_scale", "compare"}
+    {
+        "footprint",
+        "derivatives",
+        "volume_color_by",
+        "chart_type",
+        "price_scale",
+        "compare",
+        "drawings_hidden",
+    }
 )
 
 BUILTIN_DEFAULT_LAYOUT: dict[str, Any] = {
@@ -699,6 +864,7 @@ BUILTIN_DEFAULT_LAYOUT: dict[str, Any] = {
     "chart_type": CHART_TYPES[0],
     "price_scale": dict(PRICE_SCALE_DEFAULTS),
     "compare": copy.deepcopy(COMPARE_DEFAULTS),
+    "drawings_hidden": False,
 }
 
 
@@ -919,7 +1085,8 @@ def validate_layout(layout: Any, *, tolerant: bool = False) -> dict[str, Any]:
     when unset; the optional `footprint` table always present, `FOOTPRINT_DEFAULTS` when absent,
     likewise the optional `derivatives` table, `DERIVATIVES_DEFAULTS` when absent, and the optional
     `volume_color_by`, `direction` when absent; Story 33.9's `chart_type`, `price_scale` and
-    `compare`, `candles`, `PRICE_SCALE_DEFAULTS` and `COMPARE_DEFAULTS` when absent),
+    `compare`, `candles`, `PRICE_SCALE_DEFAULTS` and `COMPARE_DEFAULTS` when absent; Story 33.10's
+    `drawings_hidden`, `False` when absent),
     else raise `LayoutError` naming the key. Strict by design (DATA-07): an unknown or missing key
     or a wrong type is refused rather than dropped or defaulted.
 
@@ -956,6 +1123,7 @@ def validate_layout(layout: Any, *, tolerant: bool = False) -> dict[str, Any]:
         "chart_type": _validate_chart_type(layout.get("chart_type", CHART_TYPES[0])),
         "price_scale": _validate_price_scale(layout.get("price_scale", PRICE_SCALE_DEFAULTS)),
         "compare": _validate_compare(layout.get("compare", COMPARE_DEFAULTS)),
+        "drawings_hidden": _validate_drawings_hidden(layout.get("drawings_hidden", False)),
     }
 
 
@@ -967,6 +1135,13 @@ def _validate_volume_color_by(mode: Any) -> str:
     if mode not in VOLUME_COLOR_MODES:
         raise LayoutError("volume_color_by", f"must be one of {list(VOLUME_COLOR_MODES)}")
     return str(mode)
+
+
+def _validate_drawings_hidden(hidden: Any) -> bool:
+    """Return the hide-all flag (`False` passed when absent), else raise: a null is refused."""
+    if not isinstance(hidden, bool):
+        raise LayoutError("drawings_hidden", "must be a boolean")
+    return hidden
 
 
 def _validate_chart_type(chart_type: Any) -> str:

@@ -237,6 +237,14 @@ Point & Figure, Range bars, Hollow candles, Volume candles.
 Only these three tools exist. No trendline variants, no Fibonacci, no
 shapes/text, no Elliott wave/Gann tools, no pitchfork, no brush/highlighter.
 
+> **[amended 2026-10-07: Story 33.10]** The operator's 2026-10-05 review lifts
+> this restriction for the TradingView tools the operator uses (see the
+> exclusions list, "Extra drawing tools"): the grouped rail now holds Lines
+> (trend, ray, extended, horizontal, vertical, parallel channel), Fibonacci
+> (retracement, extension), Projection (long, short), Shapes / Annotation
+> (rectangle, text, arrow), Measure (measure, price range, date range) and
+> Volume-based, plus the magnet, undo/redo, Hide all and Delete all actions.
+
 1. **Line (trendline)** — click-drag between two points on the price/time
    plane. Implemented as a custom Primitive holding two `{time, price}`
    anchors, redrawn on each `subscribeCrosshairMove`/pan/zoom via the
@@ -752,10 +760,21 @@ the code review if any of these sneak back in:
   Ashi and Hollow candles are built (§A2), with the price-scale modes and
   compare symbols; Renko, Kagi, Point & Figure, Range bars and Volume candles
   stay excluded.
-- **Extra drawing tools** — no Fibonacci retracement/extension tools, no
-  shapes, no text annotations, no pitchforks, no Gann/Elliott wave tools, no
-  brush/highlighter, no pattern-drawing helpers. Line, horizontal line, and
-  the measurement tool only.
+- **Extra drawing tools** — no ~~Fibonacci retracement/extension tools, no
+  shapes, no text annotations,~~ pitchforks, no Gann/Elliott wave tools, no
+  brush/highlighter, no pattern-drawing helpers. ~~Line, horizontal line, and
+  the measurement tool only.~~ **[amended 2026-10-07: Story 33.10]** The
+  operator's 2026-10-05 review lifts this exclusion for the TradingView set
+  the operator uses: the rail's groups (§A3, `lib/chartTools.ts`) add the
+  ray, extended line, vertical line and parallel channel (Lines), the
+  Fibonacci extension (Fibonacci; the retracement came with Story 32.5), the
+  rectangle, text and arrow (a new Shapes / Annotation group) and the saved
+  price and date ranges (Measure), each saved in `chart_drawings.toml`, with a
+  magnet (weak/strong, on the real OHLC), Shift angle snapping, undo/redo
+  (100 steps per coin, page state), per-drawing lock and hide, Hide all (the
+  layout key `drawings_hidden`) and Delete all. Pitchforks, Gann/Elliott wave
+  tools, brush/highlighter, pattern-drawing helpers and an object tree stay
+  excluded.
 - **Full indicator library** — no 100+ built-in indicator catalog, no
   Pine-Script-style custom scripting editor, no public/community script
   library or "Add to favorites" indicator list.

@@ -883,3 +883,37 @@ def test_chart_type_and_scale_settings_mirror_the_frontend() -> None:
     compare = _ts_block("lib/chartLayout.ts", "export const DEFAULT_COMPARE")
     assert _ts_value(compare, "symbols") == "[]"
     assert _ts_value(compare, "spread") == str(COMPARE_DEFAULTS["spread"]).lower()
+
+
+# -- Story 33.10: the optional drawings_hidden key -------------------------------------------------
+
+
+def test_a_layout_saved_before_story_33_10_loads_with_drawings_shown(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    path.write_text(_PRE_32_8_FILE)  # no drawings_hidden key
+    assert load_chart_layouts(path).layouts[_IID]["drawings_hidden"] is False
+    assert BUILTIN_DEFAULT_LAYOUT["drawings_hidden"] is False
+
+
+def test_an_absent_drawings_hidden_defaults_to_false() -> None:
+    layout = _layout()
+    layout.pop("drawings_hidden")
+    assert validate_layout(layout)["drawings_hidden"] is False
+
+
+def test_drawings_hidden_round_trips_through_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    layout = _layout(drawings_hidden=True)
+    save_chart_layouts(ChartLayouts({_IID: layout}, default=layout), path)
+    assert tomllib.loads(path.read_text())[_IID]["drawings_hidden"] is True
+    loaded = load_chart_layouts(path)
+    assert loaded.layouts[_IID]["drawings_hidden"] is True
+    assert loaded.default is not None
+    assert loaded.default["drawings_hidden"] is True
+
+
+@pytest.mark.parametrize("hidden", [None, "yes", 1, 0, [True]])
+def test_a_bad_drawings_hidden_is_refused_naming_it(hidden: Any) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(drawings_hidden=hidden))
+    assert raised.value.key == "drawings_hidden"

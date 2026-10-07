@@ -1,6 +1,14 @@
-import type { ISeriesPrimitive, Time } from "lightweight-charts";
+import type {
+  IChartApi,
+  IPrimitivePaneRenderer,
+  IPrimitivePaneView,
+  ISeriesApi,
+  ISeriesPrimitive,
+  SeriesAttachedParameter,
+  Time,
+} from "lightweight-charts";
 
-import { snapIndex } from "../../../lib/drawings";
+import { type Anchor, type LineStyleName, snapIndex } from "../../../lib/drawings";
 
 /** A grab radius around a handle, in CSS pixels. */
 export const HANDLE_RADIUS_PX = 8;
@@ -98,3 +106,167 @@ export function nearestHandle(
   }
   return best;
 }
+
+/**
+ * Story 33.10: the canvas dash pattern of a stored line style at a bitmap pixel `ratio` (`[]` is
+ * solid). Any other value, which a hand-edited file could carry past the client, draws solid.
+ */
+export function lineDash(style: LineStyleName | undefined, ratio: number): number[] {
+  if (style === "dashed") return [6 * ratio, 4 * ratio];
+  if (style === "dotted") return [1.5 * ratio, 3 * ratio];
+  return [];
+}
+
+/**
+ * Story 33.10: the editable drawings' handle squares, in the bitmap space of a primitive's draw
+ * (`hr`/`vr` the pixel ratios): filled with `fill`, outlined in the current stroke style.
+ */
+export function drawHandles(context: CanvasRenderingContext2D, points: readonly { x: number; y: number }[], fill: string, hr: number, vr: number): void {
+  const half = (HANDLE_SIZE_PX / 2) * hr;
+  context.fillStyle = fill;
+  context.setLineDash([]);
+  for (const p of points) {
+    const x = p.x * hr - half;
+    const y = p.y * vr - half;
+    context.fillRect(x, y, half * 2, half * 2);
+    context.strokeRect(x, y, half * 2, half * 2);
+  }
+}
+
+/** The arrow head's sides: this long per pixel of line width, at most `ARROW_MAX_PX` (a 4 px line's
+ * head stays an arrow head, not a fan), at this angle off the line. */
+const ARROW_PX = 10;
+export const ARROW_MAX_PX = 16;
+const ARROW_ANGLE = Math.PI / 7;
+
+/**
+ * Story 33.10: two short sides at `to`, pointing back along `to`-`from` (an arrow's head, a range's
+ * pointer), in the current stroke style; none for a zero-length line (no direction).
+ */
+export function drawArrowHead(
+  context: CanvasRenderingContext2D,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  lineWidth: number,
+  hr: number,
+  vr: number,
+): void {
+  if (from.x === to.x && from.y === to.y) return;
+  const back = Math.atan2(from.y - to.y, from.x - to.x);
+  const side = Math.min(ARROW_PX * Math.max(1, lineWidth), ARROW_MAX_PX);
+  context.setLineDash([]);
+  for (const turn of [-ARROW_ANGLE, ARROW_ANGLE]) {
+    context.beginPath();
+    context.moveTo(to.x * hr, to.y * vr);
+    context.lineTo((to.x + side * Math.cos(back + turn)) * hr, (to.y + side * Math.sin(back + turn)) * vr);
+    context.stroke();
+  }
+}
+
+/**
+ * The distance from (x, y) to the box between two corners, for a body hit: the distance to its
+ * border, at most `BODY_TOLERANCE_PX` anywhere inside it (so a line crossing a box is still the
+ * nearer body on its own pixels). Null outside the tolerance.
+ */
+export function boxDistance(x: number, y: number, a: { x: number; y: number }, b: { x: number; y: number }): number | null {
+  const left = Math.min(a.x, b.x);
+  const right = Math.max(a.x, b.x);
+  const top = Math.min(a.y, b.y);
+  const bottom = Math.max(a.y, b.y);
+  const inside = x >= left && x <= right && y >= top && y <= bottom;
+  const dx = Math.max(left - x, 0, x - right);
+  const dy = Math.max(top - y, 0, y - bottom);
+  const border = inside ? Math.min(x - left, right - x, y - top, bottom - y) : Math.hypot(dx, dy);
+  if (inside) return Math.min(border, BODY_TOLERANCE_PX);
+  return border <= BODY_TOLERANCE_PX ? border : null;
+}
+
+/**
+ * Story 33.10: the attach lifecycle of the click-placed drawings (vertical line, rectangle,
+ * channel, text, ranges). The invariant it carries: a drawing's screen geometry is derived only
+ * from its stored `{time, price}` anchors, recomputed on every `updateAllViews` (the library calls
+ * it before each redraw), each anchor on the latest bar at or before its time (`BarGrid.snap`) --
+ * never cached across a pan, zoom or new page, so the drawing cannot drift from its anchors.
+ */
+export abstract class AnchoredDrawingPrimitive<G> implements DrawingPrimitive {
+  protected chart: IChartApi | null = null;
+  protected series: ISeriesApi<"Candlestick" | "Line"> | null = null;
+  protected geometry: G | null = null;
+  protected handlesVisible = false;
+  private requestUpdate: (() => void) | null = null;
+  private readonly view: IPrimitivePaneView = {
+    renderer: (): IPrimitivePaneRenderer | null => (this.geometry === null ? null : this.renderer(this.geometry)),
+  };
+
+  protected readonly grid: BarGrid;
+
+  protected constructor(grid: BarGrid) {
+    this.grid = grid;
+  }
+
+  attached(param: SeriesAttachedParameter<Time>): void {
+    this.chart = param.chart as IChartApi;
+    this.series = param.series as ISeriesApi<"Candlestick" | "Line">;
+    this.requestUpdate = param.requestUpdate;
+  }
+
+  detached(): void {
+    this.chart = null;
+    this.series = null;
+    this.requestUpdate = null;
+    this.geometry = null;
+  }
+
+  setHandlesVisible(visible: boolean): void {
+    if (visible === this.handlesVisible) return;
+    this.handlesVisible = visible;
+    this.requestUpdate?.();
+  }
+
+  refresh(): void {
+    this.requestUpdate?.();
+  }
+
+  updateAllViews(): void {
+    this.geometry = this.chart && this.series ? this.compute() : null;
+  }
+
+  paneViews(): readonly IPrimitivePaneView[] {
+    return [this.view];
+  }
+
+  /** The current screen geometry, or `null` when not drawable -- exposed for tests. */
+  screen(): G | null {
+    return this.geometry;
+  }
+
+  abstract hit(x: number, y: number): DrawingHit | null;
+
+  /** Ask the library for a repaint (the drawing changed). */
+  protected changed(): void {
+    this.requestUpdate?.();
+  }
+
+  /** An anchor's screen point, or null while it has none (scrolled out, older than every bar). */
+  protected pointOf(anchor: Anchor): { x: number; y: number } | null {
+    const x = this.xOf(anchor.time);
+    const y = this.series?.priceToCoordinate(anchor.price) ?? null;
+    return x === null || y === null ? null : { x, y };
+  }
+
+  protected xOf(time: number): number | null {
+    const snapped = this.grid.snap(time);
+    return snapped === null ? null : (this.chart?.timeScale().timeToCoordinate(snapped as Time) ?? null);
+  }
+
+  protected priceY(price: number): number | null {
+    return this.series?.priceToCoordinate(price) ?? null;
+  }
+
+  protected abstract compute(): G | null;
+
+  protected abstract renderer(geometry: G): IPrimitivePaneRenderer;
+}
+
+/** The type of a pane renderer's draw target (fancy-canvas, a transitive dependency). */
+export type DrawTarget = Parameters<IPrimitivePaneRenderer["draw"]>[0];

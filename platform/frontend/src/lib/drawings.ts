@@ -20,7 +20,14 @@
  */
 
 import { type AnchoredVwapSource, DEFAULT_VWAP_SOURCE } from "./anchoredVwap";
+import { LINE_STYLES, type LineStyleName } from "./indicatorStyle";
+import type { ChartTool } from "./chartTools";
 import { formatDecimal, roundToPrecision } from "./units";
+
+// Story 33.10: a drawing's line style is one of the indicator styles (one closed set, mirrored by
+// `views.preferences.LINE_STYLES`; `test_line_styles_mirror_the_frontend`).
+export { LINE_STYLES };
+export type { LineStyleName };
 
 export interface Anchor {
   /** UTC seconds of a bar (any time inside a bar draws on that bar). */
@@ -53,15 +60,84 @@ export function trendlinePriceAt(anchors: readonly [Anchor, Anchor], t: number):
   return a.price + ((b.price - a.price) * (t - a.time)) / span;
 }
 
-export interface HlineDrawing {
+/**
+ * Story 33.10: what every kind may carry, each absent on a drawing saved before it (absent = false):
+ * `locked` (no handles, no grab; its menu still opens) and `hidden` (neither drawn nor hit-tested).
+ */
+export interface DrawingFlags {
+  locked?: boolean;
+  hidden?: boolean;
+}
+
+/** Story 33.10: the look of a line-like kind; absent = 1 px, solid. */
+export interface LineLook {
+  line_width?: number;
+  line_style?: LineStyleName;
+}
+
+export interface HlineDrawing extends DrawingFlags, LineLook {
   kind: "hline";
   id: string;
   price: number;
   color?: string;
 }
 
-export interface TrendlineDrawing {
+export interface TrendlineDrawing extends DrawingFlags, LineLook {
   kind: "trendline";
+  id: string;
+  anchors: [Anchor, Anchor];
+  color?: string;
+}
+
+/** Story 33.10: a trendline extended past B (`ray`) or past both anchors (`extended`), or ending in
+ * an arrow head at B (`arrow`). The extension comes from the kind (`extendOf`), never a stored field. */
+export interface RayDrawing extends DrawingFlags, LineLook {
+  kind: "ray" | "extended" | "arrow";
+  id: string;
+  anchors: [Anchor, Anchor];
+  color?: string;
+}
+
+/** Story 33.10: a vertical line at a bar. */
+export interface VlineDrawing extends DrawingFlags, LineLook {
+  kind: "vline";
+  id: string;
+  /** UTC seconds of the bar. */
+  time: number;
+  color?: string;
+}
+
+/** Story 33.10: a rectangle between two opposite corners, filled at `fill_opacity` (0..1). */
+export interface RectDrawing extends DrawingFlags, LineLook {
+  kind: "rect";
+  id: string;
+  anchors: [Anchor, Anchor];
+  fill_opacity: number;
+  color?: string;
+}
+
+/** Story 33.10: a parallel channel: the A-B line and its parallel `offset` (a price) away. */
+export interface ChannelDrawing extends DrawingFlags, LineLook {
+  kind: "channel";
+  id: string;
+  anchors: [Anchor, Anchor];
+  offset: number;
+  color?: string;
+}
+
+/** Story 33.10: a text note, its box's top-left corner at `anchor`. */
+export interface TextDrawing extends DrawingFlags {
+  kind: "text";
+  id: string;
+  anchor: Anchor;
+  text: string;
+  font_size: number;
+  color?: string;
+}
+
+/** Story 33.10: the measured price range (`price_range`) or date range (`date_range`) between A and B. */
+export interface RangeDrawing extends DrawingFlags, LineLook {
+  kind: "price_range" | "date_range";
   id: string;
   anchors: [Anchor, Anchor];
   color?: string;
@@ -75,7 +151,7 @@ export interface FibLevel {
 
 export type LabelSide = "left" | "right";
 
-export interface FibDrawing {
+export interface FibDrawing extends DrawingFlags {
   kind: "fib";
   id: string;
   /** A and B of the drag: ratio 1 sits on A, ratio 0 on B. */
@@ -89,7 +165,22 @@ export interface FibDrawing {
 
 export type PositionSide = "long" | "short";
 
-export interface PositionDrawing {
+/**
+ * Story 33.10: a trend-based Fibonacci extension: A, B and C, each level at `C + (B - A) * ratio`
+ * (`fibExtensionLevelPrices`), with the retracement's options.
+ */
+export interface FibExtensionDrawing extends DrawingFlags {
+  kind: "fib_extension";
+  id: string;
+  anchors: [Anchor, Anchor, Anchor];
+  levels: FibLevel[];
+  extend_right: boolean;
+  label_side: LabelSide;
+  line_width: number;
+  color?: string;
+}
+
+export interface PositionDrawing extends DrawingFlags {
   kind: "position";
   id: string;
   side: PositionSide;
@@ -110,7 +201,7 @@ export interface PositionDrawing {
  * (`buildVolumeProfile`) from that bar to the latest, growing rightward from the anchor and
  * following new bars. Nothing but the anchor and the look is stored: the rows are recomputed.
  */
-export interface AnchoredVpDrawing {
+export interface AnchoredVpDrawing extends DrawingFlags {
   kind: "anchored_vp";
   id: string;
   /** UTC seconds of the anchor bar. */
@@ -122,7 +213,7 @@ export interface AnchoredVpDrawing {
 }
 
 /** An Anchored VWAP (Story 32.7): one click at a bar; the line (and optional bands) from that bar on. */
-export interface AnchoredVwapDrawing {
+export interface AnchoredVwapDrawing extends DrawingFlags {
   kind: "anchored_vwap";
   id: string;
   time: number;
@@ -140,7 +231,14 @@ export type Drawing =
   | FibDrawing
   | PositionDrawing
   | AnchoredVpDrawing
-  | AnchoredVwapDrawing;
+  | AnchoredVwapDrawing
+  | RayDrawing
+  | VlineDrawing
+  | RectDrawing
+  | ChannelDrawing
+  | TextDrawing
+  | FibExtensionDrawing
+  | RangeDrawing;
 export type DrawingKind = Drawing["kind"];
 
 /** The decimals the catalog's instrument definition prescribes (`GET /api/candles`). */
@@ -150,6 +248,21 @@ export interface InstrumentPrecision {
 }
 
 export const MAX_LINE_WIDTH = 4;
+/** Story 33.10: a line-like kind's width and style when it stores none. */
+export const DEFAULT_DRAWING_LINE_WIDTH = 1;
+export const DEFAULT_DRAWING_LINE_STYLE: LineStyleName = "solid";
+
+// Story 33.10: the text note's bounds, mirrored by `views.preferences` (`MAX_DRAWING_TEXT_LENGTH`,
+// `MIN_DRAWING_FONT_SIZE`, `MAX_DRAWING_FONT_SIZE`; `test_text_and_font_bounds_mirror_the_frontend`
+// reads these three lines, so keep each a plain `export const NAME = N;`).
+export const MAX_TEXT_LENGTH = 500;
+export const MIN_FONT_SIZE = 8;
+export const MAX_FONT_SIZE = 72;
+export const DEFAULT_FONT_SIZE = 14;
+/** What a placed text note says until its dialog (opened on placement) sets it. */
+export const DEFAULT_TEXT = "Text";
+/** A new rectangle's fill opacity. */
+export const DEFAULT_RECT_OPACITY = 0.2;
 
 /** The bounds of an Anchored VP's row count (the layout's `MIN_PROFILE_ROWS`/`MAX_PROFILE_ROWS`). */
 export const MIN_AVP_ROWS = 2;
@@ -216,6 +329,40 @@ export function fibLevelPrices(fib: FibDrawing, pricePrecision: number | null): 
     .sort((x, y) => x.ratio - y.ratio)
     .map((level) => {
       const price = fibPrice(a.price, b.price, level.ratio);
+      return { ratio: level.ratio, price: safeRound(price, pricePrecision), color: level.color };
+    });
+}
+
+/** Story 33.10: a new Fibonacci extension's ratios: the projection targets on, the deep ones off. */
+export const FIB_EXTENSION_DEFAULT_RATIOS: readonly { ratio: number; enabled: boolean }[] = [
+  { ratio: 0, enabled: true },
+  { ratio: 0.236, enabled: false },
+  { ratio: 0.382, enabled: true },
+  { ratio: 0.5, enabled: true },
+  { ratio: 0.618, enabled: true },
+  { ratio: 0.786, enabled: false },
+  { ratio: 1, enabled: true },
+  { ratio: 1.272, enabled: true },
+  { ratio: 1.618, enabled: true },
+  { ratio: 2.618, enabled: true },
+  { ratio: 4.236, enabled: false },
+];
+
+export function defaultFibExtensionLevels(colorOf: (ratio: number) => string): FibLevel[] {
+  return FIB_EXTENSION_DEFAULT_RATIOS.map(({ ratio, enabled }) => ({ ratio, enabled, color: colorOf(ratio) }));
+}
+
+/**
+ * Story 33.10: the enabled levels of a Fibonacci extension, ascending by ratio, each at
+ * `C + (B - A) * ratio` (ratio 0 on C, 1 a full A-B move projected from C) on the instrument's grid.
+ */
+export function fibExtensionLevelPrices(d: FibExtensionDrawing, pricePrecision: number | null): FibLevelPrice[] {
+  const [a, b, c] = d.anchors;
+  return d.levels
+    .filter((level) => level.enabled)
+    .sort((x, y) => x.ratio - y.ratio)
+    .map((level) => {
+      const price = c.price + (b.price - a.price) * level.ratio;
       return { ratio: level.ratio, price: safeRound(price, pricePrecision), color: level.color };
     });
 }
@@ -339,6 +486,270 @@ export function positionLabels(p: PositionDrawing, precision: InstrumentPrecisio
   };
 }
 
+// -- Story 33.10 tools -----------------------------------------------------------------------------
+
+/** How far a line kind runs past its anchors: a ray past B, an extended line past both. */
+export type Extend = "none" | "right" | "both";
+
+/** The trendline and the kinds drawn as one (`TrendlinePrimitive`): ray, extended line, arrow. */
+export function isLineDrawing(d: Drawing): d is TrendlineDrawing | RayDrawing {
+  return d.kind === "trendline" || d.kind === "ray" || d.kind === "extended" || d.kind === "arrow";
+}
+
+export function extendOf(kind: DrawingKind): Extend {
+  return kind === "ray" ? "right" : kind === "extended" ? "both" : "none";
+}
+
+/** A point in a pane's CSS pixels. */
+export interface Px {
+  x: number;
+  y: number;
+}
+
+/**
+ * The segment A-B as drawn on a `width` x `height` pane (CSS px): as is for `none`, else carried past
+ * B (`right`) or past both anchors (`both`) to the pane's border, so the drawn segment (and its hit
+ * test) never runs to infinity. An anchor inside the extension's far side is never cut off: the
+ * drawn segment always contains A-B. A = B, or a line that never crosses the pane, is returned
+ * unextended (there is nothing to extend along). Pure arithmetic on finite px: it never throws.
+ */
+export function extendedSegment(a: Px, b: Px, extend: Extend, width: number, height: number): [Px, Px] {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  if (extend === "none" || (dx === 0 && dy === 0)) return [a, b];
+  // Liang-Barsky: the range of t (the point A + t (B - A)) inside [0, width] x [0, height].
+  let enter = -Infinity;
+  let exit = Infinity;
+  const bounds: [number, number][] = [
+    [-dx, a.x],
+    [dx, width - a.x],
+    [-dy, a.y],
+    [dy, height - a.y],
+  ];
+  for (const [p, q] of bounds) {
+    if (p === 0) {
+      if (q < 0) return [a, b]; // parallel to this border and outside it
+      continue;
+    }
+    if (p < 0) enter = Math.max(enter, q / p);
+    else exit = Math.min(exit, q / p);
+  }
+  if (enter > exit) return [a, b];
+  const from = extend === "both" ? Math.min(0, enter) : 0;
+  const to = Math.max(1, exit);
+  return [
+    { x: a.x + from * dx, y: a.y + from * dy },
+    { x: a.x + to * dx, y: a.y + to * dy },
+  ];
+}
+
+/**
+ * A channel's offset from its third click C: the price distance from the A-B line at C's time
+ * (`trendlinePriceAt`, the one line formula), or from A's price when A-B is vertical (equal times).
+ */
+export function channelOffsetFor(a: Anchor, b: Anchor, c: Anchor): number {
+  const onLine = trendlinePriceAt([a, b], c.time);
+  return c.price - (onLine ?? a.price);
+}
+
+/** "10.00 (+11.11 %)": a rectangle's price height and that height as a percent of its lower edge. */
+export function rectLabel(d: RectDrawing, pricePrecision: number): string {
+  const [a, b] = d.anchors;
+  const low = Math.min(a.price, b.price);
+  const height = Math.abs(b.price - a.price);
+  const pct = low > 0 ? (height / low) * 100 : Number.NaN;
+  return `${safeDecimal(height, pricePrecision)} (${formatPercent(pct)})`;
+}
+
+/** What a price or date range measures between its anchors (`computeMeasurement`'s fields). */
+export interface RangeMeasure {
+  priceDelta: number;
+  /** Null when the start price is 0. */
+  priceDeltaPct: number | null;
+  /** Null when there are no candle bars to count (Lines mode, nothing loaded): printed `n/a`, never 0. */
+  bars: number | null;
+  volume: number | null;
+}
+
+/** "+1.50" / "−1.50": a signed price at the instrument precision, a true minus sign. */
+function signedDecimal(value: number, precision: number): string {
+  const text = safeDecimal(Math.abs(value), precision);
+  return value < 0 && Number(text) !== 0 ? `${MINUS}${text}` : `+${text}`;
+}
+
+/**
+ * The label lines of a range, every number through `lib/units.ts`: a price range shows the change
+ * from A to B and its percent (TradingView's Price Range), a date range the bars it spans and their
+ * volume at the size precision (TradingView's Date Range) -- `n/a` for both when no candle bars back
+ * the measurement, never a fabricated 0.
+ */
+export function rangeLabels(m: RangeMeasure, kind: RangeDrawing["kind"], precision: InstrumentPrecision): string[] {
+  if (kind === "price_range") {
+    return [`${signedDecimal(m.priceDelta, precision.price)} (${formatPercent(m.priceDeltaPct ?? Number.NaN)})`];
+  }
+  const bars = m.bars === null ? NO_VALUE : safeDecimal(m.bars, 0);
+  const volume = m.volume === null ? NO_VALUE : safeDecimal(m.volume, precision.size);
+  return [`${bars} bars`, `Vol ${volume}`];
+}
+
+/**
+ * How many clicks place a tool's drawing: 1, 2 or 3. 0 = not placed by clicks: the cursor, the
+ * horizontal line (placed by a price click, `onPriceClick`), the Fibonacci retracement (a drag) and
+ * the measure / FRVP drags.
+ */
+const PLACEMENT_POINTS: Partial<Record<ChartTool, number>> = {
+  trendline: 2,
+  ray: 2,
+  extended: 2,
+  arrow: 2,
+  rect: 2,
+  price_range: 2,
+  date_range: 2,
+  channel: 3,
+  fib_extension: 3,
+  vline: 1,
+  text: 1,
+  long: 1,
+  short: 1,
+  avp: 1,
+  avwap: 1,
+};
+
+export function placementOf(tool: ChartTool): number {
+  return PLACEMENT_POINTS[tool] ?? 0;
+}
+
+/** The kind of drawing a click-placed tool makes, or null for a tool that places none by clicks. */
+export function kindOfTool(tool: ChartTool): DrawingKind | null {
+  switch (tool) {
+    case "long":
+    case "short":
+      return "position";
+    case "avp":
+      return "anchored_vp";
+    case "avwap":
+      return "anchored_vwap";
+    default:
+      return placementOf(tool) > 0 ? (tool as DrawingKind) : null;
+  }
+}
+
+/** What a new drawing is made with: the page resolves the chart tokens, the candles the precision. */
+export interface NewDrawingContext {
+  precision: InstrumentPrecision | null;
+  color: string;
+  upColor: string;
+  downColor: string;
+  bandColor: string;
+  fibColor: (ratio: number) => string;
+}
+
+const samePoint = (a: Anchor, b: Anchor): boolean => a.time === b.time && a.price === b.price;
+
+/**
+ * Whether a channel's points so far can make a channel: A and B on two bars (a vertical A-B has no
+ * parallel to measure along), and C, once clicked, an offset that is not 0 on the grid (a channel of
+ * no width is a second line on the first).
+ */
+export function channelPlaceable(points: readonly Anchor[], pricePrecision: number | null): boolean {
+  if (points.length >= 2 && storedTime(points[0].time) === storedTime(points[1].time)) return false;
+  if (points.length < 3) return true;
+  return safeRound(channelOffsetFor(points[0], points[1], points[2]), pricePrecision) !== 0;
+}
+
+/**
+ * The drawing a finished placement makes: `points` (as many as `placementOf(tool)`) stored as whole
+ * UTC seconds (`storedTime`) and prices on the instrument's grid. Null for a degenerate placement --
+ * two points on one another (time and price), the trendline rule, or a channel `channelPlaceable`
+ * refuses -- for a wrong point count, and for a position before the precision is known.
+ */
+export function buildDrawing(
+  tool: ChartTool,
+  id: string,
+  points: readonly Anchor[],
+  ctx: NewDrawingContext,
+): Drawing | null {
+  if (points.length === 0 || points.length !== placementOf(tool)) return null;
+  const places = ctx.precision?.price ?? null;
+  const stored = points.map((p) => ({ time: storedTime(p.time), price: safeRound(p.price, places) }));
+  // Any two points on one another (a Fibonacci extension's C on A too), as `dragAnchor` refuses.
+  if (stored.some((point, i) => stored.slice(0, i).some((earlier) => samePoint(earlier, point)))) return null;
+  if (tool === "channel" && !channelPlaceable(stored, places)) return null;
+  if (tool === "long" || tool === "short") {
+    // `newPosition` puts the entry on the grid itself, from the clicked price.
+    return places === null ? null : newPosition(id, tool, points[0].time, points[0].price, places);
+  }
+  return shapeOf(tool, id, stored, ctx);
+}
+
+/**
+ * The shape a placement in progress draws: the points so far plus the pointer (`cursor`) as the
+ * next one, repeated up to the tool's count. Null for a single-click tool (nothing to preview) and
+ * before the first point. Unrounded: the preview follows the pointer, the click rounds.
+ */
+export function previewDrawing(
+  tool: ChartTool,
+  points: readonly Anchor[],
+  cursor: Anchor,
+  ctx: NewDrawingContext,
+): Drawing | null {
+  const need = placementOf(tool);
+  if (need < 2 || points.length === 0 || points.length >= need) return null;
+  const shown = [...points, cursor];
+  while (shown.length < need) shown.push(cursor);
+  return shapeOf(tool, "preview", shown, ctx);
+}
+
+/** The drawing of a two- or three-point tool (or a one-click vline / text / anchored drawing) at `p`. */
+function shapeOf(tool: ChartTool, id: string, p: readonly Anchor[], ctx: NewDrawingContext): Drawing | null {
+  const color = ctx.color;
+  const two: [Anchor, Anchor] = [p[0], p[1] ?? p[0]];
+  switch (tool) {
+    case "trendline":
+      return { kind: "trendline", id, anchors: two, color };
+    case "ray":
+    case "extended":
+    case "arrow":
+      return { kind: tool, id, anchors: two, color };
+    case "price_range":
+    case "date_range":
+      return { kind: tool, id, anchors: two, color };
+    case "rect":
+      return { kind: "rect", id, anchors: two, fill_opacity: DEFAULT_RECT_OPACITY, color };
+    case "channel": {
+      const offset = p.length > 2 ? safeRound(channelOffsetFor(two[0], two[1], p[2]), ctx.precision?.price ?? null) : 0;
+      return { kind: "channel", id, anchors: two, offset, color };
+    }
+    case "fib_extension":
+      return {
+        kind: "fib_extension",
+        id,
+        anchors: [p[0], p[1], p[2]],
+        levels: defaultFibExtensionLevels(ctx.fibColor),
+        extend_right: true,
+        label_side: "left",
+        line_width: 1,
+      };
+    default:
+      return oneClickShape(tool, id, p[0], ctx);
+  }
+}
+
+function oneClickShape(tool: ChartTool, id: string, at: Anchor, ctx: NewDrawingContext): Drawing | null {
+  switch (tool) {
+    case "vline":
+      return { kind: "vline", id, time: at.time, color: ctx.color };
+    case "text":
+      return { kind: "text", id, anchor: at, text: DEFAULT_TEXT, font_size: DEFAULT_FONT_SIZE, color: ctx.color };
+    case "avp":
+      return newAnchoredVp(id, at.time, ctx.upColor, ctx.downColor);
+    case "avwap":
+      return newAnchoredVwap(id, at.time, ctx.color, ctx.bandColor);
+    default:
+      return null;
+  }
+}
+
 // -- bars -----------------------------------------------------------------------------------------
 
 /**
@@ -371,6 +782,8 @@ export interface DragPoint {
   time: number | null;
   /** Bars from the bar `time` falls on to the pointer's bar (may be negative); null with no bars. */
   barsSince: (time: number) => number | null;
+  /** Story 33.10: Shift was held, and the chart constrained the point to 0/45/90 degrees. */
+  shift?: boolean;
 }
 
 const round = (value: number, precision: number | null): number =>
@@ -392,12 +805,15 @@ function safeRound(value: number, precision: number | null): number {
 /**
  * The drawing after its `handle` is dragged to `point`. Pure: the chart reports the pointer, this
  * decides what it means.
- * - anchored VP and VWAP `anchor`: the anchor moves to the pointer's bar (the price is not stored).
- * - hline `price`; trendline and fib `a`/`b`: the anchor moves to the pointer's bar and price.
+ * - anchored VP and VWAP `anchor`, vline `time`: the time moves to the pointer's bar (no price).
+ * - hline `price`; the anchors `a`/`b` (`c` of a Fibonacci extension) of every anchored kind -- a
+ *   rectangle's two corners included: the anchor moves to the pointer's bar and price.
+ * - channel `a`/`b`: the anchor moves and the offset is kept; `offset`: the parallel follows the
+ *   pointer (`channelOffsetFor`). text `anchor`: the box's corner moves to the pointer.
  * - position `entry`: the whole box moves (stop and target keep their distance from the entry);
  *   `target`/`stop`: only that price moves, and a drag past the entry is refused -- it stops one
  *   tick on the proper side; `right`: the width in bars follows the pointer (at least 1).
- * An unknown handle returns the drawing unchanged.
+ * A locked drawing, and an unknown handle, return the drawing unchanged.
  */
 export function applyHandleDrag(
   drawing: Drawing,
@@ -405,25 +821,77 @@ export function applyHandleDrag(
   point: DragPoint,
   pricePrecision: number | null,
 ): Drawing {
-  const price = round(point.price, pricePrecision);
+  if (drawing.locked) return drawing;
+  // Throw-safe: a pointer price whose units pass safe integers (a far zoom-out) must not throw inside
+  // the drag handler; it is kept unrounded, as a paint keeps it (`safeRound`).
+  const price = safeRound(point.price, pricePrecision);
   switch (drawing.kind) {
     case "hline":
       // The server stores only a price above zero: a drag to or below zero stops where it was.
       return handle === "price" && price > 0 ? { ...drawing, price } : drawing;
     case "trendline":
-    case "fib": {
-      if (handle !== "a" && handle !== "b") return drawing;
-      const index = handle === "a" ? 0 : 1;
-      const moved: [Anchor, Anchor] = [drawing.anchors[0], drawing.anchors[1]];
-      moved[index] = { time: point.time === null ? moved[index].time : storedTime(point.time), price };
-      return { ...drawing, anchors: moved };
-    }
+    case "ray":
+    case "extended":
+    case "arrow":
+    case "rect":
+    case "price_range":
+    case "date_range":
+    case "fib":
+    case "fib_extension":
+      return dragAnchor(drawing, handle, point, price);
+    case "channel":
+      return dragChannel(drawing, handle, point, price, pricePrecision);
+    case "text":
+      return handle === "anchor" ? { ...drawing, anchor: movedAnchor(drawing.anchor, point, price) } : drawing;
     case "position":
       return dragPosition(drawing, handle, point, price, pricePrecision);
+    case "vline":
+      return handle === "time" && point.time !== null ? { ...drawing, time: storedTime(point.time) } : drawing;
     case "anchored_vp":
     case "anchored_vwap":
       return handle === "anchor" && point.time !== null ? { ...drawing, time: storedTime(point.time) } : drawing;
   }
+}
+
+const ANCHOR_HANDLES = ["a", "b", "c"];
+
+/** An anchor at the pointer's bar (kept where it was with no bar under the pointer) and price. */
+function movedAnchor(anchor: Anchor, point: DragPoint, price: number): Anchor {
+  return { time: point.time === null ? anchor.time : storedTime(point.time), price };
+}
+
+/**
+ * The drawing with anchor `handle` at the pointer, or the drawing itself when the move would put it
+ * on another anchor (time and price): a zero-length line, range or Fibonacci, a rectangle of no size,
+ * the placement's degenerate case refused on a drag too.
+ */
+function dragAnchor<T extends { anchors: Anchor[] }>(drawing: T, handle: string, point: DragPoint, price: number): T {
+  const index = ANCHOR_HANDLES.indexOf(handle);
+  if (index === -1 || index >= drawing.anchors.length) return drawing;
+  const moved = [...drawing.anchors];
+  moved[index] = movedAnchor(moved[index], point, price);
+  if (moved.some((anchor, i) => i !== index && samePoint(anchor, moved[index]))) return drawing;
+  return { ...drawing, anchors: moved };
+}
+
+function dragChannel(
+  d: ChannelDrawing,
+  handle: string,
+  point: DragPoint,
+  price: number,
+  pricePrecision: number | null,
+): ChannelDrawing {
+  if (handle !== "offset") {
+    // Its A and B stay on two bars, as a placement requires (`channelPlaceable`).
+    const moved = dragAnchor(d, handle, point, price);
+    return moved.anchors[0].time === moved.anchors[1].time ? d : moved;
+  }
+  const [a, b] = d.anchors;
+  // With no bar under the pointer the parallel is measured at the channel's middle. The throw-safe
+  // rounding: a projected price whose units pass safe integers must not throw inside a drag.
+  const time = point.time ?? (a.time + b.time) / 2;
+  const offset = safeRound(channelOffsetFor(a, b, { time, price: point.price }), pricePrecision);
+  return offset === 0 ? d : { ...d, offset };
 }
 
 function dragPosition(
@@ -445,18 +913,18 @@ function dragPosition(
       return {
         ...p,
         time: point.time === null ? p.time : storedTime(point.time),
-        entry: round(p.entry + delta, pricePrecision),
-        stop: round(p.stop + delta, pricePrecision),
-        target: round(p.target + delta, pricePrecision),
+        entry: safeRound(p.entry + delta, pricePrecision),
+        stop: safeRound(p.stop + delta, pricePrecision),
+        target: safeRound(p.target + delta, pricePrecision),
       };
     }
     case "target": {
       const target = long ? Math.max(price, p.entry + tick) : Math.min(price, p.entry - tick);
-      return ordered({ ...p, target: Math.max(round(target, pricePrecision), floor) }) ?? p;
+      return ordered({ ...p, target: Math.max(safeRound(target, pricePrecision), floor) }) ?? p;
     }
     case "stop": {
       const stop = long ? Math.min(price, p.entry - tick) : Math.max(price, p.entry + tick);
-      return ordered({ ...p, stop: Math.max(round(stop, pricePrecision), floor) }) ?? p;
+      return ordered({ ...p, stop: Math.max(safeRound(stop, pricePrecision), floor) }) ?? p;
     }
     case "right": {
       const bars = point.barsSince(p.time);
@@ -490,17 +958,51 @@ export function nextDrawingId(drawings: readonly Drawing[], kind: DrawingKind): 
   return `${prefix}${max + 1}`;
 }
 
-export const DRAWING_KIND_NAMES: readonly string[] = ["hline", "trendline", "fib", "position", "anchored_vp", "anchored_vwap"];
+// Mirrored by `views.preferences.DRAWING_KINDS`, in its order (`test_the_closed_sets_mirror_the_frontend`).
+export const DRAWING_KIND_NAMES: readonly string[] = [
+  "hline",
+  "trendline",
+  "fib",
+  "position",
+  "anchored_vp",
+  "anchored_vwap",
+  "ray",
+  "extended",
+  "vline",
+  "rect",
+  "channel",
+  "text",
+  "arrow",
+  "fib_extension",
+  "price_range",
+  "date_range",
+];
+
+/**
+ * Story 33.10: a stored drawing of a kind this client does not know (a newer server). The load fails
+ * loudly and permanently (it is not retried: the same list would fail the same way) and nothing is
+ * ever saved, so the item can never be dropped by a save (DATA-07).
+ */
+export class UnknownDrawingKindError extends Error {
+  readonly kind: unknown;
+
+  constructor(kind: unknown) {
+    super(`unknown drawing kind ${JSON.stringify(kind)}`);
+    this.name = "UnknownDrawingKindError";
+    this.kind = kind;
+  }
+}
 
 /**
  * The drawings a `GET /api/coin/{iid}/drawings` answered. The server validated every item
  * (`views.preferences.validate_drawing`), so this only narrows the type; an item of an unknown
- * kind (a newer server) throws rather than being dropped, so a save can never erase it.
+ * kind (a newer server) throws `UnknownDrawingKindError` rather than being dropped, so a save can
+ * never erase it.
  */
 export function parseDrawings(items: readonly Record<string, unknown>[]): Drawing[] {
   return items.map((item) => {
     if (typeof item.kind !== "string" || !DRAWING_KIND_NAMES.includes(item.kind)) {
-      throw new Error(`unknown drawing kind ${JSON.stringify(item.kind)}`);
+      throw new UnknownDrawingKindError(item.kind);
     }
     return item as unknown as Drawing;
   });
@@ -628,4 +1130,48 @@ export function parseAnchoredVpForm(base: AnchoredVpDrawing, form: AnchoredVpFor
     return "Value area must be above 0 and at most 100 %";
   }
   return { ...base, rows, value_area_pct: area, up_color: form.upColor, down_color: form.downColor };
+}
+
+/**
+ * A text's length as the server counts it (Python's `len`: code points), never UTF-16 units, so an
+ * emoji counts once on both sides of the 500-character bound.
+ */
+export function textLength(text: string): number {
+  return [...text].length;
+}
+
+// The separators Python's `str.strip()` removes that JavaScript's `trim()` keeps (U+001C..U+001F and
+// NEL). `trim()` also removes U+FEFF, which Python keeps: the client is then stricter, never looser.
+const PYTHON_ONLY_SPACE: ReadonlySet<string> = new Set([0x1c, 0x1d, 0x1e, 0x1f, 0x85].map((code) => String.fromCharCode(code)));
+
+/** Whether the server would refuse `text` as blank (`not text.strip()`), or the client more strictly. */
+export function isBlankText(text: string): boolean {
+  return [...text].filter((ch) => !PYTHON_ONLY_SPACE.has(ch)).join("").trim() === "";
+}
+
+/** A UTF-16 surrogate left unpaired: under the `u` flag a paired one is one code point, never matched. */
+const LONE_SURROGATE = /[\uD800-\uDFFF]/u;
+
+/** Story 33.10: the text note's settings form, as typed. */
+export interface TextForm {
+  text: string;
+  fontSize: string;
+}
+
+/**
+ * The text note the form describes, or the first refusal (the server's rules): text that is not
+ * blank and at most `MAX_TEXT_LENGTH` characters, a whole font size in `MIN_FONT_SIZE`..`MAX_FONT_SIZE`;
+ * `color` only when the operator changed it.
+ */
+export function parseTextForm(base: TextDrawing, form: TextForm, color?: string): TextDrawing | string {
+  if (isBlankText(form.text)) return "The text must not be empty";
+  if (textLength(form.text) > MAX_TEXT_LENGTH) return `The text must be at most ${MAX_TEXT_LENGTH} characters`;
+  // A lone surrogate (half an emoji) has no UTF-8: the server would refuse the whole save.
+  if (LONE_SURROGATE.test(form.text)) return "The text holds a broken character (half an emoji)";
+  const size = Number(form.fontSize);
+  if (form.fontSize.trim() === "" || !Number.isInteger(size) || size < MIN_FONT_SIZE || size > MAX_FONT_SIZE) {
+    return `Font size must be a whole number, ${MIN_FONT_SIZE} to ${MAX_FONT_SIZE}`;
+  }
+  // No colour = the one the note has (or its absence: the drawing token).
+  return { ...base, text: form.text, font_size: size, ...(color === undefined ? {} : { color }) };
 }

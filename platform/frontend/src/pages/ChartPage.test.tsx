@@ -268,7 +268,13 @@ interface ChartStubProps {
   onDrawingSettings?: (id: string) => void;
   onDrawingDelete?: (id: string) => void;
   onDrawingColor?: (id: string, color: string) => void;
-  onPointClick?: (point: { time: number; price: number }) => void;
+  onPointClick?: (point: { time: number; price: number; shift?: boolean }) => void;
+  // Story 33.10
+  placement?: { tool: string; points: { time: number; price: number }[] } | null;
+  magnet?: string;
+  onDrawingDragStart?: (id: string) => void;
+  onDrawingLock?: (id: string, locked: boolean) => void;
+  onDrawingHide?: (id: string) => void;
   measureActive?: boolean;
   onMeasureEnd?: () => void;
   data?: { time: number }[];
@@ -881,11 +887,21 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
       "Trendline tool",
       "Lines tools",
       "Fibonacci retracement tool",
+      "Fibonacci tools",
       "Long position tool",
       "Projection tools",
+      "Rectangle tool",
+      "Shapes / Annotation tools",
       "Measurement tool",
+      "Measure tools",
       "Fixed range volume profile tool",
       "Volume-based tools",
+      // Story 33.10: the drawing actions, after a divider.
+      "Magnet",
+      "Undo",
+      "Redo",
+      "Hide all drawings",
+      "Delete all drawings",
     ]);
   });
 
@@ -900,15 +916,24 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
       return items;
     };
 
-    expect(menuOf("Lines")).toEqual(["Trendline tool", "Horizontal line tool"]);
+    expect(menuOf("Lines")).toEqual([
+      "Trendline tool",
+      "Ray tool",
+      "Extended line tool",
+      "Horizontal line tool",
+      "Vertical line tool",
+      "Parallel channel tool",
+    ]);
+    expect(menuOf("Fibonacci")).toEqual(["Fibonacci retracement tool", "Fibonacci extension tool"]);
     expect(menuOf("Projection")).toEqual(["Long position tool", "Short position tool"]);
+    expect(menuOf("Shapes / Annotation")).toEqual(["Rectangle tool", "Text tool", "Arrow tool"]);
+    expect(menuOf("Measure")).toEqual(["Measurement tool", "Price range tool", "Date range tool"]);
     expect(menuOf("Volume-based")).toEqual([
       "Fixed range volume profile tool",
       "Anchored volume profile tool",
       "Anchored VWAP tool",
     ]);
     // A one-tool group has no flyout.
-    expect(screen.queryByRole("button", { name: "Fibonacci tools" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Cursor tools" })).toBeNull();
   });
 
@@ -4738,5 +4763,241 @@ describe("chart type, price scale and compare (Story 33.9)", () => {
     expect(lastChartProps.current!.priceScale!.mode).toBe("normal");
     expect(screen.getByRole("combobox", { name: "Price scale" })).toBeEnabled();
     expect(lastSaved()).toMatchObject({ chart_type: "bars", compare: { symbols: [OTHER] } });
+  });
+});
+
+describe("ChartPage drawing tools II (Story 33.10)", () => {
+  const click = (time: number, price: number) =>
+    act(() => {
+      lastChartProps.current!.onPointClick!({ time, price });
+    });
+  const drawings = () => lastChartProps.current!.drawings!;
+  const undoKey = (shift = false) => fireEvent.keyDown(window, { key: "z", ctrlKey: true, shiftKey: shift });
+
+  it("places a ray in two clicks, showing the first point as a placement, then disarms", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Ray tool");
+    click(100, 10);
+    expect(lastChartProps.current!.placement).toEqual({ tool: "ray", points: [{ time: 100, price: 10 }] });
+    click(100, 10); // on the first point: ignored, still armed
+    expect(drawings()).toEqual([]);
+    click(200, 20.004);
+    expect(drawings()).toEqual([
+      {
+        kind: "ray",
+        id: "ray-1",
+        anchors: [
+          { time: 100, price: 10 },
+          { time: 200, price: 20 },
+        ],
+        color: CHART_TOKENS["--chart-drawing"],
+      },
+    ]);
+    expect(lastChartProps.current!.placement).toBeNull();
+    expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("places a parallel channel in three clicks, its offset from the third", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Parallel channel tool");
+    click(100, 100);
+    click(200, 110);
+    expect(drawings()).toEqual([]);
+    click(150, 99);
+    expect(drawings()).toEqual([expect.objectContaining({ kind: "channel", id: "channel-1", offset: -6 })]);
+  });
+
+  it("opens the text dialog on placing a text note", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Text tool");
+    click(100, 100);
+    expect(drawings()).toEqual([expect.objectContaining({ kind: "text", text: "Text" })]);
+    expect(screen.getByRole("dialog", { name: "Text settings" })).toBeInTheDocument();
+  });
+
+  it("discards the placement's points on Escape", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Fibonacci extension tool");
+    click(100, 100);
+    click(200, 110);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(lastChartProps.current!.placement).toBeNull();
+    armTool("Fibonacci extension tool");
+    click(300, 105);
+    expect(lastChartProps.current!.placement?.points).toEqual([{ time: 300, price: 105 }]);
+  });
+
+  it("undoes and redoes by keyboard and from the rail, but not while typing in a field", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Vertical line tool");
+    click(100, 1);
+    armTool("Vertical line tool");
+    click(200, 1);
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1", "vline-2"]);
+
+    undoKey();
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
+    undoKey();
+    expect(drawings()).toEqual([]);
+    undoKey(); // nothing left: a no-op
+    expect(drawings()).toEqual([]);
+    undoKey(true);
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
+    fireEvent.click(screen.getByRole("button", { name: "Redo" }));
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1", "vline-2"]);
+    expect(screen.getByRole("button", { name: "Redo" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
+
+    const field = screen.getAllByRole("combobox")[0];
+    fireEvent.keyDown(field, { key: "z", ctrlKey: true });
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
+  });
+
+  it("makes one drag gesture one undo step", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Horizontal line tool");
+    act(() => lastChartProps.current!.onPriceClick!(100));
+    act(() => lastChartProps.current!.onDrawingDragStart!("hline-1"));
+    for (const price of [101, 102, 103]) act(() => lastChartProps.current!.onPriceLineDrag!("hline-1", price));
+    expect(lastChartProps.current!.priceLines![0].price).toBe(103);
+    undoKey();
+    expect(lastChartProps.current!.priceLines![0].price).toBe(100);
+  });
+
+  it("deletes every drawing only once the confirm naming the count is accepted, undoably", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Vertical line tool");
+    click(100, 1);
+    armTool("Horizontal line tool");
+    act(() => lastChartProps.current!.onPriceClick!(100));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Delete all drawings" }));
+      expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Delete all 2 drawings of BTC-USD-PERP.DYDX?"));
+      expect(drawings()).toHaveLength(1);
+      expect(lastChartProps.current!.priceLines).toHaveLength(1);
+
+      confirm.mockReturnValue(true);
+      fireEvent.click(screen.getByRole("button", { name: "Delete all drawings" }));
+      expect(drawings()).toEqual([]);
+      expect(lastChartProps.current!.priceLines).toEqual([]);
+      expect(screen.getByRole("button", { name: "Delete all drawings" })).toBeDisabled();
+      undoKey();
+      expect(drawings()).toHaveLength(1);
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
+  it("hides every drawing and turns the drawing tools off, persisted in the layout", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Vertical line tool");
+    click(100, 1);
+    armTool("Ray tool");
+    fireEvent.click(screen.getByRole("button", { name: "Hide all drawings" }));
+    expect(screen.getByRole("button", { name: "Hide all drawings" })).toHaveAttribute("aria-pressed", "true");
+    expect(drawings()).toEqual([]);
+    expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true"); // disarmed
+    expect(toolControl("Ray tool")).toBeDisabled();
+    cleanup(); // flushes the pending layout save
+    expect(lastSaved().drawings_hidden).toBe(true);
+
+    layoutApi.server[IID] = layoutOf({ drawings_hidden: true });
+    drawingsApi.server = [{ kind: "vline", id: "vline-1", time: 100 }];
+    await renderReady(<ChartPage />);
+    expect(drawings()).toEqual([]);
+    expect(toolControl("Trendline tool")).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Hide all drawings" }));
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
+    expect(toolControl("Trendline tool")).toBeEnabled();
+  });
+
+  it("locks and hides a drawing from its menu, and Show hidden brings every hidden one back", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Vertical line tool");
+    click(100, 1);
+    act(() => lastChartProps.current!.onDrawingLock!("vline-1", true));
+    expect(drawings()[0]).toMatchObject({ id: "vline-1", locked: true });
+    act(() => lastChartProps.current!.onDrawingLock!("vline-1", false));
+    expect(drawings()[0]).toEqual({ kind: "vline", id: "vline-1", time: 100, color: CHART_TOKENS["--chart-drawing"] });
+
+    act(() => lastChartProps.current!.onDrawingHide!("vline-1"));
+    expect(drawings()).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: "Show hidden (1)" }));
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
+    expect(screen.queryByRole("button", { name: /Show hidden/ })).toBeNull();
+  });
+
+  it("redoes with Ctrl+Y, and ignores undo/redo keys mid-placement or under Hide all", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Vertical line tool");
+    click(100, 1);
+    undoKey();
+    expect(drawings()).toEqual([]);
+    fireEvent.keyDown(window, { key: "y", ctrlKey: true });
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
+
+    armTool("Ray tool");
+    click(100, 10); // a placement in progress
+    undoKey();
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
+    expect(screen.getByRole("button", { name: "Undo" })).toBeDisabled();
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide all drawings" }));
+    undoKey();
+    fireEvent.click(screen.getByRole("button", { name: "Hide all drawings" }));
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
+  });
+
+  it("turns Show hidden and Delete all off under Hide all, saying why", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Vertical line tool");
+    click(100, 1);
+    armTool("Vertical line tool");
+    click(200, 1);
+    act(() => lastChartProps.current!.onDrawingHide!("vline-1"));
+    fireEvent.click(screen.getByRole("button", { name: "Hide all drawings" }));
+    for (const name of ["Show hidden (1)", "Delete all drawings"]) {
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+      expect(screen.getByRole("button", { name })).toHaveAttribute("title", "Drawings are hidden (Hide all): show them first");
+    }
+  });
+
+  it("asks the stored-VWAP hook only for the drawings on screen", async () => {
+    drawingsApi.server = [
+      { kind: "anchored_vwap", id: "anchored_vwap-1", time: 100, source: "stored", bands: false, band_color: "#000000" },
+      { kind: "anchored_vwap", id: "anchored_vwap-2", time: 100, source: "stored", bands: false, band_color: "#000000", hidden: true },
+    ];
+    await renderReady(<ChartPage />);
+    expect((storedVwap.drawings as { id: string }[]).map((d) => d.id)).toEqual(["anchored_vwap-1"]);
+    fireEvent.click(screen.getByRole("button", { name: "Hide all drawings" }));
+    expect(storedVwap.drawings).toEqual([]);
+  });
+
+  it("ignores a channel's B on A's bar (a vertical A-B), the tool staying armed", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Parallel channel tool");
+    click(100, 100);
+    click(100, 120);
+    expect(lastChartProps.current!.placement?.points).toEqual([{ time: 100, price: 100 }]);
+    click(200, 110);
+    click(150, 105.001); // no width on the grid: ignored too
+    expect(drawings()).toEqual([]);
+    click(150, 99);
+    expect(drawings()).toEqual([expect.objectContaining({ kind: "channel", offset: -6 })]);
+  });
+
+  it("cycles the magnet off, weak, strong and hands it to the chart", async () => {
+    await renderReady(<ChartPage />);
+    const magnet = screen.getByRole("button", { name: "Magnet" });
+    expect(lastChartProps.current!.magnet).toBe("off");
+    fireEvent.click(magnet);
+    expect(lastChartProps.current!.magnet).toBe("weak");
+    expect(magnet).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(magnet);
+    fireEvent.click(magnet);
+    expect(lastChartProps.current!.magnet).toBe("off");
   });
 });

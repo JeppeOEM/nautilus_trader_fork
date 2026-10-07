@@ -13,7 +13,18 @@ export type ChartTool =
   | "measure"
   | "frvp"
   | "avp"
-  | "avwap";
+  | "avwap"
+  // Story 33.10
+  | "ray"
+  | "extended"
+  | "vline"
+  | "channel"
+  | "fib_extension"
+  | "rect"
+  | "text"
+  | "arrow"
+  | "price_range"
+  | "date_range";
 
 export interface ChartToolDef {
   id: ChartTool;
@@ -51,7 +62,7 @@ const CURSOR: ChartToolDef = {
 };
 
 // TradingView-style grouped rail: every group is one rail button showing its last-used tool, with a
-// flyout menu of the rest. The rail markup never changes shape for a new tool: Story 33.10 appends
+// flyout menu of the rest. The rail markup never changes shape for a new tool: Story 33.10 appended
 // its ray, extended line, rectangle, text, Fib extension and the like to these groups' `tools`.
 // The cursor group comes first; the crosshair toggle (a view option, not an exclusive tool) is drawn
 // right after it, then the drawing groups.
@@ -63,7 +74,26 @@ export const DRAWING_GROUPS: readonly ToolGroupDef[] = [
     label: "Lines",
     tools: [
       { id: "trendline", label: "Trend", ariaLabel: "Trendline tool", candlesOnly: false, placesDrawing: true },
+      // Story 33.10: two clicks each (a ray runs on past B, an extended line past both anchors).
+      { id: "ray", label: "Ray", ariaLabel: "Ray tool", title: "Ray: click A, then a point it runs through", candlesOnly: false, placesDrawing: true },
+      {
+        id: "extended",
+        label: "Ext",
+        ariaLabel: "Extended line tool",
+        title: "Extended line: click two points it runs through",
+        candlesOnly: false,
+        placesDrawing: true,
+      },
       { id: "hline", label: "HLine", ariaLabel: "Horizontal line tool", candlesOnly: true, placesDrawing: true },
+      { id: "vline", label: "VLine", ariaLabel: "Vertical line tool", title: "Vertical line: click a bar", candlesOnly: false, placesDrawing: true },
+      {
+        id: "channel",
+        label: "Chan",
+        ariaLabel: "Parallel channel tool",
+        title: "Parallel channel: click A and B, then the parallel's offset",
+        candlesOnly: false,
+        placesDrawing: true,
+      },
     ],
   },
   {
@@ -75,6 +105,15 @@ export const DRAWING_GROUPS: readonly ToolGroupDef[] = [
         label: "Fib",
         ariaLabel: "Fibonacci retracement tool",
         title: "Fibonacci retracement: drag from anchor A to anchor B",
+        candlesOnly: false,
+        placesDrawing: true,
+        needsPrecision: true,
+      },
+      {
+        id: "fib_extension",
+        label: "FibExt",
+        ariaLabel: "Fibonacci extension tool",
+        title: "Trend-based Fibonacci extension: click A, B, then C",
         candlesOnly: false,
         placesDrawing: true,
         needsPrecision: true,
@@ -106,9 +145,47 @@ export const DRAWING_GROUPS: readonly ToolGroupDef[] = [
     ],
   },
   {
+    // Story 33.10: annotations, placed by clicks and saved with the coin.
+    id: "shapes",
+    label: "Shapes / Annotation",
+    tools: [
+      { id: "rect", label: "Rect", ariaLabel: "Rectangle tool", title: "Rectangle: click two opposite corners", candlesOnly: false, placesDrawing: true },
+      {
+        id: "text",
+        label: "Text",
+        ariaLabel: "Text tool",
+        title: "Text: click where it goes, then type it",
+        candlesOnly: false,
+        placesDrawing: true,
+      },
+      { id: "arrow", label: "Arrow", ariaLabel: "Arrow tool", title: "Arrow: click its tail, then its head", candlesOnly: false, placesDrawing: true },
+    ],
+  },
+  {
     id: "measure",
     label: "Measure",
-    tools: [{ id: "measure", label: "Measure", ariaLabel: "Measurement tool", candlesOnly: true }],
+    tools: [
+      { id: "measure", label: "Measure", ariaLabel: "Measurement tool", candlesOnly: true },
+      // Story 33.10: saved measurements, read from the candle bars like the Measure tool.
+      {
+        id: "price_range",
+        label: "PRange",
+        ariaLabel: "Price range tool",
+        title: "Price range: click two points",
+        candlesOnly: true,
+        placesDrawing: true,
+        needsPrecision: true,
+      },
+      {
+        id: "date_range",
+        label: "DRange",
+        ariaLabel: "Date range tool",
+        title: "Date range: click two bars",
+        candlesOnly: true,
+        placesDrawing: true,
+        needsPrecision: true,
+      },
+    ],
   },
   {
     id: "volume",

@@ -33,6 +33,8 @@ import { MeasurementPrimitive } from "./primitives/MeasurementPrimitive";
 import { FootprintPrimitive, type FootprintRenderSpec } from "./primitives/FootprintPrimitive";
 import type { MarkerSpec } from "./LiquidationMarkers";
 import type { ChartType } from "../../lib/chartTypes";
+import type { ChartTool } from "../../lib/chartTools";
+import { ChannelPrimitive } from "./primitives/ChannelPrimitive";
 
 const addSeriesMock = vi.fn();
 const seriesUpdateMock = vi.fn();
@@ -266,6 +268,12 @@ type ChartTestProps = {
   onPaneHeights?: (heights: Record<string, number>) => void;
   initialVisibleBars?: number;
   onVisibleBars?: (bars: number) => void;
+  // Story 33.10
+  magnet?: "off" | "weak" | "strong";
+  placement?: { tool: ChartTool; points: { time: number; price: number }[] } | null;
+  onDrawingDragStart?: (id: string) => void;
+  onDrawingLock?: (id: string, locked: boolean) => void;
+  onDrawingHide?: (id: string) => void;
 };
 
 function chartElement(props: ChartTestProps) {
@@ -1073,7 +1081,13 @@ describe("drawings registry (Story 18.2)", () => {
 
     rerender(chartElement({ drawings: [moved] }));
 
-    expect(updateSpy).toHaveBeenCalledWith(moved.anchors, "#123456");
+    expect(updateSpy).toHaveBeenCalledWith(moved.anchors, "#123456", {
+      extend: "none",
+      arrow: false,
+      lineWidth: 1,
+      lineStyle: undefined,
+      locked: false,
+    });
     expect(attachPrimitiveMock).toHaveBeenCalledTimes(1);
   });
 
@@ -2343,7 +2357,7 @@ describe("Fibonacci and position drawings (Story 32.5)", () => {
     expect(onPointClick).not.toHaveBeenCalled(); // the click that ends a drag places nothing
   });
 
-  it("offers Settings... in the menu for a Fibonacci and a position, not for a trendline or a horizontal line", () => {
+  it("offers Settings... in the menu of every kind (Story 33.10: the line form for a trendline and a horizontal line)", () => {
     const onDrawingSettings = vi.fn();
     const hit = (x: number, y: number) => {
       const click = subscribeClickMock.mock.calls.at(-1)![0];
@@ -2366,11 +2380,12 @@ describe("Fibonacci and position drawings (Story 32.5)", () => {
     expect(onDrawingSettings).toHaveBeenCalledWith("fib-1");
 
     hit(200, 510); // the trendline
-    expect(screen.getByRole("menu")).toBeInTheDocument();
-    expect(screen.queryByText("Settings…")).toBeNull();
+    fireEvent.click(screen.getByText("Settings…"));
+    expect(onDrawingSettings).toHaveBeenLastCalledWith("trendline-1");
 
     hit(500, 700); // the horizontal line
-    expect(screen.queryByText("Settings…")).toBeNull();
+    fireEvent.click(screen.getByText("Settings…"));
+    expect(onDrawingSettings).toHaveBeenLastCalledWith("hline-1");
   });
 
   it("offers Add alert… on a horizontal line (a price cross at its price) and a trendline, not a Fibonacci", () => {
@@ -3210,5 +3225,180 @@ describe("chart types, price scale and compare (Story 33.9)", () => {
     expect(addSeriesMock).toHaveBeenLastCalledWith("LineSeries-sentinel", expect.objectContaining({ color: "#123456" }), 0);
     expect(addPaneMock).not.toHaveBeenCalled();
     expect(seriesAdded(1).setData).toHaveBeenLastCalledWith(aligned);
+  });
+});
+
+describe("drawing tools II (Story 33.10)", () => {
+  // Bars every 10 s from 0: on the mock chart a time's x is the time itself and a logical index's x
+  // is ten times it, so bar i sits at x = 10 i either way; a price's y is the price.
+  const bars = Array.from({ length: 31 }, (_, i) => ({ time: (i * 10) as Time, open: 100, high: 110, low: 90, close: 105 }));
+  const lastClick = () => subscribeClickMock.mock.calls.at(-1)![0] as (param: unknown) => void;
+
+  function attachGeometry(primitive: { attached: (p: never) => void; updateAllViews: () => void }): void {
+    primitive.attached({
+      chart: { timeScale: () => ({ timeToCoordinate: (t: number) => t, logicalToCoordinate: (i: number) => i * 10 }) },
+      series: { priceToCoordinate: (p: number) => p },
+      requestUpdate: vi.fn(),
+    } as never);
+    primitive.updateAllViews();
+  }
+
+  it("snaps a click to the real bar's high with the weak magnet, and leaves it raw when off or far", () => {
+    const onPointClick = vi.fn();
+    const onPriceClick = vi.fn();
+    const { rerender } = render(chartElement({ data: bars, magnet: "weak", onPointClick, onPriceClick }));
+    act(() => lastClick()({ point: { x: 100, y: 116 }, time: 100 })); // 6 px above the high (110)
+    expect(onPointClick).toHaveBeenLastCalledWith({ time: 100, price: 110 });
+    expect(onPriceClick).toHaveBeenLastCalledWith(110);
+    act(() => lastClick()({ point: { x: 100, y: 130 }, time: 100 })); // 20 px away: raw
+    expect(onPointClick).toHaveBeenLastCalledWith({ time: 100, price: 130 });
+
+    rerender(chartElement({ data: bars, magnet: "strong", onPointClick, onPriceClick }));
+    act(() => lastClick()({ point: { x: 100, y: 130 }, time: 100 }));
+    expect(onPointClick).toHaveBeenLastCalledWith({ time: 100, price: 110 });
+
+    rerender(chartElement({ data: bars, magnet: "off", onPointClick, onPriceClick }));
+    act(() => lastClick()({ point: { x: 100, y: 116 }, time: 100 }));
+    expect(onPointClick).toHaveBeenLastCalledWith({ time: 100, price: 116 });
+  });
+
+  it("does not snap in Lines mode (no OHLC there)", () => {
+    const onPointClick = vi.fn();
+    render(chartElement({ data: bars, mode: "lines", magnet: "strong", onPointClick }));
+    act(() => lastClick()({ point: { x: 100, y: 116 }, time: 100 }));
+    expect(onPointClick).toHaveBeenLastCalledWith({ time: 100, price: 116 });
+  });
+
+  it("leaves a click's price raw past the newest bar, where no bar of its own is under it", () => {
+    const onPointClick = vi.fn();
+    const onPriceClick = vi.fn();
+    render(chartElement({ data: bars, magnet: "strong", onPointClick, onPriceClick }));
+    act(() => lastClick()({ point: { x: 400, y: 116 }, time: 400 })); // the newest bar is 300
+    expect(onPointClick).toHaveBeenLastCalledWith({ time: 400, price: 116 });
+    expect(onPriceClick).toHaveBeenLastCalledWith(116);
+  });
+
+  it("constrains a line tool's second click to 0/45/90 degrees with Shift, flagged on the point", () => {
+    const onPointClick = vi.fn();
+    render(chartElement({ data: bars, onPointClick, placement: { tool: "ray", points: [{ time: 100, price: 100 }] } }));
+    act(() => lastClick()({ point: { x: 200, y: 130 }, time: 200, sourceEvent: { shiftKey: true, clientX: 0, clientY: 0 } }));
+    expect(onPointClick).toHaveBeenLastCalledWith({ time: 200, price: 100, shift: true });
+  });
+
+  it("keeps the unconstrained point when Shift's constrained point falls past the loaded bars", () => {
+    const onPointClick = vi.fn();
+    render(chartElement({ data: bars, onPointClick, placement: { tool: "ray", points: [{ time: 100, price: 100 }] } }));
+    // Snapped horizontal, the point would sit at x 500 (logical 50), past the newest bar (logical 30).
+    act(() => lastClick()({ point: { x: 500, y: 130 }, time: 300, sourceEvent: { shiftKey: true, clientX: 0, clientY: 0 } }));
+    expect(onPointClick).toHaveBeenLastCalledWith({ time: 300, price: 130 });
+  });
+
+  it("leaves a dragged point's price raw past the newest bar (no bar under the pointer), snapping inside", () => {
+    const onDrawingDrag = vi.fn();
+    const { container } = render(
+      chartElement({ drawings: [makeTrendlineSpec("trendline-1")], data: bars, drawEditable: true, onDrawingDrag, magnet: "strong" }),
+    );
+    attachGeometry(attachPrimitiveMock.mock.calls[0][0]);
+    const crosshair = subscribeCrosshairMoveMock.mock.calls[0][0];
+    crosshair({ point: { x: 200, y: 21 }, paneIndex: 0 }); // anchor B (200, 20)
+    fireEvent.mouseDown(container.firstElementChild!);
+    crosshair({ point: { x: 100, y: 116 }, paneIndex: 0, logical: 10 }); // over bar 10: the high
+    crosshair({ point: { x: 400, y: 116 }, paneIndex: 0, logical: 40 }); // past the newest bar (30)
+    fireEvent.mouseUp(window);
+    const reported = onDrawingDrag.mock.calls.map((c) => [(c[2] as DragPoint).time, (c[2] as DragPoint).price]);
+    expect(reported).toEqual([
+      [100, 110],
+      [300, 116],
+    ]);
+  });
+
+  it("previews a placement that just gained a point at once, from where the pointer last was", () => {
+    const first = { tool: "channel" as const, points: [{ time: 100, price: 100 }] };
+    const { rerender } = render(chartElement({ data: bars, placement: first }));
+    act(() => subscribeCrosshairMoveMock.mock.calls.at(-1)![0]({ point: { x: 200, y: 110 }, time: 200 }));
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(1);
+
+    rerender(chartElement({ data: bars, placement: { ...first, points: [...first.points, { time: 200, price: 110 }] } }));
+    // No pointer move since the click: the new preview is drawn anyway.
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(2);
+    expect(attachPrimitiveMock.mock.calls[1][0]).toBeInstanceOf(ChannelPrimitive);
+  });
+
+  it("does not attach a hidden drawing", () => {
+    render(chartElement({ data: bars, drawings: [makeTrendlineSpec("trendline-1", { hidden: true })] }));
+    expect(attachPrimitiveMock).not.toHaveBeenCalled();
+  });
+
+  it("ignores a grab of a locked drawing's handle, but a click opens its menu with Unlock", () => {
+    const onDrawingDrag = vi.fn();
+    const onDrawingDragStart = vi.fn();
+    const onDrawingLock = vi.fn();
+    const spec = makeTrendlineSpec("trendline-1", { locked: true });
+    const { container } = render(
+      chartElement({ drawings: [spec], data: bars, drawEditable: true, onDrawingDrag, onDrawingDragStart, onDrawingLock }),
+    );
+    attachGeometry(attachPrimitiveMock.mock.calls[0][0]);
+    const crosshair = subscribeCrosshairMoveMock.mock.calls[0][0];
+    crosshair({ point: { x: 200, y: 21 }, paneIndex: 0 }); // on anchor B (200, 20)
+    fireEvent.mouseDown(container.firstElementChild!);
+    crosshair({ point: { x: 250, y: 30 }, paneIndex: 0, logical: 25 });
+    fireEvent.mouseUp(window);
+    expect(onDrawingDrag).not.toHaveBeenCalled();
+    expect(onDrawingDragStart).not.toHaveBeenCalled();
+
+    act(() => lastClick()({ point: { x: 200, y: 21 }, sourceEvent: { clientX: 5, clientY: 5 } }));
+    fireEvent.click(screen.getByText("Unlock"));
+    expect(onDrawingLock).toHaveBeenCalledWith("trendline-1", false);
+  });
+
+  it("reports a grab as a drag start, and offers Lock and Hide in the menu", () => {
+    const onDrawingDragStart = vi.fn();
+    const onDrawingLock = vi.fn();
+    const onDrawingHide = vi.fn();
+    const { container } = render(
+      chartElement({
+        drawings: [makeTrendlineSpec("trendline-1")],
+        data: bars,
+        drawEditable: true,
+        onDrawingDrag: vi.fn(),
+        onDrawingDragStart,
+        onDrawingLock,
+        onDrawingHide,
+      }),
+    );
+    attachGeometry(attachPrimitiveMock.mock.calls[0][0]);
+    subscribeCrosshairMoveMock.mock.calls[0][0]({ point: { x: 200, y: 21 }, paneIndex: 0 });
+    fireEvent.mouseDown(container.firstElementChild!);
+    fireEvent.mouseUp(window);
+    expect(onDrawingDragStart).toHaveBeenCalledWith("trendline-1");
+
+    act(() => lastClick()({ point: { x: 150, y: 15 }, sourceEvent: { clientX: 5, clientY: 5 } }));
+    fireEvent.click(screen.getByText("Lock"));
+    expect(onDrawingLock).toHaveBeenCalledWith("trendline-1", true);
+    act(() => lastClick()({ point: { x: 150, y: 15 }, sourceEvent: { clientX: 5, clientY: 5 } }));
+    fireEvent.click(screen.getByText("Hide"));
+    expect(onDrawingHide).toHaveBeenCalledWith("trendline-1");
+  });
+
+  it("previews a 3-point tool's drawing to the pointer, and removes it when the placement ends", () => {
+    const placement = {
+      tool: "channel" as const,
+      points: [
+        { time: 100, price: 100 },
+        { time: 200, price: 110 },
+      ],
+    };
+    const { rerender } = render(chartElement({ data: bars, placement }));
+    expect(attachPrimitiveMock).not.toHaveBeenCalled(); // nothing until the pointer moves
+    const move = subscribeCrosshairMoveMock.mock.calls.at(-1)![0];
+    act(() => move({ point: { x: 150, y: 99 }, time: 150 }));
+    const preview = attachPrimitiveMock.mock.calls[0][0] as ChannelPrimitive;
+    expect(preview).toBeInstanceOf(ChannelPrimitive);
+    attachGeometry(preview as never);
+    // The A-B line is at 105 at t 150: the pointer at 99 makes the parallel 6 below it.
+    expect(preview.screen()?.a2).toEqual({ x: 100, y: 94 });
+
+    rerender(chartElement({ data: bars, placement: null }));
+    expect(detachPrimitiveMock).toHaveBeenCalledWith(preview);
   });
 });

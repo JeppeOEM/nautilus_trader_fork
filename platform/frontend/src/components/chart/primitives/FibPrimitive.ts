@@ -7,15 +7,22 @@ import type {
   Time,
 } from "lightweight-charts";
 
-import { type FibDrawing, fibLabel, fibLevelPrices } from "../../../lib/drawings";
+import {
+  type FibDrawing,
+  type FibExtensionDrawing,
+  type FibLevelPrice,
+  fibExtensionLevelPrices,
+  fibLabel,
+  fibLevelPrices,
+} from "../../../lib/drawings";
 import { chartVar } from "../chartTheme";
 import {
   BODY_TOLERANCE_PX,
   BarGrid,
   type DrawingHit,
   type DrawingPrimitive,
-  HANDLE_SIZE_PX,
   distanceToSegment,
+  drawHandles,
   nearestHandle,
 } from "./drawingPrimitive";
 
@@ -35,6 +42,8 @@ interface ScreenLevel {
 interface Geometry {
   a: { x: number; y: number };
   b: { x: number; y: number };
+  /** A Fibonacci extension's third anchor (the levels project from it); absent on a retracement. */
+  c?: { x: number; y: number };
   left: number;
   /** The levels' right end in CSS pixels, or null: they run to the pane's right edge. */
   right: number | null;
@@ -48,6 +57,9 @@ interface Geometry {
  * anchors stay `{time, price}`; screen coordinates are recomputed on every `updateAllViews`
  * (the library calls it before each redraw), each anchor on the latest bar at or before its time.
  * With no precision known the geometry draws but no label does (never a guessed precision).
+ *
+ * Story 33.10: it also draws the trend-based Fibonacci extension: three anchors (A-B-C drawn as
+ * the faint path), each level at `C + (B - A) * ratio`, starting at C's bar.
  */
 export class FibPrimitive implements DrawingPrimitive {
   private chart: IChartApi | null = null;
@@ -59,11 +71,11 @@ export class FibPrimitive implements DrawingPrimitive {
     renderer: (): IPrimitivePaneRenderer | null => this.renderer(),
   };
 
-  private fib: FibDrawing;
+  private fib: FibDrawing | FibExtensionDrawing;
   private pricePrecision: number | null;
   private readonly grid: BarGrid;
 
-  constructor(fib: FibDrawing, pricePrecision: number | null, grid: BarGrid = new BarGrid()) {
+  constructor(fib: FibDrawing | FibExtensionDrawing, pricePrecision: number | null, grid: BarGrid = new BarGrid()) {
     this.fib = fib;
     this.pricePrecision = pricePrecision;
     this.grid = grid;
@@ -82,7 +94,7 @@ export class FibPrimitive implements DrawingPrimitive {
     this.geometry = null;
   }
 
-  update(fib: FibDrawing, pricePrecision: number | null): void {
+  update(fib: FibDrawing | FibExtensionDrawing, pricePrecision: number | null): void {
     if (fib === this.fib && pricePrecision === this.pricePrecision) return;
     this.fib = fib;
     this.pricePrecision = pricePrecision;
@@ -103,21 +115,21 @@ export class FibPrimitive implements DrawingPrimitive {
     const { chart, series } = this;
     if (!chart || !series) return;
     const timeScale = chart.timeScale();
-    const [a, b] = this.fib.anchors;
-    const sa = this.grid.snap(a.time);
-    const sb = this.grid.snap(b.time);
-    const ax = sa === null ? null : timeScale.timeToCoordinate(sa as Time);
-    const bx = sb === null ? null : timeScale.timeToCoordinate(sb as Time);
-    const ay = series.priceToCoordinate(a.price);
-    const by = series.priceToCoordinate(b.price);
-    if (ax === null || bx === null || ay === null || by === null) {
-      // An anchor off the scrolled-out time range has no coordinate; draw nothing rather than
-      // fabricate a position for it.
+    const anchors = this.fib.anchors.map((anchor) => {
+      const snapped = this.grid.snap(anchor.time);
+      const x = snapped === null ? null : timeScale.timeToCoordinate(snapped as Time);
+      const y = series.priceToCoordinate(anchor.price);
+      return x === null || y === null ? null : { x, y };
+    });
+    // An anchor off the scrolled-out time range has no coordinate; draw nothing rather than
+    // fabricate a position for it.
+    if (anchors.some((p) => p === null)) {
       this.geometry = null;
       return;
     }
+    const [a, b, c] = anchors as { x: number; y: number }[];
     const levels: ScreenLevel[] = [];
-    for (const level of fibLevelPrices(this.fib, this.pricePrecision)) {
+    for (const level of this.levelPrices()) {
       const y = series.priceToCoordinate(level.price);
       if (y === null) continue;
       levels.push({
@@ -126,34 +138,31 @@ export class FibPrimitive implements DrawingPrimitive {
         color: level.color,
       });
     }
-    const left = Math.min(ax, bx);
-    this.geometry = {
-      a: { x: ax, y: ay },
-      b: { x: bx, y: by },
-      left,
-      right: this.fib.extend_right ? null : Math.max(ax, bx),
-      levels,
-    };
+    // A retracement spans A..B; an extension's levels start at C and reach as far right as the A-B move.
+    const left = c === undefined ? Math.min(a.x, b.x) : c.x;
+    const reach = c === undefined ? Math.max(a.x, b.x) : Math.max(a.x, b.x, c.x + Math.abs(b.x - a.x));
+    this.geometry = { a, b, ...(c === undefined ? {} : { c }), left, right: this.fib.extend_right ? null : reach, levels };
+  }
+
+  private levelPrices(): FibLevelPrice[] {
+    return this.fib.kind === "fib_extension"
+      ? fibExtensionLevelPrices(this.fib, this.pricePrecision)
+      : fibLevelPrices(this.fib, this.pricePrecision);
   }
 
   paneViews(): readonly IPrimitivePaneView[] {
     return [this.view];
   }
 
-  /** The A / B handle within the grab radius, else a level line or the A-B segment within its tolerance. */
+  /** The anchor handles (A, B and an extension's C) within the grab radius, else a level line or the
+   * anchors' path within its tolerance. */
   hit(x: number, y: number): DrawingHit | null {
     const g = this.geometry;
     if (!g) return null;
-    const handle = nearestHandle(
-      [
-        { id: "a", ...g.a },
-        { id: "b", ...g.b },
-      ],
-      x,
-      y,
-    );
+    const handle = nearestHandle(handlesOf(g), x, y);
     if (handle) return handle;
     let best = distanceToSegment(x, y, g.a.x, g.a.y, g.b.x, g.b.y);
+    if (g.c) best = Math.min(best, distanceToSegment(x, y, g.b.x, g.b.y, g.c.x, g.c.y));
     if (x >= g.left && (g.right === null || x <= g.right)) {
       for (const level of g.levels) best = Math.min(best, Math.abs(y - level.y));
     }
@@ -169,7 +178,7 @@ export class FibPrimitive implements DrawingPrimitive {
     const g = this.geometry;
     if (!g) return null;
     const { line_width: lineWidth, label_side: labelSide } = this.fib;
-    const handles = this.handlesVisible;
+    const handles = this.handlesVisible && !this.fib.locked;
     const dim = chartVar("--chart-text-dim");
     const bg = chartVar("--chart-bg");
     return {
@@ -188,16 +197,19 @@ export class FibPrimitive implements DrawingPrimitive {
             context.fillRect(left, top, right - left, Math.abs(lower.y - upper.y) * vr);
           }
           context.restore();
-          // The A-B segment, faint and dashed.
+          // The A-B segment (and an extension's B-C), faint and dashed.
           context.save();
           context.globalAlpha = SEGMENT_ALPHA;
           context.strokeStyle = dim;
           context.lineWidth = hr;
           context.setLineDash([4 * hr, 4 * hr]);
-          context.beginPath();
-          context.moveTo(g.a.x * hr, g.a.y * vr);
-          context.lineTo(g.b.x * hr, g.b.y * vr);
-          context.stroke();
+          const path = g.c ? [[g.a, g.b], [g.b, g.c]] : [[g.a, g.b]];
+          for (const [from, to] of path) {
+            context.beginPath();
+            context.moveTo(from.x * hr, from.y * vr);
+            context.lineTo(to.x * hr, to.y * vr);
+            context.stroke();
+          }
           context.restore();
           context.font = `${FONT_PX * vr}px sans-serif`;
           context.textBaseline = "bottom";
@@ -215,16 +227,20 @@ export class FibPrimitive implements DrawingPrimitive {
             context.fillText(level.label, x, level.y * vr - 2 * vr);
           }
           if (!handles) return;
-          const half = (HANDLE_SIZE_PX / 2) * hr;
-          context.fillStyle = bg;
           context.strokeStyle = dim;
           context.lineWidth = hr;
-          for (const p of [g.a, g.b]) {
-            context.fillRect(p.x * hr - half, p.y * vr - half, half * 2, half * 2);
-            context.strokeRect(p.x * hr - half, p.y * vr - half, half * 2, half * 2);
-          }
+          drawHandles(context, handlesOf(g), bg, hr, vr);
         });
       },
     };
   }
+}
+
+function handlesOf(g: Geometry): { id: string; x: number; y: number }[] {
+  const handles = [
+    { id: "a", ...g.a },
+    { id: "b", ...g.b },
+  ];
+  if (g.c) handles.push({ id: "c", ...g.c });
+  return handles;
 }
