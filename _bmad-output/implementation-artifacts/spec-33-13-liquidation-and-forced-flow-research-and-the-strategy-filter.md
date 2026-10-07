@@ -2,9 +2,9 @@
 title: 'Story 33.13: Liquidation and forced-flow research: cascade episodes, implied leverage, the forced/organic split proven on the trade archive, and the OFI strategy filter'
 type: 'feature'
 created: '2026-10-07'
-status: 'in-review'
+status: 'done'
 baseline_revision: '163c9b116e08d35740b7f0e8778847498ae0f33b'
-final_revision: '76a7008739c4ad2196b56a96acd5f57aba0fef54'
+final_revision: '334d89d578278b179f0f161f8dfeb6b79066f187'
 review_loop_iteration: 0
 followup_review_recommended: true
 context:
