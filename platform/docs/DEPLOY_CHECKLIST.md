@@ -1564,3 +1564,20 @@ without the `dydx` profile) it is the `archive` service's nightly saga (`build_c
       must print `[('candles_by_bar_seconds_t',)]`; repeat for `candles_hyperliquid.db` and, if it
       exists, `candles_dydx.db`. `GET /api/errors` shows no new `collector.candle_store_prune` or
       `collector.candle_store` entries.
+
+### DW-93/DW-216 bot_tui Bot-detail `o` deep-link removed (commit: this change's)
+
+Bot-detail's `o` key opened `/bot/{bot_id}`, a page the web app does not have, so it and its whole
+hand-off chain (`scripts/open_listener.go`, `BOT_TUI_OPEN_URL_PORT`, `DASHBOARD_BASE_URL`) were
+removed. Nothing changes on the VPS except the next `make tui` image; the cleanup is the desktop's
+`~/.zshrc` (see `platform/CLAUDE.md` "Desktop ↔ VPS Connection").
+
+- [ ] In `~/.zshrc`, make `troll-tui` stop starting `open_listener.go` (the `pgrep`/`go run` block),
+      drop its `-R` reverse tunnel (only the `-R` flag: keep the `-L` Redis/`data_api` forwards
+      on the same `ssh` command, `bot_tui` needs them) and the `BOT_TUI_OPEN_URL_PORT` export,
+      delete the `TROLL_OPEN_LISTENER_*` variables, and make `troll-down` stop `pkill`-ing
+      `open_listener`. Run `pkill -f open_listener` once, since the edited `troll-down` will no
+      longer stop a listener already running. Then `source ~/.zshrc`, run `troll-tui` and check
+      the TUI opens with no `open_listener` error and `pgrep -f open_listener` prints nothing.
+- [ ] Remove `DASHBOARD_BASE_URL` and `BOT_TUI_OPEN_URL_PORT` from `platform/.env` on the desktop
+      and the VPS if present (nothing reads them any more).

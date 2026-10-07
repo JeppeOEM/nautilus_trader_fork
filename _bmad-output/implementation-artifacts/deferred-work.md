@@ -707,7 +707,9 @@ resolution-undo: ddee5d273c5815dadfe57f0176738c0b9a9a64ff679763c9b494d5992cf1f02
 origin: migrated from legacy ledger ("Deferred from: code review of spec-4-7-bot-detail-trades-blotter-and-pnl-over-time-chart.md (2026-09-02)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-4-7-bot-detail-trades-blotter-and-pnl-over-time-chart.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-4-7-bot-detail-trades-blotter-and-pnl-over-time-chart.md` summary: Pressing `o` in Bot-detail opens a `/bot/{bot_id}` dashboard URL that 404s today -- the web dashboard has no per-bot route, and the TUI gives no in-app signal that this is a dead link before the operator's browser opens it. evidence: `troll/bot_tui/bots_pane.py:dashboard_bot_url`'s own docstring discloses the missing route; `troll/ml_signals/dashboard.py`'s route list has no bot-shaped endpoint (confirmed by inspection during this story's planning). Building the dashboard-side page is explicitly out of this story's scope (cross-module, TUI-only story) -- same accepted-gap shape as the pre-existing Coin-detail `o` key, but worth a future story once the web dashboard grows a bot view.
-status: open
+status: done 2026-10-07
+resolution: resolved by sweep bundle dw-bot-tui-remove-dead-deeplink
+resolution-undo: 1921b265bcbca070605b3491f747713a1ecb0d027b0c8cb4b910399c3ff99648 2026-10-07 7374617475733a206f70656e
 decision: 2026-10-05 Remove the `o` key from Bot-detail — Remove dashboard_bot_url and the o binding until a web bot view exists
 
 ### DW-94: Bot-detail's three stacked regions (snapshot + trades blotter + PnL sparkline) sit inside a plain `urwid.Filler(valign="top")` with a fixed-height blotter …
@@ -1738,7 +1740,9 @@ decision: 2026-10-05 Plan wins: skip age rule for unlimited-plan instruments —
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-1a-rankings-web-only-mode-toggle-on-web-tui-coins-pane-deleted.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1a-rankings-web-only-mode-toggle-on-web-tui-coins-pane-deleted.md` summary: bot_tui Bot-detail's `o` deep-link opens `<DASHBOARD_BASE_URL>/bot/{bot_id}`, which the web app has no route for, so the only remaining TUI deep-link (and the open_listener.go hand-off now serving it) lands on a blank page. evidence: platform/bot_tui/bots_pane.py `dashboard_bot_url` docstring states the route does not exist; platform/frontend/src/App.tsx routes are `/`, `/chart/:iid`, `/history/:iid`, `/alerts`, `/docs/*`. This predates 25.1a (the URL builder and route gap were there at baseline f00ab8aeea).
-status: open
+status: done 2026-10-07
+resolution: resolved by sweep bundle dw-bot-tui-remove-dead-deeplink
+resolution-undo: 1921b265bcbca070605b3491f747713a1ecb0d027b0c8cb4b910399c3ff99648 2026-10-07 7374617475733a206f70656e
 decision: 2026-10-05 Remove the deep-link key — Remove the `o` key and open_listener hand-off for bots
 
 ### DW-217: The ranking slow loop writes a `metrics.db` row stamped with the current `ts` for an instrument that is stale (>30 s silent) but not yet aged out (<1 h) …

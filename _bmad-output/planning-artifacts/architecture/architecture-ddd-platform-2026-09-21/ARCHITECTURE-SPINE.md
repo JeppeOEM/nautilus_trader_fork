@@ -159,7 +159,7 @@ what each constrains in the DDD shape; none is re-derived.
 | `observability/` | generic | none | error-ledger counters (in-process), outbound operator notifications, incident reports | `observability/{error_ledger,notify,watchdog,incidents}.py` |
 | `kernel/` | shared kernel | value objects only | nothing | `kernel/{second_snapshot,open_interest,fold,venues,indicators,candle_patterns,performance_metrics,clocks,archive_markers,venue_http,catalog_files,parquet_compat}.py` `[amended 2026-09-28: Story 27.7 — `candle_patterns`: one pattern definition, shared by views, research and bots (AD-D3)]` |
 | `data_api/`, `bot_tui/`, `frontend/` | interface | none | nothing | `data_api/`, `bot_tui/`, `frontend/` (names unchanged) |
-| `platform/scripts/`, `platform/docs/` | operator surfaces | none | nothing | `scripts/{capture_hl_ws.py,bench_candles.py,wipe_data.sh,open_listener.go}`, `docs/*.md`. `capture_hl_ws.py` is the mandatory raw-frame harness of "Adding a venue" step 1 and must gain a per-venue branch before a fourth venue (parent Deferred, still open: `scripts/capture_hl_ws.py:41,118` is a two-way `hyperliquid`/`bybit` branch) |
+| `platform/scripts/`, `platform/docs/` | operator surfaces | none | nothing | `scripts/{capture_hl_ws.py,bench_candles.py,wipe_data.sh}`, `docs/*.md` `[amended 2026-10-07: DW-93/DW-216 — `open_listener.go` deleted with bot_tui's dead `o` deep-link]`. `capture_hl_ws.py` is the mandatory raw-frame harness of "Adding a venue" step 1 and must gain a per-venue branch before a fourth venue (parent Deferred, still open: `scripts/capture_hl_ws.py:41,118` is a two-way `hyperliquid`/`bybit` branch) |
 
 ### AD-D2 — Layering and dependency direction
 

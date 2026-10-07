@@ -18,7 +18,7 @@ Story 25.1a): MainLoop wiring, breadcrumb/footer, the `:` command bar, a Bots pa
 start view: live per-bot PnL/status rows, per-row stale badges, `s` start/stop with a
 footer-echo confirmation), a full-screen Bot-detail view (live-snapshot header,
 left/right- (or h/l-) stepped trades blotter + PnL sparkline sourced from Story 4.6's
-bots:history:* keys, `o` dashboard deep-link), a
+bots:history:* keys), a
 Collector pane (Story 6.1: every currently-collected instrument -- always pinned,
 there is no "collected but not pinned" state -- with liquid status, `p` to unpin (stop
 + add to config.exclude) and `x` to stop (don't exclude), both behind the same
@@ -49,12 +49,9 @@ screen -- see Story 4.1's Dev Notes "Testing strategy: pure logic vs. urwid wiri
 """
 
 import asyncio
-import contextlib
 import datetime as dt
 import logging
 import os
-import socket
-import sys
 import time
 from collections.abc import Coroutine
 from pathlib import Path
@@ -88,9 +85,7 @@ _BOTS_FOOTER_HINT_TEXT = "s start/stop  : command  esc back  :q quit"
 # Bot-detail's own footer (Story 4.5 added s/esc; Story 4.7 adds left/right (h/l) for
 # the new blotter/PnL-sparkline regions' history range). No up/down (scroll) hint -- the
 # blotter's own ListBox scrolling is "free" via urwid.ListBox.
-_BOT_DETAIL_FOOTER_HINT_TEXT = (
-    "s start/stop  h/l range  o dashboard  v strategy  i incidents  esc back  :q quit"
-)
+_BOT_DETAIL_FOOTER_HINT_TEXT = "s start/stop  h/l range  v strategy  i incidents  esc back  :q quit"
 
 # Help view's own footer -- nothing to do here but leave (:h/:help got you in).
 _HELP_FOOTER_HINT_TEXT = "esc back  :q quit"
@@ -156,7 +151,6 @@ BOT DETAIL
   s          start/stop this bot (stop asks for confirmation); refused while stale,
              as on the Bots pane
   h/l, left/right  step PnL/trades history range back/forward
-  o          open dashboard bot page in browser
   v          view this bot's strategy source (read-only, scrollable)
   i          view this bot's incidents log: restarts, WS/data-stale spans
   esc        back to bots
@@ -262,9 +256,9 @@ _COMMAND_ALIASES = {"h": "help"}
 # small loop that re-renders the active view and triggers a redraw.
 _REDRAW_POLL_SECONDS = 0.5
 
-# How long a quit waits for in-flight background work (a bots:control/collector:control publish,
-# a browser launch) before cancelling it (DW-58): long enough for a healthy Redis round trip, short
-# enough that `:q` still feels immediate when Redis is unreachable.
+# How long a quit waits for in-flight background work (a bots:control/collector:control publish)
+# before cancelling it (DW-58): long enough for a healthy Redis round trip, short enough that `:q`
+# still feels immediate when Redis is unreachable.
 _SHUTDOWN_GRACE_SECONDS = 2.0
 
 # The ledger site of a background task a quit had to cancel: an operator command lost at quit must
@@ -273,11 +267,6 @@ _SHUTDOWN_CANCELLED_SITE = "bot_tui.shutdown_cancelled"
 # A task that ignored its cancellation at quit, and one that had ended in an exception.
 _SHUTDOWN_STUCK_SITE = "bot_tui.shutdown_stuck"
 _SHUTDOWN_FAILED_SITE = "bot_tui.shutdown_failed"
-
-# The browser child's program (`_launch_browser`): exit 1 when no browser took the url.
-_BROWSER_CHILD_SOURCE = (
-    "import sys, webbrowser; sys.exit(0 if webbrowser.open_new_tab(sys.argv[1]) else 1)"
-)
 
 
 def _dispatch_command(
@@ -368,53 +357,13 @@ def _segment_markup(segments: list[bots_pane.Segment]) -> list[str | tuple[str, 
     return [(attr, text) if attr is not None else text for attr, text in segments]
 
 
-async def _launch_browser(url: str) -> None:
-    """
-    Open `url` from a child Python running `webbrowser.open_new_tab` (DW-66/67): the stdlib's own
-    backend choice, off the loop thread, with every stdio on /dev/null and a new session, so
-    neither the child nor any launcher it starts (`xdg-open`, a text browser such as `w3m`) can
-    write into urwid's screen or grab the controlling terminal. Never process-wide fd redirection:
-    that races urwid's writes. The child exits 1 when no browser took the url -- `python -m
-    webbrowser` would exit 0 either way. No browser is the normal state of the headless
-    Docker/SSH deployment, not a malfunction, so a failure is a warning; the caller's footer shows
-    the url (and the OSC 52 copy) regardless.
-    """
-    try:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-c",
-            _BROWSER_CHILD_SOURCE,
-            url,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except (OSError, ValueError) as exc:  # ValueError: a url holding a NUL byte
-        logger.warning("could not start a browser for %s: %s", url, exc)
-        return
-    try:
-        returncode = await process.wait()
-    except asyncio.CancelledError:
-        # A quit while the launcher still waits on its browser (a `BROWSER` command that only
-        # returns when the browser closes): stop the launcher alone -- the browser it started is
-        # its own process and stays open -- and reap it, so the loop closes with no live
-        # subprocess transport.
-        with contextlib.suppress(ProcessLookupError):
-            process.kill()
-        await process.wait()
-        raise
-    if returncode != 0:
-        logger.warning("no browser opened %s (launcher exited %s)", url, returncode)
-
-
 def _shutdown_tasks(
     loop: asyncio.AbstractEventLoop, tasks: list[asyncio.Task], commands: set[asyncio.Task]
 ) -> None:
     """
     Drain `loop` at quit and close it (DW-58). `tasks` -- the listeners, the redraw loop (which
-    must not draw onto the terminal urwid has just restored), browser launches -- are cancelled
-    and awaited first. `commands` (bots:control/collector:control publishes) then get up to
+    must not draw onto the terminal urwid has just restored) -- are cancelled and awaited first.
+    `commands` (bots:control/collector:control publishes) then get up to
     `_SHUTDOWN_GRACE_SECONDS` to finish before the rest are cancelled and awaited too; a publish
     cut short is ledgered, since the operator's command may never have reached Redis. Every
     task's outcome is retrieved, so a failure is ledgered rather than lost; a task that ignores
@@ -594,11 +543,9 @@ class BotTuiApp:
         self._view = _START_VIEW
         self._stack: list[str] = []
         self._command_active = False
-        # In-flight bots:control/collector:control publishes (a quit gives them a grace to finish)
-        # and browser launches (a quit just cancels them: nothing is lost) -- `_track_background`.
+        # In-flight bots:control/collector:control publishes (`_track_background`): a quit gives
+        # them a grace to finish.
         self._background_tasks: set[asyncio.Task] = set()
-        self._browser_tasks: set[asyncio.Task] = set()
-        self._dashboard_base_url = os.environ.get("DASHBOARD_BASE_URL", "http://127.0.0.1:9100")
 
         # Bot-detail state (Story 4.5). No open_bot()/close_bot() lifecycle pair is
         # needed for the snapshot -- bots:status is already accumulated unconditionally
@@ -1289,22 +1236,16 @@ class BotTuiApp:
         # command was sent, not that it succeeded.
         self._footer_hint.set_text(f"sent: {action} {bot_id}")
 
-    def _track_background(
-        self,
-        coro: Coroutine[object, object, object],
-        name: str,
-        held_in: set[asyncio.Task] | None = None,
-    ) -> asyncio.Task:
+    def _track_background(self, coro: Coroutine[object, object, object], name: str) -> asyncio.Task:
         """
-        Schedule `coro` as a background task named `name`, held in `held_in` (default
-        `_background_tasks`, the commands) until it is done, so it is never garbage-collected
-        mid-flight and a quit can drain it (`_shutdown_tasks`, which names it in the ledger).
+        Schedule `coro` as a background task named `name`, held in `_background_tasks` until it is
+        done, so it is never garbage-collected mid-flight and a quit can drain it
+        (`_shutdown_tasks`, which names it in the ledger).
         """
-        tasks = self._background_tasks if held_in is None else held_in
         task = asyncio.ensure_future(coro)
         task.set_name(name)
-        tasks.add(task)
-        task.add_done_callback(tasks.discard)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
         return task
 
     def _open_stop_confirm(self, bot_id: str) -> None:
@@ -1527,51 +1468,6 @@ class BotTuiApp:
         self._body.original_widget = self._build_body()
         self._frame.focus_position = "body"
 
-    def _open_url(self, url: str) -> None:
-        """
-        Open `url` on the operator's machine: the local open_listener hand-off first,
-        else a browser launched in the background (`_launch_browser`) plus an OSC 52
-        clipboard copy. Bot-detail's `o` is the only caller since Story 25.1a deleted the
-        Coins-pane/Coin-detail chart links that used to share it.
-        """
-        if self._open_via_local_listener(url):
-            self._footer_hint.set_text(f"dashboard: {url}")
-            return
-        # The launch finds no browser inside this product's headless Docker/SSH
-        # deployment (no DISPLAY reachable) but genuinely opens one when bot_tui is run
-        # on-host -- both are real deployment shapes, so the footer text below is shown
-        # unconditionally, never gated on the launch's (environment-dependent) outcome.
-        self._track_background(
-            _launch_browser(url), f"browser launch {url}", held_in=self._browser_tasks
-        )
-        sys.stdout.write(bots_pane.osc52_copy_sequence(url))
-        sys.stdout.flush()
-        self._footer_hint.set_text(f"dashboard (copied to clipboard): {url}")
-
-    @staticmethod
-    def _open_via_local_listener(url: str) -> bool:
-        """
-        Best-effort hand-off to platform/scripts/open_listener.go running on the
-        operator's own machine (see troll-tui's -R reverse SSH tunnel in
-        ~/.zshrc) -- lets an `o` press on a VPS-hosted bot_tui actually pop a
-        Firefox tab locally, which a browser launched on the remote host can't do with
-        no DISPLAY there.
-
-        BOT_TUI_OPEN_URL_PORT unset (a local, non-SSH bot_tui run, or troll-tui
-        without the listener running) short-circuits to False immediately --
-        same fast, silent fallthrough to the browser-launch+OSC52 path as a
-        refused/timed-out connection.
-        """
-        port = os.environ.get("BOT_TUI_OPEN_URL_PORT")
-        if not port:
-            return False
-        try:
-            with socket.create_connection(("127.0.0.1", int(port)), timeout=0.3) as sock:
-                sock.sendall(url.encode("utf-8"))
-        except OSError:
-            return False
-        return True
-
     def _bot_history_range_back(self) -> None:
         self._set_bot_history_range(bots_pane.previous_range(self._bot_history_range))
 
@@ -1585,16 +1481,6 @@ class BotTuiApp:
         self._bot_history_range = range_name
         self._footer_hint.set_text(f"range: {self._bot_history_range}")
         self._body.original_widget = self._build_body()
-
-    def _open_dashboard_bot(self) -> None:
-        # Only reachable via "o" while self._view == "bot_detail", which
-        # _open_bot_detail always sets alongside a real bot_id. A raise (DW-92): under
-        # `python -O` an assertion would vanish and open `/bot/None`.
-        if self._bot_detail_bot_id is None:
-            raise RuntimeError("dashboard link requested with no bot open in Bot-detail")
-        self._open_url(
-            bots_pane.dashboard_bot_url(self._dashboard_base_url, self._bot_detail_bot_id)
-        )
 
     def _submit_command(self) -> None:
         text = self._command_edit.edit_text
@@ -1715,8 +1601,6 @@ class BotTuiApp:
             self._bot_history_range_back()
         elif key in ("right", "l"):
             self._bot_history_range_forward()
-        elif key == "o":
-            self._open_dashboard_bot()
         elif key == "v":
             self._open_strategy_view()
         elif key == "i":
@@ -1817,7 +1701,7 @@ class BotTuiApp:
         try:
             self._main_loop.run()
         finally:
-            _shutdown_tasks(loop, [*tasks, *self._browser_tasks], self._background_tasks)
+            _shutdown_tasks(loop, tasks, self._background_tasks)
 
 
 _LOG_PATH = os.environ.get("BOT_TUI_LOG_PATH", "bot_tui.log")

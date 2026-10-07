@@ -157,8 +157,7 @@ A keyboard-only control surface for the bots and the collector, with two panes:
 
 - **Bots** (the start pane, `:bots`): one row per bot (the `bots` context, `python3 -m bots`) from `bots:status`, with
   per-row stale markers. `s` starts/stops the highlighted bot (stopping asks you to type
-  `stop`), Enter opens its detail view (trades, PnL, strategy source `v`, incidents `i`,
-  dashboard link `o`).
+  `stop`), Enter opens its detail view (trades, PnL, strategy source `v`, incidents `i`).
 - **Collector** (`:data`): one section per venue from `collector:status` (dYdX, Bybit,
   Hyperliquid), each headed `<VENUE>: N collected +P pending · cap C` (`· no cap` on Bybit and
   Hyperliquid), with the plan's last apply, its rows (`pending` = planned, not yet subscribed)

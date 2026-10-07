@@ -256,7 +256,7 @@ A keybinding on a selected coin opens that coin's graph view in the web dashboar
 **Notes:** Should-tier per brainstorm convergence (2026-07-23) — implement once the Must-tier panes/navigation (FR-17–FR-24) are stable; does not block MVP sign-off (see §6.2).
 
 #### FR-27 `[ADDED 2026-07-24]`: Bot-detail trade/PnL history
-The Bot-detail view shows a trades blotter (individual fills) and a PnL-over-time chart (day/week/month/all preset toggle, no free-form scrubbing), sourced from a durable trade/position history that both the web dashboard and the TUI read — read-only, zero duplicate computation between the two surfaces. A keybinding on the open bot opens the dashboard's fuller trades/PnL view for the same bot, mirroring FR-25's coin deep-link.
+The Bot-detail view shows a trades blotter (individual fills) and a PnL-over-time chart (day/week/month/all preset toggle, no free-form scrubbing), sourced from a durable trade/position history that both the web dashboard and the TUI read — read-only, zero duplicate computation between the two surfaces. A keybinding on the open bot opens the dashboard's fuller trades/PnL view for the same bot, mirroring FR-25's coin deep-link. `[AMENDED 2026-10-07: DW-93/DW-216 — the bot deep-link and its consequence below are descoped; the web app has no bot view, so the TUI's `o` key was removed. Re-adding it is a future story once a web bot view exists.]`
 
 **Consequences (testable):**
 - The trades blotter and PnL chart are never computed independently by the TUI — both the TUI and the dashboard read the same underlying history, so the numbers always match.

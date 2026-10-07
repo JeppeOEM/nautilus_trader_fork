@@ -299,18 +299,6 @@ def test_pnl_sparkline_text_flat_series_does_not_divide_by_zero() -> None:
     assert len(set(text)) == 1
 
 
-def test_dashboard_bot_url_shape() -> None:
-    assert bots_pane.dashboard_bot_url("http://127.0.0.1:8765", "bot-01") == (
-        "http://127.0.0.1:8765/bot/bot-01"
-    )
-
-
-def test_dashboard_bot_url_strips_trailing_slash_on_base() -> None:
-    assert bots_pane.dashboard_bot_url("http://127.0.0.1:8765/", "bot-01") == (
-        "http://127.0.0.1:8765/bot/bot-01"
-    )
-
-
 def test_format_stat_none_is_na() -> None:
     assert bots_pane.format_stat(None) == "n/a"
 
@@ -394,11 +382,6 @@ def test_format_incident_line_closed_incident_shows_fixed_duration() -> None:
     line = bots_pane.format_incident_line(incident, now=999.0)
     assert "0m35s" in line
     assert "ongoing" not in line
-
-
-def test_osc52_copy_sequence_wraps_base64_payload_in_escape_codes() -> None:
-    seq = bots_pane.osc52_copy_sequence("hello")
-    assert seq == "\x1b]52;c;aGVsbG8=\x07"
 
 
 # --- Story 29.6: entry / sl / tp columns, the header, the position detail lines -----------------

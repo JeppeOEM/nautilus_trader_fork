@@ -258,20 +258,25 @@ needed for the browser. Shell functions in `~/.zshrc` (outside this repo):
 - **`troll-web`** — ensures the tunnel, then opens Firefox at `http://localhost:9100`
   (the tunneled `data_api`). There is no local dashboard process any more, so no
   `WEB_PORT` to keep in sync between desktop and VPS `.env` files.
-- **`troll-tui`** — same tunnel dependency, plus starts `scripts/open_listener.go`
-  locally (`$TROLL_OPEN_LISTENER_PORT`, `8901`) so that pressing `o` in `bot_tui`'s Bot-detail
-  (which itself runs via `make tui`, rebuilding only the thin `bot_tui` Docker layer) can pop
-  the bot's dashboard page open in the desktop's browser. `bot_tui` only needs live Redis;
-  its deep-link targets `DASHBOARD_BASE_URL` (defaults to `data_api`'s port).
+- **`troll-tui`** — same tunnel dependency, then runs `bot_tui` via `make tui` (rebuilding
+  only the thin `bot_tui` Docker layer). `bot_tui` only needs live Redis; it opens no browser
+  and has no deep-link.
 - **`troll-logs`** — a separate, independent tunnel (`-L 8080:localhost:8080` to
   `nifelheim`) for Dozzle, the container log viewer; unrelated to the Redis/`data_api`
   tunnel above. Opened with plain `xdg-open`, not Firefox directly.
-- **`troll-down`** — tears everything back down: kills the `open_listener` process and any
-  `ssh.*nifelheim` tunnel (both the Redis/`data_api` one and the Dozzle one).
+- **`troll-down`** — tears the tunnels back down: kills any `ssh.*nifelheim` tunnel (both the
+  Redis/`data_api` one and the Dozzle one).
 
 **Migration note (Story 15.10):** `_troll_dashboard_ensure`, `$TROLL_WEB_PORT` and
 `make dashboard` no longer exist in the repo — `~/.zshrc` must drop the first two and
 point `troll-web` at `http://localhost:9100`, or it will poll a port nothing listens on.
+
+**Migration note (DW-93/DW-216, 2026-10-07):** Bot-detail's `o` deep-link and
+`scripts/open_listener.go` were removed (the web app has no bot page; re-adding the key is a
+future story once it does). `~/.zshrc`'s `troll-tui` must stop starting `open_listener.go`
+(and drop its `-R` reverse tunnel, keeping the `-L` forwards on the same `ssh`, the
+`BOT_TUI_OPEN_URL_PORT` export and the `TROLL_OPEN_LISTENER_*` vars), and `troll-down` must
+stop killing it; a listener already running needs one `pkill -f open_listener`.
 
 **Why this exists:** running the web UI/TUI on the desktop instead of the VPS gets a
 real browser and better interactivity without exposing any VPS port publicly — SEC-01

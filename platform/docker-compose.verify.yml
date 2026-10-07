@@ -90,7 +90,6 @@ services:
     container_name: verify-bot-tui
     environment:
       REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-26379}"
-      DASHBOARD_BASE_URL: "http://127.0.0.1:${DATA_API_PORT:-29100}"
 
   # The Story 31.9 parity fleet: one paper DummyStrategy bot per verify instrument
   # (bots/config.verify.toml, mounted over the base's bots/config.toml -- compose merges volumes by

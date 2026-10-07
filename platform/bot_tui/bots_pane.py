@@ -31,9 +31,8 @@ already-shipped Story 4.4 formatting, are deliberately left untouched).
 Story 4.7 adds the trades-blotter/PnL-sparkline formatters for Bot-detail's other two
 regions (bots:history:{bot_id}:{range}, read via bot_history_state.py -- a distinct
 wire contract from bots:status, so these take a `dict | None` history entry directly
-rather than the `row: dict` shape every function above takes) plus next_range() and
-dashboard_bot_url(), the pure logic behind the `t`/`o` keys app.py wires in, and
-osc52_copy_sequence(), the clipboard fallback `o` writes the URL through.
+rather than the `row: dict` shape every function above takes) plus next_range(), the pure
+logic behind the range keys app.py wires in.
 
 Story 29.6 adds the `entry`/`sl`/`tp` columns and a column header: `BOTS_COLUMNS` is the one
 column-width source, `bot_line_segments` builds a row as (attr, text) segments over it,
@@ -42,7 +41,6 @@ start, so the header, the plain row and app.py's colored row can never drift apa
 fields arrive as `str(Price)` strings and are only reformatted as `Decimal`, never `float`.
 """
 
-import base64
 from datetime import UTC
 from datetime import datetime
 from decimal import Decimal
@@ -504,33 +502,6 @@ def metrics_lines(entry: dict | None) -> list[str]:
             f"avg loss {format_stat(metrics.get('avg_loss')):>9}"
         ),
     ]
-
-
-def dashboard_bot_url(base_url: str, bot_id: str) -> str:
-    """
-    `/bot/{bot_id}` (Story 4.7, AC3). The web dashboard has no route there yet (checked:
-    its route list has nothing bot-shaped) -- that gap pre-dates this story and building
-    it is explicitly out of this story's scope (spec's Never section); this function's
-    only job is producing the URL bot_tui itself opens.
-    """
-    return f"{base_url.rstrip('/')}/bot/{bot_id}"
-
-
-def osc52_copy_sequence(text: str) -> str:
-    """
-    OSC 52 terminal escape sequence that sets the system clipboard to `text` -- a
-    native terminal feature (iTerm2, kitty, wezterm, most VTE/xterm-derived
-    terminals, tmux) rather than a Python clipboard dependency. Works over SSH with
-    no clipboard utility needed on either end, since the terminal emulator itself
-    (running on the user's machine) intercepts the sequence. Caller writes this
-    straight to stdout, bypassing urwid's widget rendering -- the same technique
-    tmux/vim/fzf use to reach the real terminal underneath urwid's raw_display screen.
-
-    Moved here from the Coin-detail module Story 25.1a deleted: Bot-detail's `o` is its
-    only caller now.
-    """
-    payload = base64.b64encode(text.encode()).decode()
-    return f"\x1b]52;c;{payload}\x07"
 
 
 def format_incident_line(incident: dict, now: float) -> str:

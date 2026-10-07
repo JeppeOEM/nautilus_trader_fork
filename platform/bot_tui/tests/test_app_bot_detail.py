@@ -20,19 +20,9 @@ test_app_bots.py. `_toggle_bot`'s actual asyncio-scheduled publish call is not
 independently re-tested here beyond confirming `_active_bot_id()` returns the right
 target -- same established precedent as test_app_bots.py's own docstring: the first
 side-effecting statement needs a running event loop, left to the manual smoke check.
-Whether a real browser opens is a manual-smoke-check exception too: the `o` key's footer
-echo, its background launch (run inside `asyncio.run`, the launcher recorded), the
-launcher's child-process arguments (`asyncio.create_subprocess_exec` faked) and the
-local-listener hand-off (a real loopback socket) are asserted here.
 """
 
-import asyncio
-import logging
-import socket
-import subprocess
-import sys
 import time
-from pathlib import Path
 
 import pytest
 import urwid
@@ -139,10 +129,10 @@ def test_bot_detail_footer_hint_on_entry_and_restored_on_esc() -> None:
     assert "start/stop" in app._footer_hint.text
     assert "esc back" in app._footer_hint.text
     assert "j/k" not in app._footer_hint.text
-    # Story 4.7: h/l (range)/o (dashboard) are now real Bot-detail keys, unlike Story
-    # 4.5 which had neither yet.
+    # Story 4.7: h/l (range) is a real Bot-detail key, unlike Story 4.5 which had none yet.
+    # `o` (dashboard) is gone (DW-93/DW-216): the web app has no bot page to deep-link to.
     assert "h/l range" in app._footer_hint.text
-    assert "o dashboard" in app._footer_hint.text
+    assert "o dashboard" not in app._footer_hint.text
     app._handle_bot_detail_key("esc")
     assert app._footer_hint.text == "s start/stop  : command  esc back  :q quit"
 
@@ -277,164 +267,33 @@ def test_right_key_full_cycle_returns_to_day() -> None:
     assert app._bot_history_range == "day"
 
 
-def test_o_key_sets_footer_to_bot_dashboard_url(monkeypatch) -> None:
-    monkeypatch.delenv("BOT_TUI_OPEN_URL_PORT", raising=False)
-    launched: list[str] = []
+# --- DW-93/DW-216: `o` deep-linked to a web bot page that does not exist, so it was removed ---
 
-    async def _record(url: str) -> None:
-        launched.append(url)
 
-    monkeypatch.setattr(app_module, "_launch_browser", _record)
+def test_o_in_bot_detail_is_inert() -> None:
+    # DW-93/DW-216: the `/bot/{bot_id}` deep-link was removed (no such web route). Pressed through
+    # the real urwid input entry point, so a binding at any dispatch level would show here.
     _reset()
     bots_state._handle_status_message(_status("bot-07"))
     app = BotTuiApp()
     app._open_bot_detail("bot-07")
+    footer_before = app._footer_hint.text
 
-    async def _press() -> None:
-        app._handle_bot_detail_key("o")
-        await asyncio.gather(*app._browser_tasks)
+    app._unhandled_input("o")
 
-    asyncio.run(_press())
-    url = "http://127.0.0.1:9100/bot/bot-07"
-    assert app._footer_hint.text == f"dashboard (copied to clipboard): {url}"
-    assert launched == [url]
+    assert app._footer_hint.text == footer_before
+    assert app._view == "bot_detail"
+    assert app._background_tasks == set()
 
 
-# --- DW-66/67: the browser is a child process off the loop, every stdio on /dev/null ---
-
-
-class _FakeProcess:
-    def __init__(self, returncode: int) -> None:
-        self.returncode = returncode
-
-    async def wait(self) -> int:
-        return self.returncode
-
-
-class _BlockingProcess:
-    """A launcher that only returns once killed (a `BROWSER` waiting on its browser)."""
-
-    def __init__(self) -> None:
-        self.killed = asyncio.Event()
-        self.reaped = False
-
-    def kill(self) -> None:
-        self.killed.set()
-
-    async def wait(self) -> int:
-        await self.killed.wait()
-        self.reaped = True
-        return -9
-
-
-def _fake_spawn(
-    monkeypatch: pytest.MonkeyPatch, returncode: int = 0, error: OSError | None = None
-) -> list[tuple[tuple, dict]]:
-    calls: list[tuple[tuple, dict]] = []
-
-    async def _spawn(*args: object, **kwargs: object) -> _FakeProcess:
-        calls.append((args, kwargs))
-        if error is not None:
-            raise error
-        return _FakeProcess(returncode)
-
-    monkeypatch.setattr(app_module.asyncio, "create_subprocess_exec", _spawn)
-    return calls
-
-
-def test_the_browser_child_gets_no_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _fake_spawn(monkeypatch)
-    asyncio.run(app_module._launch_browser("http://x/bot/b"))
-    (args, kwargs) = calls[0]
-    assert args == (
-        app_module.sys.executable,
-        "-c",
-        app_module._BROWSER_CHILD_SOURCE,
-        "http://x/bot/b",
-    )
-    devnull = asyncio.subprocess.DEVNULL
-    assert kwargs == {
-        "stdin": devnull,
-        "stdout": devnull,
-        "stderr": devnull,
-        "start_new_session": True,
-    }
-
-
-@pytest.mark.parametrize(("launcher_exit", "returncode"), [(0, 0), (1, 1)])
-def test_the_browser_child_exits_nonzero_only_when_no_browser_took_the_url(
-    tmp_path: Path, launcher_exit: int, returncode: int
-) -> None:
-    # The real child program, `BROWSER` naming a launcher that succeeds or fails. Hermetic: no
-    # display and a PATH holding only that launcher, so the stdlib cannot fall through to a real
-    # browser on the test host. `python -m webbrowser` would exit 0 either way.
-    launcher = tmp_path / "launcher"
-    launcher.write_text(f"#!/bin/sh\nexit {launcher_exit}\n")
-    launcher.chmod(0o755)
-    result = subprocess.run(  # noqa: S603 -- fixed argv, no untrusted input
-        [sys.executable, "-c", app_module._BROWSER_CHILD_SOURCE, "http://x/bot/b"],
-        env={"PATH": str(tmp_path), "BROWSER": str(launcher)},
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
-    assert result.returncode == returncode
-
-
-def test_a_failing_browser_launcher_is_a_warning_not_an_error(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    _fake_spawn(monkeypatch, returncode=1)
-    with caplog.at_level(logging.WARNING, logger=app_module.__name__):
-        asyncio.run(app_module._launch_browser("http://x/bot/b"))
-    assert "exited 1" in caplog.text
-
-
-def test_a_browser_that_cannot_be_spawned_is_a_warning_not_an_error(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    _fake_spawn(monkeypatch, error=FileNotFoundError("no python"))
-    with caplog.at_level(logging.WARNING, logger=app_module.__name__):
-        asyncio.run(app_module._launch_browser("http://x/bot/b"))
-    assert "could not start a browser" in caplog.text
-
-
-def test_a_quit_during_a_browser_launch_kills_and_reaps_the_launcher(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    process = _BlockingProcess()
-
-    async def _spawn(*args: object, **kwargs: object) -> _BlockingProcess:
-        return process
-
-    monkeypatch.setattr(app_module.asyncio, "create_subprocess_exec", _spawn)
-
-    async def _quit_mid_launch() -> None:
-        launch = asyncio.create_task(app_module._launch_browser("http://x/bot/b"))
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        launch.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await launch
-
-    asyncio.run(_quit_mid_launch())
-    assert process.killed.is_set()
-    assert process.reaped
+def test_help_lists_no_o_key_under_bot_detail() -> None:
+    section = app_module._HELP_TEXT.split("BOT DETAIL\n", 1)[1].split("\n\n", 1)[0]
+    lines = [line.strip() for line in section.splitlines()]
+    assert any(line.startswith("v ") for line in lines)  # the right section was cut out
+    assert not any(line.startswith("o ") for line in lines)
 
 
 # --- DW-92: invariants raise, never vanish under `python -O` ---
-
-
-def test_the_dashboard_link_with_no_open_bot_raises_and_opens_nothing() -> None:
-    _reset()
-    app = BotTuiApp()
-    opened: list[str] = []
-    app._open_url = lambda url: opened.append(url)
-    app._bot_detail_bot_id = None
-    with pytest.raises(RuntimeError, match="no bot open"):
-        app._open_dashboard_bot()
-    assert opened == []
 
 
 def test_expect_raises_type_error_naming_both_types() -> None:
@@ -473,58 +332,6 @@ def test_s_in_bot_detail_on_a_fresh_running_bot_still_opens_the_prompt() -> None
     app._open_bot_detail("bot-07")
     app._handle_bot_detail_key("s")
     assert app._stop_confirm_active is True
-
-
-# --- BOT_TUI_OPEN_URL_PORT: hand off to a local open_listener.go instead of
-# the browser launch/OSC52, when troll-tui's reverse SSH tunnel is up ---
-
-
-def _listening_socket() -> tuple[socket.socket, int]:
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(("127.0.0.1", 0))
-    server.listen(1)
-    # accept() raises instead of hanging the suite if the app never connects.
-    server.settimeout(5.0)
-    return server, server.getsockname()[1]
-
-
-def test_open_via_local_listener_sends_url_and_returns_true(monkeypatch) -> None:
-    server, port = _listening_socket()
-    monkeypatch.setenv("BOT_TUI_OPEN_URL_PORT", str(port))
-
-    with server:
-        result = BotTuiApp._open_via_local_listener("http://127.0.0.1:9100/bot/bot-07")
-        conn, _ = server.accept()
-        with conn:
-            received = conn.recv(4096)
-
-    assert result is True
-    assert received == b"http://127.0.0.1:9100/bot/bot-07"
-
-
-def test_open_via_local_listener_false_when_port_unset(monkeypatch) -> None:
-    monkeypatch.delenv("BOT_TUI_OPEN_URL_PORT", raising=False)
-    assert BotTuiApp._open_via_local_listener("http://127.0.0.1:9100/bot/bot-07") is False
-
-
-def test_open_via_local_listener_false_when_nothing_listening(monkeypatch) -> None:
-    monkeypatch.setenv("BOT_TUI_OPEN_URL_PORT", "1")  # privileged/unused port, connect refused
-    assert BotTuiApp._open_via_local_listener("http://127.0.0.1:9100/bot/bot-07") is False
-
-
-def test_o_key_uses_local_listener_when_port_set(monkeypatch) -> None:
-    server, port = _listening_socket()
-    monkeypatch.setenv("BOT_TUI_OPEN_URL_PORT", str(port))
-    _reset()
-    bots_state._handle_status_message(_status("bot-07"))
-    app = BotTuiApp()
-    app._open_bot_detail("bot-07")
-
-    with server:
-        app._handle_bot_detail_key("o")
-        conn, _ = server.accept()
-        conn.close()
-    assert app._footer_hint.text == "dashboard: http://127.0.0.1:9100/bot/bot-07"
 
 
 def test_v_key_opens_strategy_view_with_breadcrumb(monkeypatch, tmp_path) -> None:
