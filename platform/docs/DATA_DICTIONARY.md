@@ -2653,10 +2653,12 @@ Not a stored type: a live push of the rows the archive already takes (§1.4, §1
 
 Everything here is computed **on read** from the raw types in §1 — nothing in this
 section is stored back to Parquet. Since Story 24.2 every value a UI shows is computed in the
-`views/` read-model context (§2.4, §2.6, §2.7, §2.10 moved there from `ml_signals/`; the old
-module paths' re-exports were deleted in Story 24.4; Story 33.4 deleted the §2.4 builder, most of
-§2.6 and the legacy half of §2.7, none of which had a caller, and added the derivatives read
-model, §2.16); `data_api` only formats and transports it
+`views/` read-model context (§2.6, §2.7, §2.10 moved there from `ml_signals/`; the old
+module paths' re-exports were deleted in Story 24.4; Story 33.4 deleted the order-book footprint
+builder (the former §2.4, a pointer is in §2.14), most of §2.6 and the legacy half of §2.7, none of
+which had a caller, and added the derivatives read model, §2.16; Story 33.11 deleted the rest of
+the caller-less code there, `replay_bucket_samples` and `liquidity_distance`, and added the
+`kernel/ta.py` indicators, §2.19); `data_api` only formats and transports it
 (`bot_tui` shows no market value at all since Story 25.1a: rankings are web-only). Per SSOT-01/02 (`platform/CLAUDE.md`), stateless
 single-snapshot formulas live as plain functions in `kernel/indicators.py` (the shared kernel,
 Story 23.2; the `ml_signals.indicators` re-export was deleted in Story 24.2); stateful/rolling
@@ -2752,17 +2754,19 @@ Impact of Order Book Events" (level 0), summed over the top levels as in Xu, Gou
   keeps contributions from before a gap.
 - **Gap rule, one threshold everywhere.** `kernel.indicators.OFI_GAP_NS` = 3 s: when consecutive fed
   rows' `ts_event`s differ by strictly more, the caller clears the tracker's previous book
-  (`clear_prev_state`) before the update. Every OFI replay applies it: `ranking` (live), the chart's
-  per-bar replay (`views.chart_series.replay_bucket_samples`), `OFIStrategy`, `SnapshotStrategy` and
-  `research.application.microstructure.ofi_readings`. Before Story 31.3 research used 5 s, the chart
-  replay and `SnapshotStrategy` none. `DummyStrategy` (the paper bot, `bots/strategies/dummy.py`)
+  (`clear_prev_state`) before the update. Every OFI replay applies it: `ranking` (live),
+  `OFIStrategy`, `SnapshotStrategy` and `research.application.microstructure.ofi_readings`. Before
+  Story 31.3 research used 5 s, the chart's per-bar replay and `SnapshotStrategy` none; that replay
+  (`views.chart_series.replay_bucket_samples`) was deleted in Story 33.11, its only callers being
+  tests `[amended 2026-10-07: Story 33.11]`. `DummyStrategy` (the paper bot, `bots/strategies/dummy.py`)
   and its gap handling are decided with the operator in Story 31.9, not here.
-- **One-sided rows differ by reader (not unified).** The ranking's OFI trackers, `OFIStrategy`,
-  `SnapshotStrategy` and `ofi_readings` skip a row with an empty side: it is not fed, so the next
-  two-sided row diffs against the last two-sided one. The chart's per-bar replay feeds it: its
-  contribution is 0 (the level rule above) and it becomes the previous book, so the next two-sided
-  row contributes 0 as well. The reference (`rolling_ofi`) follows the rule as written, the chart's
-  way. Known limit; upgrade path: one shared feed policy in `kernel.indicators`.
+- **One-sided rows.** The ranking's OFI trackers, `OFIStrategy`, `SnapshotStrategy` and
+  `ofi_readings` skip a row with an empty side: it is not fed, so the next two-sided row diffs
+  against the last two-sided one. The reference (`rolling_ofi`) follows the level rule as written: a
+  one-sided row contributes 0 and becomes the previous book. The one reader that fed such rows, the
+  chart's per-bar replay, was deleted in Story 33.11, so every production reader now skips them
+  `[amended 2026-10-07: Story 33.11]`. Upgrade path, should a reader ever need to feed them: one
+  shared feed policy in `kernel.indicators`.
 - **Z-score.** `(x - mean) / std` of each reading against the last `zscore_window` readings, one
   reading per contribution (a baseline adds none and keeps the last z-score), population standard
   deviation (ddof=0). **Known limit:** undefined (fewer than 2 readings, or all equal) is published
@@ -2774,23 +2778,15 @@ Impact of Order Book Events" (level 0), summed over the top levels as in Xu, Gou
 
 `MultiLevelOBI` (`indicators.py`): `sum(bid_sizes[:levels]) / (sum(bid_sizes[:levels]) + sum(ask_sizes[:levels]))`.
 1.0 = all depth on the bid side, 0.5 = balanced, 0.0 = all ask. `ranking_engine` runs
-three instances per instrument at levels 3/5/10, fed only two-sided books. A reader that feeds a
-one-sided book -- the chart's per-bar replay (`views.chart_series.replay_bucket_samples`), which
-skips nothing -- gets the formula as written: 0.0 or 1.0.
+three instances per instrument at levels 3/5/10, fed only two-sided books. A reader that fed a
+one-sided book would get the formula as written: 0.0 or 1.0 (the one such reader, the chart's
+per-bar replay, was deleted in Story 33.11).
 
 **Known limit (zero total):** when the top `levels` sizes total 0 the value is undefined, but
 `MultiLevelOBI` keeps its previous value (`.initialized` stays as it was), so a stateful reader --
-the ranking's `obi_N`, the chart's per-bar OBI -- publishes the last defined OBI for that second.
+the ranking's `obi_N` -- publishes the last defined OBI for that second.
 Pinned by `verification/tests/test_reference_signals.py::test_multilevel_obi_keeps_its_previous_value_on_a_zero_total_known_limit`;
 upgrade path: publish None there.
-
-### 2.4 Footprint / order-book flow (removed in Story 33.4)
-
-**Removed** `[amended 2026-10-06: Story 33.4]`. `views/chart_series.py`'s `build_footprint` (and
-`FootprintCell`) bucketed resting order-book size changes, not executed trades, into per-candle,
-per-price-band cells. Nothing had called it since Story 15.10 retired the aiohttp dashboard, so
-Story 33.4 deleted it with its tests. The chart's footprint is the volume footprint of executed
-trades, §2.14.
 
 ### 2.5 Candles (the `candles/` context, Story 24.1)
 
@@ -2879,19 +2875,19 @@ after their existing ones (AD-D12: added keys only, every existing key keeps its
 own `price_precision`/`size_precision` govern its units (they may be finer than the response's
 definition precisions after a venue changed them), and every key of a gap marker is null.
 
-### 2.6 Book features (`views/chart_series.py`, was `ml_signals/book_features.py`)
+### 2.6 Cancel pressure (`views/chart_series.py`'s `CancellationTracker`)
 
-Story 33.4 deleted the read-time book replay that served most of this section to the retired
-dashboard's chart page (`depth_profile`, `book_imbalance`, `top_of_book_series`, with the §2.7
-legacy series). What is left `[amended 2026-10-06: Story 33.4]`:
+`[amended 2026-10-07: Story 33.11]` What is left of the old book-features module (was
+`ml_signals/book_features.py`): Story 33.4 deleted the read-time book replay that served the retired
+dashboard's chart page (`depth_profile`, `book_imbalance`, `top_of_book_series`), and Story 33.11
+deleted `liquidity_distance`, which nothing called.
 
 | Feature | Formula | Notes |
 |---|---|---|
 | `CancellationTracker` / `cancel_pressure` (`views/chart_series.py`) | `(deleted_size - added_size) / (deleted_size + added_size)` at the best bid/ask, over a rolling event window (default 200) | Replays raw `OrderBookDelta`s. +1 = all cancellations, -1 = all additions; only tracks ADD/DELETE at the *current* best price, UPDATE is ambiguous-direction and skipped. Served as the picker's `CancelPressure` (`views.indicator_picker`, §2.7) |
-| `liquidity_distance` (`kernel/indicators.py`, moved from `views` in Story 33.4) | per side, `abs(price - best)` at the level where the cumulative size first reaches `pct_threshold` (default 80%) of the side's stored depth | Reads a `DepthProfile` of the snapshot's stored levels. Small = dense support/resistance nearby; large = a liquidity vacuum. No caller yet; kept in the kernel so the screener and research share one copy |
 
 The snapshot depth functions (`snapshot_depth`, `cumulative_depth`, `depth_within_bps`) are in
-`kernel/indicators.py` too, read by research (§2.12).
+`kernel/indicators.py`, read by research (§2.12) and the picker's `DepthWithinBps` (§2.7).
 
 ### 2.7 Chart series (`views/chart_series.py`, was `ml_signals/chart_data.py` and the `data_api` routes)
 
@@ -2950,8 +2946,9 @@ passes (`kernel.catalog_files.query_snapshot_times`, then `query_books_at` for t
 **Removed in Story 33.4** `[amended 2026-10-06: Story 33.4]`: `compute_chart_series` (the legacy
 `/catalog/chart-series` endpoint's per-second microprice, spread, imbalance and depth series),
 `compute_features`, `indicator_series_page` (the `/api/indicator-series` per-bar OFI/OBI replay)
-and the frontend hook that called it. No view used any of them. The pages above, `replay_bucket_samples`
-and `with_gap_markers` stay.
+and the frontend hook that called it. No view used any of them. The pages above and
+`with_gap_markers` stay; `replay_bucket_samples` (the per-bar OFI/OBI/microprice/spread replay),
+whose only callers were tests, followed in Story 33.11 `[amended 2026-10-07: Story 33.11]`.
 
 ### 2.8 Price stats — moved to the ranking context (§3)
 
@@ -3466,8 +3463,8 @@ in `docs/VERIFICATION_REPORT.md`.
 
 Not stored data: a read-time view of the raw trade archive (§1.1) per closed chart bar, served by
 `GET /api/coin/{instrument_id}/footprint?before_ns&limit=120&bar_seconds=60&row_ticks=auto` and
-drawn by the chart's `FootprintPrimitive`. Not the order-book footprint of §2.4 (resting size
-changes); this one is executed trades.
+drawn by the chart's `FootprintPrimitive`. This one is executed trades. The order-book footprint
+(resting size changes, `build_footprint`, the former §2.4) was deleted in Story 33.4 with no caller.
 
 - **Reader.** `kernel.catalog_files.query_trade_columns(catalog, iid, start_ns, end_ns,
   price_precision, size_precision)` reads only `price`, `size`, `aggressor_side`, `ts_event` and
@@ -3975,6 +3972,105 @@ whatever a hand-edited template holds (`data_api/routes/layout.py`'s `_template`
 
 **Ledger sites.** None server-side (a refused item is the PUT's 422); the client's
 `drawings.unknown_kind` goes to the error bar.
+
+### 2.19 Indicators Nautilus lacks (`kernel/ta.py`), plot hints and candle-pattern markers (Story 33.11)
+
+`[added 2026-10-07: Story 33.11]` Not stored: nine streaming `Indicator` subclasses computed on read
+(SIGNAL-01), for the indicators `nautilus_trader.indicators` does not have (its
+`DirectionalMovement` gives the smoothed +-DM only, and its `value` is never set). Each follows the
+`kernel/candle_patterns.py` contract: params refused at construction, O(1) bounded state per bar,
+`initialized` per Nautilus's own seeding, `reset`, and `handle_bar` on a real `Bar` (PivotPoints
+excepted: its session key is not on the bar). The formulas, with their published sources (Wilder
+1978, Chaikin, Larry Williams, Bill Williams, Quong and Soudack, StockCharts ChartSchool), are the
+module docstring; tests: `kernel/tests/test_ta.py` (a hand-computed fixture each, cross-checked by
+a naive batch recomputation).
+
+| Class (catalog entry) | Outputs | Panel, plot | Reuses (Nautilus) | Warm-up (bars) |
+|---|---|---|---|---|
+| `Supertrend(period 10, multiplier 3.0)` (custom `Supertrend`) | `up` / `down`: the line on the bars of an up / a down trend, None on the other side | overlay, line | `AverageTrueRange(WILDER)` | `period` |
+| `ParabolicSAR(step 0.02, max_step 0.2)` (native) | `value`: the bar's stop (TA-Lib `TA_SAR`'s rules) | overlay, `points` | -- | 2 |
+| `AverageDirectionalIndex(period 14)` (native) | `adx`, `plus_di`, `minus_di` | oscillator | `DirectionalMovement(WILDER)`, `AverageTrueRange(WILDER)`, `MovingAverageFactory` WILDER for DX | `2 * period - 1` |
+| `WilliamsPercentR(period 14)` (native) | `value` in `[-100, 0]`, -50 for a flat window | oscillator | -- | `period` |
+| `PivotPoints(kind)` (custom `PivotPoints`, `kind` `standard`/`fibonacci`/`camarilla`, `session` `D`/`W`) | `pp`, `r1`..`r4`, `s1`..`s4` (`r4`/`s4` camarilla only, None otherwise) | overlay, `steps` | -- | see the seed rule below |
+| `MoneyFlowIndex(period 14)` (native) | `value` in `[0, 100]`, 50 when both flow sums are 0 | oscillator | -- | `period + 1` |
+| `ChaikinMoneyFlow(period 20)` (native) | `value` in `[-1, 1]`, 0 when the volume sum is 0 | oscillator | -- | `period` |
+| `AwesomeOscillator(fast 5, slow 34)` (native) | `value` = `SMA(hl2, 5) - SMA(hl2, 34)` | histogram | `SimpleMovingAverage` | `slow` |
+| `ZigZag(deviation_pct 5.0)` (custom `ZigZag`) | `value`: each confirmed pivot at its own bar and the last leg's running end at its bar, None elsewhere | overlay, `swing`; note "repaints last leg" | -- | the first confirmed pivot |
+
+**Warm-up per page.** Like every native entry, the six native ones warm up over the page's own bars
+(no prefix is read before the page), so a page's first bars read None and the first values after it
+can differ from a longer replay's for the Wilder-smoothed ones (D-217). The custom `Supertrend` and
+`ZigZag` do too: Supertrend's ATR and trend restart at the page's first bar, ZigZag's first pivot is
+found from the page's bars, never on the page's first bar (only `PivotPoints` is store-seeded). The Technicals columns and the alert
+sources take all nine through the shared catalog, as any other entry; a ZigZag column or alert input
+is None on every bar but a pivot or the repainting tip's (D-215).
+
+**Supertrend start.** The first initialized bar is in the down trend (`direction` -1, `value` the
+upper band), as TradingView's Pine `ta.supertrend` (whose `direction := 1` is its down trend; the
+sign convention here is +1 up). `Known limit:` Nautilus's WILDER `AverageTrueRange` seeds from its
+first true range, Pine's `ta.atr` (`ta.rma`) from the SMA of the first `period`, so the first
+values differ from TradingView's until that seed decays; upgrade path: an SMA-seeded Wilder
+average.
+
+**Pivot seed rule** (`views.indicator_picker._pivot_replay`). A session is `bucket_start_ms(t,
+session_seconds)` (the one bucket rule, §2.5: a `W` session starts on Monday 00:00 UTC). A level is
+never computed from a session not seen from its start (DATA-01, D-214). For a page whose first bar
+is in session `S`, with `P` the session before it: when the candle store holds the widest stored
+width tiling the chart's (`stored_bar`) and its first observed bar of that width is at or before
+`P`, `P` is fed as one bar (`candles.application.queries.session_hlc` over `[P, S)`: the highest
+`h`, the lowest `l`, the last traded bar's `c`), then `[S, first bar)` the same way as session `S`
+when it holds a trade, then the page; `S`'s bars carry `P`'s levels. Otherwise (no store, a store
+starting after `P`, a sub-minute or 90 s chart) the page's bars before the first session boundary
+are not fed and read None, the whole next session reads None too (its previous session was seen
+only in part), and the session after it is the first with levels. A session with no traded bar
+(page or store) is unknown the same way: when the next fed session is not the one directly after
+the last fed (`bucket_start_ms(last + session, session)`), the indicator is reset, so the session
+after the gap reads None and the one after it carries its levels (a covered previous session that
+never traded leaves the page's first session None, and the next one takes the seeded first
+session's levels). `PivotPoints` refuses a session key below the running one. The session's
+alignment is checked against the bar width's own anchor, so `W` on a 1W chart is one bar per
+session. A session narrower than the bar,
+or not a whole number of bars from a bar boundary, is the entry's error (`pivot session D is
+narrower than the 604800 s bar`); the page's other entries are still served. Same `Known limit:` as
+the CVD session seed (D-187): "covered" tests where the store starts, not that it is continuous.
+
+**ZigZag rules.** Over highs and lows; the running extreme of the current leg is extended first, and
+only a bar that does not extend it can reverse it by `deviation_pct` %, which confirms the extreme
+as a pivot (a confirmed pivot never moves). Before the first pivot both the highest high and the
+lowest low are candidates (the top tested first). The last leg's end repaints until a reversal
+confirms it (D-215; the legend shows the catalog `note`), and is served only on a page reaching the
+store's newest data (its newest stored bucket starts before the end of the bar after the page): an
+older page's leg end is not a swing, and drawn the line would join it to the newer page's first
+pivot. Sub-minute charts and store-less callers get confirmed pivots only (`Known limit:`). A pivot
+on the page's first fed bar is never drawn either: that bar is an extreme only because the page
+starts there (its older bars are on the older page), so the swing line would join the older page's
+last pivot to a turn the market never made.
+
+**Catalog fields** (`GET /api/indicators/catalog`, `IndicatorCatalogEntry`, added fields only,
+AD-D12): `plot`, output -> `line`/`steps`/`points`/`swing` (`views.indicator_picker.PLOT_STYLES`;
+`{}`, and any output it does not name, is a line): `steps` holds each value flat until the next,
+`points` draws unjoined dots, `swing` drops the empty slots client-side so one line joins the sparse
+points (a ZigZag line spanning a data gap is TradingView's behaviour); and `note`, a short legend
+note after the entry's title (None for every entry but ZigZag). Every other key of every existing
+entry is unchanged.
+
+**Candle-pattern display.** A `CandlePattern` entry's display is a view-only style key,
+`style.value.display` in `chart_indicators.toml` (validated as any string style leaf by
+`views.preferences.is_valid_style`): `markers` (the default; absent or unknown reads as markers,
+including entries saved before this story) or `pane` (the +-100 histogram pane as before). Not a
+param, so it never changes the `indicator_id`, never refetches, never reaches the constructor or the
+Technicals' pattern columns. In markers mode each served +100 is an `arrowUp` below the bar, each
+-100 an `arrowDown` above it, and a hit of a `kernel.candle_patterns.NON_DIRECTIONAL` pattern
+(`DOJI`) a circle above it, through the one series-markers plugin the liquidation markers use (ids
+`pat:<entry>:<time>`, tooltip the pattern's name and bullish/bearish/neutral); no marker on a None
+or gap slot or after the Bar Replay cutoff. The frontend's `NON_DIRECTIONAL_PATTERNS`
+(`frontend/src/lib/patternMarkers.ts`) is held to the kernel's by
+`views/tests/test_indicator_picker_native.py`. Patterns are computed on the real OHLC under every
+chart type, Heikin Ashi included (AD-F6, D-216).
+
+**Research signals.** `IndicatorSignalStrategy` gains six (`supertrend`, `parabolic_sar`, `adx`,
+`mfi`, `cmf`, `awesome_oscillator`, the table in its module docstring); ZigZag (it repaints) and the
+non-directional pivot levels are deliberately not signals.
 
 ---
 

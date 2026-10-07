@@ -65,6 +65,7 @@ permanent composition-root whitelist below and the non-venue HTTP clients.
 
 import ast
 import itertools
+import os
 import re
 import sys
 from pathlib import Path
@@ -930,6 +931,7 @@ KERNEL_MODULES = frozenset(
         "performance_metrics",
         "second_snapshot",
         "snapshot_book",
+        "ta",
         "venue_http",
         "venues",
     }
@@ -1458,6 +1460,10 @@ VIEWS_QUERY_SERVICES: dict[str, frozenset[str]] = {
             # not (D-162's upgrade path), and jumps a gap to the newest older row.
             "liquidation_window",
             "newest_row_t",
+            # Story 33.11: the pivot points' seed, a session's stored high, low and last close.
+            "session_hlc",
+            # Story 33.11 review: whether a ZigZag page reaches the store's newest bar (its tip).
+            "newest_t",
         }
     ),
     "candles.application.forming": frozenset({"forming_bar", "bars_from_rows"}),
@@ -2382,3 +2388,315 @@ def test_the_reference_signals_import_the_standard_library_only(module: str) -> 
     """Story 31.3: the reference imports no in-repo module and nothing outside its stdlib list."""
     imported = {ref.target.split(".")[0] for ref in imports_of(module, _MODULES[module], _KNOWN)}
     assert imported <= _REFERENCE_STDLIB, sorted(imported - _REFERENCE_STDLIB)
+
+
+# --- dead code (Story 33.11, DESIGN-03) ------------------------------------------------------------
+# A public function or class in `views/` or `kernel/` needs a non-test reference outside its own
+# definition: an import or `module.attr` read from a non-test module (`_IMPORTS`), a use elsewhere in
+# its own module, or a string path (`"kernel.ta:Supertrend"`, `"views.x.f"`) in a non-test module.
+# Every such module needs a non-test importer. The frontend's hooks are held to the same rule: an
+# exported function (`export function`, `export async function`, `export const X = (...) =>` or
+# `= function`; types and constants are not functions) needs a non-test reference outside its
+# definition under `frontend/src`, and every hooks file a non-test importer. No allowlist: what fails
+# is deleted, or gains a real production caller. "Imported by another module" literally would flag
+# about 140 live helpers exported only so their tests can reach them; that is not dead code.
+
+_DEAD_CODE_CONTEXTS = (VIEWS, KERNEL)
+_DEFINITIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+class _Definition(NamedTuple):
+    module: str
+    name: str
+    line: int
+    node: ast.stmt
+
+
+def _dead_code_modules() -> dict[str, Path]:
+    """Return the non-test modules directly under `views/` and `kernel/` (not the packages)."""
+    return {
+        module: path
+        for module, path in _MODULES.items()
+        if module.split(".")[0] in _DEAD_CODE_CONTEXTS
+        and module.count(".") == 1
+        and not _is_test_module(module)
+    }
+
+
+def _public_definitions(module: str, tree: ast.Module) -> list[_Definition]:
+    return [
+        _Definition(module, node.name, node.lineno, node)
+        for node in tree.body
+        if isinstance(node, _DEFINITIONS) and not node.name.startswith("_")
+    ]
+
+
+def _used_in_own_module(tree: ast.Module, definition: _Definition) -> bool:
+    """Whether a top-level statement other than the definition itself reads its name."""
+    return any(
+        isinstance(node, ast.Name) and node.id == definition.name
+        for statement in tree.body
+        if statement is not definition.node
+        for node in ast.walk(statement)
+    )
+
+
+def _value_strings(tree: ast.AST) -> list[str]:
+    """
+    Return the string constants used as values (an `ImportableStrategyConfig` path, a registry
+    entry), never a docstring or other bare string statement: a name in prose is no reference.
+    """
+    prose = {
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    }
+    return [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in prose
+    ]
+
+
+def _named_by_string(definition: _Definition, strings: str) -> bool:
+    path = re.compile(rf"\b{re.escape(definition.module)}[.:]{re.escape(definition.name)}\b")
+    return path.search(strings) is not None
+
+
+def _non_test_references(imports: list[Import]) -> tuple[set[tuple[str, str | None]], set[str]]:
+    """Return the `(module, name)` pairs and modules a non-test module takes from another."""
+    outside = [i for i in imports if not _is_test_module(i.src) and i.src != i.dst]
+    return {(i.dst, i.name) for i in outside}, {i.dst for i in outside}
+
+
+def _dead_python(
+    trees: dict[str, ast.Module], paths: dict[str, Path], imports: list[Import], strings: str
+) -> list[str]:
+    """Return `path:line -> module.name` for every unreferenced definition or unimported module."""
+    names, modules = _non_test_references(imports)
+    dead = [f"{paths[module]}:1 -> {module}" for module in trees if module not in modules]
+    for module, tree in trees.items():
+        dead.extend(
+            f"{paths[module]}:{d.line} -> {module}.{d.name}"
+            for d in _public_definitions(module, tree)
+            if (module, d.name) not in names
+            and not _used_in_own_module(tree, d)
+            and not _named_by_string(d, strings)
+        )
+    return sorted(dead)
+
+
+def _non_test_strings() -> str:
+    return "\n".join(
+        text
+        for module, path in _MODULES.items()
+        if not _is_test_module(module)
+        for text in _value_strings(ast.parse(path.read_text(), filename=str(path)))
+    )
+
+
+def test_every_public_views_and_kernel_definition_has_a_non_test_reference() -> None:
+    modules = _dead_code_modules()
+    trees = {m: ast.parse(p.read_text(), filename=str(p)) for m, p in modules.items()}
+    paths = {m: p.relative_to(PLATFORM_DIR) for m, p in modules.items()}
+    dead = _dead_python(trees, paths, _IMPORTS, _non_test_strings())
+    assert dead == [], "no production caller: delete it, or give it a real caller (DESIGN-03)"
+
+
+_FRONTEND_SRC = PLATFORM_DIR / "frontend" / "src"
+_TS_EXPORTED_FUNCTION = re.compile(
+    r"^export\s+(?:async\s+)?function\s+(\w+)"
+    r"|^export\s+const\s+(\w+)\s*(?::[^=]+)?=\s*(?:async\s+)?"
+    r"(?:function\b|(?:<[^>]*>\s*)?\([^)]*\)\s*(?::\s*[^=]+?)?\s*=>)",
+    re.MULTILINE,
+)
+_TS_IMPORT = re.compile(r"""(?:\bfrom|\bimport)\s*\(?\s*["']([^"']+)["']""")
+_TS_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+_TS_LINE_COMMENT = re.compile(r"(^|[^:\w\"'`\\])//[^\n]*")
+
+
+def _ts_code(text: str) -> str:
+    """Return the source without its comments (a name in a comment is no reference)."""
+    return _TS_LINE_COMMENT.sub(r"\1", _TS_BLOCK_COMMENT.sub("", text))
+
+
+def _ts_exported_functions(text: str) -> list[tuple[str, int]]:
+    return [
+        (match.group(1) or match.group(2), text.count("\n", 0, match.start()) + 1)
+        for match in _TS_EXPORTED_FUNCTION.finditer(text)
+    ]
+
+
+def _ts_imports(path: Path, text: str) -> set[Path]:
+    """Return the extension-less paths a source's relative (and `@/`) imports resolve to."""
+    targets = (_ts_module_path(path, spec) for spec in _TS_IMPORT.findall(_ts_code(text)))
+    return {target for target in targets if target is not None}
+
+
+_TS_NAMED_IMPORT = re.compile(
+    r"""\b(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']([^"']+)["']"""
+)
+_TS_NAMESPACE_IMPORT = re.compile(r"""\bimport\s+\*\s+as\s+(\w+)\s+from\s*["']([^"']+)["']""")
+
+
+def _ts_module_path(path: Path, spec: str) -> Path | None:
+    """Return the extension-less path an import `spec` in `path` resolves to (None: a package)."""
+    if spec.startswith("@/"):
+        target = _FRONTEND_SRC.relative_to(PLATFORM_DIR) / spec[2:]
+    elif spec.startswith("."):
+        target = Path(os.path.normpath(path.parent / spec))
+    else:
+        return None
+    return target.with_suffix("") if target.suffix in (".ts", ".tsx") else target
+
+
+def _ts_named_imports(path: Path, code: str) -> set[tuple[Path, str]]:
+    """
+    Return `(module path, exported name)` for every `import { ... } from` (and re-export), and for
+    every `ns.name` read through an `import * as ns from` of that module.
+    """
+    named = set()
+    for names, spec in _TS_NAMED_IMPORT.findall(code):
+        target = _ts_module_path(path, spec)
+        for item in names.split(","):
+            name = item.strip().removeprefix("type ").split(" as ")[0].strip()
+            if target is not None and name:
+                named.add((target, name))
+    for alias, spec in _TS_NAMESPACE_IMPORT.findall(code):
+        target = _ts_module_path(path, spec)
+        if target is not None:
+            named.update((target, name) for name in re.findall(rf"\b{alias}\.(\w+)", code))
+    return named
+
+
+def _dead_hooks(hooks: dict[Path, str], sources: dict[Path, str]) -> list[str]:
+    """
+    Return `path:line -> name` for every exported hooks function nothing references, and
+    `path:1 -> (no importer)` for every hooks file nothing else imports. A reference is a non-test
+    source importing the name from that hooks file (relative or `@/` path, re-exports included),
+    or a use in its own file outside its declaration -- never the bare word elsewhere (another
+    file's same-named local, a string, a prop). `sources` are the non-test sources, the hooks files
+    included.
+    """
+    imported = {target for path, text in sources.items() for target in _ts_imports(path, text)}
+    named = {
+        pair for path, text in sources.items() for pair in _ts_named_imports(path, _ts_code(text))
+    }
+    dead = [f"{path}:1 -> (no importer)" for path in hooks if path.with_suffix("") not in imported]
+    for path, text in hooks.items():
+        own = _ts_code(text)
+        for name, line in _ts_exported_functions(own):
+            used_here = len(re.findall(rf"\b{re.escape(name)}\b", own)) > 1
+            if not used_here and (path.with_suffix(""), name) not in named:
+                dead.append(f"{path}:{line} -> {name}")
+    return sorted(dead)
+
+
+def _frontend_sources() -> dict[Path, str]:
+    return {
+        path.relative_to(PLATFORM_DIR): path.read_text(encoding="utf-8")
+        for pattern in ("*.ts", "*.tsx")
+        for path in _FRONTEND_SRC.rglob(pattern)
+        if ".test." not in path.name
+    }
+
+
+def test_every_exported_hooks_function_has_a_non_test_reference() -> None:
+    sources = _frontend_sources()
+    hooks_dir = _FRONTEND_SRC.relative_to(PLATFORM_DIR) / "hooks"
+    hooks = {path: text for path, text in sources.items() if path.parent == hooks_dir}
+    assert len(hooks) > 10, f"no hooks found under {hooks_dir}"
+    dead = _dead_hooks(hooks, sources)
+    assert dead == [], "no production caller: delete it, or give it a real caller (DESIGN-03)"
+
+
+def _fake_import(src: str, dst: str, name: str | None) -> Import:
+    return Import(src, src.split(".")[0], dst, name, dst.split(".")[0], 1)
+
+
+def test_the_dead_code_rule_catches_each_form() -> None:
+    source = (
+        "def imported(): ...\n"
+        "def by_attribute(): ...\n"
+        "def used_here(): ...\n"
+        "class ByString: ...\n"
+        "def only_tested(): ...\n"
+        "def _private(): ...\n"
+        "def recursive(): return recursive()\n"
+        "def documented(): ...\n"
+        "X = used_here()\n"
+    )
+    trees = {"views.mod": ast.parse(source), "views.orphan": ast.parse("def f(): ...\n")}
+    paths = {"views.mod": Path("views/mod.py"), "views.orphan": Path("views/orphan.py")}
+    imports = [
+        _fake_import("data_api.routes.x", "views.mod", "imported"),
+        _fake_import("data_api.routes.y", "views.mod", "by_attribute"),
+        _fake_import("views.tests.test_mod", "views.mod", "only_tested"),
+        _fake_import("tests.test_guard", "views.orphan", "f"),
+        _fake_import("views.mod", "views.mod", "recursive"),  # a self-reference is no caller
+    ]
+    # A docstring naming a definition is prose, no reference; a string used as a value is one.
+    caller = ast.parse(
+        '"""Calls views.mod:documented."""\n'
+        "def g():\n"
+        '    """Also views.mod:documented."""\n'
+        '    return "views.mod:ByString"\n'
+        'PATH = "research.strategies.x:Strategy"\n'
+    )
+    strings = "\n".join(_value_strings(caller))
+    assert _dead_python(trees, paths, imports, strings) == [
+        "views/mod.py:5 -> views.mod.only_tested",
+        "views/mod.py:7 -> views.mod.recursive",
+        "views/mod.py:8 -> views.mod.documented",
+        "views/orphan.py:1 -> views.orphan",
+        "views/orphan.py:1 -> views.orphan.f",
+    ]
+
+
+def test_the_hooks_rule_catches_each_form() -> None:
+    hook = Path("frontend/src/hooks/useThing.ts")
+    lonely = Path("frontend/src/hooks/useLonely.ts")
+    sibling = Path("frontend/src/hooks/useSibling.ts")
+    hooks = {
+        hook: (
+            "export function useThing() {}\n"
+            "export async function loadThing() {}\n"
+            "export const thingKey = (id: string): string => id;\n"
+            "export const makeThing = function () {};\n"
+            "export const THING_MS = 5;\n"
+            "export type Thing = number;\n"
+            "export function usedInside() {}\n"
+            "export function byNamespace() {}\n"
+            "const local = usedInside;\n"
+            "// useLonely is named only in this comment\n"
+        ),
+        lonely: "export function useLonely() {}\n",
+        sibling: "export function useSibling() {}\nexport function useAliased() {}\n",
+    }
+    page = Path("frontend/src/pages/Page.tsx")
+    lib = Path("frontend/src/lib/other.ts")
+    sources = {
+        **hooks,
+        page: (
+            'import { useThing } from "../hooks/useThing";\n'
+            "import {\n  type Thing,\n  useSibling as sib,\n} from '../hooks/useSibling';\n"
+            'import { makeThing } from "../lib/other";\n'  # the same name from another module
+            "const thingKey = 1; // a same-named local, no reference\n"
+            'const label = "loadThing";\n'  # a string, no reference
+            "useThing();\n"
+        ),
+        lib: (
+            'export { useAliased } from "@/hooks/useSibling";\n'
+            'import * as thing from "../hooks/useThing";\n'
+            "thing.byNamespace();\n"
+        ),
+    }
+    assert _dead_hooks(hooks, sources) == [
+        "frontend/src/hooks/useLonely.ts:1 -> (no importer)",
+        "frontend/src/hooks/useLonely.ts:1 -> useLonely",
+        "frontend/src/hooks/useThing.ts:2 -> loadThing",
+        "frontend/src/hooks/useThing.ts:3 -> thingKey",
+        "frontend/src/hooks/useThing.ts:4 -> makeThing",
+    ]

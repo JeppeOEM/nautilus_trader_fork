@@ -34,7 +34,8 @@ the snapshot/OFI strategies consume them. This is an honest note, not a gap to c
 Story 27.3 added `RollingZScore` (the one z-score formula, which `MultiLevelOFI` delegates to)
 and moved `DepthProfile` here with the snapshot depth functions, for views and research alike.
 Story 33.4 added `basis_bps` and `funding_annualised`, the one derivatives formulas behind both the
-`views.derivatives` read model and the ranking row, and moved `liquidity_distance` here.
+`views.derivatives` read model and the ranking row (it also moved `liquidity_distance` here,
+which Story 33.11 deleted: nothing called it).
 Story 33.14 added `LiquidationCascade`, the one cascade definition: the research cascade strategy
 (`research.strategies.liquidation_cascade_strategy`, backtest and live paper bot alike) feeds it,
 and `research.application.liquidations.replay_cascade` replays it for episodes -- 33.13's
@@ -948,45 +949,6 @@ def depth_within_bps(
     return (
         [_within(bid_distance, bid_sizes, edge) for edge in bps_edges],
         [_within(ask_distance, ask_sizes, edge) for edge in bps_edges],
-    )
-
-
-@dataclass(frozen=True)
-class LiquidityDistance:
-    """
-    How far from the best price the meaningful liquidity sits, per side: the absolute price
-    distance from the touch to the level at which the cumulative size first reaches
-    `pct_threshold` of that side's stored depth. Small: dense support/resistance close by; large:
-    a vacuum price can move through fast.
-    """
-
-    bid_distance: float
-    ask_distance: float
-
-
-def _distance_to_share(prices: list[float], sizes: list[float], pct_threshold: float) -> float:
-    total = sum(sizes)
-    if total == 0:
-        return 0.0
-    target = total * pct_threshold
-    cumulative = 0.0
-    for price, size in zip(prices, sizes, strict=False):
-        cumulative += size
-        if cumulative >= target:
-            return abs(price - prices[0])
-    # Float rounding can leave the last cumulative a hair under the target: the deepest level.
-    return abs(prices[-1] - prices[0])
-
-
-def liquidity_distance(profile: DepthProfile, pct_threshold: float = 0.8) -> LiquidityDistance:
-    """
-    Return each side's `LiquidityDistance` over the profile's stored levels (Story 33.4 moved it
-    here from `views.chart_series`, where nothing called it any more, so the screener and research
-    have one copy to reach for).
-    """
-    return LiquidityDistance(
-        bid_distance=_distance_to_share(profile.bid_prices, profile.bid_sizes, pct_threshold),
-        ask_distance=_distance_to_share(profile.ask_prices, profile.ask_sizes, pct_threshold),
     )
 
 

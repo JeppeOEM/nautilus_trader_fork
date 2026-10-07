@@ -24,11 +24,12 @@ indicator_series,indicators}.py`, bodies verbatim unless noted):
 - **Lines mode** -- `price_series_rows`/`snapshot_series_page`: bid/ask/mid/microprice/CVD-weighted
   price per archived second.
 - **Indicator panes** -- `indicator_values_page` (the picker's configured indicators, dispatched
-  through `views.indicator_picker`), and `replay_bucket_samples` (OFI/OBI/microprice/spread per
-  bar, the verification oracle's subject).
+  through `views.indicator_picker`). Story 33.11 deleted `replay_bucket_samples`, the per-bar
+  OFI/OBI/microprice/spread replay whose only callers were tests.
 - **Cancellation pressure** -- `CancellationTracker`, the picker's cancel-pressure replay input.
   Story 33.4 deleted the rest of the old book-feature and resting-order footprint code, which no
-  page drew any more, and moved `liquidity_distance` to `kernel.indicators`.
+  page drew any more (its `liquidity_distance`, moved to `kernel.indicators`, was deleted there in
+  Story 33.11 with no caller either).
 - **Volume footprint** -- `footprint_page` (Story 32.8): the raw trade archive's executed trades in
   integer price rows per closed bar of the same `candle_page`, historical bars only.
 
@@ -63,12 +64,8 @@ from candles.domain.fold import bucket_start_ms
 from kernel import catalog_files
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import NS_PER_S
-from kernel.indicators import OFI_GAP_NS
-from kernel.indicators import MultiLevelOBI
-from kernel.indicators import MultiLevelOFI
 from kernel.indicators import microprice as calc_microprice
 from kernel.indicators import mid_price as calc_mid_price
-from kernel.indicators import spread as calc_spread
 from kernel.liquidation import Liquidation
 from kernel.liquidation import has_liquidation_feed
 from kernel.second_snapshot import DydxSecondSnapshot
@@ -91,9 +88,8 @@ if TYPE_CHECKING:  # the runtime import is deferred: indicator_picker imports th
 
 # =============================================================================================
 # Cancellation rate tracker (what remains of the book-features module: Story 33.4 deleted its
-# caller-less depth-profile, book-imbalance, feature and top-of-book series functions and moved
-# `liquidity_distance` to `kernel.indicators`). Read by `views.indicator_picker`'s cancel-pressure
-# replay.
+# caller-less depth-profile, book-imbalance, feature and top-of-book series functions). Read by
+# `views.indicator_picker`'s cancel-pressure replay.
 # =============================================================================================
 
 
@@ -630,72 +626,6 @@ def candle_page(
         recent_liquidations,
     )
     return older + kept, has_more
-
-
-# =============================================================================================
-# Per-bar OFI/OBI/microprice/spread replay (its page and route had no caller and were deleted in
-# Story 33.4; the replay stays as the verification oracle's subject,
-# `verification/tests/test_reference_signals.py`)
-#
-# SSOT-02 governs *live* rolling OFI/OBI (ranking_engine is the sole owner) -- it does not apply
-# here: this is a bounded, deterministic *historical* replay for one request's own fixed time
-# window, the same sanctioned category as `views.indicator_picker`'s request-scoped
-# `_ofi_replay`/`_cancel_pressure_replay`, not a second live computer of the published metric.
-# =============================================================================================
-
-
-def replay_bucket_samples(
-    snapshots: Sequence[DydxSecondSnapshot], bar_seconds: int
-) -> dict[int, dict]:
-    """
-    Replay `MultiLevelOFI`/`MultiLevelOBI` in chronological order over every queried
-    snapshot, and compute stateless `microprice`/`spread` per snapshot -- keeping the
-    last-computed value per `bar_seconds`-wide bucket (`candles.domain.fold.bucket_start_ms`, the
-    one bucket rule: a 1W pane starts on Monday like its candles), same bucket-sampling technique
-    `indicator_picker`'s `_ofi_bucket_samples` uses, adapted from delta-driven to snapshot-driven
-    input.
-
-    A `ts_event` step over `kernel.indicators.OFI_GAP_NS` clears OFI's previous book first
-    (`clear_prev_state`), so a post-gap book is never diffed against the pre-gap one -- the one
-    gap rule every OFI replay shares (Story 31.3). A page's OFI/OBI replay starts fresh at that
-    page's own window start -- it cannot carry state across pages, since pages are fetched
-    independently and out of full-history order (same explicit per-page-reset scope choice the CVD
-    replay already documents). OFI's first snapshot in this window only seeds its `_prev_*` state
-    and yields no value -- only record `ofi` once `.initialized` is True.
-
-    A second with an empty side is not an error here: its microprice/spread are honestly `None`
-    (`kernel.indicators` returns no value without a top), pinned by
-    `views/tests/test_chart_series.py`'s thin-book test -- nothing is skipped or invented.
-    Known limit (§2.3): `MultiLevelOBI` keeps its previous value on a second whose top-10 sizes
-    total zero, so that bucket shows the last defined OBI; upgrade path: publish None there.
-    """
-    ofi = MultiLevelOFI(levels=10, window=50)
-    obi = MultiLevelOBI(levels=10)
-    buckets: dict[int, dict] = {}
-    last_ts: int | None = None
-
-    for snapshot in sorted(snapshots, key=lambda s: s.ts_event):
-        if last_ts is not None and snapshot.ts_event - last_ts > OFI_GAP_NS:
-            ofi.clear_prev_state()
-        last_ts = snapshot.ts_event
-        ofi.update_raw(
-            snapshot.bid_prices,
-            snapshot.bid_sizes,
-            snapshot.ask_prices,
-            snapshot.ask_sizes,
-        )
-        obi.update_raw(snapshot.bid_sizes, snapshot.ask_sizes)
-        snapshot_dict = snapshot.as_floats()
-        bucket = bucket_start_ms(snapshot.ts_event // 1_000_000, bar_seconds)
-        buckets[bucket] = {
-            "t": bucket,
-            "ofi": ofi.value if ofi.initialized else None,
-            "obi": obi.value if obi.initialized else None,
-            "microprice": calc_microprice(snapshot_dict),
-            "spread": calc_spread(snapshot_dict),
-        }
-
-    return buckets
 
 
 # =============================================================================================

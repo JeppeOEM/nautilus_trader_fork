@@ -1760,6 +1760,38 @@ migration: a file saved before this story loads unchanged.
 - [ ] After an hour, `curl -s localhost:9100/api/errors` shows no new `data_api` drawings or layout
       error site, and the browser's error bar shows no `drawings.unknown_kind`.
 
+### 33-11-missing-indicators-candle-pattern-markers-and-dead-code-removed (commit: this story's)
+
+The picker gains nine indicators from the new `kernel/ta.py` (Supertrend, Parabolic SAR, ADX,
+Williams %R, Pivot Points, MFI, CMF, Awesome Oscillator, ZigZag), `GET /api/indicators/catalog`
+gains two keys per entry (`plot`, `note`), and a `CandlePattern` entry draws as markers on the
+candles by default (its Style section's Display select switches back to the pane; a view-only
+`style.value.display` key in `chart_indicators.toml`). Caller-less code was deleted
+(`liquidity_distance`, `replay_bucket_samples`, `resetErrorLog`). Only `data_api` changes (the
+picker, the catalog route and the frontend built into its image); `research` gains six
+`IndicatorSignalStrategy` signals, which reach the bots only through a fleet config that names
+them. No config key, env var, mount or compose service changes, and nothing is migrated: a saved
+indicator list loads unchanged, and a `CandlePattern` saved before this story draws as markers.
+
+- [ ] On the VPS, pull this commit and rebuild/restart the one service:
+      `cd ~/nautilus_trader_fork/platform && docker compose up -d --build data_api`.
+- [ ] Smoke-check the catalog:
+      `curl -s localhost:9100/api/indicators/catalog | python3 -c 'import json,sys; c=json.load(sys.stdin); print([n for n in ("Supertrend","ParabolicSAR","AverageDirectionalIndex","WilliamsPercentR","PivotPoints","MoneyFlowIndex","ChaikinMoneyFlow","AwesomeOscillator","ZigZag") if n not in c], c["ZigZag"]["plot"], c["ZigZag"]["note"], c["ParabolicSAR"]["plot"])'`
+      prints `[] {'value': 'swing'} repaints last leg {'value': 'points'}`.
+- [ ] In the browser, on a Bybit BTC 1h chart, add each of the nine from the picker with its
+      defaults: Supertrend, Parabolic SAR (dots), Pivot Points (stepped levels) and ZigZag (a line
+      through the swing points, legend title ending `· repaints last leg`) draw on the price pane,
+      the other five in their own panes; open one gear and change a param (the series redraws).
+      On a 1W chart, a Pivot Points entry with session `D` shows its legend error
+      `pivot session D is narrower than the 604800 s bar` while the other entries still draw.
+      Remove the test entries.
+- [ ] Add a `CandlePattern` (e.g. `ENGULFING`): its hits show as arrows on the candles (a `DOJI`
+      entry as circles) with the pattern's name on hover, and the price axis does not move; set its
+      Style > Display to Pane: the ±100 pane returns; hide it with the eye: the markers go. Remove
+      it afterwards.
+- [ ] After an hour, `curl -s localhost:9100/api/errors` shows no new `data_api` indicator site, and
+      the browser's error bar is empty.
+
 ### 33-14-liquidation-cascade-bot-shorts-into-a-long-liquidation-cascade-backtested-and-paper-run (commit: this story's)
 
 A new paper strategy, `liquidation_cascade` (`research/strategies/liquidation_cascade_strategy.py`,

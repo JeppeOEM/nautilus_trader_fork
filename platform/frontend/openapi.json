@@ -3131,6 +3131,31 @@
             },
             "type": "array",
             "title": "Outputs"
+          },
+          "plot": {
+            "additionalProperties": {
+              "type": "string",
+              "enum": [
+                "line",
+                "steps",
+                "points",
+                "swing"
+              ]
+            },
+            "type": "object",
+            "title": "Plot",
+            "default": {}
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
           }
         },
         "type": "object",

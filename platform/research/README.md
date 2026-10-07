@@ -314,7 +314,7 @@ tuning knobs — e.g. `backtest_dydx.run(symbols=["BTC-USD-PERP.DYDX"], bar_inte
 | Raw 1s book snapshots | `DydxSecondSnapshot` | `research/strategies/backtest_snapshot.py` |
 | Raw 1s book snapshots, fills at the snapshot's best bid/ask | `DydxSecondSnapshot` + `QuoteTick` derived by `kernel.catalog_files.query_top_of_book` | `research/strategies/backtest_ofi.py` (via `research/strategies/snapshot_backtest.py`) |
 | Bars from trades, pattern entries | `TradeTick` → internal `Bar`, through `NodeRunner` (`data="trades"`) | `research/strategies/backtest_candle_pattern.py` (`CandlePatternStrategy`, Story 27.8; also the second worked example in `04_backtest_evaluation`, and a paper bot with `strategy = "candle_pattern"`, `bots/README.md`) |
-| Every Nautilus indicator, one at a time | bars (`data="bars:1-MINUTE"`) | `IndicatorSignalStrategy` (`signal`, `signal_params`, `filter`, `exit`, `allow_short`; 25 signals, one per bar indicator), shown in `08_strategy_gallery` |
+| Every Nautilus indicator, one at a time | bars (`data="bars:1-MINUTE"`) | `IndicatorSignalStrategy` (`signal`, `signal_params`, `filter`, `exit`, `allow_short`; 31 signals, one per bar indicator, six of them `kernel.ta`'s), shown in `08_strategy_gallery` |
 | Two moving averages crossing, any of the eight types, with an ATR stop or a trailing ATR stop | bars | `MACrossStrategy` (`ma_type`, `fast_period`, `slow_period`, `exit`, `atr_multiple`) |
 | A Nautilus example strategy as-is (`EMACross*`, `BBMeanReversion`, `EMACrossTWAP`) | bars | its string path (`nautilus_trader.examples.strategies.<file>:<Class>`), `data="bars:1-MINUTE"`, `params={"trade_size": "0.01", ...}`; `08_strategy_gallery` |
 
@@ -331,7 +331,7 @@ the `strategy_path`/`config_path`/`data=[...]` list.
 ### Build a strategy
 
 Two parameterised families already cover most indicator ideas without new code:
-`research.strategies.indicator_signal_strategy:IndicatorSignalStrategy` (`signal` picks one of 25
+`research.strategies.indicator_signal_strategy:IndicatorSignalStrategy` (`signal` picks one of 31
 Nautilus or kernel indicators, `filter` gates entries on `vhf` or `volatility_ratio`, `exit` is the
 opposite signal or `bars:<n>`) and `research.strategies.ma_cross_strategy:MACrossStrategy` (any of the
 eight `MovingAverageType`s, exit on the opposite cross, an ATR stop or a trailing ATR stop); both are

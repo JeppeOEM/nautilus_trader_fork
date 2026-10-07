@@ -249,8 +249,11 @@ interface ChartStubProps {
     format?: (value: number, time: number | null) => string;
     text?: string;
     zeroLine?: boolean;
+    plot?: string;
+    markersOnly?: boolean;
   }[];
   liquidationMarkers?: { id: string; time: number; position: string; price?: number; text?: string }[];
+  patternMarkers?: { id: string; time: number; shape: string; position: string; color: string; tooltip: readonly string[] }[];
   onBarSpacing?: (spacing: number) => void;
   onLegendAction?: (action: "hide" | "settings" | "remove", group: string) => void;
   initialPaneHeights?: Record<string, number>;
@@ -598,7 +601,13 @@ describe("ChartPage default layout and per-coin persistence", () => {
   });
 
   it("offers a CandlePattern's pattern as a dropdown of the catalog's choices and draws it as a histogram", async () => {
-    const entry = { name: "CandlePattern", params: { pattern: "ENGULFING", trend_bars: 3 }, category: "native" };
+    // Story 33.11: the ±100 pane is the Pane display; markers are the default (tested below).
+    const entry = {
+      name: "CandlePattern",
+      params: { pattern: "ENGULFING", trend_bars: 3 },
+      category: "native",
+      style: { value: { display: "pane" } },
+    };
     vi.mocked(fetchCoinIndicatorConfig).mockResolvedValueOnce([entry]);
     picker.values = { "CandlePattern_pattern=ENGULFING,trend_bars=3.value": [] };
     render(page());
@@ -609,7 +618,10 @@ describe("ChartPage default layout and per-coin persistence", () => {
     expect(lastChartProps.current!.panes!.find((p) => p.id === `${id}.value`)).toMatchObject({
       group: id,
       actionable: true,
+      kind: "Histogram",
+      placement: "pane",
     });
+    expect(lastChartProps.current!.patternMarkers).toEqual([]);
     act(() => lastChartProps.current!.onLegendAction!("settings", id));
     const dialog = screen.getByRole("dialog", { name: "CandlePattern (ENGULFING, 3)" });
     const select = within(dialog).getByLabelText<HTMLSelectElement>(/pattern/);
@@ -627,11 +639,13 @@ describe("ChartPage default layout and per-coin persistence", () => {
     ]);
     const byId = Object.fromEntries((lastChartProps.current?.panes ?? []).map((p) => [p.id, p]));
     expect(byId["CandlePattern_pattern=ENGULFING,trend_bars=3.value"]).toMatchObject({
-      kind: "Histogram",
-      placement: "pane",
       // After Apply the values mock still keys the old params, so no entry owns the series any
       // more: it keeps its own instance group, with no buttons (the real hook refetches under the
-      // new key).
+      // new key). With no entry its display is unknown, so it takes the default (markers): an
+      // invisible legend row, never a pane that would flash in and out.
+      kind: "Line",
+      placement: "overlay",
+      markersOnly: true,
       group: id,
       actionable: false,
     });
@@ -4999,5 +5013,134 @@ describe("ChartPage drawing tools II (Story 33.10)", () => {
     fireEvent.click(magnet);
     fireEvent.click(magnet);
     expect(lastChartProps.current!.magnet).toBe("off");
+  });
+});
+
+describe("ChartPage candle-pattern markers and catalog plot hints (Story 33.11)", () => {
+  const paneOf = (id: string) => lastChartProps.current!.panes!.find((p) => p.id === id)!;
+  const legendAction = (action: "hide" | "settings" | "remove", group: string) =>
+    act(() => lastChartProps.current!.onLegendAction!(action, group));
+  const ENGULFING = { name: "CandlePattern", params: { pattern: "ENGULFING", trend_bars: 3 }, category: "native" };
+  const ENGULFING_ID = "CandlePattern_pattern=ENGULFING,trend_bars=3";
+  // A bullish hit at 60, a bearish one at 120, a gap at 180, no pattern at 240, bullish again at 300.
+  const HITS = [
+    { time: 60, value: 100 },
+    { time: 120, value: -100 },
+    { time: 180 },
+    { time: 240, value: 0 },
+    { time: 300, value: 100 },
+  ];
+  const placed = () => (lastChartProps.current!.patternMarkers ?? []).map((m) => [m.time, m.shape, m.position]);
+  let baseCatalog: Awaited<ReturnType<typeof fetchIndicatorCatalog>>;
+
+  beforeEach(async () => {
+    baseCatalog = await fetchIndicatorCatalog();
+    vi.mocked(fetchIndicatorCatalog).mockResolvedValue({
+      ...baseCatalog,
+      ZigZag: {
+        params: { deviation_pct: 5 },
+        panel: "overlay",
+        category: "custom",
+        plot: { value: "swing" },
+        note: "repaints last leg",
+        outputs: ["value"],
+      },
+    });
+  });
+  afterEach(() => {
+    vi.mocked(fetchIndicatorCatalog).mockResolvedValue(baseCatalog);
+  });
+
+  async function mountWith(entries: object[], values: Record<string, unknown[]>): Promise<void> {
+    vi.mocked(fetchCoinIndicatorConfig).mockResolvedValueOnce(entries as never);
+    picker.values = values as Record<string, never[]>;
+    render(page());
+    await act(async () => {}); // catalog + saved config
+  }
+
+  it("draws bullish hits as arrows below the bar and bearish ones above, by default", async () => {
+    await mountWith([ENGULFING], { [`${ENGULFING_ID}.value`]: HITS });
+
+    expect(placed()).toEqual([
+      [60, "arrowUp", "belowBar"],
+      [120, "arrowDown", "aboveBar"],
+      [300, "arrowUp", "belowBar"],
+    ]);
+    const markers = lastChartProps.current!.patternMarkers!;
+    expect(markers[0]).toMatchObject({ id: `pat:${ENGULFING_ID}:60`, tooltip: ["Engulfing", "bullish"], color: CHART_TOKENS["--chart-up"] });
+    expect(markers[1]).toMatchObject({ tooltip: ["Engulfing", "bearish"], color: CHART_TOKENS["--chart-down"] });
+    // The legend row stays, on an invisible overlay that never scales the price axis.
+    const spec = paneOf(`${ENGULFING_ID}.value`);
+    expect(spec).toMatchObject({ kind: "Line", placement: "overlay", markersOnly: true, actionable: true });
+    expect(spec.format!(100, 60)).toBe("Engulfing");
+    expect(spec.format!(0, 240)).toBe("—");
+  });
+
+  it("draws a non-directional pattern's hit as a neutral circle above the bar", async () => {
+    const doji = { name: "CandlePattern", params: { pattern: "DOJI", trend_bars: 3 }, category: "native" };
+    await mountWith([doji], { "CandlePattern_pattern=DOJI,trend_bars=3.value": [{ time: 60, value: 100 }] });
+
+    expect(placed()).toEqual([[60, "circle", "aboveBar"]]);
+    expect(lastChartProps.current!.patternMarkers![0].tooltip).toEqual(["Doji", "neutral"]);
+  });
+
+  it("names a stale series' hits by the pattern its id carries, not the catalog default", async () => {
+    // No saved entry owns these HAMMER values any more; the catalog's default pattern is ENGULFING.
+    await mountWith([], { "CandlePattern_pattern=HAMMER,trend_bars=3.value": HITS });
+
+    const spec = paneOf("CandlePattern_pattern=HAMMER,trend_bars=3.value");
+    expect(spec).toMatchObject({ markersOnly: true, actionable: false });
+    expect(spec.format!(100, 60)).toBe("Hammer");
+  });
+
+  it("removes the markers while the eye hides the entry, keeping its legend row", async () => {
+    await mountWith([ENGULFING], { [`${ENGULFING_ID}.value`]: HITS });
+
+    legendAction("hide", ENGULFING_ID);
+    await act(async () => {});
+
+    expect(lastChartProps.current!.patternMarkers).toEqual([]);
+    expect(paneOf(`${ENGULFING_ID}.value`)).toMatchObject({ hidden: true, markersOnly: true });
+  });
+
+  it("switches to the ±100 pane from the settings' Display select, a style key and never a param", async () => {
+    await mountWith([ENGULFING], { [`${ENGULFING_ID}.value`]: HITS });
+
+    legendAction("settings", ENGULFING_ID);
+    const dialog = screen.getByRole("dialog", { name: "CandlePattern (ENGULFING, 3)" });
+    const display = within(dialog).getByLabelText<HTMLSelectElement>(/Display/);
+    expect(display.value).toBe("markers");
+    fireEvent.change(display, { target: { value: "pane" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await act(async () => {});
+
+    expect(saveConfigMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", [
+      expect.objectContaining({ ...ENGULFING, style: { value: { display: "pane" } } }),
+    ]);
+    expect(paneOf(`${ENGULFING_ID}.value`)).toMatchObject({ kind: "Histogram", placement: "pane" });
+    expect(paneOf(`${ENGULFING_ID}.value`).markersOnly).toBeUndefined();
+    expect(lastChartProps.current!.patternMarkers).toEqual([]);
+  });
+
+  it("draws no marker after the Bar Replay cursor", async () => {
+    mocks.candles = [60, 120, 180, 240, 300].map((time) => ({ time, open: 1, high: 2, low: 1, close: 1 }));
+    await mountWith([ENGULFING], { [`${ENGULFING_ID}.value`]: HITS });
+    expect(placed()).toHaveLength(3);
+
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    act(() => lastChartProps.current!.onPointClick!({ time: 120, price: 1 }));
+
+    expect(placed().map(([time]) => time)).toEqual([60, 120]);
+  });
+
+  it("carries a ZigZag's swing plot and its catalog note onto the legend title", async () => {
+    const zigzag = { name: "ZigZag", params: { deviation_pct: 5 }, category: "custom" };
+    await mountWith([zigzag], { "ZigZag_deviation_pct=5.value": [{ time: 60, value: 110 }, { time: 120 }] });
+
+    expect(paneOf("ZigZag_deviation_pct=5.value")).toMatchObject({
+      plot: "swing",
+      placement: "overlay",
+      groupLabel: "ZigZag (5) · repaints last leg",
+    });
   });
 });

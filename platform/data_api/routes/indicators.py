@@ -34,6 +34,7 @@ import tomllib
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from typing import Literal
 
 from fastapi import APIRouter
 from fastapi import HTTPException
@@ -96,6 +97,11 @@ class IndicatorCatalogEntry(BaseModel):
     units: dict[str, str] = {}
     # Every output name the entry's replay can return (Story 33.8): the alert form's output select.
     outputs: list[str]
+    # Output -> how it is drawn (`indicator_picker.PlotStyle`, Story 33.11); an absent output is a
+    # line: `steps` (pivot levels), `points` (Parabolic SAR), `swing` (ZigZag's joined pivots).
+    plot: dict[str, Literal["line", "steps", "points", "swing"]] = {}
+    # A short legend note after the entry's title (Story 33.11: ZigZag's "repaints last leg").
+    note: str | None = None
 
 
 @router.get("/api/indicators/catalog")

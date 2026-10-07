@@ -183,6 +183,28 @@ def oldest_t(
     return row[0]
 
 
+def session_hlc(
+    db: sqlite3.Connection, iid: str, bar_seconds: int, start_ms: int, end_ms: int
+) -> tuple[float, float, float] | None:
+    """
+    Return `(high, low, close)` over the instrument's traded stored bars of one width with
+    `start_ms <= t < end_ms`: the highest `h`, the lowest `l` and the last traded bar's `c`; None
+    when no bar in the range traded. The pivot-points seed of a session the chart page starts
+    inside (Story 33.11, `views.indicator_picker`'s `_pivot_replay`). One indexed SQLite statement
+    bounded by the range (its close a correlated `ORDER BY t DESC LIMIT 1` on the same index), so
+    only one row reaches Python (MEM-01).
+    """
+    row = db.execute(
+        "SELECT MAX(h), MIN(l), (SELECT c FROM candles WHERE instrument_id = ? AND bar_seconds = ? "
+        "AND t >= ? AND t < ? AND o IS NOT NULL ORDER BY t DESC LIMIT 1) FROM candles "
+        "WHERE instrument_id = ? AND bar_seconds = ? AND t >= ? AND t < ? AND o IS NOT NULL",
+        (iid, bar_seconds, start_ms, end_ms) * 2,
+    ).fetchone()
+    if row[0] is None:
+        return None
+    return (row[0], row[1], row[2])
+
+
 def newest_t(db: sqlite3.Connection, iid: str, bar_seconds: int) -> int | None:
     """
     Start of the newest observed bucket (ms), traded or not: the store's coverage of the archive

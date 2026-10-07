@@ -854,3 +854,34 @@ def test_liquidation_window_of_an_instrument_without_the_feed_reads_null(tmp_pat
     sqlite_store.apply_seconds(db, _SPOT, [_sec(0, 10, 2, 0, 1, 0)])
     (row,) = queries.liquidation_window(db, _SPOT, 60, _DAY0_MS, _DAY0_MS + 60_000)
     assert (row["liq_long_v"], row["liq_short_v"], row["liq_n"]) == (None, None, None)
+
+
+def _ranged(s: int, high: float, low: float, close: float) -> SecondOHLC:
+    """One traded second at (price, size) precision (1, 3) with its own high and low."""
+    return SecondOHLC(
+        _T0 + s * _S, close, high, low, close, 0.001, 0.0, 1, 3, round(close * 10), 1, 0, 1, 0
+    )
+
+
+def test_session_hlc_is_the_highest_high_lowest_low_and_last_traded_close(tmp_path: Path) -> None:
+    """
+    Minute 0: h 10.5, l 9.8, c 10.0; minute 1: h 11.0, l 10.1, c 10.9; minute 2 only a liquidation
+    (no trade, `o` null): over the three minutes H 11.0, L 9.8 and the last *traded* close 10.9.
+    """
+    db = _db(tmp_path)
+    sqlite_store.apply_liquidations(db, _LINEAR, [_liq("a", 0, 4)])
+    sqlite_store.apply_seconds(db, _LINEAR, [_ranged(1, 10.5, 9.8, 10.0)])
+    sqlite_store.apply_seconds(db, _LINEAR, [_ranged(61, 11.0, 10.1, 10.9)])
+    sqlite_store.apply_liquidations(db, _LINEAR, [_liq("b", 130, 6)])
+    end = _DAY0_MS + 180_000
+    assert queries.session_hlc(db, _LINEAR, 60, _DAY0_MS, end) == (11.0, 9.8, 10.9)
+    assert queries.session_hlc(db, _LINEAR, 60, _DAY0_MS + 60_000, end) == (11.0, 10.1, 10.9)
+    assert queries.session_hlc(db, _LINEAR, 60, _DAY0_MS, _DAY0_MS + 60_000) == (10.5, 9.8, 10.0)
+
+
+def test_session_hlc_of_a_range_without_a_trade_is_none(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    sqlite_store.apply_liquidations(db, _LINEAR, [_liq("a", 0, 4)])
+    sqlite_store.apply_seconds(db, _LINEAR, [_ranged(61, 11.0, 10.1, 10.9)])
+    assert queries.session_hlc(db, _LINEAR, 60, _DAY0_MS, _DAY0_MS + 60_000) is None
+    assert queries.session_hlc(db, _SPOT, 60, _DAY0_MS, _DAY0_MS + 180_000) is None

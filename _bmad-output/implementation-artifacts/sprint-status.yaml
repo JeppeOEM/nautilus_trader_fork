@@ -391,7 +391,7 @@ development_status:
   33-8-alert-conditions-beyond-a-price-cross-and-an-alerts-page-that-creates-and-edits: done  # operator decision 2026-10-05: epic-32 merged into epic-33, released
   33-9-price-scale-modes-chart-types-and-a-compare-symbol-on-the-percent-scale: done  # operator decision 2026-10-05: epic-32 merged into epic-33, released
   33-10-drawing-tools-two-ray-vline-rectangle-channel-text-arrow-magnet-undo-lock: done  # operator decision 2026-10-05: epic-32 merged into epic-33, released
-  33-11-missing-indicators-candle-pattern-markers-and-dead-code-removed: ready-for-dev  # operator decision 2026-10-05: epic-32 merged into epic-33, released
+  33-11-missing-indicators-candle-pattern-markers-and-dead-code-removed: done  # operator decision 2026-10-05: epic-32 merged into epic-33, released
   33-12-symbol-search-watchlist-fullscreen-shortcuts-time-zone-countdown: ready-for-dev  # operator decision 2026-10-05: epic-32 merged into epic-33, released
   33-13-liquidation-and-forced-flow-research-and-the-strategy-filter: ready-for-dev  # operator decision 2026-10-05: epic-32 merged into epic-33, released
   epic-33-retrospective: optional

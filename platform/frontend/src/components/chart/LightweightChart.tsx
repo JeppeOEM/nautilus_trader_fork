@@ -11,6 +11,7 @@ import {
   type IPaneApi,
   type IPriceLine,
   LineStyle,
+  LineType,
   PriceScaleMode,
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
@@ -187,7 +188,18 @@ export interface IndicatorPaneSpec {
   text?: string;
   /** Story 33.5: a dashed line at 0 in this series' pane (Basis). */
   zeroLine?: boolean;
+  /** Story 33.11: how a line output is drawn (the catalog's `plot` hint; absent = `line`): `steps` a
+   * stepped line (pivot levels), `points` dots with no line (Parabolic SAR), `swing` a line through
+   * the valued points only, its whitespace dropped so the swings join (ZigZag). */
+  plot?: IndicatorPlot;
+  /** Story 33.11: a series that only hosts a legend row (a `CandlePattern` drawn as markers): an
+   * invisible overlay on its own hidden price scale that never autoscales, so its values never move
+   * the price axis; no line, crosshair marker, last-value label or price line. */
+  markersOnly?: boolean;
 }
+
+/** Story 33.11: the catalog's per-output plot hint. */
+export type IndicatorPlot = "line" | "steps" | "points" | "swing";
 
 // Story 18.1: a tool-drawn horizontal price line (AC #2). `id` is the caller's stable
 // key (ChartPage uses deterministic "hline-N" counter ids), diffed exactly like
@@ -558,6 +570,9 @@ interface LightweightChartProps {
    * `createSeriesMarkers` plugin set on every change and detached on unmount; hovering one shows its
    * `tooltip` lines. Empty/omitted draws none. */
   liquidationMarkers?: readonly MarkerSpec[];
+  /** Story 33.11: candle-pattern markers, merged with `liquidationMarkers` into the one plugin (sorted
+   * by time; the ids are disjoint, `pat:` against `liq:`), hovering one shows its `tooltip` lines. */
+  patternMarkers?: readonly MarkerSpec[];
   /** Story 33.5: the time scale's bar spacing (px), reported on mount and on every zoom, so the page
    * can hide markers too narrow to read. */
   onBarSpacing?: (barSpacing: number) => void;
@@ -648,11 +663,41 @@ function lineOptions(spec: IndicatorPaneSpec): { lineWidth?: LineWidth; lineStyl
   return { lineWidth: width as LineWidth, lineStyle: style };
 }
 
+/** What the series is drawn with beyond colour, width and style, fixed at creation: the plot hint, or
+ * the markers-only host's invisible overlay on its own price scale (`markersScaleId`). */
+function shapeOptions(spec: IndicatorPaneSpec): Record<string, unknown> {
+  if (spec.markersOnly) {
+    return {
+      lineVisible: false,
+      pointMarkersVisible: false,
+      crosshairMarkerVisible: false,
+      lastValueVisible: false,
+      priceLineVisible: false,
+      priceScaleId: markersScaleId(spec),
+      autoscaleInfoProvider: () => null,
+    };
+  }
+  if (spec.kind !== "Line") return {};
+  if (spec.plot === "steps") return { lineType: LineType.WithSteps };
+  if (spec.plot === "points") return { lineVisible: false, pointMarkersVisible: true };
+  return {};
+}
+
+/** The markers-only host's own overlay price scale: never the right scale the candles use. */
+const markersScaleId = (spec: IndicatorPaneSpec): string => `markers:${spec.id}`;
+
+/** What, once a series exists, can only change by re-creating it: where it lives and its shape. */
+const structureKey = (spec: IndicatorPaneSpec): string =>
+  [spec.kind, spec.placement === "overlay" ? "overlay" : "pane", spec.group ?? spec.id, spec.markersOnly ? "markers" : "", spec.plot ?? ""].join("|");
+
 const upDownKey = (spec: IndicatorPaneSpec): string =>
   spec.kind === "Histogram" ? `${spec.upColor ?? ""}|${spec.downColor ?? ""}` : "";
 
 /** A histogram with up/down colours paints each bar by its sign; the data in state is untouched. */
 function paintedData(spec: IndicatorPaneSpec): IndicatorDatum[] {
+  // A swing output's whitespace is no gap to draw: one line joins its valued points (ZigZag). A
+  // non-finite value is a gap like elsewhere, never a joined point.
+  if (spec.plot === "swing") return spec.data.filter((d) => "value" in d && Number.isFinite(d.value));
   if (spec.kind !== "Histogram" || (!spec.upColor && !spec.downColor)) return spec.data;
   return spec.data.map((d) => {
     // A null / NaN value is a gap, not a positive bar: no colour (never "up").
@@ -972,6 +1017,7 @@ export default function LightweightChart({
   initialVisibleBars,
   onVisibleBars,
   liquidationMarkers = NO_MARKERS,
+  patternMarkers = NO_MARKERS,
   onBarSpacing,
   chartType = "candles",
   priceScale = DEFAULT_PRICE_SCALE_SETTINGS,
@@ -1042,9 +1088,17 @@ export default function LightweightChart({
   const anchorMarkerRef = useRef<VerticalMarkerPrimitive | null>(null);
   const footprintRef = useRef<FootprintPrimitive | null>(null);
   // Story 33.5: the liquidation markers' plugin on the candle series, and the hovered marker's tooltip.
+  // Story 33.11: the candle-pattern markers share it, one array sorted by time (the plugin's contract).
+  const allMarkers = useMemo(
+    () =>
+      patternMarkers.length === 0
+        ? liquidationMarkers
+        : [...liquidationMarkers, ...patternMarkers].sort((a, b) => (a.time as number) - (b.time as number)),
+    [liquidationMarkers, patternMarkers],
+  );
   const markersPluginRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
-  const markerSpecsRef = useRef<readonly MarkerSpec[]>(liquidationMarkers);
-  markerSpecsRef.current = liquidationMarkers;
+  const markerSpecsRef = useRef<readonly MarkerSpec[]>(allMarkers);
+  markerSpecsRef.current = allMarkers;
   const [markerTip, setMarkerTip] = useState<{ lines: readonly string[]; x: number; y: number } | null>(null);
   const barSpacingCallbackRef = useRef(onBarSpacing);
   barSpacingCallbackRef.current = onBarSpacing;
@@ -1666,7 +1720,10 @@ export default function LightweightChart({
     // Remove ids no longer present first -- never touches timeScale/visible range, just
     // `chart.removePane()` (AC #4). A shared pane goes only with its group's last series.
     for (const [id, entry] of [...registry]) {
-      if (specsById.has(id)) continue;
+      // A spec whose shape changed (a CandlePattern switched between markers and its pane) is
+      // re-created below: a series cannot move between the price pane and a pane of its own.
+      const next = specsById.get(id);
+      if (next && structureKey(next) === structureKey(entry.spec)) continue;
       registry.delete(id);
       // A pane's gap painter goes with its host series; a pane that stays gets a new one on a
       // sibling below.
@@ -1704,7 +1761,7 @@ export default function LightweightChart({
         const definition = spec.kind === "Line" ? LineSeries : HistogramSeries;
         const series = chart.addSeries(
           definition,
-          { color: spec.color, ...lineOptions(spec), ...(spec.hidden ? { visible: false } : {}) },
+          { color: spec.color, ...lineOptions(spec), ...shapeOptions(spec), ...(spec.hidden ? { visible: false } : {}) },
           pane ? pane.paneIndex() : 0,
         ) as AnySeriesApi;
         entry = { pane, group, spec, series, lastData: spec.data, gap: null, lastUpDown: upDownKey(spec), zero: null };
@@ -2055,13 +2112,13 @@ export default function LightweightChart({
     // markers replaced on every change (created on the first marker, re-created after a mode flip).
     const host = seriesRef.current;
     if (!host || mode !== "candles") return;
-    const markers = liquidationMarkers.map(({ tooltip: _tooltip, ...marker }) => marker);
+    const markers = allMarkers.map(({ tooltip: _tooltip, ...marker }) => marker);
     // A tooltip open on a marker that this change removed (or merged) would outlive it under a still
     // pointer; the next crosshair move re-opens it on whatever marker is there now.
     setMarkerTip((prev) => (prev === null ? prev : null));
     if (markersPluginRef.current) markersPluginRef.current.setMarkers(markers);
     else if (markers.length > 0) markersPluginRef.current = createSeriesMarkers(host, markers);
-  }, [liquidationMarkers, mode, mainKind]);
+  }, [allMarkers, mode, mainKind]);
 
   useEffect(() => {
     latestRef.current = { volumeProfiles, onRangeSelect, onProfileEdgeDrag, onProfileEdgeCommit, onProfileEdgeCancel };

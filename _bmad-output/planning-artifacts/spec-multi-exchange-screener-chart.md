@@ -778,8 +778,19 @@ the code review if any of these sneak back in:
 - **Full indicator library** — no 100+ built-in indicator catalog, no
   Pine-Script-style custom scripting editor, no public/community script
   library or "Add to favorites" indicator list.
-- **Candlestick pattern auto-recognition** — no automated bullish/bearish
-  pattern scanner or pattern tooltips.
+- **Candlestick pattern auto-recognition** — no ~~automated bullish/bearish
+  pattern scanner or pattern tooltips~~. **[amended 2026-10-07: Story 33.11]**
+  The operator's 2026-10-05 review lifts this exclusion: a `CandlePattern`
+  indicator entry (Story 27.7's 22 patterns, `kernel/candle_patterns.py`) is
+  drawn as series markers on the candles by default (an arrow up below the
+  bar for a bullish hit, an arrow down above it for a bearish one, a circle
+  for a non-directional pattern), with the pattern's name and reading as the
+  marker's hover tooltip, through the one series-markers plugin it shares
+  with the liquidation markers; the gear's Display select (the view-only
+  style key `style.value.display`) switches an entry back to its ±100 pane.
+  Patterns are detected on the real OHLC (AD-F6) from served values only,
+  none after the Bar Replay cursor. A standalone pattern scanner page stays
+  excluded (the Technicals tab's pattern columns are the screener view).
 - **Multi-chart grid layouts** — no 2/4/6/8-pane workspace of different
   symbols/timeframes; this build is a single chart.
 - ~~**Anchored Volume Profile** — the one Volume Profile variant we don't

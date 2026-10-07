@@ -11,6 +11,7 @@ import {
   type OutputStyle,
   outputStyle,
 } from "../../lib/indicatorStyle";
+import { PATTERN_INDICATOR, type PatternDisplay, patternDisplay } from "../../lib/patternMarkers";
 import ParamInputs from "./ParamInputs";
 import SettingsDialogShell from "./SettingsDialogShell";
 import { coerceParams, invalidParamKeys, rawFromParams } from "./paramCoercion";
@@ -52,7 +53,8 @@ const asHex = (color: string): string => (/^#[0-9a-f]{6}$/i.test(color) ? color 
 /**
  * The legend gear's modal (Story 32.3): Inputs (params through the shared `ParamInputs`, plus a
  * Source select for a `source_selectable` indicator), Style (per output: colour, width 1-4,
- * solid/dashed/dotted; a histogram output gets up and down colours) and a footer (Apply, Cancel,
+ * solid/dashed/dotted; a histogram output gets up and down colours; a `CandlePattern` also its
+ * Display, Markers or Pane, Story 33.11) and a footer (Apply, Cancel,
  * Remove). Esc, Cancel or a backdrop click close it with no change. Mounted only while open, so
  * its drafts always start from the saved entry.
  */
@@ -73,6 +75,10 @@ export default function IndicatorSettingsDialog({
   // Only an output the operator touched is written back; the rest keep what the entry holds
   // (nothing, usually: the pane palette default).
   const [drafts, setDrafts] = useState<Record<string, OutputStyle>>({});
+  // Story 33.11: a CandlePattern's display (markers on the candles, or its ±100 pane), a view-only
+  // style key on its `value` output: never a param, so changing it refetches nothing.
+  const isPattern = entry.name === PATTERN_INDICATOR;
+  const [display, setDisplay] = useState<PatternDisplay>(() => patternDisplay(entry));
   const [refusal, setRefusal] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const invalidKeys = invalidParamKeys(params, raw, choices);
@@ -86,6 +92,7 @@ export default function IndicatorSettingsDialog({
     for (const [label, draft] of Object.entries(drafts)) {
       style[label] = { ...style[label], ...draft };
     }
+    if (isPattern && display !== patternDisplay(entry)) style.value = { ...style.value, display };
     // Closed only once the save landed: a refused or failed save keeps the drafts and says why.
     setSaving(true);
     setRefusal(null);
@@ -123,6 +130,15 @@ export default function IndicatorSettingsDialog({
       </section>
       <section aria-label="Style">
         <h3>Style</h3>
+        {isPattern && (
+          <label>
+            Display:
+            <select value={display} onChange={(e) => setDisplay(e.target.value === "pane" ? "pane" : "markers")}>
+              <option value="markers">Markers</option>
+              <option value="pane">Pane</option>
+            </select>
+          </label>
+        )}
         {outputs.length === 0 && <p>No outputs drawn yet.</p>}
         {outputs.map((output) => {
           const style = styleOf(output.label);

@@ -191,6 +191,7 @@ vi.mock("lightweight-charts", () => ({
   BaselineSeries: "BaselineSeries-sentinel",
   PriceScaleMode: { Normal: 0, Logarithmic: 1, Percentage: 2, IndexedTo100: 3 },
   LineStyle: { Solid: 0, Dotted: 1, Dashed: 2 },
+  LineType: { Simple: 0, WithSteps: 1, Curved: 2 },
   createChart: (...args: unknown[]) => createChartMock(...args),
   createSeriesMarkers: (...args: unknown[]) => createSeriesMarkersMock(...args),
 }));
@@ -3400,5 +3401,117 @@ describe("drawing tools II (Story 33.10)", () => {
 
     rerender(chartElement({ data: bars, placement: null }));
     expect(detachPrimitiveMock).toHaveBeenCalledWith(preview);
+  });
+});
+
+// Story 33.11: the catalog's plot hints, the markers-only legend host and the candle-pattern markers.
+describe("plot hints, markers-only series and pattern markers (Story 33.11)", () => {
+  const optionsOf = (n: number): Record<string, unknown> => addSeriesMock.mock.calls[n][1] as Record<string, unknown>;
+  const valued = (time: number, value: number) => ({ time: time as Time, value });
+  const blank = (time: number) => ({ time: time as Time });
+
+  it("draws a steps output as a stepped line and a points output as dots with no line", () => {
+    render(
+      <LightweightChart
+        data={[]}
+        onChartApi={() => {}}
+        panes={[
+          makePaneSpec("pp", { placement: "overlay", plot: "steps" }),
+          makePaneSpec("sar", { placement: "overlay", plot: "points" }),
+        ]}
+      />,
+    );
+    expect(optionsOf(1)).toMatchObject({ lineType: 1 });
+    expect(optionsOf(2)).toMatchObject({ lineVisible: false, pointMarkersVisible: true });
+    expect(optionsOf(2)).not.toHaveProperty("lineType");
+  });
+
+  it("drops a swing output's whitespace so one line joins its points, and keeps it for a plain line", () => {
+    const data = [valued(60, 110), blank(120), blank(180), valued(240, 104.4)];
+    render(<LightweightChart data={[]} onChartApi={() => {}} panes={[makePaneSpec("zz", { placement: "overlay", plot: "swing", data })]} />);
+    expect(setDataMock).toHaveBeenLastCalledWith([valued(60, 110), valued(240, 104.4)]);
+
+    cleanup();
+    setDataMock.mockReset();
+    render(<LightweightChart data={[]} onChartApi={() => {}} panes={[makePaneSpec("sma", { placement: "overlay", data })]} />);
+    expect(setDataMock).toHaveBeenLastCalledWith(data);
+  });
+
+  it("hosts a markers-only spec on an invisible overlay with its own scale that never autoscales", () => {
+    render(
+      <LightweightChart
+        data={[]}
+        onChartApi={() => {}}
+        panes={[makePaneSpec("pat.value", { placement: "overlay", markersOnly: true, data: [valued(60, 100)] })]}
+      />,
+    );
+    expect(addPaneMock).not.toHaveBeenCalled();
+    expect(addSeriesMock.mock.calls[1][2]).toBe(0);
+    const options = optionsOf(1);
+    expect(options).toMatchObject({
+      lineVisible: false,
+      pointMarkersVisible: false,
+      crosshairMarkerVisible: false,
+      lastValueVisible: false,
+      priceLineVisible: false,
+      priceScaleId: "markers:pat.value",
+    });
+    expect((options.autoscaleInfoProvider as () => unknown)()).toBeNull();
+  });
+
+  it("re-creates a series whose shape changed: markers-only to its own pane and back", () => {
+    const markersSpec = makePaneSpec("pat.value", { group: "pat", placement: "overlay", markersOnly: true });
+    const paneSpec = makePaneSpec("pat.value", { group: "pat", kind: "Histogram", placement: "pane" });
+    const { rerender } = render(<LightweightChart data={[]} onChartApi={() => {}} panes={[markersSpec]} />);
+    expect(addSeriesMock).toHaveBeenCalledTimes(2);
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} panes={[paneSpec]} />);
+    expect(removeSeriesMock).toHaveBeenCalledTimes(1);
+    expect(addPaneMock).toHaveBeenCalledTimes(1);
+    expect(addSeriesMock).toHaveBeenLastCalledWith("HistogramSeries-sentinel", expect.any(Object), 1);
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} panes={[markersSpec]} />);
+    expect(removePaneMock).toHaveBeenCalledTimes(1);
+    expect(addSeriesMock).toHaveBeenLastCalledWith("LineSeries-sentinel", expect.objectContaining({ priceScaleId: "markers:pat.value" }), 0);
+  });
+
+  const liq: MarkerSpec = {
+    id: "liq:a",
+    time: 120 as Time,
+    shape: "circle",
+    color: "#a00",
+    position: "atPriceBottom",
+    price: 100,
+    tooltip: ["long liquidated"],
+  };
+  const pat: MarkerSpec = {
+    id: "pat:CandlePattern_x:60",
+    time: 60 as Time,
+    shape: "arrowDown",
+    color: "#0a0",
+    position: "aboveBar",
+    tooltip: ["Evening star", "bearish"],
+  };
+
+  it("merges pattern and liquidation markers into the one plugin, sorted by time", () => {
+    const { rerender, unmount } = render(<LightweightChart data={[]} onChartApi={() => {}} liquidationMarkers={[liq]} patternMarkers={[pat]} />);
+    expect(createSeriesMarkersMock).toHaveBeenCalledTimes(1);
+    const [, initial] = createSeriesMarkersMock.mock.calls[0] as [unknown, { id: string }[]];
+    expect(initial.map((m) => m.id)).toEqual(["pat:CandlePattern_x:60", "liq:a"]);
+    expect(initial[0]).not.toHaveProperty("tooltip");
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} liquidationMarkers={[liq]} patternMarkers={[]} />);
+    expect(setMarkersMock).toHaveBeenLastCalledWith([expect.objectContaining({ id: "liq:a" })]);
+    expect(createSeriesMarkersMock).toHaveBeenCalledTimes(1);
+
+    unmount();
+    expect(detachMarkersMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a hovered pattern marker's tooltip", () => {
+    render(<LightweightChart data={[]} onChartApi={() => {}} liquidationMarkers={[liq]} patternMarkers={[pat]} />);
+    const handler = subscribeCrosshairMoveMock.mock.calls.at(-1)![0];
+    act(() => handler({ time: 60, point: { x: 10, y: 20 }, seriesData: new Map(), hoveredObjectId: "pat:CandlePattern_x:60" }));
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Evening starbearish");
   });
 });

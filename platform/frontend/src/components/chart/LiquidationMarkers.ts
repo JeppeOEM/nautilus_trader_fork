@@ -14,6 +14,14 @@ import { formatUnits, unitsToNumber } from "../../lib/units";
 export const MARKER_MERGE_COUNT = 3;
 /** At or below this bar spacing (px) no marker is drawn: the legend says to zoom in. */
 export const MARKER_MIN_BAR_SPACING_PX = 6;
+
+/**
+ * Whether the candles are too dense for markers (`MARKER_MIN_BAR_SPACING_PX`): the one zoom rule of
+ * every marker on the candle series, liquidations and candle patterns alike.
+ */
+export function markersHiddenAt(barSpacing: number): boolean {
+  return barSpacing <= MARKER_MIN_BAR_SPACING_PX;
+}
 /** The circle radius (px) of the smallest and of the largest notional on the chart (sqrt scale). */
 export const MARKER_MIN_RADIUS_PX = 5;
 export const MARKER_MAX_RADIUS_PX = 18;
@@ -207,7 +215,7 @@ export function buildLiquidationMarkers(
   colors: MarkerColors,
   bars: ReadonlyMap<number, LiquidationBarItem> = new Map(),
 ): MarkerSpec[] {
-  if (barSpacing <= MARKER_MIN_BAR_SPACING_PX || rows.length === 0) return [];
+  if (markersHiddenAt(barSpacing) || rows.length === 0) return [];
   const drafts = groupBySlot(rows, candleTimes, barSeconds).flatMap((group) => draftsOf(group, colors, bars));
   const max = Math.max(0, ...drafts.map((d) => d.notional));
   return drafts.map(({ spec, notional }) => ({ ...spec, size: markerSize(sqrtRadius(notional, max), barSpacing) }) as MarkerSpec);

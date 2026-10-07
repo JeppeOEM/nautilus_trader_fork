@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from candles.domain.fold import bucket_start_ms
 from candles.infrastructure.sqlite_store import CandleStore
 from candles.infrastructure.sqlite_store import db_path_for_venue
 from kernel.second_snapshot import DydxSecondSnapshot
@@ -107,6 +108,8 @@ def test_catalog_json_returns_params_and_panel_per_entry() -> None:
         "choices": {},
         "units": {},
         "outputs": ["value"],
+        "plot": {},
+        "note": None,
     }
     assert (
         "category" not in ci.custom_catalog_json()["PlaceholderCustom"]
@@ -292,6 +295,8 @@ def test_cvd_registered_in_production_catalog_with_correct_shape() -> None:
         "choices": {"anchor": ["session", "visible", "all"]},
         "units": {"value": "size"},
         "outputs": ["value"],
+        "plot": {},
+        "note": None,
     }
 
 
@@ -390,6 +395,8 @@ def test_cancel_pressure_registered_in_production_catalog_with_correct_shape() -
         "choices": {},
         "units": {},
         "outputs": ["bid_pressure", "ask_pressure"],
+        "plot": {},
+        "note": None,
     }
 
 
@@ -547,6 +554,8 @@ def test_ofi_registered_in_production_catalog_with_correct_shape() -> None:
         "choices": {},
         "units": {},
         "outputs": ["value"],
+        "plot": {},
+        "note": None,
     }
 
 
@@ -912,3 +921,295 @@ def test_every_listed_entry_of_the_merged_catalog_carries_outputs() -> None:
     for name, entry in ci.merged_catalog().items():
         assert entry["outputs"], name
         assert set(entry.get("units", {})) <= set(entry["outputs"]), name
+
+
+# -- Story 33.11: Supertrend, PivotPoints and ZigZag (`kernel.ta`) -------------------------------
+
+
+def _ohlc(t: int, high: float, low: float, close: float) -> dict:
+    return {"t": t, "o": close, "h": high, "l": low, "c": close, "v": 1.0}
+
+
+def _hourly_bars(rows: list[tuple[int, float, float, float]]) -> list[dict]:
+    """`(hour since day 1's midnight, h, l, c)` -> hourly candles."""
+    return [_ohlc(_DAY1_MS + hour * _HOUR_MS, h, l, c) for hour, h, l, c in rows]
+
+
+def test_supertrend_splits_its_line_at_a_flip() -> None:
+    """
+    `kernel/tests/test_ta.py`'s fixture (period 2, multiplier 1): directions -1, -1, -1, -1, +1
+    from bar 1 (TradingView's down-trend start) -- `down` holds the line through bar 4 and `up`
+    from the flip at bar 5.
+    """
+    bars = _hourly_bars(
+        [
+            (0, 10, 8, 9),
+            (1, 11, 9, 10),
+            (2, 12, 10, 11.5),
+            (3, 11, 7, 7.5),
+            (4, 9, 6, 8.5),
+            (5, 12, 9, 11.8),
+        ]
+    )
+    result = ci.replay_custom(bars, "Supertrend", {"period": 2, "multiplier": 1.0}, _hourly(bars))
+    assert result["up"] == [None, None, None, None, None, 7.1875]
+    assert result["down"] == [None, 12.0, 12.0, 12.0, 10.625, None]
+
+
+def test_supertrend_refuses_a_bad_param_at_save() -> None:
+    with pytest.raises(ValueError, match="period"):
+        ci.check_params("Supertrend", {"period": 0})
+    ci.check_params("Supertrend", {"period": 7, "multiplier": 2.5})
+
+
+def _store_second_at(candles_dir: Path, ms: int) -> None:
+    """Store one traded second at `ms` (precision 0): the store's newest observed bar."""
+    store = CandleStore(db_path_for_venue(candles_dir, venue_of(_IID)))
+    store.apply(
+        _IID, [SecondOHLC(ms * 1_000_000, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0, 0, 1, 1, 0, 1, 0)]
+    )
+    store.close()
+
+
+def _zigzag(bars: list[dict], candles_dir: Path) -> list[float | None]:
+    """ZigZag over `bars` on a store whose newest bar is the page's last (the newest page)."""
+    _store_second_at(candles_dir, bars[-1]["t"])
+    return ci.replay_custom(bars, "ZigZag", {}, _hourly(bars, str(candles_dir)))["value"]
+
+
+_ZIGZAG_ROWS = [
+    (0, 100, 99, 99.5),
+    (1, 105, 104, 104.5),
+    (2, 110, 109, 109.5),
+    (3, 109, 104.4, 105),
+]
+
+
+def test_zigzag_emits_each_confirmed_pivot_and_the_last_legs_end(tmp_path: Path) -> None:
+    """
+    The spec's matrix at 5 %: a bottom at bar 0 (99) is confirmed by bar 1's 105 but not drawn
+    (the page's first bar, see the next test), the top at bar 2 (110) by bar 3's 104.4; bar 3's
+    low is the last leg's running end. Then bar 4 extends that leg: its end moves to bar 4 (100)
+    and bar 3 goes back to None (the repainting last leg).
+    """
+    assert _zigzag(_hourly_bars(_ZIGZAG_ROWS), tmp_path / "a") == [None, None, 110, 104.4]
+    longer = _hourly_bars([*_ZIGZAG_ROWS, (4, 104, 100, 101)])
+    assert _zigzag(longer, tmp_path / "b") == [None, None, 110, None, 100]
+
+
+def test_zigzag_draws_no_pivot_on_the_pages_first_bar(tmp_path: Path) -> None:
+    """
+    The page's first bar is an extreme only because the page starts there (its older bars are on
+    the older page), so a pivot there is no swing the market made: with one bar before it, the
+    same bottom (99, now bar 1) is a real local low and is drawn.
+    """
+    rows = [(0, 101, 100, 100.5), *((i + 1, h, l, c) for i, h, l, c in _ZIGZAG_ROWS)]
+    assert _zigzag(_hourly_bars(rows), tmp_path) == [None, 99, None, 110, 104.4]
+
+
+def test_zigzag_skips_a_gap_candle_and_keeps_the_pivots_on_their_own_bars(tmp_path: Path) -> None:
+    bars = _hourly_bars(_ZIGZAG_ROWS)
+    bars.insert(2, {"t": _DAY1_MS + 90 * 60_000, "h": None, "l": None, "c": None})
+    assert _zigzag(bars, tmp_path) == [None, None, None, 110, 104.4]
+
+
+def test_zigzag_on_an_older_page_draws_confirmed_pivots_only(tmp_path: Path) -> None:
+    """
+    The store holds bars two hours past the page: newer bars continue the page's last leg, so its
+    running end is no swing point (drawn, the line would join it to the newer page's first pivot).
+    """
+    bars = _hourly_bars(_ZIGZAG_ROWS)
+    _store_second_at(tmp_path, bars[-1]["t"] + 2 * _HOUR_MS)
+    values = ci.replay_custom(bars, "ZigZag", {}, _hourly(bars, str(tmp_path)))["value"]
+    assert values == [None, None, 110, None]
+
+
+def test_zigzag_read_by_a_closed_bar_reader_keeps_the_tip(tmp_path: Path) -> None:
+    """The store's newest bar is the forming one just after the page (a Technicals/alert read)."""
+    bars = _hourly_bars(_ZIGZAG_ROWS)
+    _store_second_at(tmp_path, bars[-1]["t"] + _HOUR_MS + 60_000)
+    values = ci.replay_custom(bars, "ZigZag", {}, _hourly(bars, str(tmp_path)))["value"]
+    assert values == [None, None, 110, 104.4]
+
+
+def test_zigzag_without_a_store_draws_confirmed_pivots_only() -> None:
+    bars = _hourly_bars(_ZIGZAG_ROWS)
+    assert ci.replay_custom(bars, "ZigZag", {}, _hourly(bars))["value"] == [None, None, 110, None]
+
+
+def test_zigzag_and_pivots_serialize_their_plot_and_note() -> None:
+    catalog = ci.custom_catalog_json()
+    assert (catalog["ZigZag"]["plot"], catalog["ZigZag"]["note"]) == (
+        {"value": "swing"},
+        "repaints last leg",
+    )
+    assert catalog["PivotPoints"]["plot"] == dict.fromkeys(
+        catalog["PivotPoints"]["outputs"], "steps"
+    )
+    assert catalog["PivotPoints"]["outputs"] == [
+        "pp",
+        "r1",
+        "r2",
+        "r3",
+        "r4",
+        "s1",
+        "s2",
+        "s3",
+        "s4",
+    ]
+    assert catalog["PivotPoints"]["choices"] == {
+        "kind": ["standard", "fibonacci", "camarilla"],
+        "session": ["D", "W"],
+    }
+    assert (catalog["Supertrend"]["outputs"], catalog["Supertrend"]["plot"]) == (["up", "down"], {})
+    for name in ("Supertrend", "PivotPoints", "ZigZag"):
+        assert catalog[name]["panel"] == "overlay", name
+
+
+# Day 1's page from 10:00 (session S0 = day 1, the previous P = day 0): two day-1 bars, then day 2.
+_PIVOT_PAGE = [
+    (10, 105, 100, 102),
+    (11, 106, 99, 104),
+    (24, 104, 99, 103),
+    (25, 108, 103, 107),
+]
+
+
+def _store_pivot_history(candles_dir: Path, day0_from_hour: int = 0) -> None:
+    """
+    Store whole-unit seconds (precision 0): day 0 from `day0_from_hour` -- H 110 at 01:00, L 90 at
+    12:00, last close 100 at 23:00 -- and day 1 before the page, 05:00 with h 120, l 95, c 101.
+    """
+    store = CandleStore(db_path_for_venue(candles_dir, venue_of(_IID)))
+    day0 = _DAY1_MS - 86_400_000
+    seconds = [
+        (day0 + day0_from_hour * _HOUR_MS, 100.0, 100.0, 100.0),
+        (day0 + 1 * _HOUR_MS, 110.0, 100.0, 105.0),
+        (day0 + 12 * _HOUR_MS, 95.0, 90.0, 92.0),
+        (day0 + 23 * _HOUR_MS, 101.0, 99.0, 100.0),
+        (_DAY1_MS + 5 * _HOUR_MS, 120.0, 95.0, 101.0),
+    ]
+    for ms, high, low, close in seconds:
+        row = SecondOHLC(
+            ms * 1_000_000, close, high, low, close, 1.0, 0.0, 0, 0, int(close), 1, 0, 1, 0
+        )
+        store.apply(_IID, [row])
+    store.close()
+
+
+def _pivots(
+    rows: list[tuple[int, float, float, float]], params: dict, candles_dir: str | None = None
+) -> dict[str, list[float | None]]:
+    bars = _hourly_bars(rows)
+    return ci.replay_custom(bars, "PivotPoints", params, _hourly(bars, candles_dir))
+
+
+def test_pivots_seeded_from_the_store_cover_the_pages_first_session(tmp_path: Path) -> None:
+    """
+    The store covers day 0 from its midnight: day 1's bars carry day 0's levels (H 110, L 90, C 100:
+    PP 100, R1 110), and day 2's day 1's -- the stored prefix [00:00, 10:00) (H 120, L 95) plus the
+    page's day-1 bars (last close 104): PP (120 + 95 + 104) / 3.
+    """
+    _store_pivot_history(tmp_path)
+    levels = _pivots(_PIVOT_PAGE, {}, str(tmp_path))
+    assert levels["pp"][:2] == [100.0, 100.0]
+    assert levels["r1"][:2] == [110.0, 110.0]
+    assert levels["pp"][2:] == pytest.approx([319 / 3, 319 / 3])
+    assert levels["r4"] == [None] * 4  # standard: no fourth level
+
+
+def test_pivots_without_a_store_never_take_levels_from_a_partial_session() -> None:
+    """
+    No store: day 1 is seen only from 10:00, so its bars and all of day 2 (whose levels would be
+    day 1's) read None; feeding starts at day 2's midnight, so day 3 carries day 2's levels.
+    """
+    rows = [*_PIVOT_PAGE, (48, 106, 101, 105)]
+    levels = _pivots(rows, {"kind": "camarilla"})
+    assert levels["pp"] == [None, None, None, None, pytest.approx((108 + 99 + 107) / 3)]
+    assert levels["r4"][4] == pytest.approx(107 + 9 * 1.1 / 2)
+
+
+def test_pivots_with_a_store_starting_after_the_previous_session_are_uncovered(
+    tmp_path: Path,
+) -> None:
+    _store_pivot_history(tmp_path, day0_from_hour=1)  # day 0 stored from 01:00 only
+    assert _pivots(_PIVOT_PAGE, {}, str(tmp_path))["pp"] == [None] * 4
+
+
+def test_pivots_on_a_page_starting_at_a_session_boundary_feed_from_its_first_bar() -> None:
+    rows = [(24, 104, 99, 103), (25, 108, 103, 107), (48, 110, 100, 101)]
+    assert _pivots(rows, {})["pp"] == [None, None, pytest.approx((108 + 99 + 107) / 3)]
+
+
+def test_a_daily_pivot_on_a_weekly_chart_is_the_entrys_error() -> None:
+    @dataclass(frozen=True)
+    class _Request:
+        name: str
+        params: dict
+        source: str = "close"
+
+    week = 604_800
+    bars = [_ohlc(_DAY1_MS, 10, 9, 9.5)]
+    window = ReplayWindow(_IID, week, _DAY1_MS, _DAY1_MS + week * 1000)
+    entries = [_Request("PivotPoints", {"session": "D"}), _Request("ZigZag", {})]
+    by_time, errors = ci.values_by_time(bars, entries, window)
+    assert errors == {"PivotPoints_session=D": "pivot session D is narrower than the 604800 s bar"}
+    assert "ZigZag.value" in by_time[_DAY1_MS]
+
+
+def test_a_weekly_pivot_on_a_weekly_chart_carries_the_previous_weeks_bar() -> None:
+    """
+    A 1W bar and a `W` session are the same Monday-anchored bucket: one bar per session, so each
+    week carries the previous week's levels (never refused for not starting at the epoch).
+    """
+    week = 604_800
+    monday = bucket_start_ms(_DAY1_MS, week) + week * 1000
+    bars = [
+        _ohlc(monday, 110, 90, 100),
+        _ohlc(monday + week * 1000, 108, 99, 107),
+        _ohlc(monday + 2 * week * 1000, 104, 100, 101),
+    ]
+    window = ReplayWindow(_IID, week, monday, monday + 3 * week * 1000)
+    levels = ci.replay_custom(bars, "PivotPoints", {"session": "W"}, window)
+    assert levels["pp"] == [None, 100.0, pytest.approx((108 + 99 + 107) / 3)]
+
+
+def test_pivots_after_a_session_with_no_traded_bar_wait_for_a_whole_session() -> None:
+    """
+    Days 0, 1, 3, 4 (day 2 has no bar): day 1 carries day 0's levels; day 3's previous session
+    (day 2) is unknown, so it reads None, never day 1's levels; day 4 carries day 3's.
+    """
+    rows = [(0, 110, 90, 100), (24, 108, 99, 107), (72, 104, 100, 101), (96, 103, 101, 102)]
+    assert _pivots(rows, {})["pp"] == [None, 100.0, None, pytest.approx(305 / 3)]
+
+
+def test_pivots_with_a_covered_but_untraded_previous_session_start_from_the_seeded_one(
+    tmp_path: Path,
+) -> None:
+    """
+    The store covers day 0 from its midnight but day 0 never traded (one observed, untraded
+    second): day 1's bars read None, and day 2's carry day 1's levels -- the stored prefix
+    [00:00, 10:00) (H 120, L 95) plus the page's day-1 bars (last close 104).
+    """
+    store = CandleStore(db_path_for_venue(tmp_path, venue_of(_IID)))
+    day0_ms = _DAY1_MS - 86_400_000
+    untraded = SecondOHLC(
+        day0_ms * 1_000_000, None, None, None, None, 0.0, 0.0, 0, 0, None, 0, 0, 0, 0
+    )
+    prefix = (_DAY1_MS + 5 * _HOUR_MS) * 1_000_000
+    traded = SecondOHLC(prefix, 101.0, 120.0, 95.0, 101.0, 1.0, 0.0, 0, 0, 101, 1, 0, 1, 0)
+    store.apply(_IID, [untraded])
+    store.apply(_IID, [traded])
+    store.close()
+    levels = _pivots(_PIVOT_PAGE, {}, str(tmp_path))
+    assert levels["pp"] == [None, None, pytest.approx(319 / 3), pytest.approx(319 / 3)]
+
+
+@pytest.mark.parametrize(
+    ("params", "match"), [({"kind": "woodie"}, "kind"), ({"session": "M"}, "session")]
+)
+def test_pivots_refuse_an_unknown_kind_or_session(params: dict, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        ci.check_params("PivotPoints", params)
+    with pytest.raises(ValueError, match=match):
+        _pivots(_PIVOT_PAGE, params)

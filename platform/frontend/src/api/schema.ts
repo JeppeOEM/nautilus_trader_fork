@@ -193,6 +193,8 @@ export interface IndicatorCatalogEntry {
   source_selectable?: boolean;
   units?: Record<string, string>;
   outputs: string[];
+  plot?: Record<string, string>;
+  note?: string | null;
 }
 
 export interface IndicatorCondition {

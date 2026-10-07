@@ -20,6 +20,7 @@ import LightweightChart, {
   type LegendExtra,
   type VolumeProfileSpec,
   type IndicatorPaneSpec,
+  type IndicatorPlot,
   type PriceLineSpec,
   type PriceScalePatch,
 } from "../components/chart/LightweightChart";
@@ -90,6 +91,7 @@ import { roundToPrecision } from "../lib/units";
 import { type ChartDrawings, useChartDrawings } from "../hooks/useChartDrawings";
 import { DEFAULT_SOURCE, entryId, splitSeriesKey } from "../lib/indicatorId";
 import { outputStyle } from "../lib/indicatorStyle";
+import { buildPatternMarkers, drawsPatternMarkers, PATTERN_INDICATOR, patternReadout } from "../lib/patternMarkers";
 import { assignPaneColor } from "../components/chart/paneColors";
 import type { IndicatorCatalogEntry, IndicatorConfigEntry } from "../api/schema";
 import { useCandles } from "../hooks/useCandles";
@@ -200,11 +202,33 @@ function panelForKey(key: string, catalog: Record<string, IndicatorCatalogEntry>
 
 // Legend title, TradingView-style: name plus its params and, when it is not the close, its
 // source, e.g. "RelativeStrengthIndex (14)" or "SimpleMovingAverage (20, hl2)". Per instance:
-// RSI(14) and RSI(21) are two titles.
-function legendTitle(entry: IndicatorConfigEntry): string {
+// RSI(14) and RSI(21) are two titles. Story 33.11: the catalog's `note` follows on the legend
+// ("ZigZag (5) · repaints last leg"); the settings dialog's title omits it.
+function legendTitle(entry: IndicatorConfigEntry, note?: string | null): string {
   const parts: unknown[] = Object.values(entry.params ?? {});
   if (entry.source && entry.source !== DEFAULT_SOURCE) parts.push(entry.source);
-  return parts.length ? `${entry.name} (${parts.join(", ")})` : entry.name;
+  const title = parts.length ? `${entry.name} (${parts.join(", ")})` : entry.name;
+  return note ? `${title} · ${note}` : title;
+}
+
+const INDICATOR_PLOTS: readonly IndicatorPlot[] = ["line", "steps", "points", "swing"];
+
+/** The catalog's plot hint for one output; absent or unknown draws a plain line. */
+function plotOf(catalogEntry: IndicatorCatalogEntry | undefined, output: string): IndicatorPlot | undefined {
+  const plot = catalogEntry?.plot?.[output];
+  return (INDICATOR_PLOTS as readonly string[]).includes(plot ?? "") ? (plot as IndicatorPlot) : undefined;
+}
+
+/** The pattern a `CandlePattern` entry detects (its `pattern` param, else the catalog default). */
+// A CandlePattern instance's pattern: its entry's param, else -- a stale series no entry owns any
+// more -- the `pattern=` its instance id carries (`indicatorId`), and only then the catalog default.
+function patternOf(
+  entry: IndicatorConfigEntry | undefined,
+  catalogEntry: IndicatorCatalogEntry | undefined,
+  instanceId?: string,
+): string {
+  const fromId = instanceId?.match(/(?:^|[_,])pattern=([^,:]+)/)?.[1];
+  return String(entry?.params?.pattern ?? fromId ?? catalogEntry?.params?.pattern ?? "");
 }
 
 type TpoDetail = { rows: TpoRow[]; balance: InitialBalance | null; ibMinutes: number };
@@ -832,47 +856,80 @@ function ChartInner({
             },
           ]
         : []),
-      ...pickerSeriesKeys.map((key) => {
+      ...pickerSeriesKeys.map((key): IndicatorPaneSpec => {
         const panel = panelForKey(key, catalog);
         const { id: instanceId, output } = splitSeriesKey(key);
         const entry = entriesById.get(instanceId);
         const name = entry?.name ?? catalogNameForKey(key, catalog) ?? key;
+        const catalogEntry = catalog[catalogNameForKey(key, catalog) ?? ""];
         const style = outputStyle(entry, output);
         // Story 33.6: an output the catalog gives a unit prints at the instrument's decimals (a
         // native entry has none, and keeps the legend's default readout, as does every entry while
         // the precision is unknown).
-        const unit = catalog[catalogNameForKey(key, catalog) ?? ""]?.units?.[output];
+        const unit = catalogEntry?.units?.[output];
         const format =
           precision !== null && isIndicatorUnit(unit)
             ? (value: number): string => formatIndicatorValue(value, unit, precision)
             : undefined;
+        // Story 33.11: a CandlePattern drawn as markers (its default) keeps only a legend row here,
+        // on an invisible overlay that never scales the price axis; the markers are `patternMarkers`.
+        // A stale series no entry owns follows the same default.
+        const markersOnly = name === PATTERN_INDICATOR && (entry === undefined || drawsPatternMarkers(entry));
+        const plot = plotOf(catalogEntry, output);
+        const shape = markersOnly
+          ? { kind: "Line" as const, placement: "overlay" as const, markersOnly: true, format: patternReadout(patternOf(entry, catalogEntry, instanceId)) }
+          : {
+              kind: panel === "histogram" ? ("Histogram" as const) : ("Line" as const),
+              placement: panel === "overlay" ? ("overlay" as const) : ("pane" as const),
+              ...(plot ? { plot } : {}),
+              ...(format ? { format } : {}),
+            };
         return {
           id: key,
           // One legend row, one pane per instance (RSI(14) and RSI(21) are two), even for stale
           // values no entry owns any more -- those get no buttons (the picker finds no entry).
           group: instanceId,
-          groupLabel: entry ? legendTitle(entry) : name,
+          groupLabel: entry ? legendTitle(entry, catalogEntry?.note) : name,
           outputLabel: output,
-          // Known limit: pattern hits are ±100 histogram spikes, not on-candle markers. Upgrade
-          // path: lightweight-charts `createSeriesMarkers`. (Story 27.7's `CandlePattern` is a
-          // "histogram" catalog entry like any other: no special case here.)
-          kind: panel === "histogram" ? ("Histogram" as const) : ("Line" as const),
           data: trimAfter(pickerValues[key], cutoffTime),
           // Combined with DEFAULT_PANE_IDS so a picker series never lands on volume's slot. A
           // colour the entry stores wins over the palette slot.
           color: style.color ?? assignPaneColor(key, [...DEFAULT_PANE_IDS, ...pickerSeriesKeys]),
-          placement: panel === "overlay" ? ("overlay" as const) : ("pane" as const),
+          ...shape,
           hidden: entry?.hidden === true,
           actionable: entry !== undefined,
           lineWidth: style.line_width,
           lineStyle: style.line_style,
           upColor: style.up_color,
           downColor: style.down_color,
-          ...(format ? { format } : {}),
         };
       }),
     ],
     [volumeOn, volumeHidden, paintedVolume, volumePalette, pickerSeriesKeys, pickerValues, catalog, entriesById, cutoffTime, precision],
+  );
+
+  // The time scale's bar spacing (px), reported by the chart: every candle-series marker (pattern
+  // and liquidation) hides at or below `MARKER_MIN_BAR_SPACING_PX` (`markersHiddenAt`).
+  const [barSpacing, setBarSpacing] = useState(Number.POSITIVE_INFINITY);
+
+  // Story 33.11: each shown CandlePattern entry's hits as markers on the candles, from the values the
+  // replay served up to its cursor (`trimAfter`): a hidden entry (the eye) or one drawn as a pane has
+  // none, and zoomed out past the marker spacing (`markersHiddenAt`) neither. Coloured by the entry's
+  // stored up/down colours, else the candles' own.
+  const patternMarkers = useMemo(
+    () =>
+      pickerSeriesKeys.flatMap((key) => {
+        const { id, output } = splitSeriesKey(key);
+        const entry = entriesById.get(id);
+        if (output !== "value" || !entry || entry.hidden || !drawsPatternMarkers(entry)) return [];
+        const style = outputStyle(entry, output);
+        return buildPatternMarkers(id, patternOf(entry, catalog[PATTERN_INDICATOR]), trimAfter(pickerValues[key] ?? [], cutoffTime), {
+          up: style.up_color ?? chartVar("--chart-up"),
+          down: style.down_color ?? chartVar("--chart-down"),
+          neutral: style.color ?? assignPaneColor(key, [...DEFAULT_PANE_IDS, ...pickerSeriesKeys]),
+        }, barSpacing);
+      }),
+    [pickerSeriesKeys, pickerValues, entriesById, catalog, cutoffTime, barSpacing],
   );
 
   // Story 32.8: the volume footprint, a field of the coin's layout (on/off and its settings). It is
@@ -903,7 +960,6 @@ function ChartInner({
   const [derivatives, setDerivatives] = useState<DerivativesLayout>(initialLayout.derivatives);
   useEffect(() => patchLayout({ derivatives }), [derivatives, patchLayout]);
   const [tapeOn, setTapeOn] = useState(false);
-  const [barSpacing, setBarSpacing] = useState(Number.POSITIVE_INFINITY);
   const [derivativeSettings, setDerivativeSettings] = useState<DerivativeKey | null>(null);
   const changeDerivativeOn = useCallback(
     (key: DerivativeKey, on: boolean): void => setDerivatives((prev) => ({ ...prev, [key]: { ...prev[key], on } })),
@@ -1047,12 +1103,14 @@ function ChartInner({
       .filter((key) => splitSeriesKey(key).id === id)
       .map((key) => {
         const palette = assignPaneColor(key, [...DEFAULT_PANE_IDS, ...pickerSeriesKeys]);
+        // A CandlePattern drawn as markers paints its hits in the candles' colours while none is stored.
+        const markers = drawsPatternMarkers(entriesById.get(id));
         return {
           label: splitSeriesKey(key).output,
           kind: panelForKey(key, catalog) === "histogram" ? "Histogram" : "Line",
           defaultColor: palette,
-          defaultUpColor: palette,
-          defaultDownColor: palette,
+          defaultUpColor: markers ? chartVar("--chart-up") : palette,
+          defaultDownColor: markers ? chartVar("--chart-down") : palette,
         };
       });
 
@@ -1975,6 +2033,7 @@ function ChartInner({
             legendExtras={anchored.legend}
             footprint={footprintSpec}
             liquidationMarkers={derivativesData.markers}
+            patternMarkers={patternMarkers}
             onBarSpacing={setBarSpacing}
             chartType={chartType}
             priceScale={{ mode: effectiveScaleMode, autoScale: priceScale.auto_scale, invert: priceScale.invert }}

@@ -14,8 +14,8 @@
 # -------------------------------------------------------------------------------------------------
 """
 Unit tests for `views.chart_series.CancellationTracker`, what remains of the book-features module
-(Story 33.4 deleted its caller-less depth/imbalance/feature code and moved `liquidity_distance`'s
-tests to `kernel/tests/test_indicators_zscore_depth.py` with the function).
+(Story 33.4 deleted its caller-less depth/imbalance/feature code; `liquidity_distance`, moved to
+the kernel then, was deleted in Story 33.11 with no caller).
 """
 
 from nautilus_trader.model.data import BookOrder

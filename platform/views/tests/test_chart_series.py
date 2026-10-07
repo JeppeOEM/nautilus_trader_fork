@@ -21,7 +21,6 @@ gap-marker rules are the only thing that changes what is drawn.
 from pathlib import Path
 
 import pytest
-from kernel.indicators import OFI_GAP_NS
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.tests.snapshot_factory import make_snapshot
 from observability import error_ledger
@@ -101,35 +100,6 @@ def test_an_undefined_microprice_is_null_never_the_mid() -> None:
     (row,) = price_series_rows([zero_tops])
 
     assert (row["mid"], row["micro"]) == (100.5, None)
-
-
-def test_the_replay_clears_the_previous_ofi_book_after_a_gap() -> None:
-    """
-    Story 31.3: a `ts_event` step over `OFI_GAP_NS` clears OFI's previous book before the next
-    update, so the post-gap book is a baseline -- no contribution diffed across the gap.
-    """
-    bar = 60
-    before = _snapshot(_BASE_NS, [100.0], [101.0])
-    after_gap = _snapshot(_BASE_NS + OFI_GAP_NS + 1, [90.0], [91.0])  # a big move across the gap
-    same_book = _snapshot(_BASE_NS + OFI_GAP_NS + 2_000_000_001, [90.0], [91.0])
-
-    gapped = chart_series.replay_bucket_samples([before, after_gap], bar)
-    continued = chart_series.replay_bucket_samples([before, after_gap, same_book], bar)
-
-    assert [row["ofi"] for row in gapped.values()] == [None]  # still only a baseline
-    assert [row["ofi"] for row in continued.values()] == [0.0]  # unchanged book: no flow
-
-
-def test_a_thin_book_second_replays_to_a_null_microprice_and_spread() -> None:
-    """
-    An empty-sided second is not an error in the per-bar replay: its microprice and spread are
-    honestly None (moved here in Story 33.4 from the deleted OFI/OBI series route's test).
-    """
-    thin = _snapshot(_BASE_NS, [], [])
-
-    (row,) = chart_series.replay_bucket_samples([thin], 60).values()
-
-    assert (row["microprice"], row["spread"]) == (None, None)
 
 
 def test_a_touched_second_is_priced_too() -> None:

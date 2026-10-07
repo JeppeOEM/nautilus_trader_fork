@@ -15,7 +15,8 @@
 """
 The per-snapshot and per-bar derived signals against the independent reference (Story 31.3,
 `docs/DATA_DICTIONARY.md` §2.13): the two decoders, `kernel.indicators`, the chart's Lines mode
-and per-bar replay (`views.chart_series`) and the one seconds -> bars fold -- each on seeded
+(`views.chart_series`; its per-bar OFI/OBI replay, whose only callers were tests, was deleted in
+Story 33.11) and the one seconds -> bars fold -- each on seeded
 generators, on the committed real soak rows and on hand-computed golden cases, each with a planted
 defect the comparison must catch.
 
@@ -59,7 +60,6 @@ from verification.tests.signal_cases import FIXTURE_IDS
 from verification.tests.signal_cases import BookCase
 from verification.tests.signal_cases import book_series
 from verification.tests.signal_cases import both
-from verification.tests.signal_cases import carried
 from verification.tests.signal_cases import load_fixture
 from verification.tests.signal_cases import pinned_zero
 from verification.tests.signal_cases import seeded
@@ -342,7 +342,7 @@ def test_depth_within_bps_matches_the_reference_nan_beyond_the_stored_depth() ->
     assert tally.count("depth_within_bps", Agreement.BOTH_UNDEFINED) > 0
 
 
-# --- §2.7 views: Lines mode and the per-bar replay ---------------------------------------------
+# --- §2.7 views: Lines mode ---------------------------------------------
 
 
 def test_price_series_rows_match_the_reference_mid_micro_and_cvd_weighted_price() -> None:
@@ -357,41 +357,6 @@ def test_price_series_rows_match_the_reference_mid_micro_and_cvd_weighted_price(
             tally.record("lines.price", relative(line["price"], ref.cvd_weighted_price(book)))
     _assert_agrees(tally)
     assert tally.count("lines.micro", Agreement.BOTH_UNDEFINED) > 0  # no mid stands in
-
-
-def _ref_bars(books: list[RefBook], bar: int) -> dict[int, dict[str, Any]]:
-    ordered = sorted(books, key=lambda b: b.ts_event)
-    ofi = ref.rolling_ofi(ordered, 10, 50, False, OFI_GAP_NS)
-    obi = carried([ref.obi(b, 10) for b in ordered])
-    bars: dict[int, dict[str, Any]] = {}
-    for i, book in enumerate(ordered):
-        values = {"ofi": ofi[i], "obi": obi[i], "micro": ref.microprice(book)}
-        bars[ref.bucket_start(book.ts_event // 1_000_000, bar)] = {**values, "book": book}
-    return bars
-
-
-def _compare_bar(tally: Tally, got: dict[str, object], want: dict[str, object]) -> None:
-    book = want["book"]
-    assert isinstance(book, RefBook)
-    s, p = book.size_precision, book.price_precision
-    tally.record("replay.ofi", at_places(got["ofi"], want["ofi"], s))  # type: ignore[arg-type]
-    tally.record("replay.obi", relative(got["obi"], want["obi"]))  # type: ignore[arg-type]
-    tally.record("replay.microprice", relative(got["microprice"], want["micro"]))  # type: ignore[arg-type]
-    tally.record("replay.spread", at_places(got["spread"], ref.spread(book), p))  # type: ignore[arg-type]
-
-
-def test_the_per_bar_replay_matches_the_reference_ofi_obi_per_bucket() -> None:
-    tally = Tally()
-    for _, rows in _inputs():
-        prods, books = both(rows)
-        for bar in (1, 60, 300, 604_800):
-            got = chart_series.replay_bucket_samples(prods, bar)
-            want = _ref_bars(books, bar)
-            tally.record("replay.buckets", equal(sorted(got), sorted(want)))
-            # A bucket on one side only is already DIFFERENT above; the rest compare value by value.
-            for key in sorted(want.keys() & got.keys()):
-                _compare_bar(tally, got[key], want[key])
-    _assert_agrees(tally)
 
 
 # --- §2.5 candles -----------------------------------------------------------------------------

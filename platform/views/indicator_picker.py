@@ -22,8 +22,9 @@ and `replay_custom`/`custom_catalog_json` (was `custom_indicators.replay_indicat
 
 **Native** -- dispatch/metadata over OHLCV-fed `Indicator` classes: `nautilus_trader.indicators`,
 plus the kernel's own candle-fed indicators (`kernel.candle_patterns.CandlePattern`, Story 27.7:
-one pattern definition, shared by views, research and bots) -- no indicator math of its own
-(DESIGN-02). `INDICATOR_CATALOG` maps a registered name to an `IndicatorSpec` describing how to
+one pattern definition, shared by views, research and bots; six of `kernel.ta`'s, Story 33.11) --
+no indicator math of its own (DESIGN-02). Every entry of both catalogs may carry a `plot` hint per
+output (`PlotStyle`) and a legend `note` (Story 33.11). `INDICATOR_CATALOG` maps a registered name to an `IndicatorSpec` describing how to
 build and feed the real indicator class. `replay_native` instantiates it and drives it from candle
 data. An enum-typed param travels as its member name (`enum_params`), and `native_catalog_json`
 lists each one's allowed names as `choices`, which the picker renders as a dropdown. Six of `nautilus_trader.indicators`'s public classes are intentionally excluded:
@@ -41,8 +42,10 @@ it needs to fetch its own order-book/trade-level/second-snapshot rows for that w
 dict alone (o/h/l/c/v) doesn't carry that data. Since Story 33.3 a candle dict also carries the bar's
 exact order-flow and liquidation sums, which CVD and Story 33.6's order-flow entries read instead
 (their cumulative modes seeded from an exact store prefix); `DepthWithinBps` is the one entry
-reading raw seconds. Each entry declares its outputs' `units` (the legend's formatting), and an
-unlisted one (`listed=False`) is replayed but never offered.
+reading raw seconds. Story 33.11's `Supertrend`, `PivotPoints` and `ZigZag` drive `kernel.ta`
+classes the native shape cannot carry (a split output, a store seed, sparse output). Each entry
+declares its outputs' `units` (the legend's formatting), and an unlisted one (`listed=False`) is
+replayed but never offered.
 
 `CUSTOM_INDICATOR_CATALOG` is filled once, at import, by the registrations below each replay: a
 static table, never mutated at runtime. Per DESIGN-02, the two catalogs stay unaware of each other's contents -- the native half never reads
@@ -84,6 +87,17 @@ from kernel.indicators import organic_delta_units
 from kernel.indicators import snapshot_depth
 from kernel.indicators import units_ratio
 from kernel.second_snapshot import BOOK_DEPTH
+from kernel.ta import PIVOT_KINDS
+from kernel.ta import PIVOT_LEVELS
+from kernel.ta import AverageDirectionalIndex
+from kernel.ta import AwesomeOscillator
+from kernel.ta import ChaikinMoneyFlow
+from kernel.ta import MoneyFlowIndex
+from kernel.ta import ParabolicSAR
+from kernel.ta import PivotPoints
+from kernel.ta import Supertrend
+from kernel.ta import WilliamsPercentR
+from kernel.ta import ZigZag
 from kernel.venues import venue_of
 
 from nautilus_trader import indicators as _ind
@@ -100,6 +114,12 @@ from views.chart_series import stored_bar
 # =============================================================================================
 
 Panel = Literal["overlay", "oscillator", "histogram"]
+# How the chart draws one output (Story 33.11): a plain line (the default, also for an output the
+# entry's `plot` does not name), a stepped line held flat until the next value (`steps`), unjoined
+# dots (`points`), or one line joining only the slots that carry a value (`swing`: the frontend
+# drops the empty slots, so sparse swing points are connected across them).
+PlotStyle = Literal["line", "steps", "points", "swing"]
+PLOT_STYLES: tuple[str, ...] = ("line", "steps", "points", "swing")
 
 
 @dataclass
@@ -114,6 +134,10 @@ class IndicatorSpec:
     panel: Panel
     # Param name -> enum type, for string<->enum round-tripping through JSON.
     enum_params: dict[str, type[Enum]] = field(default_factory=dict)
+    # Output -> how it is drawn (`PlotStyle`); an output not named here is a line (Story 33.11).
+    plot: dict[str, PlotStyle] = field(default_factory=dict)
+    # A short legend note shown after the entry's title (Story 33.11); None: no note.
+    note: str | None = None
 
 
 INDICATOR_CATALOG: dict[str, IndicatorSpec] = {
@@ -358,6 +382,39 @@ INDICATOR_CATALOG: dict[str, IndicatorSpec] = {
         "histogram",
         {"pattern": PatternName},
     ),
+    # Story 33.11: `kernel.ta`, the indicators `nautilus_trader.indicators` lacks. Like every
+    # native entry they warm up over the page's own bars (audit D-217).
+    "ParabolicSAR": IndicatorSpec(
+        ParabolicSAR,
+        {"step": 0.02, "max_step": 0.2},
+        ("high", "low"),
+        ("value",),
+        "overlay",
+        plot={"value": "points"},
+    ),
+    "AverageDirectionalIndex": IndicatorSpec(
+        AverageDirectionalIndex,
+        {"period": 14},
+        ("high", "low", "close"),
+        ("adx", "plus_di", "minus_di"),
+        "oscillator",
+    ),
+    "WilliamsPercentR": IndicatorSpec(
+        WilliamsPercentR, {"period": 14}, ("high", "low", "close"), ("value",), "oscillator"
+    ),
+    "MoneyFlowIndex": IndicatorSpec(
+        MoneyFlowIndex, {"period": 14}, ("high", "low", "close", "volume"), ("value",), "oscillator"
+    ),
+    "ChaikinMoneyFlow": IndicatorSpec(
+        ChaikinMoneyFlow,
+        {"period": 20},
+        ("high", "low", "close", "volume"),
+        ("value",),
+        "oscillator",
+    ),
+    "AwesomeOscillator": IndicatorSpec(
+        AwesomeOscillator, {"fast": 5, "slow": 34}, ("high", "low"), ("value",), "histogram"
+    ),
 }
 
 
@@ -507,6 +564,8 @@ def native_catalog_json() -> dict[str, Any]:
             "choices": {key: _choices(enum) for key, enum in spec.enum_params.items()},
             "source_selectable": is_source_selectable(spec),
             "outputs": list(spec.outputs),
+            "plot": spec.plot,
+            "note": spec.note,
         }
         for name, spec in INDICATOR_CATALOG.items()
     }
@@ -577,6 +636,9 @@ class CustomIndicatorSpec:
     # indicator-config PUT, the layout seed and the Technicals refuse it, while the values route
     # (`replay_entry`) still replays it -- the stored Anchored VWAP drawing's series (Story 33.6).
     listed: bool = True
+    # Output -> how it is drawn and the legend note, as on `IndicatorSpec` (Story 33.11).
+    plot: dict[str, PlotStyle] = field(default_factory=dict)
+    note: str | None = None
 
 
 # What a custom output's value measures (Story 33.6): a price (`price_precision`), a size
@@ -613,6 +675,8 @@ def custom_catalog_json() -> dict[str, Any]:
             "choices": spec.choices,
             "units": spec.units,
             "outputs": list(spec.outputs),
+            "plot": spec.plot,
+            "note": spec.note,
         }
         for name, spec in CUSTOM_INDICATOR_CATALOG.items()
         if spec.listed
@@ -1415,6 +1479,255 @@ CUSTOM_INDICATOR_CATALOG["DepthWithinBps"] = CustomIndicatorSpec(
     outputs=("bid", "ask"),
     check_params=_check_bps,
     units={"bid": "size", "ask": "size"},
+)
+
+
+# -- Story 33.11: `kernel.ta` entries the native shape cannot carry ------------------------------
+# Supertrend splits one value into two outputs by its direction, PivotPoints is seeded from the
+# store, and ZigZag is sparse: each drives its `kernel.ta` class over the candles, as `replay_native`
+# would (DESIGN-02: no indicator math here). A candle missing a price is a gap: not fed, None.
+
+
+def _hlc_of(candle: dict) -> tuple[float, float, float] | None:
+    values = (candle.get("h"), candle.get("l"), candle.get("c"))
+    if any(v is None for v in values):
+        return None
+    return values  # type: ignore[return-value]
+
+
+def _constructs(cls: Callable[..., object]) -> Callable[[dict[str, Any]], None]:
+    """Return a `check_params` that builds `cls` from the merged params: its own checks decide."""
+
+    def check(params: dict[str, Any]) -> None:
+        cls(**params)
+
+    return check
+
+
+def _supertrend_replay(
+    candles: list[dict], params: dict[str, Any], window: ReplayWindow
+) -> dict[str, list[float | None]]:
+    """
+    `kernel.ta.Supertrend` split by direction: `up` carries the line on the bars of an up trend
+    (+1), `down` on those of a down trend (-1), each None elsewhere, so a flip at bar i ends `down`
+    at i - 1 and starts `up` at i (the two colours of TradingView's line).
+    """
+    supertrend = Supertrend(**params)
+    up: list[float | None] = []
+    down: list[float | None] = []
+    for candle in candles:
+        hlc = _hlc_of(candle)
+        if hlc is not None:
+            supertrend.update_raw(*hlc)
+        value = supertrend.value if hlc is not None and supertrend.initialized else None
+        up.append(value if supertrend.direction == 1 else None)
+        down.append(value if supertrend.direction == -1 else None)
+    return {"up": up, "down": down}
+
+
+PIVOT_SESSIONS: dict[str, int] = {"D": _DAY_SECONDS, "W": 604_800}
+
+
+def _check_pivot_params(params: dict[str, Any]) -> None:
+    if params.get("kind") not in PIVOT_KINDS:
+        raise ValueError(
+            f"kind={params.get('kind')!r} is not one of the choices {list(PIVOT_KINDS)}"
+        )
+    if params.get("session") not in PIVOT_SESSIONS:
+        raise ValueError(
+            f"session={params.get('session')!r} is not one of the choices {list(PIVOT_SESSIONS)}"
+        )
+
+
+def _pivot_session_seconds(session: str, bar_seconds: int) -> int:
+    """
+    Return the session's width, refusing one a bar does not tile: narrower than the bar, or not a
+    whole number of bars starting on a bar boundary. Both are `bucket_start_ms` buckets, each with
+    its own anchor (a week starts on Monday, a day divisor at the epoch), so the session's anchor is
+    checked against the bar's, never against the epoch: a `W` session on a 1W chart is one bar.
+    """
+    seconds = PIVOT_SESSIONS[session]
+    if seconds < bar_seconds:
+        raise ValueError(f"pivot session {session} is narrower than the {bar_seconds} s bar")
+    offset = bucket_start_ms(0, seconds) - bucket_start_ms(0, bar_seconds)
+    if seconds % bar_seconds or offset % (bar_seconds * 1000):
+        raise ValueError(f"pivot session {session} is not a whole number of {bar_seconds} s bars")
+    return seconds
+
+
+def _seed_pivots_from_store(
+    pivots: PivotPoints, window: ReplayWindow, previous: int, start: int, first_t: int
+) -> bool:
+    """
+    Feed the stored session `[previous, start)` and the stored prefix `[start, first_t)` of the
+    page's first session, each as one bar (`queries.session_hlc`), and return True; False when the
+    store does not cover the previous session from its start (no `candles_dir`, no tiling width,
+    no store file, or a store starting after `previous`): nothing is fed then.
+
+    Known limit: "covered" tests where the store starts, not that it is continuous, as the CVD
+    session seed does (audit D-187): an outage inside a session leaves its high and low from the
+    bars observed around it. Upgrade path: the capture's recorded gaps, as there.
+    """
+    width = stored_bar(window.bar_seconds)
+    if window.candles_dir is None or width is None:
+        return False
+    iid = window.instrument_id
+    with queries.open_store(window.candles_dir, venue_of(iid)) as db:
+        if db is None:
+            return False
+        oldest = queries.oldest_t(db, iid, width, traded_only=False)
+        if oldest is None or oldest > previous:
+            return False
+        before = queries.session_hlc(db, iid, width, previous, start)
+        prefix = queries.session_hlc(db, iid, width, start, first_t) if first_t > start else None
+    session_s = (start - previous) // 1000  # `previous` and `start` are consecutive sessions
+    if before is not None:
+        _feed_pivots(pivots, before, previous, session_s)
+    if prefix is not None:
+        _feed_pivots(pivots, prefix, start, session_s)
+    return True
+
+
+def _feed_pivots(
+    pivots: PivotPoints, hlc: tuple[float, float, float], session: int, session_s: int
+) -> None:
+    """
+    Feed one bar of `session` (its `bucket_start_ms` key), first resetting `pivots` when the session
+    does not directly follow the last one fed: a session in between had no traded (fed) bar, so the
+    new session's previous one is unknown and its bars read None; the session after it is the next
+    with levels (DATA-01, audit D-214).
+    """
+    last = pivots.session
+    if last is not None and session != last:
+        following = bucket_start_ms(last + session_s * 1000, session_s)
+        if session != following:
+            pivots.reset()
+    pivots.update_raw(*hlc, session)
+
+
+def _pivot_feed_start(
+    pivots: PivotPoints, candles: list[dict], window: ReplayWindow, session_s: int
+) -> int:
+    """
+    Return the first page bar to feed: 0 when the store seeds the sessions before the page or the
+    page starts on a session boundary, else the first bar of the page's second session -- the bars
+    before it belong to a session seen only in part, never a source of levels (DATA-01).
+    """
+    first_t = candles[0]["t"]
+    start = bucket_start_ms(first_t, session_s)
+    previous = bucket_start_ms(start - 1, session_s)
+    if _seed_pivots_from_store(pivots, window, previous, start, first_t) or first_t == start:
+        return 0
+    later = (i for i, c in enumerate(candles) if bucket_start_ms(c["t"], session_s) != start)
+    return next(later, len(candles))
+
+
+def _pivot_replay(
+    candles: list[dict], params: dict[str, Any], window: ReplayWindow
+) -> dict[str, list[float | None]]:
+    """
+    `kernel.ta.PivotPoints` of `kind` over `session` (`D`/`W`, keyed by `bucket_start_ms`, the one
+    bucket rule): every bar carries the nine levels of the session before its own (`r4`/`s4` None
+    unless camarilla), seeded from the store when it covers that session from its start (see
+    `_pivot_feed_start`; docs/DATA_DICTIONARY.md §2.19). A bar before the first level reads None,
+    and so does every bar of a session whose previous session had no traded bar (`_feed_pivots`).
+    A session narrower than the bar, or not tiled by it, raises `ValueError` (the entry's error).
+    """
+    _check_pivot_params(params)
+    session_s = _pivot_session_seconds(params["session"], window.bar_seconds)
+    pivots = PivotPoints(params["kind"])
+    out: dict[str, list[float | None]] = {name: [] for name in PIVOT_LEVELS}
+    feed_from = _pivot_feed_start(pivots, candles, window, session_s) if candles else 0
+    for i, candle in enumerate(candles):
+        hlc = _hlc_of(candle) if i >= feed_from else None
+        if hlc is not None:
+            _feed_pivots(pivots, hlc, bucket_start_ms(candle["t"], session_s), session_s)
+        known = hlc is not None and pivots.initialized
+        for name, level in pivots.levels().items():
+            out[name].append(level if known else None)
+    return out
+
+
+def _zigzag_replay(
+    candles: list[dict], params: dict[str, Any], window: ReplayWindow
+) -> dict[str, list[float | None]]:
+    """
+    `kernel.ta.ZigZag` as sparse swing points: each confirmed pivot's price at its own bar, and,
+    on the page reaching the newest stored data only (`_reaches_newest`), the last leg's running
+    extreme at its bar (it repaints until a reversal confirms it, audit D-215); None everywhere
+    else. The chart joins the points (`plot` `swing`), across pages too: an older page's tip is no
+    swing (the newer bars continue its leg), so drawn it would be a permanent point the line joins
+    to the newer page's first pivot -- a fabricated swing. For the same reason a pivot on the
+    page's first fed bar is not drawn: that bar is an extreme only because the page starts there
+    (the bars before it are on the older page), so it would be a swing the market never made.
+    """
+    zigzag = ZigZag(**params)
+    out: list[float | None] = [None] * len(candles)
+    candle_of_update: list[int] = []
+    for i, candle in enumerate(candles):
+        high, low = candle.get("h"), candle.get("l")
+        if high is None or low is None:
+            continue
+        candle_of_update.append(i)
+        zigzag.update_raw(high, low)
+        if zigzag.confirmed and zigzag.pivot_bar:  # 0: the page's first fed bar, see above
+            out[candle_of_update[zigzag.pivot_bar]] = zigzag.pivot_price
+    if zigzag.extreme_bar is not None and _reaches_newest(window):
+        out[candle_of_update[zigzag.extreme_bar]] = zigzag.extreme_price
+    return {"value": out}
+
+
+def _reaches_newest(window: ReplayWindow) -> bool:
+    """
+    Return whether the page reaches the newest stored data: the store's newest observed bucket of
+    the widest stored width tiling the chart's (`stored_bar`, `queries.newest_t`) starts before
+    the end of the bar after the page's last. That one bar of slack is the forming bar a
+    closed-bar reader leaves out (the Technicals column and the alert reader end their page at the
+    newest *closed* bar while the store already holds the forming one), so both read the tip as the
+    chart's newest page does; an older chart page ends a whole newer page before the newest data.
+
+    Known limit: sub-minute and 90 s charts (no tiling stored width) and store-less callers (no
+    `candles_dir`, no store file) never know whether a newer page exists, so they draw confirmed
+    pivots only, no tip. Known limit: a newer page holding only the forming bar leaves its older
+    page the tip (one bar of slack); harmless, since a one-bar page has no ZigZag tip of its own.
+    Upgrade path: the page reader passes `has_newer` (it knows whether it cut the page short).
+    """
+    width = stored_bar(window.bar_seconds)
+    if window.candles_dir is None or width is None or window.end_ms is None:
+        return False
+    iid = window.instrument_id
+    with queries.open_store(window.candles_dir, venue_of(iid)) as db:
+        newest = None if db is None else queries.newest_t(db, iid, width)
+    return newest is not None and newest < window.end_ms + window.bar_seconds * 1000
+
+
+CUSTOM_INDICATOR_CATALOG["Supertrend"] = CustomIndicatorSpec(
+    params={"period": 10, "multiplier": 3.0},
+    panel="overlay",
+    replay=_supertrend_replay,
+    outputs=("up", "down"),
+    check_params=_constructs(Supertrend),
+    units={"up": "price", "down": "price"},
+)
+CUSTOM_INDICATOR_CATALOG["PivotPoints"] = CustomIndicatorSpec(
+    params={"kind": "standard", "session": "D"},
+    panel="overlay",
+    replay=_pivot_replay,
+    outputs=PIVOT_LEVELS,
+    check_params=_check_pivot_params,
+    choices={"kind": list(PIVOT_KINDS), "session": list(PIVOT_SESSIONS)},
+    units=dict.fromkeys(PIVOT_LEVELS, "price"),
+    plot=dict.fromkeys(PIVOT_LEVELS, "steps"),
+)
+CUSTOM_INDICATOR_CATALOG["ZigZag"] = CustomIndicatorSpec(
+    params={"deviation_pct": 5.0},
+    panel="overlay",
+    replay=_zigzag_replay,
+    outputs=("value",),
+    check_params=_constructs(ZigZag),
+    units={"value": "price"},
+    plot={"value": "swing"},
+    note="repaints last leg",
 )
 
 

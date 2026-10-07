@@ -19,7 +19,7 @@ import {
   openInterestSpec,
 } from "../components/chart/derivativePanes";
 import type { IndicatorPaneSpec } from "../components/chart/LightweightChart";
-import { MARKER_MIN_BAR_SPACING_PX, type MarkerSpec, buildLiquidationMarkers } from "../components/chart/LiquidationMarkers";
+import { type MarkerSpec, buildLiquidationMarkers, markersHiddenAt } from "../components/chart/LiquidationMarkers";
 import type { DerivativesLayout } from "../lib/chartLayout";
 import {
   type LiveSlots,
@@ -213,7 +213,7 @@ export function useChartDerivatives(input: ChartDerivativesInput): ChartDerivati
   const liqLines = useMemo(() => liquidationData(liqBars.rows, measure, firstCandle, cutoff), [liqBars.rows, measure, firstCandle, cutoff]);
 
   const markerSource = useMemo(() => eventsUpTo(markerRows.rows, (r) => r.ts_event, cutoff, barSeconds), [markerRows.rows, cutoff, barSeconds]);
-  const markersHidden = barSpacing <= MARKER_MIN_BAR_SPACING_PX;
+  const markersHidden = markersHiddenAt(barSpacing);
   const markers = useMemo(() => {
     if (!on.markers || markerSource.length === 0) return NO_MARKERS;
     const barsByT = new Map(liqBars.rows.map((row) => [row.t, row] as const));
