@@ -411,7 +411,41 @@ def test_story_33_4_columns_are_appended_after_every_existing_one() -> None:
         "high_24h",
         "low_24h",
         "range_position_24h",
+        "oi_change_1h_pct",
+        "oi_change_24h_pct",
     )
+
+
+def test_migration_adds_the_story_33_7_columns_nullable_to_a_33_4_table(tmp_path: Path) -> None:
+    path = str(tmp_path / "metrics.db")
+    pre_33_7 = COLS[: COLS.index("oi_change_1h_pct")]
+    db = sqlite3.connect(path)
+    db.executescript(f"""
+        CREATE TABLE snapshots (
+            ts INTEGER NOT NULL, instrument_id TEXT NOT NULL,
+            {", ".join(f"{c} REAL" for c in pre_33_7)},
+            PRIMARY KEY (ts, instrument_id)
+        );
+    """)
+    db.execute(
+        "INSERT INTO snapshots(ts, instrument_id, oi_change_1h) VALUES (?, ?, ?)",
+        (_NOW - 1_000_000_000, "BTC-USD-PERP.DYDX", 10.0),
+    )
+    db.commit()
+    db.close()
+
+    _store(path).write([_row(_NOW, oi_change_1h=10.0, oi_change_1h_pct=5.0)])
+
+    with closing(sqlite3.connect(path)) as check:
+        columns = [r[1] for r in check.execute("PRAGMA table_info(snapshots)")]
+    assert columns == ["ts", "instrument_id", *COLS]
+    old, new = _store(path).history("BTC-USD-PERP.DYDX", days=1)
+    assert (old["oi_change_1h"], old["oi_change_1h_pct"], old["oi_change_24h_pct"]) == (
+        10.0,
+        None,
+        None,
+    )
+    assert (new["oi_change_1h_pct"], new["oi_change_24h_pct"]) == (5.0, None)
 
 
 def test_migration_adds_the_story_33_4_columns_nullable_to_a_pre_33_4_table(

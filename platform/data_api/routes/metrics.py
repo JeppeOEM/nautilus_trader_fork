@@ -83,6 +83,8 @@ class MetricHistoryItem(BaseModel):
     high_24h: float | None = None
     low_24h: float | None = None
     range_position_24h: float | None = None
+    oi_change_1h_pct: float | None = None
+    oi_change_24h_pct: float | None = None
 
 
 class MetricsHistoryResponse(BaseModel):

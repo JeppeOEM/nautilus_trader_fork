@@ -58,6 +58,8 @@ METRIC_COLUMNS = (
     "high_24h",
     "low_24h",
     "range_position_24h",
+    "oi_change_1h_pct",
+    "oi_change_24h_pct",
 )
 
 

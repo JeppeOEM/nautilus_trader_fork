@@ -74,6 +74,28 @@ from views.catalog_reads import liquidation_feed_start
 # mid pct returns over the last hour (`ranking.domain.volatility.VolatilityTracker`, the
 # volatility-mode sort key), and "volatility_fast" (coin page only, not a column here) the sample
 # stdev of mid pct returns over the last 300 snapshots.
+#
+# Story 33.7's columns (ranking's Story 33.4 fields plus its 33.7 OI percent changes, each shown as
+# published -- the page only scales a value for display, it computes none):
+# - "open_interest": the venue's own open-interest units (contracts or base tokens, per venue).
+#   Known limit: those units differ per coin, so sorting or filtering OI across rows orders
+#   incomparable numbers (1,000,000 DOGE above 50,000 BTC); the filter label says "venue units".
+#   Upgrade path: `ranking` publishes an OI notional (OI x mark, SSOT-02) as its own column;
+# - "oi_change_1h_pct"/"oi_change_24h_pct": percent (ranking computes them in `Decimal`);
+# - "funding_rate": a fraction per funding interval, shown x100 as a percent (4 decimals);
+# - "basis_mi_bps": mark minus index in bps, signed;
+# - "liq_notional_1h": quote currency (size x bankruptcy price), shown in thousands (`K`);
+# - "liq_ratio_1h" (long share of the liquidated size) and "forced_share_1h" (liquidated size
+#   over traded size): fractions shown x100 as a percent;
+# - "relative_volume": a ratio (last hour over the mean hourly volume), shown with a `x`;
+# - "range_position_24h": a fraction (0 = the 24 h low, 1 = the high) shown x100 as a percent with
+#   a small inline bar.
+# A filter value is typed in the row's raw units (a fraction for funding, never the shown percent).
+# Spot dash: the web page applies it, not this module -- on a row whose `market` is "spot" the page
+# shows the dash in every `DERIVATIVE_COLUMN_KEYS` cell whatever its value (spot has no
+# derivatives), and its sort and filters read it as missing. Relative volume and the 24 h range are
+# not derivatives: spot shows them. Each Story 33.7 `format_fn` is only the recorded text format of
+# a present value: no code calls it, and None (a missing value, shown as the dash) is never passed.
 RANKING_COLS: list[tuple[str, str, Callable[[Any], str]]] = [
     ("ofi_10_z", "OFI10z", lambda v: f"{v:+.2f}"),
     ("obi_10", "OBI10", lambda v: f"{v:.3f}"),
@@ -90,7 +112,33 @@ RANKING_COLS: list[tuple[str, str, Callable[[Any], str]]] = [
     ("volatility", "Vol 24h \u03c3 (trade closes)", lambda v: f"{v:.6f}"),
     ("volatility_score", "Vol 1h \u03c3 (mids)", lambda v: f"{v:.6f}" if v is not None else "—"),
     ("volume24h", "Vol24h", lambda v: f"{v / 1e6:.3f}M"),
+    ("open_interest", "OI", lambda v: f"{v:.2f}"),
+    ("oi_change_1h_pct", "OI \u03941h %", lambda v: f"{v:+.2f}%"),
+    ("oi_change_24h_pct", "OI \u039424h %", lambda v: f"{v:+.2f}%"),
+    ("funding_rate", "Funding", lambda v: f"{v * 100:.4f}%"),
+    ("basis_mi_bps", "Basis (bps)", lambda v: f"{v:+.2f}"),
+    ("liq_notional_1h", "Liq 1h", lambda v: f"{v / 1e3:.1f}K"),
+    ("liq_ratio_1h", "Liq L/S", lambda v: f"{v * 100:.1f}%"),
+    ("forced_share_1h", "Forced %", lambda v: f"{v * 100:.1f}%"),
+    ("relative_volume", "Rel vol", lambda v: f"{v:.2f}\u00d7"),
+    ("range_position_24h", "24h range", lambda v: f"{v * 100:.0f}%"),
 ]
+
+# The derivatives columns (Story 33.7): the page shows a spot row's dash in each, whatever its value,
+# and sorts and filters it as missing. The page's `DERIVATIVE_COLUMNS` mirrors this set
+# (`data_api/tests/test_ranking_columns_mirror.py`).
+DERIVATIVE_COLUMN_KEYS: frozenset[str] = frozenset(
+    {
+        "open_interest",
+        "oi_change_1h_pct",
+        "oi_change_24h_pct",
+        "funding_rate",
+        "basis_mi_bps",
+        "liq_notional_1h",
+        "liq_ratio_1h",
+        "forced_share_1h",
+    }
+)
 
 # History-only columns (store_key, header_label): plotted on /history/{id}'s per-coin
 # 31-day charts from metrics_store rows, but deliberately NOT in RANKING_COLS -- that

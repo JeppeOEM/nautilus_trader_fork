@@ -279,6 +279,8 @@ RANK_KEYS: dict[str, str] = {
     "high_24h": "accounted:slow_fields_from_the_last_slow_loop",
     "low_24h": "accounted:slow_fields_from_the_last_slow_loop",
     "range_position_24h": "accounted:slow_fields_from_the_last_slow_loop",
+    "oi_change_1h_pct": "accounted:slow_fields_from_the_last_slow_loop",
+    "oi_change_24h_pct": "accounted:slow_fields_from_the_last_slow_loop",
 }
 MESSAGE_KEYS: dict[str, str] = {
     "mode": "identity",
@@ -316,6 +318,8 @@ DB_KEYS: dict[str, str] = {
     "high_24h": "hop",
     "low_24h": "hop",
     "range_position_24h": "hop",
+    "oi_change_1h_pct": "hop",
+    "oi_change_24h_pct": "hop",
 }
 SNAPSHOT_KEYS: dict[str, str] = {
     "t": "accounted:snapshots_t_is_milliseconds",
@@ -358,6 +362,8 @@ _DB_33_4_FROM_RANK = {
     "high_24h": "high_24h",
     "low_24h": "low_24h",
     "range_position_24h": "range_position_24h",
+    "oi_change_1h_pct": "oi_change_1h_pct",
+    "oi_change_24h_pct": "oi_change_24h_pct",
 }
 
 # --- the fixture trace ------------------------------------------------------------------------

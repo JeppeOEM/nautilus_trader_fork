@@ -12,6 +12,8 @@ import type {
   ArchiveStep,
   CandlesResponse,
   DrawingsResponse,
+  FilterPresetItem,
+  FilterPresetsResponse,
   FootprintItem,
   FootprintResponse,
   FootprintRow,
@@ -38,6 +40,7 @@ import type {
 } from "./schema";
 
 export type {
+  FilterPresetItem,
   AlertCreate,
   AlertResponse,
   ArchiveRun,
@@ -322,6 +325,28 @@ export async function saveTechnicalsColumns(entries: TechnicalsColumn[]): Promis
     const body = await res.json().catch(() => ({}));
     throw new Error(`PUT /api/rankings/technicals-columns failed: ${res.status} ${JSON.stringify(body)}`);
   }
+}
+
+// Story 33.7: the Rankings page's named filter presets -- one server-side list
+// (`screener_filter_presets.toml`), so a preset saved in one browser is listed in every other.
+export async function fetchFilterPresets(): Promise<FilterPresetItem[]> {
+  const res = await fetch("/api/rankings/filter-presets");
+  if (!res.ok) throw new Error(`GET /api/rankings/filter-presets failed: ${res.status}`);
+  return ((await res.json()) as FilterPresetsResponse).presets;
+}
+
+/** Replace the whole list; resolves to what the server stored (names stripped). */
+export async function saveFilterPresets(presets: FilterPresetItem[]): Promise<FilterPresetItem[]> {
+  const res = await fetch("/api/rankings/filter-presets", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ presets }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(`PUT /api/rankings/filter-presets failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return ((await res.json()) as FilterPresetsResponse).presets;
 }
 
 // Latest value of every requested indicator for every ranked instrument, keyed

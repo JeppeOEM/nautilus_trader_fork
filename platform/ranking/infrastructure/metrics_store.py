@@ -33,7 +33,8 @@ from pathlib import Path
 # removed). Extend here and in the writer's rows; `_migrate` adds a new column, nullable, to a
 # deployed table. Story 33.4 appended the numeric derivatives, liquidation and flow fields of the
 # slow row (`ranking.domain.derivs.DERIVS_FIELDS` minus `next_funding_ns`: an epoch-ns timestamp
-# that a REAL column would round, and a schedule rather than a metric).
+# that a REAL column would round, and a schedule rather than a metric). Story 33.7 appended the two
+# open-interest percent changes (`oi_change_1h_pct`/`oi_change_24h_pct`).
 COLS = (
     "price",
     "pct_1h",
@@ -62,6 +63,8 @@ COLS = (
     "high_24h",
     "low_24h",
     "range_position_24h",
+    "oi_change_1h_pct",
+    "oi_change_24h_pct",
 )
 
 _SCHEMA = f"""

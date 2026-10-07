@@ -173,7 +173,33 @@ def test_open_interest_and_its_1h_and_24h_changes() -> None:
         "open_interest": 1200.0,
         "oi_change_1h": 100.0,  # 1200 - the 1100 standing at now - 1 h
         "oi_change_24h": 200.0,  # 1200 - the 1000 standing at now - 24 h
+        "oi_change_1h_pct": pytest.approx(100 / 11),  # 100 / 1100 * 100
+        "oi_change_24h_pct": 20.0,  # 200 / 1000 * 100
     }
+
+
+def test_oi_percent_change_is_the_change_over_its_base() -> None:
+    series = _oi((NOW_NS - HOUR_NS - 60 * SEC_NS, "200"), (NOW_NS - 30 * SEC_NS, "210"))
+
+    fields = series.fields(NOW_NS)
+
+    assert (fields["oi_change_1h"], fields["oi_change_1h_pct"]) == (10.0, 5.0)  # 10 / 200 * 100
+
+
+def test_oi_percent_change_is_exact_in_decimal_before_the_float() -> None:
+    # 0.3 - 0.1 in float is 0.19999999999999998; in Decimal the change is exactly 0.2, so the
+    # percent is exactly 200.
+    series = _oi((NOW_NS - HOUR_NS - 60 * SEC_NS, "0.1"), (NOW_NS - 30 * SEC_NS, "0.3"))
+
+    assert series.fields(NOW_NS)["oi_change_1h_pct"] == 200.0
+
+
+def test_oi_percent_change_on_a_zero_base_is_none_not_infinite() -> None:
+    series = _oi((NOW_NS - HOUR_NS - 60 * SEC_NS, "0"), (NOW_NS - 30 * SEC_NS, "210"))
+
+    fields = series.fields(NOW_NS)
+
+    assert (fields["oi_change_1h"], fields["oi_change_1h_pct"]) == (210.0, None)
 
 
 def test_oi_changes_are_none_when_the_series_reaches_back_only_30_minutes() -> None:
@@ -183,6 +209,8 @@ def test_oi_changes_are_none_when_the_series_reaches_back_only_30_minutes() -> N
         "open_interest": 1200.0,
         "oi_change_1h": None,
         "oi_change_24h": None,
+        "oi_change_1h_pct": None,
+        "oi_change_24h_pct": None,
     }
 
 
@@ -200,6 +228,8 @@ def test_a_stalled_open_interest_reads_none_not_its_last_value() -> None:
         "open_interest": None,
         "oi_change_1h": None,
         "oi_change_24h": None,
+        "oi_change_1h_pct": None,
+        "oi_change_24h_pct": None,
     }
 
 

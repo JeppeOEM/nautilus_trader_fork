@@ -4,12 +4,15 @@ import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  fetchFilterPresets,
   fetchRankings,
   fetchTechnicalsColumns,
   fetchTechnicalsValues,
+  saveFilterPresets,
   saveTechnicalsColumns,
   setRankingMode,
 } from "../api/client";
+import type { FilterPresetItem } from "../api/client";
 import type { RankingsLiveMessage } from "./RankingsPage";
 
 // api/client's fetchRankings would otherwise hit a real network fetch under jsdom --
@@ -31,6 +34,9 @@ vi.mock("../api/client", () => ({
   fetchTechnicalsValues: vi.fn().mockResolvedValue({}),
   // Story 25.1a: the ranking-mode switch.
   setRankingMode: vi.fn().mockResolvedValue({ mode: "volatility" }),
+  // Story 33.7: saved filter presets (server-side).
+  fetchFilterPresets: vi.fn().mockResolvedValue([]),
+  saveFilterPresets: vi.fn().mockImplementation((presets: unknown) => Promise.resolve(presets)),
 }));
 
 const useLiveChannelMock = vi.fn();
@@ -67,6 +73,16 @@ const PERFORMANCE_COL_LABELS = [
   "Vol 24h σ (trade closes)",
   "Vol 1h σ (mids)",
   "Vol24h",
+  "OI",
+  "OI Δ1h %",
+  "OI Δ24h %",
+  "Funding",
+  "Basis (bps)",
+  "Liq 1h",
+  "Liq L/S",
+  "Forced %",
+  "Rel vol",
+  "24h range",
 ];
 
 function pageElement(queryClient: QueryClient) {
@@ -191,7 +207,7 @@ describe("RankingsPage", () => {
     expect(cells[1].textContent).toContain("BTC-USD-PERP.DYDX");
   });
 
-  it("shows Performance as the default tab with all 13 metric columns visible", () => {
+  it("shows Performance as the default tab with every metric column visible", () => {
     useLiveChannelMock.mockReturnValue({ latest: liveMessage(), connected: true });
 
     renderPage();
@@ -1136,6 +1152,669 @@ describe("RankingsPage", () => {
       } finally {
         consoleError.mockRestore();
       }
+    });
+  });
+
+  describe("Story 33.7: derivatives, flow and range columns, every-column sort, saved presets", () => {
+    const NOW_MS = 1_800_000_000_000;
+    const linear = {
+      instrument_id: "BTCUSDT-LINEAR.BYBIT",
+      venue: "BYBIT",
+      symbol: "BTC",
+      market: "perp",
+      pct_1h: 2,
+      open_interest: 1000,
+      oi_change_1h_pct: 5,
+      oi_change_24h_pct: -1,
+      funding_rate: 0.0002,
+      funding_annualised: 0.1095,
+      next_funding_ns: (NOW_MS + 3_600_000) * 1_000_000,
+      basis_mi_bps: 1.5,
+      liq_long_1h: 1.5,
+      liq_short_1h: 0.5,
+      liq_notional_1h: 120_000,
+      liq_ratio_1h: 0.75,
+      forced_share_1h: 0.0123,
+      relative_volume: 1.5,
+      high_24h: 110,
+      low_24h: 100,
+      range_position_24h: 0.25,
+    };
+    // A spot row carrying stray derivative values: each must still read as the dash.
+    const spot = {
+      instrument_id: "BTCUSDT-SPOT.BYBIT",
+      venue: "BYBIT",
+      symbol: "BTC",
+      market: "spot",
+      pct_1h: null,
+      open_interest: 5,
+      oi_change_1h_pct: 1,
+      oi_change_24h_pct: 1,
+      funding_rate: 0.0001,
+      funding_annualised: 0.05,
+      basis_mi_bps: 2,
+      liq_notional_1h: 10,
+      liq_ratio_1h: 0.5,
+      forced_share_1h: 0.5,
+      relative_volume: 0.8,
+      high_24h: 111,
+      low_24h: 99,
+      range_position_24h: 0.5,
+    };
+    // Hyperliquid: a perp with no liquidation feed (every liq_* null).
+    const hyperliquid = {
+      instrument_id: "SOL-USD-PERP.HYPERLIQUID",
+      venue: "HYPERLIQUID",
+      symbol: "SOL",
+      market: "perp",
+      pct_1h: -1,
+      open_interest: 2000,
+      oi_change_1h_pct: null,
+      oi_change_24h_pct: null,
+      funding_rate: -0.00005,
+      funding_annualised: -0.05475,
+      next_funding_ns: null,
+      basis_mi_bps: -0.5,
+      liq_long_1h: null,
+      liq_short_1h: null,
+      liq_notional_1h: null,
+      liq_ratio_1h: null,
+      forced_share_1h: null,
+      relative_volume: 2,
+      high_24h: 20,
+      low_24h: 20,
+      range_position_24h: null,
+    };
+    const DERIVATIVE_LABELS = ["OI", "OI Δ1h %", "OI Δ24h %", "Funding", "Basis (bps)", "Liq 1h", "Liq L/S", "Forced %"];
+
+    let dateNow: { mockRestore: () => void };
+
+    beforeEach(() => {
+      dateNow = vi.spyOn(Date, "now").mockReturnValue(NOW_MS);
+      vi.mocked(fetchFilterPresets).mockReset().mockResolvedValue([]);
+      vi.mocked(saveFilterPresets)
+        .mockReset()
+        .mockImplementation((presets) => Promise.resolve(presets));
+      showLive([linear, spot, hyperliquid]);
+    });
+
+    afterEach(() => dateNow.mockRestore());
+
+    function showLive(ranks: RankingsLiveMessage["ranks"], overrides: Partial<RankingsLiveMessage> = {}): void {
+      useLiveChannelMock.mockReturnValue({ latest: liveMessage({ ranks, ...overrides }), connected: true });
+    }
+
+    function headerLabels(): string[] {
+      return screen.getAllByRole("columnheader").map((th) => (th.textContent ?? "").replace(/ [▲▼]$/, ""));
+    }
+
+    function header(label: string): HTMLElement {
+      return screen.getAllByRole("columnheader")[headerLabels().indexOf(label)];
+    }
+
+    function clickHeader(label: string): void {
+      fireEvent.click(within(header(label)).getByRole("button"));
+    }
+
+    function cell(instrumentId: string, label: string): HTMLElement {
+      const row = screen.getByText(instrumentId).closest("tr")!;
+      return within(row).getAllByRole("cell")[headerLabels().indexOf(label)];
+    }
+
+    function shownRanks(): string[] {
+      return screen
+        .getAllByRole("row")
+        .slice(1)
+        .map((tr) => within(tr).getAllByRole("cell")[0].textContent ?? "");
+    }
+
+    function addFilter(fieldLabel: string, op: string, value: string): void {
+      fireEvent.click(screen.getByRole("button", { name: "Add filter" }));
+      const select = screen.getByLabelText<HTMLSelectElement>("Filter field");
+      fireEvent.change(select, { target: { value: Array.from(select.options).find((o) => o.text === fieldLabel)!.value } });
+      fireEvent.change(screen.getByLabelText("Filter operator"), { target: { value: op } });
+      fireEvent.change(screen.getByLabelText("Filter value"), { target: { value } });
+      fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    }
+
+    // Instrument rows only (the Technicals tab's empty-state row has one cell).
+    function shownInstruments(): string[] {
+      return screen
+        .getAllByRole("row")
+        .slice(1)
+        .map((tr) => within(tr).getAllByRole("cell"))
+        .filter((cells) => cells.length > 3)
+        .map((cells) => (cells[3].textContent ?? "").replace(/[⏲⏱⚠ ]/g, ""));
+    }
+
+    describe("columns", () => {
+      it("renders the ten new columns after Vol24h, each at its display precision", () => {
+        renderPage();
+
+        expect(headerLabels().slice(-11)).toEqual(["Vol24h", ...DERIVATIVE_LABELS, "Rel vol", "24h range"]);
+        const iid = linear.instrument_id;
+        expect(
+          [...DERIVATIVE_LABELS, "Rel vol", "24h range"].map((label) => cell(iid, label).textContent),
+        ).toEqual(["1000.00", "+5.00%", "-1.00%", "0.0200%", "+1.50", "120.0K", "75.0%", "1.2%", "1.50×", "25%"]);
+      });
+
+      it("dashes every derivatives column of a spot row whatever its value, but shows rel vol and range", () => {
+        renderPage();
+
+        for (const label of DERIVATIVE_LABELS) expect(cell(spot.instrument_id, label).textContent).toBe("—");
+        expect(cell(spot.instrument_id, "Rel vol").textContent).toBe("0.80×");
+        expect(cell(spot.instrument_id, "24h range").textContent).toBe("50%");
+      });
+
+      it("dashes a Hyperliquid row's liquidation columns (no feed) and keeps the staleness markers", () => {
+        showLive([linear, spot, hyperliquid], { stale_instrument_ids: [hyperliquid.instrument_id] });
+        renderPage();
+
+        for (const label of ["Liq 1h", "Liq L/S", "Forced %"]) {
+          expect(cell(hyperliquid.instrument_id, label).textContent).toBe("—");
+        }
+        expect(cell(hyperliquid.instrument_id, "Funding").textContent).toBe("-0.0050%");
+        const staleRow = screen.getByText(hyperliquid.instrument_id).closest("tr")!;
+        expect(within(staleRow).getByTitle("market data stale")).toBeInTheDocument();
+        const freshRow = screen.getByText(linear.instrument_id).closest("tr")!;
+        expect(within(freshRow).queryByTitle("market data stale")).toBeNull();
+        expect(within(freshRow).queryByTitle("rankings feed stale")).toBeNull();
+      });
+
+      it("explains the funding cell with its annualised rate and the countdown to the next payment", () => {
+        renderPage();
+
+        expect(cell(linear.instrument_id, "Funding")).toHaveAttribute(
+          "title",
+          "annualised 10.95% · next payment in 01:00:00",
+        );
+        expect(cell(hyperliquid.instrument_id, "Funding")).toHaveAttribute(
+          "title",
+          "annualised -5.48% · next payment unknown",
+        );
+        expect(cell(spot.instrument_id, "Funding")).not.toHaveAttribute("title");
+      });
+
+      it("reads a funding time at or before now as a payment due, never a frozen countdown", () => {
+        showLive([{ ...linear, next_funding_ns: NOW_MS * 1_000_000 }]);
+        renderPage();
+
+        expect(cell(linear.instrument_id, "Funding")).toHaveAttribute(
+          "title",
+          "annualised 10.95% · next payment due",
+        );
+      });
+
+      it("clamps the range marker to the bar while the text keeps the published value", () => {
+        showLive([{ ...linear, range_position_24h: 1.2 }]);
+        renderPage();
+
+        const range = cell(linear.instrument_id, "24h range");
+        expect(range.textContent).toBe("120%");
+        expect((within(range).getByTestId("range-bar").firstElementChild as HTMLElement).style.left).toBe("100%");
+      });
+
+      it("explains the liquidation cells and the range, and marks the close's place on the range bar", () => {
+        renderPage();
+
+        expect(cell(linear.instrument_id, "Liq 1h")).toHaveAttribute(
+          "title",
+          "liquidated last 1 h (base size): long 1.5 · short 0.5",
+        );
+        expect(cell(linear.instrument_id, "Liq L/S")).toHaveAttribute("title", "long share of liquidated size");
+        const range = cell(linear.instrument_id, "24h range");
+        expect(range).toHaveAttribute("title", "low 100 · high 110");
+        const marker = within(range).getByTestId("range-bar").firstElementChild as HTMLElement;
+        expect(marker.style.left).toBe("25%");
+        // A flat range has no position: the dash, no bar.
+        expect(cell(hyperliquid.instrument_id, "24h range").textContent).toBe("—");
+        expect(within(cell(hyperliquid.instrument_id, "24h range")).queryByTestId("range-bar")).toBeNull();
+      });
+    });
+
+    describe("sort", () => {
+      const pctRanks = [
+        { instrument_id: "AAA-USD-PERP.DYDX", pct_1h: 2, pct_24h: 1 },
+        { instrument_id: "BBB-USD-PERP.DYDX", pct_1h: null, pct_24h: 1 },
+        { instrument_id: "CCC-USD-PERP.DYDX", pct_1h: -1, pct_24h: Number.NaN },
+        { instrument_id: "DDD-USD-PERP.DYDX", pct_1h: 5, pct_24h: 0 },
+      ];
+
+      it("cycles a metric header ascending, descending, then rank order, missing values last both ways", () => {
+        showLive(pctRanks);
+        renderPage();
+
+        clickHeader("1h %");
+        expect(header("1h %")).toHaveAttribute("aria-sort", "ascending");
+        expect(shownRanks()).toEqual(["3", "1", "4", "2"]); // -1, 2, 5, null
+
+        clickHeader("1h %");
+        expect(header("1h %")).toHaveAttribute("aria-sort", "descending");
+        expect(shownRanks()).toEqual(["4", "1", "3", "2"]); // 5, 2, -1, null
+
+        clickHeader("1h %");
+        expect(header("1h %")).toHaveAttribute("aria-sort", "none");
+        expect(shownRanks()).toEqual(["1", "2", "3", "4"]);
+      });
+
+      it("breaks ties by rank in both directions and sorts NaN as missing", () => {
+        showLive(pctRanks);
+        renderPage();
+
+        clickHeader("24h %");
+        expect(shownRanks()).toEqual(["4", "1", "2", "3"]); // 0, 1, 1, NaN
+        clickHeader("24h %");
+        expect(shownRanks()).toEqual(["1", "2", "4", "3"]); // 1, 1, 0, NaN
+      });
+
+      it("sorts a spot row's stray derivative value last, as missing", () => {
+        renderPage();
+
+        clickHeader("Funding");
+        expect(shownInstruments()).toEqual([hyperliquid.instrument_id, linear.instrument_id, spot.instrument_id]);
+        clickHeader("Funding");
+        expect(shownInstruments()).toEqual([linear.instrument_id, hyperliquid.instrument_id, spot.instrument_id]);
+      });
+
+      it("keeps the sort across a reload, and clears it once back at rank order", () => {
+        renderPage();
+        clickHeader("Funding");
+        clickHeader("Funding");
+        expect(JSON.parse(localStorage.getItem("rankings-sort") ?? "null")).toEqual({
+          key: "funding_rate",
+          direction: "descending",
+        });
+
+        cleanup();
+        renderPage();
+        expect(header("Funding")).toHaveAttribute("aria-sort", "descending");
+        expect(shownInstruments()[0]).toBe(linear.instrument_id);
+
+        clickHeader("Funding");
+        expect(localStorage.getItem("rankings-sort")).toBeNull();
+      });
+
+      it.each([
+        ["a removed column's key", JSON.stringify({ key: "gone_column", direction: "ascending" })],
+        ["a bad direction", JSON.stringify({ key: "funding_rate", direction: "up" })],
+        ["a bad shape", JSON.stringify(["funding_rate"])],
+        ["bad JSON", "{not json"],
+      ])("reads %s in storage as rank order", (_case, stored) => {
+        localStorage.setItem("rankings-sort", stored);
+        renderPage();
+
+        expect(shownRanks()).toEqual(["1", "2", "3"]);
+        expect(header("Funding")).toHaveAttribute("aria-sort", "none");
+      });
+
+      it("renders in rank order and still sorts in memory when storage throws", () => {
+        const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+          throw new Error("storage blocked");
+        });
+        const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+          throw new Error("storage blocked");
+        });
+        try {
+          renderPage();
+          expect(shownRanks()).toEqual(["1", "2", "3"]);
+
+          clickHeader("Rel vol");
+
+          expect(shownInstruments()).toEqual([spot.instrument_id, linear.instrument_id, hyperliquid.instrument_id]);
+        } finally {
+          getItem.mockRestore();
+          setItem.mockRestore();
+        }
+      });
+
+      it("applies a metric sort on Performance only, keeping it stored, while Symbol sorts both tabs", () => {
+        renderPage();
+        clickHeader("Rel vol");
+
+        fireEvent.click(screen.getByText("Technicals"));
+
+        expect(within(screen.getByRole("table")).queryByRole("button", { name: "Rel vol" })).toBeNull();
+        // No header on this tab shows the Rel vol sort, so the rows keep their rank order here.
+        expect(shownInstruments()).toEqual([linear.instrument_id, spot.instrument_id, hyperliquid.instrument_id]);
+        expect(JSON.parse(localStorage.getItem("rankings-sort") ?? "null")).toEqual({
+          key: "relative_volume",
+          direction: "ascending",
+        });
+
+        fireEvent.click(screen.getByText("Performance"));
+        expect(shownInstruments()).toEqual([spot.instrument_id, linear.instrument_id, hyperliquid.instrument_id]);
+
+        fireEvent.click(screen.getByText("Technicals"));
+        clickHeader("Symbol");
+        clickHeader("Symbol");
+        // Descending: SOL before the two BTC rows (ties by rank).
+        expect(shownInstruments()).toEqual([hyperliquid.instrument_id, linear.instrument_id, spot.instrument_id]);
+      });
+    });
+
+    describe("filters", () => {
+      it("types a fraction raw, matches `=` at the shown percent, and never matches a spot derivative", () => {
+        renderPage();
+
+        addFilter("Funding (fraction/interval)", ">", "0");
+        expect(shownInstruments()).toEqual([linear.instrument_id]); // spot's stray 0.0001 is missing
+
+        fireEvent.click(screen.getByRole("button", { name: /Remove filter/ }));
+        addFilter("Funding (fraction/interval)", "=", "0.0002");
+        expect(shownInstruments()).toEqual([linear.instrument_id]);
+      });
+
+      it("labels each scaled field with the unit it is typed in", () => {
+        renderPage();
+        fireEvent.click(screen.getByRole("button", { name: "Add filter" }));
+
+        const labels = Array.from(screen.getByLabelText<HTMLSelectElement>("Filter field").options).map((o) => o.text);
+        expect(labels).toEqual(
+          expect.arrayContaining([
+            "OI (venue units)",
+            "OI Δ1h %",
+            "Funding (fraction/interval)",
+            "Basis (bps)",
+            "Liq 1h (raw quote)",
+            "Liq L/S (fraction)",
+            "Forced % (fraction)",
+            "Rel vol",
+            "24h range (fraction)",
+          ]),
+        );
+      });
+    });
+
+    describe("presets", () => {
+      function presetBar(): HTMLElement {
+        return screen.getByLabelText("Filter preset").parentElement!;
+      }
+
+      async function savePreset(name: string): Promise<void> {
+        fireEvent.change(screen.getByLabelText("Preset name"), { target: { value: name } });
+        const save = within(presetBar()).getByRole("button", { name: /^(Save|Overwrite)$/ });
+        await waitFor(() => expect(save).toBeEnabled()); // once the stored list has loaded
+        fireEvent.click(save);
+      }
+
+      function pickPreset(name: string): void {
+        fireEvent.change(screen.getByLabelText("Filter preset"), { target: { value: name } });
+      }
+
+      function presetOptions(): string[] {
+        return Array.from(screen.getByLabelText<HTMLSelectElement>("Filter preset").options).map((o) => o.text);
+      }
+
+      function activeChip(): string | null {
+        return within(presetBar()).queryByTitle("active preset")?.textContent ?? null;
+      }
+
+      it("saves, recalls, clears the chip on an edit, and deletes a preset", async () => {
+        renderPage();
+        expect(within(presetBar()).getByRole("button", { name: "Save" })).toBeDisabled(); // no conditions
+
+        addFilter("Funding (fraction/interval)", ">", "0.00003");
+        await savePreset("lev");
+
+        await waitFor(() => expect(activeChip()).toBe("lev"));
+        expect(saveFilterPresets).toHaveBeenLastCalledWith([
+          { name: "lev", conditions: [{ field: "funding_rate", op: ">", value: 0.00003 }] },
+        ]);
+        expect(presetOptions()).toContain("lev");
+        expect(within(presetBar()).getByRole("button", { name: "Overwrite" })).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole("button", { name: /Remove filter/ })); // an edit
+        expect(activeChip()).toBeNull();
+        expect(shownInstruments()).toHaveLength(3);
+
+        pickPreset("lev");
+        expect(activeChip()).toBe("lev");
+        expect(shownInstruments()).toEqual([linear.instrument_id]);
+        expect(screen.getByText("Funding (fraction/interval) > 0.00003")).toBeInTheDocument();
+        // The select is back on its placeholder: picking the same preset after an edit recalls it.
+        expect(screen.getByLabelText<HTMLSelectElement>("Filter preset").value).toBe("");
+        fireEvent.click(screen.getByRole("button", { name: /Remove filter/ }));
+        pickPreset("lev");
+        expect(shownInstruments()).toEqual([linear.instrument_id]);
+
+        fireEvent.click(screen.getByRole("button", { name: "Delete preset" }));
+        await waitFor(() => expect(presetOptions()).not.toContain("lev"));
+        expect(saveFilterPresets).toHaveBeenLastCalledWith([]);
+        expect(activeChip()).toBeNull();
+      });
+
+      it("recalls a preset saved in another browser, naming a field it no longer knows", async () => {
+        vi.mocked(fetchFilterPresets).mockResolvedValue([
+          {
+            name: "old",
+            conditions: [
+              { field: "gone_column", op: ">", value: 1 },
+              { field: "pct_1h", op: ">", value: 0 },
+            ],
+          },
+        ]);
+        renderPage();
+        await waitFor(() => expect(presetOptions()).toContain("old"));
+
+        pickPreset("old");
+
+        expect(within(presetBar()).getByRole("status")).toHaveTextContent(
+          "not applied: gone_column (unknown field) — kept on save",
+        );
+        expect(shownInstruments()).toEqual([linear.instrument_id]); // pct_1h > 0 applied
+
+        await savePreset("old");
+        await waitFor(() => expect(saveFilterPresets).toHaveBeenCalled());
+        expect(saveFilterPresets).toHaveBeenLastCalledWith([
+          {
+            name: "old",
+            conditions: [
+              { field: "pct_1h", op: ">", value: 0 },
+              { field: "gone_column", op: ">", value: 1 },
+            ],
+          },
+        ]);
+      });
+
+      it("names the actual reason a recalled condition does not fit its field", async () => {
+        vi.mocked(fetchFilterPresets).mockResolvedValue([
+          {
+            name: "odd",
+            conditions: [
+              { field: "symbol", op: ">", value: "BTC" },
+              { field: "pct_1h", op: "=", value: "two" },
+              { field: "venue", op: "=", value: 3 },
+            ],
+          },
+        ]);
+        renderPage();
+        await waitFor(() => expect(presetOptions()).toContain("odd"));
+
+        pickPreset("odd");
+
+        expect(within(presetBar()).getByRole("status")).toHaveTextContent(
+          "not applied: symbol (operator does not fit the field), pct_1h (value does not fit the field), " +
+            "venue (value does not fit the field) — kept on save",
+        );
+      });
+
+      it("keeps Save and Delete disabled and shows the error when the stored list failed to load", async () => {
+        vi.mocked(fetchFilterPresets).mockRejectedValue(new Error("GET failed: 500"));
+        const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+        try {
+          renderPage();
+          addFilter("Rel vol", ">", "1");
+          fireEvent.change(screen.getByLabelText("Preset name"), { target: { value: "lev" } });
+
+          expect(await within(presetBar()).findByRole("alert")).toHaveTextContent("load failed: GET failed: 500");
+          expect(within(presetBar()).getByRole("button", { name: "Save" })).toBeDisabled();
+          expect(within(presetBar()).getByRole("button", { name: "Delete preset" })).toBeDisabled();
+          expect(saveFilterPresets).not.toHaveBeenCalled();
+        } finally {
+          consoleError.mockRestore();
+        }
+      });
+
+      it("never lets a GET that resolves after a later PUT overwrite the stored list", async () => {
+        let resolveStaleGet: (presets: never[]) => void = () => {};
+        vi.mocked(fetchFilterPresets)
+          .mockResolvedValueOnce([])
+          .mockImplementationOnce(() => new Promise((resolve) => (resolveStaleGet = resolve)));
+        vi.mocked(saveFilterPresets).mockRejectedValueOnce(new Error("PUT failed: 503"));
+        const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+        try {
+          renderPage();
+          addFilter("Rel vol", ">", "1");
+          await savePreset("first"); // fails: the list reload (a GET) stays pending
+          await within(presetBar()).findByRole("alert");
+          await savePreset("second"); // succeeds
+          await waitFor(() => expect(presetOptions()).toContain("second"));
+
+          resolveStaleGet([]);
+          await new Promise((resolve) => setTimeout(resolve, 0));
+
+          expect(presetOptions()).toContain("second");
+        } finally {
+          consoleError.mockRestore();
+        }
+      });
+
+      it("shows no active chip when the filters changed while the save was in flight", async () => {
+        let resolveSave: (presets: FilterPresetItem[]) => void = () => {};
+        vi.mocked(saveFilterPresets).mockImplementationOnce(
+          () => new Promise((resolve) => (resolveSave = resolve)),
+        );
+        renderPage();
+        addFilter("Rel vol", ">", "1");
+        await savePreset("lev");
+        fireEvent.click(screen.getByRole("button", { name: /Remove filter/ }));
+
+        resolveSave([{ name: "lev", conditions: [{ field: "relative_volume", op: ">", value: 1 }] }]);
+
+        await waitFor(() => expect(presetOptions()).toContain("lev"));
+        expect(activeChip()).toBeNull();
+      });
+
+      it("shows a failed save inline, reports it and reloads the list", async () => {
+        vi.mocked(saveFilterPresets).mockRejectedValueOnce(new Error("PUT failed: 500"));
+        const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+        try {
+          renderPage();
+          await waitFor(() => expect(fetchFilterPresets).toHaveBeenCalledTimes(1));
+          addFilter("Rel vol", ">", "1");
+          await savePreset("busy");
+
+          expect(await within(presetBar()).findByRole("alert")).toHaveTextContent("PUT failed: 500");
+          expect(consoleError).toHaveBeenCalledWith("RankingsPage: failed to save filter presets", expect.any(Error));
+          await waitFor(() => expect(fetchFilterPresets).toHaveBeenCalledTimes(2));
+          expect(activeChip()).toBeNull();
+        } finally {
+          consoleError.mockRestore();
+        }
+      });
+
+      it("offers a Retry after a failed load, which enables Save once the list loads", async () => {
+        vi.mocked(fetchFilterPresets).mockRejectedValueOnce(new Error("GET failed: 502")).mockResolvedValue([]);
+        const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+        try {
+          renderPage();
+          addFilter("Rel vol", ">", "1");
+          fireEvent.change(screen.getByLabelText("Preset name"), { target: { value: "lev" } });
+          await within(presetBar()).findByRole("alert");
+          expect(within(presetBar()).getByRole("button", { name: "Save" })).toBeDisabled();
+
+          fireEvent.click(within(presetBar()).getByRole("button", { name: "Retry" }));
+
+          await waitFor(() => expect(within(presetBar()).getByRole("button", { name: "Save" })).toBeEnabled());
+          expect(within(presetBar()).queryByRole("alert")).toBeNull();
+          expect(within(presetBar()).queryByRole("button", { name: "Retry" })).toBeNull();
+        } finally {
+          consoleError.mockRestore();
+        }
+      });
+
+      it("deletes the preset just saved under a new name, not the one recalled before", async () => {
+        vi.mocked(fetchFilterPresets).mockResolvedValue([
+          { name: "lev", conditions: [{ field: "relative_volume", op: ">", value: 1 }] },
+        ]);
+        renderPage();
+        await waitFor(() => expect(presetOptions()).toContain("lev"));
+        pickPreset("lev");
+        await savePreset("lev2");
+        await waitFor(() => expect(presetOptions()).toContain("lev2"));
+
+        const del = within(presetBar()).getByRole("button", { name: "Delete preset" });
+        expect(del).toHaveAttribute("title", "delete preset lev2");
+        fireEvent.click(del);
+
+        await waitFor(() => expect(presetOptions()).not.toContain("lev2"));
+        expect(presetOptions()).toContain("lev");
+      });
+
+      it("lets a recalled preset whose every condition was not applied be saved back", async () => {
+        vi.mocked(fetchFilterPresets).mockResolvedValue([
+          { name: "old", conditions: [{ field: "gone_column", op: ">", value: 1 }] },
+        ]);
+        renderPage();
+        await waitFor(() => expect(presetOptions()).toContain("old"));
+        pickPreset("old");
+
+        await savePreset("old"); // no chip is visible, yet Save stores the kept condition
+
+        await waitFor(() =>
+          expect(saveFilterPresets).toHaveBeenLastCalledWith([
+            { name: "old", conditions: [{ field: "gone_column", op: ">", value: 1 }] },
+          ]),
+        );
+      });
+
+      describe("a Technicals condition", () => {
+        const rsi = { name: "RelativeStrengthIndex", params: {}, category: "native" };
+
+        afterEach(() => {
+          vi.mocked(fetchTechnicalsColumns).mockReset().mockResolvedValue([]);
+          vi.mocked(fetchTechnicalsValues).mockReset().mockResolvedValue({});
+        });
+
+        it("is reported as not loaded, not unknown, while the Technicals columns are loading", async () => {
+          vi.mocked(fetchTechnicalsColumns).mockImplementation(() => new Promise(() => {}));
+          vi.mocked(fetchFilterPresets).mockResolvedValue([
+            { name: "rsi", conditions: [{ field: "tech:RelativeStrengthIndex.value", op: "<", value: 30 }] },
+          ]);
+          renderPage();
+          await waitFor(() => expect(presetOptions()).toContain("rsi"));
+
+          pickPreset("rsi");
+
+          expect(within(presetBar()).getByRole("status")).toHaveTextContent(
+            "not applied: tech:RelativeStrengthIndex.value (Technicals columns not loaded) — kept on save",
+          );
+        });
+
+        it("is unknown when its output is not one the loaded values have", async () => {
+          vi.mocked(fetchTechnicalsColumns).mockResolvedValue([rsi]);
+          vi.mocked(fetchTechnicalsValues).mockResolvedValue({ [linear.instrument_id]: { "0.value": 25 } });
+          vi.mocked(fetchFilterPresets).mockResolvedValue([
+            {
+              name: "rsi",
+              conditions: [
+                { field: "tech:RelativeStrengthIndex.value", op: "<", value: 30 },
+                { field: "tech:RelativeStrengthIndex.valeu", op: "<", value: 30 },
+              ],
+            },
+          ]);
+          renderPage();
+          fireEvent.click(screen.getByRole("button", { name: "Add filter" })); // loads the values
+          await waitFor(() => expect(fetchTechnicalsValues).toHaveBeenCalled());
+          await screen.findByRole("option", { name: "RelativeStrengthIndex.value" });
+
+          pickPreset("rsi");
+
+          expect(within(presetBar()).getByRole("status")).toHaveTextContent(
+            "not applied: tech:RelativeStrengthIndex.valeu (unknown field) — kept on save",
+          );
+        });
+      });
     });
   });
 });

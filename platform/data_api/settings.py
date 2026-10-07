@@ -47,7 +47,8 @@ ERROR_LEDGER_DIR: str = os.environ.get(
 )
 
 # The one directory holding the UI preference files (Story 32.5): `chart_indicators.toml`,
-# `screener_columns.toml`, `chart_drawings.toml` and `chart_layouts.toml`, mounted as a directory
+# `screener_columns.toml`, `chart_drawings.toml`, `chart_layouts.toml` and (Story 33.7)
+# `screener_filter_presets.toml`, mounted as a directory
 # (`./data/preferences/`) so a new preference file needs no new mount. The two per-file path
 # variables it replaced would be silently ignored by a stale compose file (the files would then be
 # written inside the container and lost on the next recreate), so they refuse to start instead.
@@ -68,6 +69,10 @@ CHART_INDICATOR_CONFIG_PATH: str = str(Path(CHART_PREFERENCES_DIR) / "chart_indi
 SCREENER_COLUMNS_CONFIG_PATH: str = str(Path(CHART_PREFERENCES_DIR) / "screener_columns.toml")
 CHART_DRAWINGS_PATH: str = str(Path(CHART_PREFERENCES_DIR) / "chart_drawings.toml")
 CHART_LAYOUTS_PATH: str = str(Path(CHART_PREFERENCES_DIR) / "chart_layouts.toml")
+# Story 33.7: the Rankings page's named filter presets.
+SCREENER_FILTER_PRESETS_PATH: str = str(
+    Path(CHART_PREFERENCES_DIR) / "screener_filter_presets.toml"
+)
 
 
 def candles_db_path(venue: str) -> str:

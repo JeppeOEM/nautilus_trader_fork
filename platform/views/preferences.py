@@ -15,8 +15,9 @@
 """
 The UI preference files, and their one loader/saver each (Story 24.2 merged
 the `chart_indicator_config` and `screener_columns_config` modules here, bodies verbatim; Story 32.5
-added `chart_drawings.toml`, Story 32.6 `chart_layouts.toml`). All four live in one directory
-(`CHART_PREFERENCES_DIR`, Story 32.5):
+added `chart_drawings.toml`, Story 32.6 `chart_layouts.toml`, Story 33.7
+`screener_filter_presets.toml`). All five live in one directory (`CHART_PREFERENCES_DIR`, Story
+32.5):
 
 - `chart_indicators.toml`: per-instrument chart indicator
   selections (Story 10.5), a table keyed by instrument_id, each holding a list of
@@ -63,6 +64,12 @@ added `chart_drawings.toml`, Story 32.6 `chart_layouts.toml`). All four live in 
   selection (Story 17.5), one flat top-level `columns` array of
   `{name, params, category, bar_seconds}` tables in display order, applied to every row of the
   Rankings table -- `load_screener_columns`/`save_screener_columns`.
+- `screener_filter_presets.toml`: the Rankings page's named filter presets (Story 33.7), `v = 1`
+  and a `[[presets]]` array of `{name, conditions}` tables, each condition a `[[presets.conditions]]`
+  table of `field`, `op` (one of `FILTER_OPERATORS`) and `value` (a finite number, or a string with
+  `=` only) -- `load_filter_presets`/`save_filter_presets`. Every preset is checked by
+  `validate_filter_presets`, which names the offending field (`FilterPresetError`); a condition's
+  display precision is never stored (the page re-derives it from its field list on recall).
 
 All are tomllib to read, tomli_w to write, and a full rewrite (not a patch). Key sets frozen
 (AD-D12): these files are bind-mounted and hand-editable, so a renamed or dropped key would silently
@@ -1003,4 +1010,176 @@ def save_chart_layouts(config: ChartLayouts, path: Path) -> None:
         table = _layout_table(validate_layout(config.default))
         table["default_indicators"] = [_indicator_table(e) for e in config.default_indicators]
         raw[LAYOUT_DEFAULT_KEY] = table
+    _write_atomic(path, tomli_w.dumps(raw).encode())
+
+
+# -- screener filter presets ------------------------------------------------------------------------
+
+# `screener_filter_presets.toml` (Story 33.7). `FILTER_OPERATORS` mirrors the frontend's
+# `FILTER_OPERATORS` (`pages/filters.ts`; `views/tests/test_filter_presets.py` pins the pair).
+FILTER_PRESETS_VERSION = 1
+FILTER_OPERATORS = (">", "<", ">=", "<=", "=")
+MAX_FILTER_PRESETS = 100
+MAX_PRESET_CONDITIONS = 50
+MAX_PRESET_NAME_LENGTH = 64
+MAX_FILTER_FIELD_LENGTH = 512
+MAX_FILTER_TEXT_LENGTH = 512
+_PRESET_KEYS = frozenset({"name", "conditions"})
+_CONDITION_KEYS = frozenset({"field", "op", "value"})
+
+
+class FilterPresetError(ValueError):
+    """A preset (or the preset list) that is not storable; `field` names what is wrong."""
+
+    def __init__(self, field_name: str, message: str) -> None:
+        super().__init__(f"{field_name}: {message}")
+        self.field = field_name
+
+
+@dataclass(frozen=True)
+class FilterPresetCondition:
+    """One stored condition. Its display precision is not stored: the page re-derives it on recall."""
+
+    field: str
+    op: str
+    value: float | int | str
+
+
+@dataclass(frozen=True)
+class FilterPreset:
+    name: str
+    conditions: tuple[FilterPresetCondition, ...]
+
+
+def _check_keys_exactly(where: str, item: Any, keys: frozenset[str]) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        raise FilterPresetError(where, "must be an object")
+    missing = sorted(keys - set(item))
+    if missing:
+        raise FilterPresetError(f"{where}.{missing[0]}", "is required")
+    unknown = sorted(set(item) - keys)
+    if unknown:
+        raise FilterPresetError(f"{where}.{unknown[0]}", "is not a field")
+    return item
+
+
+def _validate_condition(where: str, item: Any) -> FilterPresetCondition:
+    condition = _check_keys_exactly(where, item, _CONDITION_KEYS)
+    field_name, op, value = condition["field"], condition["op"], condition["value"]
+    if not isinstance(field_name, str) or not 1 <= len(field_name) <= MAX_FILTER_FIELD_LENGTH:
+        raise FilterPresetError(
+            f"{where}.field", f"must be a string of 1..{MAX_FILTER_FIELD_LENGTH} characters"
+        )
+    if op not in FILTER_OPERATORS:
+        raise FilterPresetError(f"{where}.op", f"must be one of {list(FILTER_OPERATORS)}")
+    if isinstance(value, str):
+        if op != "=":
+            raise FilterPresetError(f"{where}.value", "a text value takes only the `=` operator")
+        if len(value) > MAX_FILTER_TEXT_LENGTH:
+            raise FilterPresetError(
+                f"{where}.value", f"must be at most {MAX_FILTER_TEXT_LENGTH} characters"
+            )
+    elif isinstance(value, int) and not isinstance(value, bool) and not _exact_in_a_double(value):
+        raise FilterPresetError(
+            f"{where}.value", "an integer must be exact in a browser number (a 64-bit double)"
+        )
+    elif not _is_number(value):
+        raise FilterPresetError(f"{where}.value", "must be a finite number or a string")
+    return FilterPresetCondition(field=field_name, op=op, value=value)
+
+
+def _exact_in_a_double(value: int) -> bool:
+    """
+    Whether a browser's number (a double) holds `value` exactly: one it does not would be silently
+    rounded by `JSON.parse` on the next GET, so the preset read back would not be the one saved. An
+    integer too large for any double (`10**400`) is not, rather than an `OverflowError`.
+    """
+    try:
+        return int(float(value)) == value
+    except OverflowError:
+        return False
+
+
+def _validate_preset(where: str, item: Any) -> FilterPreset:
+    preset = _check_keys_exactly(where, item, _PRESET_KEYS)
+    name = preset["name"]
+    if not isinstance(name, str) or not name.strip():
+        raise FilterPresetError(f"{where}.name", "must be a non-empty string")
+    if len(name.strip()) > MAX_PRESET_NAME_LENGTH:
+        raise FilterPresetError(
+            f"{where}.name", f"must be at most {MAX_PRESET_NAME_LENGTH} characters"
+        )
+    conditions = preset["conditions"]
+    if not isinstance(conditions, list) or not 1 <= len(conditions) <= MAX_PRESET_CONDITIONS:
+        raise FilterPresetError(
+            f"{where}.conditions", f"must be a list of 1..{MAX_PRESET_CONDITIONS} conditions"
+        )
+    return FilterPreset(
+        name=name.strip(),
+        conditions=tuple(
+            _validate_condition(f"{where}.conditions[{j}]", c) for j, c in enumerate(conditions)
+        ),
+    )
+
+
+def validate_filter_presets(body: Any) -> list[FilterPreset]:
+    """
+    Return the presets of a `{"presets": [...]}` body, else raise `FilterPresetError` naming the
+    field (`presets[1].conditions[0].value`). Strict (DATA-07): an unknown key, a wrong type, a
+    duplicate name or one over a bound is refused, never dropped. A name is stored stripped, and
+    two names equal once stripped are duplicates.
+    """
+    if not isinstance(body, dict) or set(body) != {"presets"}:
+        raise FilterPresetError("presets", 'the body must be exactly {"presets": [...]}')
+    preset_list = body["presets"]
+    if not isinstance(preset_list, list):
+        raise FilterPresetError("presets", "must be a list of presets")
+    if len(preset_list) > MAX_FILTER_PRESETS:
+        raise FilterPresetError("presets", f"must hold at most {MAX_FILTER_PRESETS} presets")
+    presets: list[FilterPreset] = []
+    for index, item in enumerate(preset_list):
+        preset = _validate_preset(f"presets[{index}]", item)
+        if any(p.name == preset.name for p in presets):
+            raise FilterPresetError(f"presets[{index}].name", f"{preset.name!r} appears twice")
+        presets.append(preset)
+    return presets
+
+
+def load_filter_presets(path: Path) -> list[FilterPreset]:
+    """
+    Load the stored presets. A missing file (none saved yet) is `[]`; a file of another version, a
+    stray top-level key or a malformed preset raises (`FilterPresetError`, or `TOMLDecodeError`) --
+    the file is hand-editable and a preset is never silently skipped.
+    """
+    if not path.exists():
+        return []
+    with path.open("rb") as f:
+        raw = tomllib.load(f)
+    version = raw.get("v")
+    if (
+        type(version) is not int
+        or version != FILTER_PRESETS_VERSION
+        or not set(raw) <= {"v", "presets"}
+    ):
+        raise FilterPresetError(
+            "v", f"is not a v = {FILTER_PRESETS_VERSION} presets file (only `v` and `presets`)"
+        )
+    return validate_filter_presets({"presets": raw.get("presets", [])})
+
+
+def _preset_table(preset: FilterPreset) -> dict[str, Any]:
+    return {
+        "name": preset.name,
+        "conditions": [{"field": c.field, "op": c.op, "value": c.value} for c in preset.conditions],
+    }
+
+
+def save_filter_presets(presets: list[FilterPreset], path: Path) -> None:
+    """
+    Persist the whole preset list (`v = 1`, `[[presets]]` with `[[presets.conditions]]`), a full
+    rewrite: validated and serialized before the file is touched, then published atomically
+    (`_write_atomic`). Callers serialize concurrent writers (data_api's `PREFERENCES_LOCK`).
+    """
+    raw = {"v": FILTER_PRESETS_VERSION, "presets": [_preset_table(p) for p in presets]}
+    validate_filter_presets({"presets": raw["presets"]})
     _write_atomic(path, tomli_w.dumps(raw).encode())

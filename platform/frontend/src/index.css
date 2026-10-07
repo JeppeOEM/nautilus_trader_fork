@@ -199,6 +199,41 @@ table {
   color: var(--color-text-dim);
 }
 
+/* Story 33.7: the saved filter presets -- a select, a name and its Save, beside the chips; the
+   recalled preset's chip is the one undimmed chip. */
+.filter-presets {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-chip.filter-preset-active {
+  color: inherit;
+  border-color: var(--color-link);
+}
+
+/* Story 33.7: the 24h range cell's inline bar -- the 24 h low at the left end, the high at the
+   right, a marker where the last close sits. */
+.rankings-range {
+  position: relative;
+  display: inline-block;
+  width: 3em;
+  height: 0.5em;
+  margin-right: 0.4em;
+  background: var(--color-border);
+  vertical-align: middle;
+}
+
+.rankings-range-marker {
+  position: absolute;
+  top: -0.15em;
+  width: 2px;
+  height: 0.8em;
+  margin-left: -1px;
+  background: var(--color-link);
+}
+
 /* Story 18.1: the chart page's left tool rail -- the .tabs/.tabbtn shared pattern
    (theme.css) with only the overrides a narrow vertical rail needs (no flex:1
    stretch, compact padding), same scoped-override precedent as .filter-panel

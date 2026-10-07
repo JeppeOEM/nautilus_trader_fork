@@ -2985,10 +2985,12 @@ rankings table's single column source (`platform/CLAUDE.md` SSOT-04). `frontend/
 sequence by `data_api/tests/test_ranking_columns_mirror.py`. `[amended 2026-09-26: Story 25.1a
 -- its old renderer, `bot_tui`'s Coins pane, was deleted (rankings are web-only), and with it the
 `color_fn` member and `POSITIVE_COLOR`/`NEGATIVE_COLOR`, which only that pane read.]` Every
-`store_key` in this list
-(`ofi_10_z`, `obi_10`, `obi_5`, `obi_3`, `cvd`, `spread`, `microprice_lean`,
-`volume_delta`, `price`, `pct_1h`, `pct_24h`, `volatility`, `volatility_score`,
-`volume24h`) is a field name coming straight off a `rankings:live` rank entry —
+`store_key` in this list, in order (`ofi_10_z`, `obi_10`, `obi_5`, `obi_3`, `cvd`, `spread`,
+`volume_delta`, `price`, `pct_1h`, `pct_24h`, `pct_1w`, `pct_1m`, `volatility`,
+`volatility_score`, `volume24h`, and since Story 33.7 `open_interest`, `oi_change_1h_pct`,
+`oi_change_24h_pct`, `funding_rate`, `basis_mi_bps`, `liq_notional_1h`, `liq_ratio_1h`,
+`forced_share_1h`, `relative_volume`, `range_position_24h`; `microprice_lean` is history-only,
+`_HISTORY_ONLY_COLS`) is a field name coming straight off a `rankings:live` rank entry —
 i.e. every column this file defines maps 1:1 to a field `ranking_engine` publishes
 (§3). It is display metadata (labels, `f"{v:+.2f}"`-style formatting), not a new
 computation. The same module also holds the Technicals tab's per-coin
@@ -3013,6 +3015,64 @@ descending, then back to message order; an Exchange sort groups a venue's market
 before `spot` ascending) before the rank tie-break; ties break by rank, a row missing the field
 sorts last, and every row keeps its message rank -- and filterable with `=` (`Symbol`, `Exchange (venue)`).
 The page never derives a symbol from the id itself. `[amended 2026-09-28: Story 29.1]`
+
+**Story 33.7's columns, units and display** (`[amended 2026-10-07: Story 33.7]`). The ten columns
+appended after `volume24h` show §3.3's fields as published; the page only scales a value for
+display (a fraction x 100 as a percent), it computes none (SSOT-02):
+
+| Column | Key | Unit as published | Shown |
+|---|---|---|---|
+| OI | `open_interest` | the venue's open-interest unit (§1.8) | 2 decimals |
+| OI Δ1h % / OI Δ24h % | `oi_change_1h_pct` / `oi_change_24h_pct` | percent (§3.3) | signed, 2 decimals, `%` |
+| Funding | `funding_rate` | fraction per funding interval | x 100, 4 decimals, `%`; title: `annualised <funding_annualised as %> · next payment in HH:MM:SS` (browser clock against `next_funding_ns`) or `next payment unknown` |
+| Basis (bps) | `basis_mi_bps` | bps | signed, 2 decimals |
+| Liq 1h | `liq_notional_1h` | quote currency (size x bankruptcy price) | / 1000, 1 decimal, `K`; title: the long and short base sizes |
+| Liq L/S | `liq_ratio_1h` | fraction (long share of the liquidated size) | x 100, 1 decimal, `%` |
+| Forced % | `forced_share_1h` | fraction (liquidated over traded size) | x 100, 1 decimal, `%` |
+| Rel vol | `relative_volume` | ratio | 2 decimals, `×` |
+| 24h range | `range_position_24h` | fraction (0 = low, 1 = high) | x 100, 0 decimals, `%`, plus an inline bar with a marker at that position; title: `low … · high …` |
+
+**Spot dash.** `DERIVATIVE_COLUMN_KEYS` (OI, both OI Δ %, Funding, Basis, Liq 1h, Liq L/S,
+Forced %; mirrored by the page's `DERIVATIVE_COLUMNS`, held equal by
+`test_ranking_columns_mirror.py`) read as missing on a row whose `market` is `"spot"`, whatever the
+value: the cell shows `—` (never 0), the sort puts it last and no filter matches it. Rel vol and the
+24h range are not derivatives, so spot shows them.
+
+**Sort.** Every Performance header sorts (a click cycles ascending, descending, then rank order); a
+missing value (null, absent, a non-number, NaN) sorts last in both directions and ties break by
+rank. The `{key, direction}` is a per-viewer convenience kept in `localStorage` (`rankings-sort`);
+a stored key that is no longer a column, a bad shape or a throwing storage reads as rank order. A
+metric-column sort orders the Performance tab only (the Technicals tab keeps the rank order, and the
+stored sort is unchanged); a Symbol or Exchange sort orders both tabs. The Technicals tab's columns
+stay unsortable.
+
+**Filters.** Every new column is a filter field, typed in the row's raw units, its label naming the
+unit where the cell shows it scaled: `OI (venue units)`, `Funding (fraction/interval)`, `Liq 1h
+(raw quote)`, `Liq L/S (fraction)`, `Forced % (fraction)`, `24h range (fraction)` (as `Vol24h (raw
+USD)`); `=` matches what the cell shows (`DisplayPrecision.scale`, the typed value divided by the
+scale without float noise, audit D-193).
+
+**Saved presets.** Named filter presets are one server-side list, `screener_filter_presets.toml` in
+the preferences directory (`SCREENER_FILTER_PRESETS_PATH`, derived from `CHART_PREFERENCES_DIR`;
+SSOT-06): `v = 1` and a `presets` array of tables `{name, conditions}`, each condition `{field, op,
+value}` (`op` one of `> < >= <= =`, `value` a finite number, or a string of at most 512 characters
+with `=` only). No display precision is stored: the page re-derives it from its field list on recall
+(`tech:` fields from the Technicals precision). `GET /api/rankings/filter-presets` returns
+`{presets: [...]}` (a missing file is empty, a corrupt or unreadable one a 500); `PUT` takes the
+whole list as `{presets: [...]}` and returns what it stored: 400 for invalid JSON, 422 naming the
+field (`presets[i].conditions[j].value`) for a name that is empty, over 64 characters or a duplicate
+once stripped, 0 or over 50 conditions, over 100 presets, an unknown operator or key, a NaN/bool
+value, an integer a browser number (a double) would round, or a text value with an ordering
+operator; nothing is written unless every preset passes
+(`views.preferences.validate_filter_presets`), and the write is a full atomic rewrite under
+`PREFERENCES_LOCK`. Recall replaces the conditions and shows the preset's name as a chip until the
+next filter edit; a condition the page cannot apply (an unknown field or Technicals output, a
+Technicals field recalled before the Technicals columns have loaded, or an operator or value that
+no longer fits the field) is named in a notice with its reason and not applied, and a Save while the
+notice is shown writes it back unchanged (audit D-196). A Save stores every condition, including one
+hidden with its removed Technicals column. Save and Delete wait until the stored list has loaded; a
+failed load shows a Retry. Delete targets the preset last recalled or saved.
+Whole-list last-write-wins across tabs and processes (audit D-194).
 
 ### 2.11 Price alerts (the `alerting/` context, Story 24.3, was `data_api/alerts.py`)
 
@@ -3806,7 +3866,11 @@ dropped, `RankingBoard.age_out`, Story 25.2). Each row combines:
     `oi_change_1h`, `oi_change_24h` — the **absolute** change (`latest - base`, in the venue's own
     open-interest unit as stored, §1.8, not a percentage), the base being the newest point at or
     before `now - 1 h` / `24 h`, itself within 900 s of that time; null when the series (kept 25 h,
-    one point per minute) does not reach back to it. Perps only.
+    one point per minute) does not reach back to it. Perps only. `oi_change_1h_pct`,
+    `oi_change_24h_pct` (Story 33.7, appended after `range_position_24h`) — the same change as a
+    percent of its base, `(latest - base) / base x 100` computed exactly in `Decimal` and floated
+    only at the end; null when either point is null or the base is 0 (audit D-192)
+    `[amended 2026-10-07: Story 33.7]`.
   - `basis_mi_bps` — `(mark - index) / index x 10^4`; `basis_ml_bps` — the mark against the last
     traded close (`kernel.indicators.basis_bps`); null without either input, and `basis_ml_bps`
     null once that close is more than 900 s old (`LAST_CLOSE_MAX_AGE_NS`: an untraded
@@ -3862,13 +3926,15 @@ Every `db_write_interval_seconds` (60s), `RankingEngine.slow_loop_once` merges t
 `volatility`, `ofi`, `microprice`, `spread`, `rank`, `volume24h`, and since Story 33.4
 `funding_rate`, `funding_annualised`, `open_interest`, `oi_change_1h`, `oi_change_24h`,
 `basis_mi_bps`, `basis_ml_bps`, `liq_long_1h`, `liq_short_1h`, `liq_notional_1h`, `liq_ratio_1h`,
-`forced_share_1h`, `relative_volume`, `high_24h`, `low_24h`, `range_position_24h` (the §3.3
+`forced_share_1h`, `relative_volume`, `high_24h`, `low_24h`, `range_position_24h`, and since Story
+33.7 `oi_change_1h_pct`, `oi_change_24h_pct` (the §3.3
 fields of the slow row, same meaning and nulls; `next_funding_ns` is not stored: an epoch-ns
 timestamp a REAL column would round, and a schedule rather than a metric) — a 31-day rolling
 history used by the web UI's per-coin history page. `COLS` is append-only (AD-D12): on
 the writer's first connection (`SqliteMetricsStore._conn`, in the ranking process), `_migrate` adds each missing column in place as a nullable REAL, so
 every row written before the migration reads null in it, never 0; `/api/metrics/history` serves
-the new columns (`MetricHistoryItem`) `[amended 2026-10-06: Story 33.4]`. Its `price` column is the slow loop's
+the new columns (`MetricHistoryItem`) `[amended 2026-10-06: Story 33.4]` `[amended 2026-10-07:
+Story 33.7 -- the two OI percent columns, added the same way]`. Its `price` column is the slow loop's
 latest trade close (the `pct_1w`/`pct_1m` base), not the rank entry's live mid. `nearest(ts)`
 (`/api/metrics/nearest/{symbol}`) returns the row closest to `ts` only within
 `NEAREST_TOLERANCE_S` = 120 s (two write intervals); a farther row is another time, so the answer is
@@ -3887,6 +3953,12 @@ order and column values unchanged (the web page is the only renderer since Story
 ranking. The ranking's current, only
 confirmed consumer is the human-facing web UI's rankings page, not an automated
 trading decision.
+
+Since Story 33.7 that page shows the derivatives, flow and range fields as columns, sorts by every
+column and saves named filter presets server-side (§2.10); the per-coin History page tiles
+`forced_share_1h` ("Forced share 1h (fraction)") and `relative_volume` ("Relative volume (×)")
+after Story 33.5's OI, funding and liquidation tiles, skipping a column that is null in every row
+like any other `[amended 2026-10-07: Story 33.7]`.
 
 ### 3.6 The published `markets:live` message (Story 29.5)
 

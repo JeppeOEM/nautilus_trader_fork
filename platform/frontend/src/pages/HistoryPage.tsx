@@ -29,6 +29,9 @@ const METRIC_COLUMNS: { key: MetricColumnKey; label: string }[] = [
   { key: "open_interest", label: "Open interest (venue units)" },
   { key: "funding_rate", label: "Funding rate (fraction per interval)" },
   { key: "liq_notional_1h", label: "Liquidations 1h (quote notional)" },
+  // Story 33.7: the flow fields the Rankings page shows as Forced % and Rel vol, plotted as stored.
+  { key: "forced_share_1h", label: "Forced share 1h (fraction)" },
+  { key: "relative_volume", label: "Relative volume (×)" },
 ];
 
 // Stable empty-array identity (mirrors useSnapshotSeries.ts's own EMPTY_LINES precedent)

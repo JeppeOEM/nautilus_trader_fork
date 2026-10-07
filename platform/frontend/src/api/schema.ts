@@ -98,6 +98,21 @@ export interface ErrorsResponse {
   services: Record<string, ServiceErrorSummary>;
 }
 
+export interface FilterPresetConditionItem {
+  field: string;
+  op: string;
+  value: number | string;
+}
+
+export interface FilterPresetItem {
+  name: string;
+  conditions: FilterPresetConditionItem[];
+}
+
+export interface FilterPresetsResponse {
+  presets: FilterPresetItem[];
+}
+
 export interface FootprintItem {
   t: number;
   row_ticks: number | null;
@@ -259,6 +274,8 @@ export interface MetricHistoryItem {
   high_24h?: number | null;
   low_24h?: number | null;
   range_position_24h?: number | null;
+  oi_change_1h_pct?: number | null;
+  oi_change_24h_pct?: number | null;
 }
 
 export interface MetricsHistoryResponse {

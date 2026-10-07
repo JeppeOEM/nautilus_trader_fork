@@ -968,6 +968,19 @@ losses over time," not a user-configurable panel):
 > which of 1H/4H/1D/1W/1M/YTD/1Y are actually buildable today vs. requiring
 > a retention change.
 
+> **Amended 2026-10-07 (Story 33.7): derivatives, flow and range columns.**
+> After `Vol24h` the Performance tab shows ten published `rankings:live`
+> fields, appended to `views/ranking_columns.py`'s `RANKING_COLS` and its TS
+> mirror: OI (venue units), OI Δ1h % / OI Δ24h % (`oi_change_*_pct`, computed
+> by `ranking` in `Decimal`, SSOT-02), Funding (a fraction shown as a percent,
+> tooltip: annualised rate and the countdown to the next payment), Basis
+> (mark − index, bps), Liq 1h (quote notional in `K`, tooltip: long/short base
+> sizes), Liq L/S and Forced % (fractions as percents), Rel vol (`×`) and the
+> 24h range (a percent with an inline bar). The page only scales for display.
+> A spot row shows `—` in every derivatives column (`DERIVATIVE_COLUMN_KEYS`),
+> never 0; Rel vol and the range are not derivatives. Full units table:
+> `platform/docs/DATA_DICTIONARY.md` §2.10.
+
 ---
 
 ## B4. Filter panel
@@ -985,10 +998,28 @@ losses over time," not a user-configurable panel):
 - Multiple filter conditions combine with AND (don't build OR/grouped
   logic for MVP).
 
+> **Amended 2026-10-07 (Story 33.7): new fields and saved presets.** Every
+> new Performance column is a filter field, typed in the row's raw units
+> with the unit in the label (`Funding (fraction/interval)`, `Liq 1h (raw
+> quote)`, `24h range (fraction)`, …); `=` matches what the cell shows. A spot
+> row's derivative never matches. Named presets are stored server-side
+> (`screener_filter_presets.toml` in the preferences directory, `GET`/`PUT
+> /api/rankings/filter-presets`, never `localStorage`): a select recalls one
+> (replacing the conditions, its name shown as a chip until the next edit),
+> Save / Overwrite stores the current conditions under a name, Delete
+> removes the last picked one; a recalled condition the page cannot apply
+> is named in a notice with its reason, not applied, and kept on the next
+> Save. Precision is not stored.
+
 ---
 
 ## B5. Table mechanics (baseline, not otherwise specified)
 - Sort by clicking any column header, ascending/descending toggle
+  *(built, Stories 29.1 and 33.7: Symbol, Exchange and every Performance
+  header cycle ascending → descending → rank order; a missing value sorts
+  last both ways, ties by rank; the sort is kept per browser in
+  `localStorage`; a metric-column sort orders the Performance tab only, Symbol
+  and Exchange both tabs; the Technicals tab's columns stay unsortable)*
 - A symbol/name search box above the table, filters rows by text match
 - No pagination assumption either way — infinite-scroll or simple
   pagination, your call, not a functional requirement either of us has

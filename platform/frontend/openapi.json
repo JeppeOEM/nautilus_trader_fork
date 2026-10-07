@@ -561,6 +561,52 @@
         }
       }
     },
+    "/api/rankings/filter-presets": {
+      "get": {
+        "summary": "Get Filter Presets",
+        "description": "Return every saved preset; none saved yet is `[]`, a corrupt file a 500.",
+        "operationId": "get_filter_presets_api_rankings_filter_presets_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FilterPresetsResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Put Filter Presets",
+        "description": "Replace the whole preset list with the body's `{\"presets\": [...]}` and return what is stored.\n\nInvalid JSON is a 400; a body that is not a storable preset list a 422 naming the field\n(`presets[1].conditions[0].value: ...`), and nothing is written unless all of it passes. The\nwrite is a full rewrite under `PREFERENCES_LOCK`, published atomically.\n\nKnown limit: whole-list last-write-wins with no version, so two tabs or browsers saving presets\nat once overwrite each other (the later save wins), and the lock is in-process only. Upgrade\npath: a `version` returned by the GET and sent back by the PUT, a 409 on a mismatch.",
+        "operationId": "put_filter_presets_api_rankings_filter_presets_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FilterPresetsResponse"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FilterPresetsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/candles/{instrument_id}": {
       "get": {
         "summary": "Get Candles",
@@ -2317,6 +2363,81 @@
         ],
         "title": "ErrorsResponse"
       },
+      "FilterPresetConditionItem": {
+        "properties": {
+          "field": {
+            "type": "string",
+            "title": "Field"
+          },
+          "op": {
+            "type": "string",
+            "enum": [
+              ">",
+              "<",
+              ">=",
+              "<=",
+              "="
+            ],
+            "title": "Op"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "type": "object",
+        "required": [
+          "field",
+          "op",
+          "value"
+        ],
+        "title": "FilterPresetConditionItem",
+        "description": "One stored condition; its display precision is re-derived by the page on recall."
+      },
+      "FilterPresetItem": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "conditions": {
+            "items": {
+              "$ref": "#/components/schemas/FilterPresetConditionItem"
+            },
+            "type": "array",
+            "title": "Conditions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "conditions"
+        ],
+        "title": "FilterPresetItem"
+      },
+      "FilterPresetsResponse": {
+        "properties": {
+          "presets": {
+            "items": {
+              "$ref": "#/components/schemas/FilterPresetItem"
+            },
+            "type": "array",
+            "title": "Presets"
+          }
+        },
+        "type": "object",
+        "required": [
+          "presets"
+        ],
+        "title": "FilterPresetsResponse"
+      },
       "FootprintItem": {
         "properties": {
           "t": {
@@ -3378,6 +3499,28 @@
               }
             ],
             "title": "Range Position 24H"
+          },
+          "oi_change_1h_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oi Change 1H Pct"
+          },
+          "oi_change_24h_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oi Change 24H Pct"
           }
         },
         "type": "object",

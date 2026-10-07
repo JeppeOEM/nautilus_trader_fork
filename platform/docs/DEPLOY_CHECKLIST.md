@@ -1631,6 +1631,46 @@ var, compose service, bind mount or migration.
 - [ ] Check the ledger shows no new `technicals.values` line since the restart and the ErrorBar no
       console error: any one is a DATA-07 finding to explain, not noise.
 
+### 33-7-rankings-sorts-every-column-derivatives-flow-and-range-columns-saved-filter-presets (commit: this story's)
+
+The Rankings page gains ten columns (OI, OI Δ1h %, OI Δ24h %, Funding, Basis, Liq 1h, Liq L/S,
+Forced %, Rel vol, 24h range), a sort on every Performance header kept in the browser, and named
+filter presets saved server-side in `data/preferences/screener_filter_presets.toml` (no new mount:
+the preferences directory is already mounted). `ranking` publishes two added keys,
+`oi_change_1h_pct`/`oi_change_24h_pct` (appended after every existing one, AD-D12), and
+`metrics.db` gains the matching two nullable columns, added in place by `_migrate` on the ranking
+engine's first write -- no manual migration. The History page tiles `forced_share_1h` and
+`relative_volume`. No config key, env var or compose service changes.
+
+- [ ] On the VPS, pull this commit and rebuild/restart the two services:
+      `cd ~/nautilus_trader_fork/platform && docker compose up -d --build ranking_engine data_api`.
+- [ ] After one slow loop (60 s), check the published keys:
+      `curl -s localhost:9100/api/rankings | python3 -c 'import json,sys; r=json.load(sys.stdin)["items"]; print([(x["instrument_id"], x.get("oi_change_1h_pct"), x.get("oi_change_24h_pct")) for x in r[:5]])'`
+      prints both keys on every row: a number on a perp whose open interest reaches back 1 h
+      (24 h for the second), `None` on spot and on a perp with a shorter series.
+- [ ] Check the migration ran: `sqlite3 data/metrics/metrics.db "PRAGMA table_info(snapshots)" | tail -2`
+      lists `oi_change_1h_pct` and `oi_change_24h_pct` (REAL), and
+      `curl -s "localhost:9100/api/metrics/history/BTCUSDT-LINEAR.BYBIT?days=1" | python3 -c 'import json,sys; i=json.load(sys.stdin)["items"]; print(i[0].get("oi_change_1h_pct"), i[-1].get("oi_change_1h_pct"))'`
+      prints `None` for a row written before the deploy and a number for a row after it (once the
+      series reaches back 1 h).
+- [ ] Curl the presets route: `curl -s localhost:9100/api/rankings/filter-presets` prints
+      `{"presets":[]}` before any save; a malformed PUT
+      `curl -s -X PUT -H 'content-type: application/json' -d '{"presets":[{"name":"x","conditions":[{"field":"f","op":"!=","value":1}]}]}' localhost:9100/api/rankings/filter-presets`
+      prints a 422 detail starting `presets[0].conditions[0].op`, and no
+      `data/preferences/screener_filter_presets.toml` was written by it.
+- [ ] In the browser, on Rankings: the ten columns render after Vol24h; a Bybit spot row reads `—`
+      in OI, both OI Δ %, Funding, Basis, Liq 1h, Liq L/S and Forced % (Rel vol and 24h range
+      filled); a Hyperliquid row reads `—` in Liq 1h, Liq L/S and Forced %. Hover a Funding cell:
+      `annualised …% · next payment in HH:MM:SS`, counting down.
+- [ ] Click a Performance header three times: ascending, descending, rank order, with empty cells
+      last both ways. Sort Funding descending and reload: the sort is restored.
+- [ ] Add `Funding (fraction/interval) > 0.0001`, type a preset name, Save; open the page in a
+      second browser (or a private window): the preset is listed, and picking it applies the same
+      condition with its name as a chip; `cat data/preferences/screener_filter_presets.toml` shows
+      `v = 1` and the preset. Delete it from the page.
+- [ ] Open one coin's History page (`/history/BTCUSDT-LINEAR.BYBIT`): the Forced share 1h and
+      Relative volume tiles draw after the liquidation tile once the series has values.
+
 ### 33-14-liquidation-cascade-bot-shorts-into-a-long-liquidation-cascade-backtested-and-paper-run (commit: this story's)
 
 A new paper strategy, `liquidation_cascade` (`research/strategies/liquidation_cascade_strategy.py`,

@@ -13,7 +13,17 @@ import {
 import type { TechnicalsColumn } from "../api/schema";
 import IndicatorPicker from "../components/chart/IndicatorPicker";
 import { useLiveChannel } from "../hooks/useLiveChannel";
-import FilterPanel, { type FilterField } from "./FilterPanel";
+import { formatCountdown, formatPercent } from "../lib/units";
+import FilterPanel, { type FilterField, type PresetControls } from "./FilterPanel";
+import {
+  type NotApplied,
+  type NotAppliedReason,
+  notAppliedNotice,
+  recallPreset,
+  toStoredConditions,
+  upsertPreset,
+  useFilterPresets,
+} from "./filterPresets";
 import { applyFilters, type DisplayPrecision, type FilterCondition, formatFixed } from "./filters";
 import { buildGroups, COLUMN_TIMEFRAMES, columnBarSeconds, reorder } from "./technicals";
 
@@ -59,6 +69,11 @@ function saveDeselectedVenues(venues: Set<string>): void {
 // so a saved condition survives reordering/removing other columns.
 const TECHNICAL_FIELD_PREFIX = "tech:";
 
+/** The Technicals entry a `tech:{entry name}.{output attr}` field reads. */
+function technicalEntryName(field: string): string {
+  return field.slice(TECHNICAL_FIELD_PREFIX.length).replace(/\.[^.]*$/, "");
+}
+
 // Every Technicals output cell and filter field: 4 decimals.
 const TECHNICALS_PRECISION: DisplayPrecision = { decimals: 4 };
 
@@ -89,6 +104,20 @@ function fmtMillions(v: number, precision: DisplayPrecision): string {
   return `${formatFixed(v, precision)}M`;
 }
 
+// Story 33.7: a fraction (funding, liquidation shares, the range position) is shown as a percent
+// by its precision's `scale: 0.01` -- the display scaling the page may do, never a computation.
+function fmtFraction(v: number, precision: DisplayPrecision): string {
+  return `${formatFixed(v, precision)}%`;
+}
+
+function fmtThousands(v: number, precision: DisplayPrecision): string {
+  return `${formatFixed(v, precision)}K`;
+}
+
+function fmtRatio(v: number, precision: DisplayPrecision): string {
+  return `${formatFixed(v, precision)}×`;
+}
+
 const RANKING_COLS: RankingColumn[] = [
   { key: "ofi_10_z", label: "OFI10z", precision: { decimals: 2 }, format: fmtSigned },
   { key: "obi_10", label: "OBI10", precision: { decimals: 3 }, format: formatFixed },
@@ -105,7 +134,86 @@ const RANKING_COLS: RankingColumn[] = [
   { key: "volatility", label: "Vol 24h σ (trade closes)", precision: { decimals: 6 }, format: formatFixed },
   { key: "volatility_score", label: "Vol 1h σ (mids)", precision: { decimals: 6 }, format: formatFixed },
   { key: "volume24h", label: "Vol24h", precision: { scale: 1e6, decimals: 3 }, format: fmtMillions },
+  { key: "open_interest", label: "OI", precision: { decimals: 2 }, format: formatFixed },
+  { key: "oi_change_1h_pct", label: "OI Δ1h %", precision: { decimals: 2 }, format: fmtPercent },
+  { key: "oi_change_24h_pct", label: "OI Δ24h %", precision: { decimals: 2 }, format: fmtPercent },
+  { key: "funding_rate", label: "Funding", precision: { scale: 0.01, decimals: 4 }, format: fmtFraction },
+  { key: "basis_mi_bps", label: "Basis (bps)", precision: { decimals: 2 }, format: fmtSigned },
+  { key: "liq_notional_1h", label: "Liq 1h", precision: { scale: 1e3, decimals: 1 }, format: fmtThousands },
+  { key: "liq_ratio_1h", label: "Liq L/S", precision: { scale: 0.01, decimals: 1 }, format: fmtFraction },
+  { key: "forced_share_1h", label: "Forced %", precision: { scale: 0.01, decimals: 1 }, format: fmtFraction },
+  { key: "relative_volume", label: "Rel vol", precision: { decimals: 2 }, format: fmtRatio },
+  { key: "range_position_24h", label: "24h range", precision: { scale: 0.01, decimals: 0 }, format: fmtFraction },
 ];
+
+// Story 33.7: the derivatives columns -- mirror of views/ranking_columns.py's
+// DERIVATIVE_COLUMN_KEYS (held equal by data_api/tests/test_ranking_columns_mirror.py). Spot has no
+// derivatives: on a `market: "spot"` row each of these reads as missing whatever the value says
+// (a dash, sorted last, never matching a filter). Relative volume and the 24h range are not
+// derivatives, so spot shows them.
+const DERIVATIVE_COLUMNS = new Set<string>([
+  "open_interest",
+  "oi_change_1h_pct",
+  "oi_change_24h_pct",
+  "funding_rate",
+  "basis_mi_bps",
+  "liq_notional_1h",
+  "liq_ratio_1h",
+  "forced_share_1h",
+]);
+
+// A filter value is typed in the row's raw units; the field label names the unit wherever the cell
+// shows the value scaled (volume24h in millions, a fraction as a percent). Known limit: a viewer
+// who types the shown percent instead filters 100x off (audit D-193). Upgrade path: a per-field
+// input unit converted once in the builder.
+const FILTER_LABELS: Record<string, string> = {
+  volume24h: "Vol24h (raw USD)",
+  open_interest: "OI (venue units)",
+  funding_rate: "Funding (fraction/interval)",
+  liq_notional_1h: "Liq 1h (raw quote)",
+  liq_ratio_1h: "Liq L/S (fraction)",
+  forced_share_1h: "Forced % (fraction)",
+  range_position_24h: "24h range (fraction)",
+};
+
+/** A rank-entry metric as the page reads it: a spot row's derivative is missing (Story 33.7). */
+function metricValue(row: RankingRow, key: string): unknown {
+  return DERIVATIVE_COLUMNS.has(key) && row.market === "spot" ? undefined : row[key];
+}
+
+/** The value when it is a number; undefined when missing (null, absent, a non-number or NaN). */
+function presentNumber(value: unknown): number | undefined {
+  return typeof value === "number" && !Number.isNaN(value) ? value : undefined;
+}
+
+function plainNumber(value: unknown): string {
+  return String(presentNumber(value) ?? "—");
+}
+
+/** The funding tooltip's payment clause; a time at or before now reads "due" (the venue has not
+ * sent the next schedule yet), never a countdown frozen at 00:00:00. */
+function fundingPayment(nextNs: number | undefined, nowMs: number): string {
+  if (nextNs === undefined) return "next payment unknown";
+  const remainingMs = nextNs / 1e6 - nowMs;
+  return remainingMs <= 0 ? "next payment due" : `next payment in ${formatCountdown(remainingMs)}`;
+}
+
+// Cell tooltips (a `title`), keyed by column -- kept outside RANKING_COLS so that list stays the
+// flat literal array the mirror test reads.
+const CELL_TITLES: Record<string, (row: RankingRow, nowMs: number) => string> = {
+  funding_rate: (row, nowMs) => {
+    const annualised = presentNumber(row.funding_annualised);
+    const rate = annualised === undefined ? "annualised —" : `annualised ${formatPercent(annualised, 2)}%`;
+    const next = presentNumber(row.next_funding_ns);
+    // Known limit: the countdown runs on this browser's clock against the venue's next_funding_ns, so
+    // a skewed local clock shifts it (audit D-195). Upgrade path: the server's time on each message.
+    return `${rate} · ${fundingPayment(next, nowMs)}`;
+  },
+  liq_notional_1h: (row) =>
+    `liquidated last 1 h (base size): long ${plainNumber(row.liq_long_1h)} · short ${plainNumber(row.liq_short_1h)}`,
+  liq_ratio_1h: () => "long share of liquidated size",
+  range_position_24h: (row) => `low ${plainNumber(row.low_24h)} · high ${plainNumber(row.high_24h)}`,
+};
 
 function formatCell(col: RankingColumn, value: unknown): string {
   if (value === null || value === undefined) return "—";
@@ -140,11 +248,13 @@ export interface RankingsLiveMessage {
 // Story 29.1: Symbol and Exchange are pinned identity columns (like Rank and Instrument), not
 // RANKING_COLS metrics. Both read published rank-entry fields only -- `symbol` is ranking's
 // kernel.venues.base_symbol, never re-derived from the id here (SIGNAL-01).
-type SortKey = "symbol" | "venue";
+// Story 33.7: every RANKING_COLS key sorts too (numerically), so a SortKey is either.
+type SortKey = string;
 // The pinned columns every tab leads with: Rank, Symbol, Exchange, Instrument.
 const PINNED_COLUMN_COUNT = 4;
-// What each sort compares, in order: an Exchange sort groups a venue's perp and spot rows.
-const SORT_FIELDS: Record<SortKey, readonly string[]> = { symbol: ["symbol"], venue: ["venue", "market"] };
+// What each text sort compares, in order: an Exchange sort groups a venue's perp and spot rows.
+const TEXT_SORT_FIELDS: Record<string, readonly string[]> = { symbol: ["symbol"], venue: ["venue", "market"] };
+const SORT_KEYS = new Set<string>([...Object.keys(TEXT_SORT_FIELDS), ...RANKING_COLS.map((col) => col.key)]);
 type SortDirection = "ascending" | "descending";
 interface RowSort {
   key: SortKey;
@@ -177,18 +287,59 @@ function compareText(left: string | undefined, right: string | undefined, sign: 
   return (left < right ? -1 : 1) * sign;
 }
 
+// A metric column's order: a missing value (null, absent, a non-number, NaN -- and a spot row's
+// derivative, `metricValue`) sorts last in both directions.
+function compareNumber(left: number | undefined, right: number | undefined, sign: number): number {
+  if (left === right) return 0;
+  if (left === undefined) return 1;
+  if (right === undefined) return -1;
+  return (left < right ? -1 : 1) * sign;
+}
+
+function compareRows(a: RankedRow, b: RankedRow, key: SortKey, sign: number): number {
+  const textFields = TEXT_SORT_FIELDS[key];
+  if (textFields === undefined) {
+    return compareNumber(presentNumber(metricValue(a.row, key)), presentNumber(metricValue(b.row, key)), sign);
+  }
+  for (const field of textFields) {
+    const order = compareText(textField(a.row, field), textField(b.row, field), sign);
+    if (order !== 0) return order;
+  }
+  return 0;
+}
+
 // The viewer's explicit sort over the already-narrowed rows. Stable by construction: ties
 // break by ascending message rank in either direction.
 function sortRows(rows: RankedRow[], sort: RowSort | null): RankedRow[] {
   if (sort === null) return rows;
   const sign = sort.direction === "ascending" ? 1 : -1;
-  return [...rows].sort((a, b) => {
-    for (const field of SORT_FIELDS[sort.key]) {
-      const order = compareText(textField(a.row, field), textField(b.row, field), sign);
-      if (order !== 0) return order;
-    }
-    return a.rank - b.rank;
-  });
+  return [...rows].sort((a, b) => compareRows(a, b, sort.key, sign) || a.rank - b.rank);
+}
+
+// Story 33.7: the sort is a per-viewer convenience kept in this browser (like the venue chips):
+// `{key, direction}`, or nothing for rank order. A stored key no longer a column, a bad shape or a
+// throwing storage all read as rank order.
+const SORT_STORAGE_KEY = "rankings-sort";
+
+function loadSort(): RowSort | null {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(SORT_STORAGE_KEY) ?? "null");
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const { key, direction } = parsed as Record<string, unknown>;
+    if (typeof key !== "string" || !SORT_KEYS.has(key)) return null;
+    return direction === "ascending" || direction === "descending" ? { key, direction } : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveSort(sort: RowSort | null): void {
+  try {
+    if (sort === null) localStorage.removeItem(SORT_STORAGE_KEY);
+    else localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify(sort));
+  } catch {
+    // storage blocked: the sort just won't survive a reload
+  }
 }
 
 const SORT_ARROWS: Record<SortDirection, string> = { ascending: " ▲", descending: " ▼" };
@@ -225,6 +376,26 @@ function ExchangeCell({ row }: { row: RankingRow }) {
     <td>
       {venue ?? "—"}
       {venue !== undefined && market !== undefined && <span className="rankings-market-tag"> · {market}</span>}
+    </td>
+  );
+}
+
+// One Performance metric cell: the formatted value (a spot row's derivative as the dash), its
+// tooltip, and for the 24h range a small bar with the last close's position marked (Story 33.7).
+function MetricCell({ col, row, nowMs }: { col: RankingColumn; row: RankingRow; nowMs: number }) {
+  const value = metricValue(row, col.key);
+  const text = formatCell(col, value);
+  const title = text === "—" ? undefined : CELL_TITLES[col.key]?.(row, nowMs);
+  const position = col.key === "range_position_24h" ? presentNumber(value) : undefined;
+  return (
+    <td title={title}>
+      {position !== undefined && (
+        <span className="rankings-range" aria-hidden="true" data-testid="range-bar">
+          {/* Clamped to the bar visually only; the text beside it keeps the published value. */}
+          <span className="rankings-range-marker" style={{ left: `${Math.min(100, Math.max(0, position * 100))}%` }} />
+        </span>
+      )}
+      {text}
     </td>
   );
 }
@@ -313,8 +484,9 @@ export default function RankingsPage() {
   // bar itself reuses the shared .tabs/.tabbtn pattern from theme.css (the same
   // classes DocsPage's sidebar tabs use) rather than a second tab visual style.
   const [activeTab, setActiveTab] = useState<"performance" | "technicals">("performance");
-  // Story 29.1: the viewer's explicit Symbol/Exchange sort; null is message order (the rank).
-  const [sort, setSort] = useState<RowSort | null>(null);
+  // Story 29.1: the viewer's explicit sort (Symbol/Exchange, and every Performance metric since
+  // Story 33.7); null is message order (the rank). Kept in this browser across reloads.
+  const [sort, setSort] = useState<RowSort | null>(loadSort);
 
   // Technicals columns (Story 17.5): the screener-wide selection, owned/persisted by the shared
   // IndicatorPicker; header actions below (remove/reorder) save directly and bump `reloadKey`
@@ -323,23 +495,40 @@ export default function RankingsPage() {
   const [technicalsEntries, setTechnicalsEntries] = useState<TechnicalsColumn[]>([]);
   const [reloadKey, setReloadKey] = useState(0);
   const savedLocally = useRef(false); // a header save beat the mount fetch: its result is stale
+  // Whether the selection is known (fetched, or set by a header save): until then a recalled `tech:`
+  // field cannot be told from a removed column's.
+  const [technicalsKnown, setTechnicalsKnown] = useState(false);
   const [dragFrom, setDragFrom] = useState<number | null>(null);
   const technicalsActive = activeTab === "technicals" && technicalsEntries.length > 0;
   // Filters (Story 17.6) narrow the row set on either tab; a Technicals-field filter therefore
   // needs those columns' entries and values loaded even while Performance is showing.
   const [allFilters, setFilters] = useState<FilterCondition[]>([]);
+  // Story 33.7: saved presets (server-side), the recalled one's name -- cleared by any filter edit
+  // -- and the notice naming a recalled condition that could not be applied.
+  const filterPresets = useFilterPresets();
+  const [activePreset, setActivePreset] = useState<string | null>(null);
+  // The conditions the last recall could not apply, exactly as stored: kept on a Save while their
+  // notice is shown (an edit clears both), so saving a recalled preset never drops one.
+  const [notApplied, setNotApplied] = useState<NotApplied[]>([]);
+  // The filters as of the latest render, for a save resolving later (the chip is set only if the
+  // filters it stored are still the ones on screen).
+  const allFiltersRef = useRef(allFilters);
+  useEffect(() => {
+    allFiltersRef.current = allFilters;
+  });
   // A filter on a Technicals output whose column was removed would exclude every row with no
   // visible cause -- it is ignored (and its chip hidden) with its column, derived here rather
   // than pruned from state so it comes back if the same column is re-added.
   const filters = allFilters.filter((f) => {
     if (!f.field.startsWith(TECHNICAL_FIELD_PREFIX)) return true;
-    const name = f.field.slice(TECHNICAL_FIELD_PREFIX.length).replace(/\.[^.]*$/, "");
+    const name = technicalEntryName(f.field);
     return technicalsEntries.some((e) => e.name === name);
   });
   useEffect(() => {
     fetchTechnicalsColumns()
       .then((loaded) => {
         if (!savedLocally.current) setTechnicalsEntries(loaded);
+        setTechnicalsKnown(true);
       })
       .catch((err: unknown) => console.error("RankingsPage: failed to load Technicals columns", err));
   }, []);
@@ -363,9 +552,11 @@ export default function RankingsPage() {
     // millions but typed in raw USD: `=` divides the typed value by the column's scale before
     // matching the shown millions (so only a multiple of $1000 can match), and `<`/`>` compare
     // raw USD outside that shown-equal band.
+    // Story 33.7: likewise every fraction shown as a percent is typed as the raw fraction, which
+    // its label names (`Funding (fraction/interval)`).
     ...RANKING_COLS.map((col) => ({
       key: col.key,
-      label: col.key === "volume24h" ? `${col.label} (raw USD)` : col.label,
+      label: FILTER_LABELS[col.key] ?? col.label,
       precision: col.precision,
     })),
     { key: "symbol", label: "Symbol", text: true },
@@ -382,12 +573,66 @@ export default function RankingsPage() {
   ];
 
   function readField(row: RankingRow, field: string): unknown {
-    if (!field.startsWith(TECHNICAL_FIELD_PREFIX)) return row[field];
+    if (!field.startsWith(TECHNICAL_FIELD_PREFIX)) return metricValue(row, field);
     const path = field.slice(TECHNICAL_FIELD_PREFIX.length);
     const dot = path.lastIndexOf(".");
     const entryIndex = technicalsEntries.findIndex((e) => e.name === path.slice(0, dot));
     return entryIndex < 0 ? undefined : technicalsValues?.[row.instrument_id]?.[`${entryIndex}.${path.slice(dot + 1)}`];
   }
+
+  function editFilters(next: FilterCondition[]): void {
+    setFilters(next);
+    setActivePreset(null);
+    setNotApplied([]);
+  }
+
+  // A recalled `tech:` field takes the Technicals precision while its column exists, even before
+  // its values (and so its outputs) have loaded; a removed column's field, or an output its loaded
+  // values do not have, is unknown. Before the selection itself is known nothing can be told.
+  function technicalsPrecision(field: string): DisplayPrecision | NotAppliedReason {
+    if (!field.startsWith(TECHNICAL_FIELD_PREFIX)) return "unknown field";
+    if (!technicalsKnown) return "Technicals columns not loaded";
+    const name = technicalEntryName(field);
+    const group = groups.find((g) => g.entry.name === name);
+    if (group === undefined) return "unknown field";
+    const attr = field.slice(TECHNICAL_FIELD_PREFIX.length + name.length + 1);
+    return group.attrs.length > 0 && !group.attrs.includes(attr) ? "unknown field" : TECHNICALS_PRECISION;
+  }
+
+  const presetControls: PresetControls = {
+    presets: filterPresets.presets,
+    active: activePreset,
+    notice: notAppliedNotice(notApplied),
+    loaded: filterPresets.loaded,
+    savable: allFilters.length + notApplied.length > 0,
+    error: filterPresets.error,
+    busy: filterPresets.busy,
+    onRecall: (name) => {
+      const preset = filterPresets.presets.find((p) => p.name === name);
+      if (preset === undefined) return;
+      const recalled = recallPreset(preset, filterFields, technicalsPrecision);
+      setFilters(recalled.conditions);
+      setActivePreset(name);
+      setNotApplied(recalled.notApplied);
+    },
+    onSave: (name) => {
+      // Every condition, the ones hidden with a removed Technicals column included, plus the ones
+      // the last recall could not apply: a Save never drops a stored condition.
+      const applied = toStoredConditions(allFilters);
+      const preset = { name, conditions: [...applied, ...notApplied.map((n) => n.stored)] };
+      filterPresets.persist(upsertPreset(filterPresets.presets, preset), () => {
+        const current = toStoredConditions(allFiltersRef.current);
+        if (JSON.stringify(current) === JSON.stringify(applied)) setActivePreset(name);
+      });
+    },
+    onRetry: filterPresets.retry,
+    onDelete: (name) => {
+      filterPresets.persist(
+        filterPresets.presets.filter((p) => p.name !== name),
+        () => setActivePreset((active) => (active === name ? null : active)),
+      );
+    },
+  };
 
   const [deselectedVenues, setDeselectedVenues] = useState<Set<string>>(loadDeselectedVenues);
 
@@ -475,13 +720,20 @@ export default function RankingsPage() {
   const venueRows = rows
     .map((row, index) => ({ row, rank: index + 1 }))
     .filter(({ row }) => typeof row.venue !== "string" || !deselectedVenues.has(row.venue));
-  // Sorting comes last, over what the chips and conditions left, and carries each row's rank.
+  // Sorting comes last, over what the chips and conditions left, and carries each row's rank. A
+  // metric-column sort applies on the Performance tab only, where its header shows it; Symbol and
+  // Exchange (pinned on both tabs) sort both. The stored sort is unchanged by a tab switch.
+  const tabSort = sort !== null && TEXT_SORT_FIELDS[sort.key] === undefined && activeTab !== "performance" ? null : sort;
   const visibleRows = sortRows(
     applyFilters(venueRows, activeFilters, ({ row }, field) => readField(row, field)),
-    sort,
+    tabSort,
   );
   const pinnedRowSpan = technicalsActive ? 2 : 1;
-  const onSort = (key: SortKey) => setSort((current) => nextSort(current, key));
+  const onSort = (key: SortKey): void => {
+    const next = nextSort(sort, key);
+    setSort(next);
+    saveSort(next);
+  };
 
   return (
     <div className="term-box" data-label="Rankings">
@@ -510,8 +762,9 @@ export default function RankingsPage() {
       <FilterPanel
         fields={filterFields}
         conditions={filters}
-        onChange={setFilters}
+        onChange={editFilters}
         onOpen={() => setFilterBuilderOpened(true)}
+        presets={presetControls}
       />
       {skippedFilters > 0 && (
         <p className="rankings-empty">
@@ -542,7 +795,9 @@ export default function RankingsPage() {
             <th rowSpan={pinnedRowSpan}>Instrument</th>
             {activeTab === "performance" && <th>Kind</th>}
             {activeTab === "performance" &&
-              RANKING_COLS.map((col) => <th key={col.key}>{col.label}</th>)}
+              RANKING_COLS.map((col) => (
+                <SortHeader key={col.key} label={col.label} sortKey={col.key} sort={sort} onSort={onSort} rowSpan={1} />
+              ))}
             {technicalsActive &&
               groups.map((group) => (
                 <th
@@ -652,7 +907,7 @@ export default function RankingsPage() {
                 </td>
                 {activeTab === "performance" && <td>{textField(row, "venue_kind") ?? "—"}</td>}
                 {activeTab === "performance" &&
-                  RANKING_COLS.map((col) => <td key={col.key}>{formatCell(col, row[col.key])}</td>)}
+                  RANKING_COLS.map((col) => <MetricCell key={col.key} col={col} row={row} nowMs={now} />)}
                 {technicalsActive &&
                   groups.flatMap((group) =>
                     (group.attrs.length > 0 ? group.attrs : [null]).map((attr) => {
@@ -685,7 +940,10 @@ export default function RankingsPage() {
           saveConfig={saveTechnicalsColumns}
           reloadKey={reloadKey}
           disabled={saving}
-          onEntriesChange={setTechnicalsEntries}
+          onEntriesChange={(next) => {
+            setTechnicalsEntries(next);
+            setTechnicalsKnown(true);
+          }}
         />
       )}
     </div>

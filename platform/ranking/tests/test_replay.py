@@ -48,7 +48,8 @@ Story 33.4 appended the derivatives, liquidation and flow keys (`ADDED_33_4`) to
 after `volatility` and before `rank`, and the matching numeric columns to `metrics.db`. They are
 stripped from each message with `symbol` (`_without_added_keys`) and the stored rows are projected
 onto the recorded columns (`_project`), so every pre-33.4 byte, publish decision and stored value is
-still proven unchanged; `_assert_added_keys_placed` pins where the new keys sit.
+still proven unchanged; `_assert_added_keys_placed` pins where the new keys sit. Story 33.7 appended
+the open-interest percent changes (`ADDED_33_7`) after them, stripped and projected the same way.
 """
 
 import asyncio
@@ -249,14 +250,17 @@ ADDED_33_4 = (
     "low_24h",
     "range_position_24h",
 )
+# Story 33.7's appended keys: the open-interest percent changes, right after the 33.4 keys.
+ADDED_33_7 = ("oi_change_1h_pct", "oi_change_24h_pct")
+ADDED_KEYS = (*ADDED_33_4, *ADDED_33_7)
 
 
 def _assert_added_keys_placed(message: dict) -> None:
-    """Assert the 33.4 keys sit together right after `volatility` and `rank` stays last."""
+    """Assert the 33.4 and 33.7 keys sit together right after `volatility`; `rank` stays last."""
     for rank in message["ranks"]:
         keys = list(rank)
         start = keys.index("volatility") + 1
-        assert tuple(keys[start : start + len(ADDED_33_4)]) == ADDED_33_4
+        assert tuple(keys[start : start + len(ADDED_KEYS)]) == ADDED_KEYS
         assert keys[-1] == "rank"
 
 
@@ -271,14 +275,14 @@ def _assert_symbol_right_after_venue(message: dict) -> None:
 def _without_added_keys(message: str) -> str:
     """
     Return the message as the recording's producer published it: `symbol` (29.1) and every
-    `ADDED_33_4` key stripped from each rank and the rest re-serialized exactly as the engine does
+    `ADDED_33_4`/`ADDED_33_7` key stripped from each rank and the rest re-serialized exactly as the engine does
     (`json.dumps`, insertion order kept). Matching the recorded hashes proves every existing field,
     byte and order is unchanged; the fixture is not re-recorded, which would prove nothing about the
     existing bytes.
     """
     decoded = json.loads(message)
     for rank in decoded["ranks"]:
-        for key in ("symbol", *ADDED_33_4):
+        for key in ("symbol", *ADDED_KEYS):
             del rank[key]
     return json.dumps(decoded)
 

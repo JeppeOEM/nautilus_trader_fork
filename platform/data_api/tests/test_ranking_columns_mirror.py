@@ -23,6 +23,7 @@ import os
 import re
 from pathlib import Path
 
+from views.ranking_columns import DERIVATIVE_COLUMN_KEYS
 from views.ranking_columns import RANKING_COLS
 
 
@@ -33,6 +34,7 @@ _PLATFORM_DIR = Path(_SOURCE) if _SOURCE else Path(__file__).resolve().parents[2
 _RANKINGS_PAGE = _PLATFORM_DIR / "frontend" / "src" / "pages" / "RankingsPage.tsx"
 _TS_ARRAY = re.compile(r"const RANKING_COLS: RankingColumn\[\] = \[(.*?)\n\];", re.DOTALL)
 _TS_ENTRY = re.compile(r'\{\s*key:\s*"([^"]+)",\s*label:\s*"([^"]+)"')
+_TS_DERIVATIVES = re.compile(r"const DERIVATIVE_COLUMNS = new Set<string>\(\[(.*?)\]\);", re.DOTALL)
 
 
 def _ts_columns() -> list[tuple[str, str]]:
@@ -43,3 +45,10 @@ def _ts_columns() -> list[tuple[str, str]]:
 
 def test_ts_mirror_has_rankings_cols_key_label_sequence() -> None:
     assert _ts_columns() == [(key, label) for key, label, _format in RANKING_COLS]
+
+
+def test_ts_derivative_columns_mirror_the_derivative_column_keys() -> None:
+    """Story 33.7: the columns a spot row dashes are the same set on both sides."""
+    found = _TS_DERIVATIVES.search(_RANKINGS_PAGE.read_text())
+    assert found is not None, f"DERIVATIVE_COLUMNS set not found in {_RANKINGS_PAGE}"
+    assert set(re.findall(r'"([^"]+)"', found.group(1))) == DERIVATIVE_COLUMN_KEYS

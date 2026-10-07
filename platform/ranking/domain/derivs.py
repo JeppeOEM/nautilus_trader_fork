@@ -25,7 +25,8 @@ formula runs in `Decimal`; a field becomes a `float` only in the row `DerivsStat
 
 Null vs 0: a missing input is None, never 0 -- an id with no liquidation feed
 (`kernel.liquidation.has_liquidation_feed`) has every `liq_*`/`forced_share_1h` None, a ratio with a
-zero denominator is None, and a change whose base the series does not reach is None.
+zero denominator is None, and a change whose base the series does not reach is None (so is a
+percent change, `oi_change_*_pct`, whose base is 0).
 
 Pure (ranking/domain): no clock, no I/O, no ledger -- a command returns what to ledger.
 
@@ -117,6 +118,8 @@ DERIVS_FIELDS: tuple[str, ...] = (
     "high_24h",
     "low_24h",
     "range_position_24h",
+    "oi_change_1h_pct",
+    "oi_change_24h_pct",
 )
 
 
@@ -136,6 +139,17 @@ def _float(value: Decimal | None) -> float | None:
 
 def _ratio(numerator: Decimal, denominator: Decimal) -> Decimal | None:
     return numerator / denominator if denominator else None
+
+
+def _percent_change(latest: Decimal | None, base: Decimal | None) -> Decimal | None:
+    """
+    Return `(latest - base) / base * 100` exactly in `Decimal`; None when either is missing or the
+    base is 0 (a percent of nothing is undefined, never 0 or infinity).
+    """
+    if latest is None or base is None:
+        return None
+    ratio = _ratio(latest - base, base)
+    return None if ratio is None else ratio * 100
 
 
 class OpenInterestSeries:
@@ -179,13 +193,17 @@ class OpenInterestSeries:
         return before[-1][1]
 
     def fields(self, now_ns: int) -> dict[str, float | None]:
-        """Return `open_interest` and its absolute 1 h / 24 h changes, each None per the rules."""
+        """
+        Return `open_interest`, its absolute 1 h / 24 h changes and the same changes as a percent of
+        the base (`oi_change_*_pct`, Story 33.7), each None per the rules.
+        """
         points = sorted(self._by_minute.values())
         latest = self._as_of(points, now_ns)
-        changes = {}
+        changes: dict[str, float | None] = {}
         for name, hours in (("oi_change_1h", 1), ("oi_change_24h", 24)):
             base = self._as_of(points, now_ns - hours * HOUR_NS)
             changes[name] = None if latest is None or base is None else float(latest - base)
+            changes[f"{name}_pct"] = _float(_percent_change(latest, base))
         return {"open_interest": _float(latest), **changes}
 
 
