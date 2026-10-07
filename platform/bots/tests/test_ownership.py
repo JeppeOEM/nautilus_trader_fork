@@ -76,13 +76,15 @@ class _Runtime:
     last_data_ns = 0
 
     def positions(self) -> PositionSnapshot:
-        return PositionSnapshot("flat", 0.0, 0.0, 0.0)
+        return PositionSnapshot("flat", 0.0, 0.0)
 
     def start(self) -> None: ...
 
     def stop(self) -> None: ...
 
     def on_fill(self, handler: object) -> None: ...
+
+    def on_position_closed(self, handler: object) -> None: ...
 
     def on_order_event(self, handler: Callable[[], None]) -> None: ...
 

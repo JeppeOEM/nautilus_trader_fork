@@ -1596,3 +1596,31 @@ restart waits up to ~20 s for its old lease to expire. Live only once `live-pape
 - [ ] Before ever starting an exec config (`LIVE_PAPER_REAL_MONEY_CONFIG`) beside the paper fleet,
       confirm its `bot_id` is not one of `config.toml`'s: a collision now refuses that start, and
       after five refused restarts (`restart: on-failure:5`) the container stays down.
+
+### DW-223/DW-225 bots realized PnL from `PositionClosed` events (commit: this change's)
+
+Realized PnL now comes only from each round trip's Nautilus `PositionClosed` event, stored as one
+row in the new `fills.db` table `position_closes`. `bots:status.realized_pnl` is that table's
+total, so it agrees with `bots:history`. On its first open, the store copies every legacy closing
+row into the table once. This is live only once `live-paper` is rebuilt.
+
+- [ ] Before redeploying, note each bot's `closed_trades`/`win_rate` from `bot_tui`'s Bots pane.
+      Then run `cd platform && docker compose --profile live-paper up -d --build live-paper` on
+      the VPS.
+- [ ] After the first heartbeat, check that each bot shows the same `closed_trades`/`win_rate`
+      (the one-time legacy copy). Its realized PnL may differ from before: it is now the all-time
+      sum over closed round trips in `fills.db` (no longer the current process run's Cache view,
+      so the TUI's total PnL becomes all-time too), without a still-open position's partial
+      reductions. Rows written before `position_realized_pnl` existed (per-fill PnL only) are not
+      copied, so their PnL leaves the daily PnL and equity curve.
+      `docker exec dydx-live-paper python3 -c "import os, sqlite3; print(sqlite3.connect(os.environ['FILLS_DB_PATH']).execute('SELECT COUNT(*) FROM position_closes').fetchone())"`
+      must print a non-zero count if any bot had closed a trade.
+- [ ] Watch `GET /api/errors` across the first round trips for the two new sites. Any
+      `bots.close_unlinked` (a close linked to no closing fill) or `bots.close_lost` (a close not
+      stored) is a real fault to trace, never noise.
+- [ ] Do not roll `live-paper` back to an older image once this is live. The legacy copy runs
+      only when `position_closes` is first created, so round trips an older image records (in
+      `fills.position_realized_pnl`) are never copied on the next upgrade, and the older image
+      reads the new fill rows as carrying no PnL. If a rollback is unavoidable, the round trips
+      closed while it runs are missing from every PnL figure after the re-upgrade. Recover them by
+      hand from `fills` rows with a non-NULL `position_realized_pnl` newer than the rollback.

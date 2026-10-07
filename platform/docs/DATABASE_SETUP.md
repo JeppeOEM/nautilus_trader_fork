@@ -119,8 +119,25 @@ single-file mount can't expose.
 - **Path:** `./data/live_paper/fills.db` on the host, `/app/data/live_paper/fills.db` in the
   container (`FILLS_DB_PATH` env; `/app/live_paper/data/fills.db` until Story 26.3 mirrored the
   host path).
-- **Table:** `fills(ts, bot_id, side, price, qty, realized_pnl,
-  position_realized_pnl, trade_id)`, indexed on `(bot_id, ts)`.
+- **Tables:** `fills(ts, bot_id, side, price, qty, realized_pnl,
+  position_realized_pnl, trade_id)`, indexed on `(bot_id, ts)`: one row per fill, with no PnL
+  since DW-223 (the two PnL columns are legacy, read only for rows written before
+  `position_closes` existed, never written again). `position_closes(bot_id, position_id,
+  ts_closed, realized_pnl, trade_id)`, keyed by two partial unique indexes -- a linked close
+  (non-NULL `trade_id`) on `(bot_id, trade_id)`, an unlinked one on `(bot_id, position_id,
+  ts_closed)` -- and indexed on `(bot_id, ts_closed)`: one row per Nautilus `PositionClosed`
+  event, its `realized_pnl` exactly the event's (never read back from the Cache, which a flip
+  has already overwritten), `trade_id` the closing fill's (NULL, ledgered
+  `bots.close_unlinked`, when none could be linked; the PnL still counts). Every realized-PnL
+  figure reads it: the per-trip stats, win rate, daily PnL (bucketed by the UTC day the round
+  trip closed), the trades blotter's PnL column (a `LEFT JOIN` on `(bot_id, trade_id)`) and
+  `bots:status.realized_pnl` (closed round trips only, equal to `bots:history`'s per-trip
+  total).
+- **Close migration (DW-223):** the transaction that first creates `position_closes` copies
+  every legacy closing fill (non-NULL `position_realized_pnl`) into it as `position_id =
+  'legacy-' || rowid`, `ts_closed = ts`, so the stats read the same values before and after;
+  it runs once (guarded by the table's existence under `BEGIN IMMEDIATE`). A legacy partial
+  reduction's per-fill share is no longer shown in the blotter.
 - **Idempotency key:** unique index `idx_bot_trade` on `(bot_id, trade_id)`, `trade_id`
   being the venue's trade id (DW-224). A fill re-delivered into a later process life is a
   no-op (`INSERT ... ON CONFLICT(bot_id, trade_id) DO NOTHING`, never `INSERT OR IGNORE`,
@@ -133,10 +150,14 @@ single-file mount can't expose.
   written directly off the strategy's message bus. This exists specifically because
   Nautilus's `Cache.positions_closed()` silently discards prior closed positions on a
   NETTING-mode position reopen — `fills.db` is the durable source of truth trade
-  history is rebuilt from, not the Nautilus cache.
+  history is rebuilt from, not the Nautilus cache. A close re-delivered into a later
+  process life is a no-op (`ON CONFLICT DO NOTHING` over either partial index) logged at
+  WARNING, like a fill; keying a linked close on its trade id also keeps a migrated
+  `legacy-` close re-delivered under its real position id, and two round trips closing in
+  the same ns, from counting twice or once respectively.
 - **Writer:** `bots/application/history.py` (through `bots.domain.fill_ledger.FillLedger`).
-  **Readers:** `bots/application/supervise.py` (win-rate stats) and `history.py` itself, to
-  build the `bots:history:*` Redis blobs above. Both readers run their queries on the
+  **Readers:** `bots/application/supervise.py` (realized PnL and win-rate stats) and
+  `history.py` itself, to build the `bots:history:*` Redis blobs above. Both readers run their queries on the
   event loop's default executor, never on the node's event loop itself, which every bot on
   the node shares (DW-222). Nothing outside `bots/` reads this file
   directly — `bot_tui`/

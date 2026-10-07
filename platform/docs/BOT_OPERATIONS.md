@@ -184,7 +184,12 @@ second, so the flat moment in between would otherwise rarely be seen). Fields, i
 instrument's precision, never floats; `null` when flat, when no such protective order rests, or
 before the first mid), `stop_loss_orders`, `take_profit_orders` (how many rest), `open_orders`
 (every open or emulated order of the bot, protective or not, flat or not) and `last_fill_at`
-(UNIX ns of the bot's latest fill in `fills.db`, `null` before its first).
+(UNIX ns of the bot's latest fill in `fills.db`, `null` before its first). `realized_pnl`,
+`win_rate` and `closed_trades` count closed round trips only, from `fills.db`'s
+`position_closes` (one row per Nautilus `PositionClosed`, DW-223/225), so `realized_pnl` equals
+the sum of `bots:history`'s per-trip PnL; an open position's realized part (its entry
+commission, a partial reduction) counts once its round trip closes, and `unrealized_pnl` is the
+open position's mark-to-mid.
 
 **Bracket exits and the churn check.** A paper bot gets a resting take-profit and/or stop-loss
 per entry from `take_profit_bps`/`stop_loss_bps` in its `[[bots]]` entry (`bots/README.md`);

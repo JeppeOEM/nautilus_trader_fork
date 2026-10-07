@@ -20,10 +20,11 @@ through its Redis Open Host Service -- `bots:status`, `bots:control`, `bots:hist
 
 - `domain/` -- the paper/non-paper split as two aggregate types (`PaperFleet`, `ExecBot`, over the
   `PaperConfig`/`ExecConfig`/`BotConfig` value objects), `Bot` (id == Nautilus `order_id_tag`, the
-  bounded incident log, heartbeat state) and `FillLedger` (per-fill realized PnL and the
-  day/week/month/all history windows). Stdlib, `kernel` and Nautilus value types only.
+  bounded incident log, heartbeat state) and `FillLedger` (fill rows and one realized-PnL row
+  per `PositionClosed` event, and the day/week/month/all history windows). Stdlib, `kernel` and
+  Nautilus value types only.
 - `application/` -- the ports (`BotRuntime`, `FillsStore`, `BusConnection`), `supervise` (status
-  heartbeat and `bots:control`) and `history` (fill recording and the history refresh).
+  heartbeat and `bots:control`) and `history` (fill and close recording and the history refresh).
 - `infrastructure/` -- the Nautilus anti-corruption layer: `nautilus_host` (the only module that
   imports `TradingNode`, asserted by `platform/tests/test_boundaries.py`), `cache_reader` (every
   read strategy-scoped), plus `fills_store`, `redis` and the two config loaders (`config`).

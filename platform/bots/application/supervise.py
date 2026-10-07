@@ -67,10 +67,16 @@ OWNER_TTL_HEARTBEATS = 3
 
 @dataclass(frozen=True)
 class FillStats:
-    """A bot's all-time `fills.db` figures for one `bots:status` payload."""
+    """
+    A bot's all-time `fills.db` figures for one `bots:status` payload. `realized_pnl` is the sum
+    over closed round trips only (`position_closes`, DW-225): the same per-trip values
+    `bots:history`'s `all` window sums, so the two can never disagree; an open position's realized
+    part (its entry commission, a partial reduction) counts once its round trip closes.
+    """
 
     closed_trades: int
     wins: int
+    realized_pnl: float
     last_fill_ns: int | None
 
 
@@ -78,25 +84,37 @@ def read_fill_stats(fills: FillsStore, bot_id: str) -> FillStats:
     """
     Blocking sqlite reads: run on an executor, never on the node's event loop (DW-222).
 
-    Known limit: `win_rate_stats` scans every closing row of the bot on each heartbeat (and each
-    order-event wake), so its cost grows with `fills.db`, off the loop but serialised with fill
-    writes by the store's one lock. Upgrade path: the per-UTC-day rollup table `history.py`'s
-    Known limit names, carrying closed/win counts, read in place of the scan.
+    Known limit: `win_rate_stats` and `total_realized_pnl` each scan every close of the bot on
+    each heartbeat (and each order-event wake), so their cost grows with `fills.db`, off the loop
+    but serialised with row writes by the store's one lock. Upgrade path: the per-UTC-day rollup
+    table `history.py`'s Known limit names, carrying closed/win counts and PnL sums, read in place
+    of the scans.
     """
     closed_trades, wins = fills.win_rate_stats(bot_id)
-    return FillStats(closed_trades, wins, fills.last_fill_ns(bot_id))
+    return FillStats(
+        closed_trades, wins, fills.total_realized_pnl(bot_id), fills.last_fill_ns(bot_id)
+    )
 
 
 def build_status(bot: Bot, runtime: BotRuntime, stats: FillStats, now: float) -> dict:
     """
     One `bots:status` payload, field order frozen (AD-10): the published language only ever gains
     fields appended after `updated_at` (Story 29.6's nine, in this order); an existing field is
-    never renamed, removed or reordered, so the first thirteen stay byte-identical (replay test).
+    never renamed, removed or reordered, so the first thirteen keep their names and order (replay
+    test). Values may change source: since DW-225 `realized_pnl` is the all-time closed-trip
+    total, no longer the current process's Cache view.
 
     `win_rate` is None (not 0.0) until a round trip has closed: "no trades yet" is not "0% so
-    far". `closed_trades`/`win_rate` come from the append-only `fills.db`, never
-    `cache.positions_closed()`, which loses every round trip but the latest under NETTING (see
-    `bots.domain.fill_ledger`).
+    far". `realized_pnl`/`closed_trades`/`win_rate` come from the append-only `fills.db`'s
+    round-trip closes (`FillStats`), never the Nautilus Cache, whose closed positions lose every
+    round trip but the latest under NETTING (see `bots.domain.fill_ledger`).
+
+    Known limit: `realized_pnl` counts closed round trips only, and `bot_tui` shows
+    `realized_pnl + unrealized_pnl` as the bot's total PnL (`bot_tui/bots_pane.py`). While a
+    position is open after a partial reduction, the reduction's realized part and the entry
+    commission are in neither figure, so that total misses them until the round trip closes.
+    Upgrade path: an appended `open_realized_pnl` field, the open position's own `realized_pnl`
+    read through `runtime.positions()` on the loop, which the TUI adds into its total.
     """
     positions = runtime.positions()
     closed_trades = stats.closed_trades
@@ -108,7 +126,7 @@ def build_status(bot: Bot, runtime: BotRuntime, stats: FillStats, now: float) ->
         "running": runtime.is_running,
         "position_side": positions.position_side,
         "net_exposure": positions.net_exposure,
-        "realized_pnl": positions.realized_pnl,
+        "realized_pnl": stats.realized_pnl,
         "unrealized_pnl": positions.unrealized_pnl,
         "win_rate": stats.wins / closed_trades if closed_trades else None,
         "closed_trades": closed_trades,

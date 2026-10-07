@@ -19,7 +19,10 @@ The Nautilus anti-corruption layer's read side: one bot's view of its own strate
 and history see Nautilus. Every figure is scoped to the strategy's own `strategy_id`: the
 Portfolio's `net_exposure`/`realized_pnl`/`unrealized_pnl` are account+instrument scoped in the
 Rust core (`cache.positions_open(strategy_id=None, ...)`), so under one node hosting many bots they
-would silently blend two bots the moment they share an instrument (AD-11).
+would silently blend two bots the moment they share an instrument (AD-11). Realized PnL is not
+read here at all: the Cache keeps only a NETTING position's latest round trip
+(`bots.domain.fill_ledger`), so it comes from the `PositionClosed` events `on_position_closed`
+hands over (DW-223/225).
 
 Protective orders (Story 29.6) are classified by the order itself -- its reduce-only flag, its
 type and its side against the open position -- never by the strategy's class, so any strategy's
@@ -38,6 +41,7 @@ from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.enums import OrderType
 from nautilus_trader.model.enums import PriceType
 from nautilus_trader.model.events import OrderFilled
+from nautilus_trader.model.events import PositionClosed
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.orders import Order
 from nautilus_trader.model.position import Position
@@ -132,8 +136,9 @@ def own_open_orders(strategy: Strategy) -> list[Order]:
 
 class StrategyCacheReader:
     """
-    `BotRuntime` over one strategy. Invariant: reads `cache.positions_open/closed` filtered by
-    this strategy's id only, and hands `on_fill` handlers only this strategy's `OrderFilled`s.
+    `BotRuntime` over one strategy. Invariant: reads `cache.positions_open` filtered by this
+    strategy's id only, and hands `on_fill`/`on_position_closed` handlers only this strategy's
+    `OrderFilled`/`PositionClosed` events, exactly as published.
     """
 
     def __init__(self, strategy: Strategy) -> None:
@@ -170,23 +175,13 @@ class StrategyCacheReader:
         positions_open = strategy.cache.positions_open(
             instrument_id=instrument_id, strategy_id=strategy.id
         )
-        positions_closed = strategy.cache.positions_closed(
-            instrument_id=instrument_id, strategy_id=strategy.id
-        )
-        realized_pnl = sum(
-            position.realized_pnl.as_double()
-            for position in (*positions_open, *positions_closed)
-            if position.realized_pnl is not None
-        )
         open_orders = own_open_orders(strategy)
         if not positions_open:
-            return PositionSnapshot("flat", 0.0, realized_pnl, 0.0, open_orders=len(open_orders))
+            return PositionSnapshot("flat", 0.0, 0.0, open_orders=len(open_orders))
         # NETTING (the only OMS type here): at most one open position per strategy+instrument.
-        return self._open_position(positions_open[0], realized_pnl, open_orders)
+        return self._open_position(positions_open[0], open_orders)
 
-    def _open_position(
-        self, position: Position, realized_pnl: float, open_orders: list[Order]
-    ) -> PositionSnapshot:
+    def _open_position(self, position: Position, open_orders: list[Order]) -> PositionSnapshot:
         strategy = self._strategy
         instrument_id = strategy.config.instrument_id
         position_side = "long" if position.is_long else "short" if position.is_short else "flat"
@@ -209,7 +204,6 @@ class StrategyCacheReader:
         return PositionSnapshot(
             position_side,
             net_exposure,
-            realized_pnl,
             unrealized_pnl,
             entry_price=_text(entry),
             mark_price=_text(mid),
@@ -236,24 +230,34 @@ class StrategyCacheReader:
             return None
         return instrument.make_price(position.avg_px_open)
 
-    def on_fill(self, handler: Callable[[OrderFilled, Position | None], None]) -> None:
+    def on_fill(self, handler: Callable[[OrderFilled], None]) -> None:
         """
         Subscribe to this strategy's order-event topic (`events.order.{strategy_id}`, published by
-        the ExecutionEngine for every order event) and hand over each fill with its position.
+        the ExecutionEngine for every order event) and hand over each fill.
         """
         strategy = self._strategy
 
         def _on_order_event(event: object) -> None:
-            if not isinstance(event, OrderFilled):
-                return
-            position = (
-                strategy.cache.position(event.position_id)
-                if event.position_id is not None
-                else None
-            )
-            handler(event, position)
+            if isinstance(event, OrderFilled):
+                handler(event)
 
         strategy.msgbus.subscribe(topic=f"events.order.{strategy.id}", handler=_on_order_event)
+
+    def on_position_closed(self, handler: Callable[[PositionClosed], None]) -> None:
+        """
+        Subscribe to this strategy's position-event topic (`events.position.{strategy_id}`, which
+        the ExecutionEngine publishes right after the `OrderFilled` that caused the event, on the
+        same synchronous dispatch) and hand over each `PositionClosed`.
+        """
+        strategy = self._strategy
+
+        def _on_position_event(event: object) -> None:
+            if isinstance(event, PositionClosed):
+                handler(event)
+
+        strategy.msgbus.subscribe(
+            topic=f"events.position.{strategy.id}", handler=_on_position_event
+        )
 
     def on_order_event(self, handler: Callable[[], None]) -> None:
         """Call `handler` after every event on this strategy's order-event topic."""

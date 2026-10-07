@@ -1804,7 +1804,9 @@ resolution-undo: b98e299a1973c6cd760dd890fe03e85313515bcb9f8a9937413ae821024a54e
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-3-bots-context-paper-and-exec-types-nautilus-acl.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-3-bots-context-paper-and-exec-types-nautilus-acl.md` summary: Per-fill realized PnL attribution loses its invariant across a restart or a flip -- the pending partial-close estimates live only in memory, so a close after a restart records `total - 0` over estimates already in `fills.db` (double count), and a fill on the new entry side of a flipped position returns `(None, None)`, dropping the closed leg's round trip from win rate and PnL. evidence: platform/bots/domain/fill_ledger.py `FillLedger.attribute` (`_pending` in-process dict; `fill.order_side == position.entry` short-circuit), moved from live_paper/trade_history.py `_fill_pnl`/`_pending_realized_pnl` at baseline 88abf70269.
-status: open
+status: done 2026-10-07
+resolution: resolved by sweep bundle dw-bots-realized-pnl-from-position-events
+resolution-undo: 3206e8850d0aee0ad813276ab5ba09b37ad0ad6c8c2dfead773678f8c4a0c9ca 2026-10-07 7374617475733a206f70656e
 decision: 2026-10-05 Derive realized PnL from Nautilus position events only — Replace estimate scheme with per-position-close attribution Operator: record each PositionClosed live as it fires; never read closed positions back from the Cache (NETTING overwrites them, cf. DW-225 / Story 4.6).
 
 ### DW-224: `fills.db` has no idempotency key (no `trade_id`, no unique constraint), so a re-delivered `OrderFilled` (e.g. exec-path reconciliation after a restart) …
@@ -1821,7 +1823,9 @@ resolution-undo: b98e299a1973c6cd760dd890fe03e85313515bcb9f8a9937413ae821024a54e
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-3-bots-context-paper-and-exec-types-nautilus-acl.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-3-bots-context-paper-and-exec-types-nautilus-acl.md` summary: `bots:status.realized_pnl` sums `cache.positions_closed(strategy_id=...)`, which keeps only a NETTING position's latest round trip, so after any reopen the status figure shows the current cycle only and disagrees with `bots:history` (from `fills.db`). evidence: platform/bots/infrastructure/cache_reader.py `positions()`; the Cache overwrite is documented in bots/domain/fill_ledger.py and was the reason Story 4.6 moved closed_trades/win_rate to fills.db. Same computation in live_paper/bot_status.py `build_status` at baseline 88abf70269; changing it changes a frozen payload value.
-status: open
+status: done 2026-10-07
+resolution: resolved by sweep bundle dw-bots-realized-pnl-from-position-events
+resolution-undo: 3206e8850d0aee0ad813276ab5ba09b37ad0ad6c8c2dfead773678f8c4a0c9ca 2026-10-07 7374617475733a206f70656e
 decision: 2026-10-05 Source from fills.db — realized_pnl from fills.db total, consistent with bots:history
 
 ### DW-226: `DummyStrategy._maybe_trade` decides from `portfolio.is_flat/is_net_long/is_net_short(instrument_id)`, which are account-and-instrument wide, so two paper bots …

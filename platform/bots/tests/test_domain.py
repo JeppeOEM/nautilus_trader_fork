@@ -14,7 +14,9 @@
 # -------------------------------------------------------------------------------------------------
 """
 Invariant tests of the bots aggregates, one per command (DDD spine AD-D15, DESIGN-01):
-`PaperFleet`/`ExecBot` construction, `Bot.start`/`Bot.observe`, `FillLedger.attribute`.
+`PaperFleet`/`ExecBot` construction, `Bot.start`/`Bot.observe`. `FillLedger`'s two commands,
+`record_fill`/`record_close`, need real Nautilus events, so `test_trade_history.py` drives them
+through a real BacktestEngine (TEST-03).
 """
 
 from decimal import Decimal

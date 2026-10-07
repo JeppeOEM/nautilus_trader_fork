@@ -28,6 +28,13 @@ only ever appended): the recorded thirteen-field prefix must still be byte-ident
 appended fields, in their frozen order, are recorded as `status_appended` (the run ends short
 with no bracket exits configured, so both exits are null; `last_fill_at` is the latest seeded
 fill).
+
+DW-223/225 deliberately re-recorded three values, field order untouched: `bots:status`'s
+`realized_pnl` is now the sum over closed round trips (`fills.db`, equal to `bots:history`'s
+per-trip total), no longer the Cache's latest position, and the seeded multi-fill round trip's
+two reducing fills now show the round trip's total on its closing fill only (a partial
+reduction's per-fill share no longer exists), in `fills` and every history window's `trades`.
+Metrics, `pnl_series` and every other byte are unchanged.
 """
 
 import json
@@ -172,8 +179,10 @@ def _run(store: SqliteFillsStore) -> tuple[BacktestEngine, DummyStrategy]:
     engine.add_strategy(strategy)
     record_fills(strategy, store, _INPUTS["bot_id"])
     engine.run()
-    for ts, side, price, qty, realized, position_realized in _INPUTS["seeded_fills"]:
-        write_fill(store, _INPUTS["bot_id"], ts, side, price, qty, realized, position_realized)
+    # The recorded per-fill `realized` share has no store column since DW-223: a seeded round
+    # trip is its closing fill plus the close it carried.
+    for ts, side, price, qty, _realized, position_realized in _INPUTS["seeded_fills"]:
+        write_fill(store, _INPUTS["bot_id"], ts, side, price, qty, closes_pnl=position_realized)
     return engine, strategy
 
 

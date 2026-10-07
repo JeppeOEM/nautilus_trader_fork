@@ -26,8 +26,9 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from bots.domain.fill_ledger import FillRecord
+from bots.domain.fill_ledger import PositionCloseRecord
 from nautilus_trader.model.events import OrderFilled
-from nautilus_trader.model.position import Position
+from nautilus_trader.model.events import PositionClosed
 
 
 STATUS_CHANNEL = "bots:status"
@@ -58,11 +59,12 @@ class PositionSnapshot:
     that kind, no mid yet. `stop_loss`/`take_profit` are the protective order nearest the mid (the
     entry price when there is no mid); the counts are every protective order of that kind;
     `open_orders` is every open or emulated order of the bot, protective or not (Story 29.6).
+    No realized PnL: that is the append-only `fills.db`'s `position_closes` (DW-225), never the
+    Cache, whose closed positions under NETTING keep only the latest round trip.
     """
 
     position_side: str  # "flat" | "long" | "short"
     net_exposure: float
-    realized_pnl: float
     unrealized_pnl: float
     entry_price: str | None = None
     mark_price: str | None = None
@@ -80,8 +82,9 @@ class BotRuntime(Protocol):
 
     Invariant: every figure is scoped to this bot's own `strategy_id`, never the portfolio's
     account+instrument aggregates, which blend every bot trading the same instrument on the node
-    (AD-11); `on_fill` hands over this strategy's fills only, with the position as the Cache holds
-    it right after the fill.
+    (AD-11); `on_fill`/`on_position_closed` hand over this strategy's own events only, as the
+    ExecutionEngine published them (a fill, then the position events it caused, synchronously),
+    never re-read from the Cache.
     """
 
     @property
@@ -102,7 +105,9 @@ class BotRuntime(Protocol):
 
     def stop(self) -> None: ...
 
-    def on_fill(self, handler: Callable[[OrderFilled, Position | None], None]) -> None: ...
+    def on_fill(self, handler: Callable[[OrderFilled], None]) -> None: ...
+
+    def on_position_closed(self, handler: Callable[[PositionClosed], None]) -> None: ...
 
     def on_order_event(self, handler: Callable[[], None]) -> None:
         """Call `handler` after each of this strategy's order events (its position may change)."""
@@ -111,23 +116,31 @@ class BotRuntime(Protocol):
 
 class FillsStore(Protocol):
     """
-    `fills.db`, the append-only fill log (one row per fill, every bot, a `bot_id` column).
+    `fills.db`, the append-only fill and round-trip log (one row per fill and one per
+    `PositionClosed`, every bot, a `bot_id` column).
 
-    Invariant: a written row is never rewritten or dropped, and one bot stores a venue trade id
-    at most once (`(bot_id, trade_id)` is the idempotency key, so a re-delivered fill is a no-op);
-    every query is scoped to one bot and returns rows at/after `cutoff_ns` (all time when None) in
-    ascending `ts` order.
+    Invariant: a written row is never rewritten or dropped; one bot stores a venue trade id at
+    most once and a close at most once (`(bot_id, trade_id)` for a fill and a linked close,
+    `(bot_id, position_id, ts_closed)` for an unlinked close, so a re-delivered event is a
+    no-op); every realized-PnL figure comes from the closes alone; every query is scoped to one
+    bot and returns rows at/after `cutoff_ns` (all time when None) in ascending time order.
     """
 
     def write_fill(self, record: FillRecord) -> bool:
         """Append one fill: True when inserted, False when this bot already stored its trade id."""
         ...
 
+    def write_position_close(self, record: PositionCloseRecord) -> bool:
+        """Append one close: True when inserted, False when this bot already stored it."""
+        ...
+
     def recent_trades(self, bot_id: str, cutoff_ns: int | None, limit: int) -> list[dict]: ...
 
-    def realized_pnls(self, bot_id: str, cutoff_ns: int | None) -> list[float]: ...
-
     def position_realized_pnls(self, bot_id: str, cutoff_ns: int | None) -> list[float]: ...
+
+    def total_realized_pnl(self, bot_id: str) -> float:
+        """Return the sum of `position_realized_pnls(bot_id, None)`, summed in that order."""
+        ...
 
     def win_rate_stats(self, bot_id: str) -> tuple[int, int]: ...
 

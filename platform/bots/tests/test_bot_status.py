@@ -255,25 +255,26 @@ def test_build_status_closed_trades_survives_a_netting_reopen(store: SqliteFills
     history the instant it reopens (see bots.domain.fill_ledger's module docstring for the
     full diagnosis), so a bot with 2 completed round trips could show closed_trades=0
     or 1 -- never 2 -- if build_status() read it directly. Seed fills.db with 2
-    synthetic closing fills (mirroring what 2 real round trips would have written) and
-    confirm build_status() counts both, using a strategy that itself traded zero times
-    (impossible thresholds) so cache.positions_closed() is provably empty here -- any
-    non-zero closed_trades/win_rate the status shows can only have come from
-    fills.db, not the Cache.
+    synthetic round trips (mirroring what 2 real ones would have written) and confirm
+    build_status() counts both and sums their PnL (DW-225: equal to bots:history's per-trip
+    total), using a strategy that itself traded zero times (impossible thresholds) so the
+    Cache holds no position at all here -- any non-zero closed_trades/win_rate/realized_pnl
+    the status shows can only have come from fills.db, not the Cache.
     """
     engine, strategy = _run_strategy(
         store, trend_buy_threshold=0.999_999, trend_sell_threshold=0.000_001
     )
-    assert strategy.cache.positions_closed(strategy_id=strategy.id) == []
+    assert strategy.cache.positions(strategy_id=strategy.id) == []
 
-    write_fill(store, "bot-01", 1, "BUY", 100.0, 1.0, None)
-    write_fill(store, "bot-01", 2, "SELL", 105.0, 1.0, 5.0, position_realized_pnl=5.0)  # win
-    write_fill(store, "bot-01", 3, "BUY", 105.0, 1.0, None)
-    write_fill(store, "bot-01", 4, "SELL", 103.0, 1.0, -2.0, position_realized_pnl=-2.0)  # loss
+    write_fill(store, "bot-01", 1, "BUY", 100.0, 1.0)
+    write_fill(store, "bot-01", 2, "SELL", 105.0, 1.0, closes_pnl=5.0)  # win
+    write_fill(store, "bot-01", 3, "BUY", 105.0, 1.0)
+    write_fill(store, "bot-01", 4, "SELL", 103.0, 1.0, closes_pnl=-2.0)  # loss
 
     status = status_of(strategy, store, mode="paper", started_at=0.0, now=1.0)
     assert status["closed_trades"] == 2
     assert status["win_rate"] == 0.5
+    assert status["realized_pnl"] == sum(store.position_realized_pnls("bot-01", None)) == 3.0
 
     engine.reset()
     engine.dispose()
@@ -465,7 +466,7 @@ class _Runtime:
         if self.fail_positions:
             self.fail_positions -= 1
             raise TypeError("float() argument must be a string or a real number, not 'NoneType'")
-        return PositionSnapshot("flat", 0.0, 0.0, 0.0)
+        return PositionSnapshot("flat", 0.0, 0.0)
 
     def start(self) -> None:
         self.calls.append("start")
@@ -477,6 +478,9 @@ class _Runtime:
 
     def on_fill(self, handler: object) -> None:
         raise AssertionError("the supervisor never records fills")
+
+    def on_position_closed(self, handler: object) -> None:
+        raise AssertionError("the supervisor never records closes")
 
     def on_order_event(self, handler: Callable[[], None]) -> None:
         self.order_event = handler
@@ -672,7 +676,7 @@ def test_seed_retries_an_unreachable_prior_log_instead_of_overwriting_it(
 def test_heartbeat_reads_fill_stats_off_the_event_loop_thread(store: SqliteFillsStore) -> None:
     # DW-222: a sqlite read on the loop would freeze every bot on the node for its duration.
     recording = ThreadRecordingStore(store)
-    write_fill(store, "bot-01", 1, "SELL", 1.0, 1.0, 2.0, position_realized_pnl=2.0)
+    write_fill(store, "bot-01", 1, "SELL", 1.0, 1.0, closes_pnl=2.0)
     runtime, bus, clock = _Runtime(), FakeBus(), _Clock(100.0)
     supervisor = _supervisor(runtime, recording, bus, clock)
     loop_threads: list[int] = []

@@ -29,6 +29,7 @@ from bots.application.supervise import build_status
 from bots.application.supervise import read_fill_stats
 from bots.domain.bot import Bot
 from bots.domain.fill_ledger import FillRecord
+from bots.domain.fill_ledger import PositionCloseRecord
 from bots.infrastructure.cache_reader import StrategyCacheReader
 from bots.infrastructure.fills_store import SqliteFillsStore
 from nautilus_trader.trading.strategy import Strategy
@@ -36,6 +37,8 @@ from nautilus_trader.trading.strategy import Strategy
 
 # A fresh trade id per seeded fill unless a test names one: the store keys on (bot_id, trade_id).
 _trade_ids = itertools.count()
+# A fresh position id per seeded close: an unlinked close is keyed on (bot_id, position_id, ts).
+_position_ids = itertools.count()
 
 
 def write_fill(
@@ -45,14 +48,34 @@ def write_fill(
     side: str,
     price: float,
     qty: float,
-    realized_pnl: float | None,
-    position_realized_pnl: float | None = None,
+    closes_pnl: float | None = None,
     trade_id: str | None = None,
 ) -> bool:
+    """
+    Seed one fill; with `closes_pnl`, also the round trip it closed (at the fill's ts, linked to
+    its trade id), as a real fill followed by its `PositionClosed` records them.
+    """
     if trade_id is None:
         trade_id = f"T-{next(_trade_ids)}"
-    record = FillRecord(bot_id, ts, side, price, qty, realized_pnl, position_realized_pnl, trade_id)
-    return store.write_fill(record)
+    inserted = store.write_fill(FillRecord(bot_id, ts, side, price, qty, trade_id))
+    if closes_pnl is not None:
+        write_close(store, bot_id, ts, closes_pnl, trade_id)
+    return inserted
+
+
+def write_close(
+    store: SqliteFillsStore,
+    bot_id: str,
+    ts_closed: int,
+    realized_pnl: float,
+    trade_id: str | None = None,
+    position_id: str | None = None,
+) -> bool:
+    """Seed one round trip's close."""
+    if position_id is None:
+        position_id = f"P-{next(_position_ids)}"
+    record = PositionCloseRecord(bot_id, position_id, ts_closed, realized_pnl, trade_id)
+    return store.write_position_close(record)
 
 
 class ThreadRecordingStore:
@@ -71,17 +94,20 @@ class ThreadRecordingStore:
     def write_fill(self, record: FillRecord) -> bool:
         return self._store.write_fill(record)
 
+    def write_position_close(self, record: PositionCloseRecord) -> bool:
+        return self._store.write_position_close(record)
+
     def recent_trades(self, bot_id: str, cutoff_ns: int | None, limit: int) -> list[dict]:
         self._reading()
         return self._store.recent_trades(bot_id, cutoff_ns, limit)
 
-    def realized_pnls(self, bot_id: str, cutoff_ns: int | None) -> list[float]:
-        self._reading()
-        return self._store.realized_pnls(bot_id, cutoff_ns)
-
     def position_realized_pnls(self, bot_id: str, cutoff_ns: int | None) -> list[float]:
         self._reading()
         return self._store.position_realized_pnls(bot_id, cutoff_ns)
+
+    def total_realized_pnl(self, bot_id: str) -> float:
+        self._reading()
+        return self._store.total_realized_pnl(bot_id)
 
     def win_rate_stats(self, bot_id: str) -> tuple[int, int]:
         self._reading()
@@ -181,7 +207,10 @@ def unused_connect() -> AbstractAsyncContextManager[BusConnection]:
 def record_fills(
     strategy: Strategy, store: SqliteFillsStore, bot_id: str = "bot-01"
 ) -> HistoryPublisher:
-    """Record `strategy`'s fills into `store` from now on, exactly as `python3 -m bots` wires it."""
+    """
+    Record `strategy`'s fills and closes into `store` from now on, exactly as `python3 -m bots`
+    wires it.
+    """
     history = HistoryPublisher(
         bot_id, StrategyCacheReader(strategy), store, unused_connect, starting_balance=None
     )

@@ -32,6 +32,7 @@ from bots.application.ports import BusConnection
 from bots.application.ports import FillsStore
 from bots.application.ports import owner_key
 from bots.domain.fill_ledger import FillRecord
+from bots.domain.fill_ledger import PositionCloseRecord
 from bots.infrastructure.fills_store import SqliteFillsStore
 from bots.infrastructure.redis import RedisBus
 from bots.infrastructure.redis import connect
@@ -41,16 +42,23 @@ _DAY = 24 * 3600 * 1_000_000_000
 
 
 def _fills_store_contract(store: FillsStore) -> None:
-    store.write_fill(FillRecord("b1", 3 * _DAY, "SELL", 105.0, 1.0, 5.0, 5.0, "T-3"))
-    store.write_fill(FillRecord("b1", 1 * _DAY, "BUY", 100.0, 1.0, None, None, "T-1"))
-    store.write_fill(FillRecord("b2", 2 * _DAY, "SELL", 1.0, 1.0, -1.0, -1.0, "T-2"))
+    store.write_fill(FillRecord("b1", 3 * _DAY, "SELL", 105.0, 1.0, "T-3"))
+    store.write_fill(FillRecord("b1", 1 * _DAY, "BUY", 100.0, 1.0, "T-1"))
+    store.write_fill(FillRecord("b2", 2 * _DAY, "SELL", 1.0, 1.0, "T-2"))
+    assert store.write_position_close(PositionCloseRecord("b1", "P-1", 3 * _DAY, 5.0, "T-3"))
+    assert store.write_position_close(PositionCloseRecord("b2", "P-1", 2 * _DAY, -1.0, "T-2"))
+    # a linked close is keyed on (bot, trade_id): a re-delivery is a no-op
+    assert not store.write_position_close(PositionCloseRecord("b1", "P-1", 3 * _DAY, 5.0, "T-3"))
 
     # scoped to one bot, ascending by ts, every row kept
     assert [t["ts"] for t in store.recent_trades("b1", None, 10)] == [1 * _DAY, 3 * _DAY]
     # cutoff is inclusive
     assert [t["ts"] for t in store.recent_trades("b1", 3 * _DAY, 10)] == [3 * _DAY]
-    assert store.realized_pnls("b1", None) == [5.0]
+    # a fill shows the PnL of the round trip it closed, nothing otherwise
+    assert [t["realized_pnl"] for t in store.recent_trades("b1", None, 10)] == [None, 5.0]
     assert store.position_realized_pnls("b2", None) == [-1.0]
+    assert store.total_realized_pnl("b1") == 5.0
+    assert store.total_realized_pnl("nobody") == 0.0
     assert store.win_rate_stats("b1") == (1, 1)
     assert store.win_rate_stats("nobody") == (0, 0)
     # the latest fill of that bot only, None before its first
@@ -66,7 +74,7 @@ def test_sqlite_fills_store_satisfies_the_fills_store_contract(store: SqliteFill
 def test_a_reopened_store_still_holds_every_row(tmp_path: Path) -> None:
     path = str(tmp_path / "fills.db")
     first = SqliteFillsStore(path)
-    first.write_fill(FillRecord("b1", 1, "BUY", 1.0, 1.0, None, None, "T-1"))
+    first.write_fill(FillRecord("b1", 1, "BUY", 1.0, 1.0, "T-1"))
     first.close()
     second = SqliteFillsStore(path)
     try:
