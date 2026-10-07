@@ -303,9 +303,10 @@ hotpath-baseline:
 ## (data type, instrument) for every venue -- audit D-36: without this the catalog grows ~1,440
 ## files per instrument per type per day. Safe while the collectors run (today's files are never
 ## touched). Ends with one summary line (days, files/MB before -> after, wall s, peak RSS) and
-## exits 1 when any day was refused. Extra flags via CONSOLIDATE_ARGS, e.g.
-## `make consolidate CONSOLIDATE_ARGS="--days 3"`. A manual tool: the `archive` compose service
-## (Story 25.1b) is the schedule -- it runs this after every nightly run and the
+## exits 1 when a leaf failed or a day was refused for a reason other than differing schemas,
+## else 2 (findings, which make prints as "Error 2") when only mixed-schema days were refused,
+## else 0. Extra flags via CONSOLIDATE_ARGS, e.g. `make consolidate CONSOLIDATE_ARGS="--days 3"`.
+## A manual tool: the `archive` compose service (Story 25.1b) is the schedule -- it runs this after every nightly run and the
 ## `--closed-hours` merge intraday -- so no host cron line runs it any more.
 consolidate:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \

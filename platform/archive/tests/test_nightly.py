@@ -278,6 +278,24 @@ def test_compare_findings_continue_to_prune_and_exit_two(tmp_path: Path) -> None
     assert error_ledger.counts() == {"nightly.compare_klines": 1}
 
 
+def test_consolidate_findings_from_a_mixed_schema_day_run_every_later_step_and_exit_two(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    `consolidate_catalog` exits 2 when its only problems were mixed-schema refusals (DW-213): one
+    standing D-24 day must not stop the venue's candles, reconcile, retention and verdict nightly.
+    """
+    error_ledger.reset()
+    runner = _FakeRunner({"consolidate_catalog": 2})
+    with caplog.at_level("INFO", logger="archive.nightly"):
+        assert main(_args(tmp_path), runner) == 2
+    assert runner.ran == _ORDER
+    assert error_ledger.counts() == {"nightly.consolidate_catalog": 1}
+    (summary,) = [r.getMessage() for r in caplog.records if ": rebuild_seconds " in r.getMessage()]
+    assert "consolidate_catalog findings" in summary
+    assert "outcome findings; run id " in summary
+
+
 def test_consolidate_is_limited_to_recent_days_and_candles_to_one_worker() -> None:
     chain = steps("/c", "/cd", "BYBIT", "2026-09-20", "/r")
     assert chain[1].argv[-2:] == ["--days", "2"]

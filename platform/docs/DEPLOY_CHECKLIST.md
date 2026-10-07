@@ -38,12 +38,16 @@ What the service runs (schedule in `platform/archive/config.toml`, times UTC):
     `--not-rebuilt <iid>` per instrument it refused. Only the rebuilt are reconciled: any other
     instrument-day is never judged (`reconcile.not_rebuilt`). A missing result file stops the saga
     before consolidating. The run id is on the summary line.
-  - A step's exit 2 is "findings" (some instruments refused, mismatched or not comparable, all
-    ledgered, and none of them releases trades to the prune): the chain continues. Any other
-    non-zero exit stops that venue's chain.
+  - A step's exit 2 is "findings": the chain continues. It means some instruments were refused,
+    mismatched or not comparable, or (consolidate) the only refused days were mixed-schema ones
+    (`consolidate.mixed_schema`); all are ledgered, and none of them releases trades to the prune.
+    Any other non-zero exit stops that venue's chain (for consolidate: any other refused day, a
+    failed leaf, a held lock, a usage error).
   - The full `consolidate_catalog` after the sagas covers every closed day and every data type. It
     is the step that keeps reporting an old refused day, which the saga's `--days 2` no longer sees,
-    so one bad old day cannot block every night.
+    so one bad old day cannot block every night. Its summary line counts refused days and, of
+    those, mixed-schema ones (`<R> refused (<X> mixed-schema)`); exit 2 when only those, 1 when any
+    other.
 - **Catch-up.** Each venue's last day of unbroken success (`last_success_day`) and the last
   completed scheduled run (`last_run_day`) are kept in `platform/data/archive/state.json`. That
   file is a scheduler cursor, not a data verdict: `verified_days` stays the only day status.

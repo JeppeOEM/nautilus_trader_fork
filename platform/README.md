@@ -363,13 +363,17 @@ flags pass through `CONSOLIDATE_ARGS` (`make consolidate CONSOLIDATE_ARGS="--day
 ends with one line:
 
 ```text
-consolidate: <D> day(s) consolidated, <R> refused, <L> leaf/leaves failed; files <before> -> <after>; <MB before> -> <MB after> MB; <S> s wall; peak RSS <M> MB
+consolidate: <D> day(s) consolidated, <R> refused (<X> mixed-schema), <L> leaf/leaves failed; files <before> -> <after>; <MB before> -> <MB after> MB; <S> s wall; peak RSS <M> MB
 ```
 
 Peak RSS is the job's own `ru_maxrss`, measured inside
 the container -- `/usr/bin/time -v make consolidate` would only measure the `docker compose` client.
-The exit code is 1 when any day was refused or leaf failed; the reason is logged above the summary line and in
-the `consolidate.*` error-ledger entries.
+`<X>` is the part of `<R>` refused for differing schemas. The exit code is 1 when a day was
+refused for any other reason (row count or covering-file mismatch, partial commit, unreadable
+file) or a leaf failed, else 2 ("findings": the nightly saga carries on) when the only refusals
+were mixed-schema days, else 0 -- the same at `--closed-hours`, where `<D>`/`<R>` count hours,
+and without `--apply`. A held lock, a missing catalog or a usage error is exit 1. Every refusal's
+reason is logged above the summary line and in the `consolidate.*` error-ledger entries.
 
 **`make backup-catalog`** runs `python3 -m archive.backup_catalog` in the `archive` service's
 container -- the same module the service runs after every nightly run when `backup_enabled =

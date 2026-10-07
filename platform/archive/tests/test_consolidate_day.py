@@ -22,6 +22,7 @@ reader returns the same rows afterwards. Real catalog, real files (TEST-03).
 import fcntl
 import itertools
 from pathlib import Path
+from types import SimpleNamespace
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -36,7 +37,9 @@ from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.tests.snapshot_factory import make_snapshot
 from observability import error_ledger
 
+from archive import consolidate_catalog
 from archive.application import consolidate_day
+from archive.application.consolidate_day import PeriodOutcome
 from archive.application.consolidate_day import RunStats
 from archive.application.consolidate_day import file_span as _file_span
 from archive.application.consolidate_day import leaf_dirs
@@ -391,18 +394,28 @@ def test_a_midnight_crossing_file_is_left_alone_and_both_days_still_merge(tmp_pa
     assert len(rows) == 5 * 6 + 7 + 5 * 6
 
 
-def test_a_day_with_differing_precision_metadata_is_refused_and_run_exits_1(
+def _seed_mixed_precision_day(catalog: ParquetDataCatalog, day: int) -> None:
+    """
+    Three mark-price minute files at `price_precision` 1 and one at 2 in `day` (a venue tick-size
+    change mid-day): the same columns, differing Arrow metadata -- a mixed-schema day (D-24).
+    """
+    _seed_mark_minutes(catalog, day, 3, price="2500.5")
+    iid = InstrumentId.from_str(_MARK_IID)
+    ts = day * _DAY_NS + 3600 * _SEC
+    catalog.write_data([MarkPriceUpdate(iid, Price.from_str("2500.50"), ts, ts)])
+
+
+def test_a_day_with_differing_precision_metadata_is_refused_and_run_exits_2_as_findings(
     tmp_path: Path,
 ) -> None:
     """
     Same columns, different `price_precision` label (a venue tick-size change mid-day): merging
     would relabel part of the rows (`pa.concat_tables` keeps the first metadata), so it is refused.
+    A mixed-schema day is a standing finding, not a failure (DW-213): exit 2, so the nightly saga
+    still runs its later steps, with the refusal ledgered every run.
     """
     catalog = ParquetDataCatalog(str(tmp_path))
-    _seed_mark_minutes(catalog, _DAY0, 3, price="2500.5")
-    iid = InstrumentId.from_str(_MARK_IID)
-    ts = _DAY0 * _DAY_NS + 3600 * _SEC
-    catalog.write_data([MarkPriceUpdate(iid, Price.from_str("2500.50"), ts, ts)])
+    _seed_mixed_precision_day(catalog, _DAY0)
     (directory,) = leaf_dirs(str(tmp_path))
     precisions = {
         pq.read_schema(str(f)).metadata[b"price_precision"] for f in directory.glob("*.parquet")
@@ -416,13 +429,109 @@ def test_a_day_with_differing_precision_metadata_is_refused_and_run_exits_1(
 
     stats = run(str(tmp_path), None, None, apply=True, now_ns=now_ns)
 
-    assert (stats.days_done, stats.days_refused) == (0, 1)
+    assert (stats.days_done, stats.days_refused, stats.days_mixed_schema) == (0, 1, 1)
     assert stats.files_before == stats.files_after == 4
     assert sorted(directory.glob("*.parquet")) == files_before
     assert error_ledger.counts()["consolidate.mixed_schema"] == refused_before + 1
-    # The CLI turns the refusal into a non-zero exit (DATA-07); no --apply needed to see it.
-    assert main(["--catalog", str(tmp_path)]) == 1
+    # The CLI turns the refusal into exit 2, never 0 (DATA-07); no --apply needed to see it.
+    assert main(["--catalog", str(tmp_path)]) == 2
+    assert error_ledger.counts()["consolidate.mixed_schema"] == refused_before + 2
+    assert main(["--catalog", str(tmp_path), "--apply"]) == 2
+    assert error_ledger.counts()["consolidate.mixed_schema"] == refused_before + 3
     assert sorted(directory.glob("*.parquet")) == files_before
+
+
+def test_a_mixed_schema_day_beside_an_unreadable_file_exits_1_because_failure_wins(
+    tmp_path: Path,
+) -> None:
+    """
+    An unreadable file refuses its day as a failure (`consolidate.error`), not a finding: one such
+    refusal in the run makes it exit 1 however many mixed-schema days it also refused.
+    """
+    catalog = ParquetDataCatalog(str(tmp_path))
+    _seed_mixed_precision_day(catalog, _DAY0)
+    _seed_minutes(catalog, IID, _DAY0, 3)
+    snap_dir = tmp_path / "data" / "custom_dydx_second_snapshot" / IID
+    victim = sorted(snap_dir.glob("*.parquet"))[0]
+    victim.write_bytes(victim.read_bytes()[:40])
+    counts_before = dict(error_ledger.counts())
+
+    stats = run(str(tmp_path), None, None, apply=True, now_ns=(_DAY0 + 1) * _DAY_NS)
+
+    assert (stats.days_done, stats.days_refused, stats.days_mixed_schema) == (0, 2, 1)
+    for site in ("consolidate.mixed_schema", "consolidate.error"):
+        assert error_ledger.counts()[site] == counts_before.get(site, 0) + 1
+    assert main(["--catalog", str(tmp_path), "--apply"]) == 1
+    assert main(["--catalog", str(tmp_path)]) == 1  # report-only: the same rule
+
+
+def test_an_unreadable_file_after_the_schema_mismatch_is_a_failure_not_a_finding(
+    tmp_path: Path,
+) -> None:
+    """
+    Every file's footer is read before the schemas are compared: a truncated file sorting after
+    the odd one must not hide behind the mismatch (exit 2), it refuses its day as a failure.
+    """
+    catalog = ParquetDataCatalog(str(tmp_path))
+    _seed_mixed_precision_day(catalog, _DAY0)  # minutes 0-2 at precision 1, 01:00 at precision 2
+    iid = InstrumentId.from_str(_MARK_IID)
+    ts = _DAY0 * _DAY_NS + 2 * 3600 * _SEC
+    catalog.write_data([MarkPriceUpdate(iid, Price.from_str("2500.5"), ts, ts)])
+    (directory,) = leaf_dirs(str(tmp_path))
+    victim = sorted(directory.glob("*.parquet"))[-1]  # the 02:00 file, after the mismatch
+    assert _file_span(victim)[0] == ts
+    victim.write_bytes(victim.read_bytes()[:40])
+    counts_before = dict(error_ledger.counts())
+
+    stats = run(str(tmp_path), None, None, apply=True, now_ns=(_DAY0 + 1) * _DAY_NS)
+
+    assert (stats.days_refused, stats.days_mixed_schema) == (1, 0)
+    assert (
+        error_ledger.counts()["consolidate.error"] == counts_before.get("consolidate.error", 0) + 1
+    )
+    assert error_ledger.counts().get("consolidate.mixed_schema", 0) == counts_before.get(
+        "consolidate.mixed_schema", 0
+    )
+    assert main(["--catalog", str(tmp_path), "--apply"]) == 1
+    assert main(["--catalog", str(tmp_path)]) == 1
+
+
+def test_a_mixed_schema_day_beside_an_abandoned_leaf_exits_1_because_failure_wins(
+    tmp_path: Path,
+) -> None:
+    catalog = ParquetDataCatalog(str(tmp_path))
+    _seed_mixed_precision_day(catalog, _DAY0)
+    _seed_minutes(catalog, IID, _DAY0, 3)
+    snap_dir = tmp_path / "data" / "custom_dydx_second_snapshot" / IID
+    (snap_dir / "not-a-catalog-span.parquet").write_bytes(b"")  # unparseable name: leaf abandoned
+    errors_before = error_ledger.counts().get("consolidate.error", 0)
+
+    stats = run(str(tmp_path), None, None, apply=True, now_ns=(_DAY0 + 1) * _DAY_NS)
+
+    assert (stats.days_refused, stats.days_mixed_schema, stats.leaves_failed) == (1, 1, 1)
+    assert error_ledger.counts()["consolidate.error"] == errors_before + 1
+    assert main(["--catalog", str(tmp_path), "--apply"]) == 1
+
+
+def test_run_stats_count_mixed_schema_refusals_as_a_subset_of_refused_and_show_both() -> None:
+    stats = RunStats()
+
+    stats.count_refusal(PeriodOutcome.MIXED_SCHEMA)
+    stats.count_refusal(PeriodOutcome.REFUSED)
+
+    assert (stats.days_refused, stats.days_mixed_schema) == (2, 1)
+    assert stats.summary(apply=True).startswith(
+        "0 day(s) consolidated, 2 refused (1 mixed-schema), 0 leaf/leaves failed; "
+    )
+
+
+def test_run_stats_refuse_to_count_a_done_period_as_a_refusal() -> None:
+    stats = RunStats()
+
+    with pytest.raises(ValueError, match="not a refusal"):
+        stats.count_refusal(PeriodOutcome.DONE)
+
+    assert (stats.days_refused, stats.days_mixed_schema) == (0, 0)
 
 
 def test_a_clean_run_exits_0_and_report_only_changes_nothing(tmp_path: Path) -> None:
@@ -592,6 +701,16 @@ def test_a_missing_catalog_exits_1(tmp_path: Path) -> None:
     assert main(["--catalog", str(tmp_path / "nope"), "--apply"]) == 1
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [["--days", "0"], ["--closed-hours", "--days", "2"], ["--no-such-flag"]],
+)
+def test_a_usage_error_exits_1_never_2_which_the_saga_reads_as_findings(
+    tmp_path: Path, argv: list[str]
+) -> None:
+    assert main(["--catalog", str(tmp_path), *argv]) == 1
+
+
 # -- story 22.13: the raw trade archive and per-venue runs -----------------------------------------
 
 
@@ -701,6 +820,30 @@ def test_closed_hours_are_merged_and_nothing_reaching_the_current_hour_is_touche
     assert rows == 7 * 6 + len(crossing)  # every row kept
 
 
+def test_a_closed_hour_refused_only_for_mixed_schema_exits_2_as_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The intraday merge applies the day rule one period finer: a mixed-schema hour is a finding.
+    """
+    _seed_mark_at(ParquetDataCatalog(str(tmp_path)), _DAY0, [9 * 60, 9 * 60 + 1])
+    iid = InstrumentId.from_str(_MARK_IID)
+    ts = _DAY0 * _DAY_NS + 9 * _HOUR_NS + 30 * _MIN
+    ParquetDataCatalog(str(tmp_path)).write_data(
+        [MarkPriceUpdate(iid, Price.from_str("2500.50"), ts, ts)]
+    )
+    mark_dir = tmp_path / "data" / "mark_price_update" / _MARK_IID
+    files_before = sorted(mark_dir.glob("*.parquet"))
+    refused_before = error_ledger.counts().get("consolidate.mixed_schema", 0)
+    monkeypatch.setattr(consolidate_catalog, "time", SimpleNamespace(time_ns=lambda: _NOW_1420))
+
+    assert main(["--catalog", str(tmp_path), "--closed-hours"]) == 2
+    assert main(["--catalog", str(tmp_path), "--apply", "--closed-hours"]) == 2
+
+    assert sorted(mark_dir.glob("*.parquet")) == files_before
+    assert error_ledger.counts()["consolidate.mixed_schema"] == refused_before + 2
+
+
 def _hours_of_path(path: Path) -> int:
     a, _ = _file_span(path)
     return (a % _DAY_NS) // _HOUR_NS
@@ -724,8 +867,7 @@ def test_the_nightly_consolidate_absorbs_the_hourly_files(tmp_path: Path) -> Non
 
 def test_closed_hours_takes_neither_days_nor_data_types_and_takes_the_lock(tmp_path: Path) -> None:
     for extra in (["--days", "1"], ["--data-type", "mark_price_update"]):
-        with pytest.raises(SystemExit):
-            main(["--catalog", str(tmp_path), "--closed-hours", *extra])
+        assert main(["--catalog", str(tmp_path), "--closed-hours", *extra]) == 1
     with (tmp_path / ".consolidate.lock").open("a") as held:
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         assert main(["--catalog", str(tmp_path), "--apply", "--closed-hours"]) == 1

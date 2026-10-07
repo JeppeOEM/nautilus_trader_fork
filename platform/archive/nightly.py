@@ -51,9 +51,11 @@ keeps working, loudly (the old module path's shim itself was removed in Story 25
 A missing catalog stops the saga before any step (`archive.catalog_missing`, exit 1).
 
 Known limit: plan retention runs only as the saga's last step, so an earlier FAILED step (e.g. a
-standing consolidate refusal) also postpones dYdX dropped-instrument and delta retention -- and the
-trade retention -- until that failure is fixed. Upgrade path: a standalone
-`archive.prune_catalog --dydx-plan` job in the `archive` service's chains
+rebuild whose result file is unusable, or a standing consolidate refusal that is not a
+mixed-schema one, such as the sparse-leaf late file's `consolidate.row_count`; a mixed-schema day
+is a finding since DW-213 and does not stop the saga) also postpones dYdX dropped-instrument and
+delta retention -- and the trade retention -- until that failure is fixed. Upgrade path: a
+standalone `archive.prune_catalog --dydx-plan` job in the `archive` service's chains
 (`archive/scheduler.py`), or a saga that runs retention after a failure that does not concern
 the files it would delete. Ends with one summary line
 (per-step outcome and wall seconds, peak child RSS, the run id). Exit code: the failing step's,

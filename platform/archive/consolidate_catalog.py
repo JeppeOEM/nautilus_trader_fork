@@ -33,9 +33,15 @@ types only (mark/index price, funding rate, open interest, instrument status --
 it becomes one file; a file reaching the current hour is never touched. It takes neither `--days`
 nor `--data-type`, and `--apply` takes the maintenance flock exactly as a day run does.
 
-Each run ends with one summary line (days consolidated/refused, files and MB before -> after, wall
-seconds, peak RSS of this process) and exits 1 when any day was refused (DATA-07): the refusal's
-detail is in the error ledger and the log above the summary.
+Each run ends with one summary line (days consolidated, refused and of those mixed-schema, leaves
+failed, files and MB before -> after, wall seconds, peak RSS of this process). Exit code (DW-213):
+1 when anything other than a mixed-schema refusal went wrong -- a period refused for another
+reason (merged or covering file failing verification, partial commit, open-day write, unreadable
+file), an abandoned leaf, a held lock, a missing catalog, a usage error (argparse's own 2 is
+mapped to 1, so a bad command line never reads as findings); else 2 (`archive.application.nightly`'s
+FINDINGS, so the nightly saga continues) when a period was refused for differing schemas (D-24);
+else 0. The same rule holds for --closed-hours and report-only runs. Every refusal's detail is in
+the error ledger and the log above the summary (DATA-07).
 """
 
 import argparse
@@ -49,6 +55,7 @@ from archive.application.catalog_check import catalog_missing
 from archive.application.consolidate_day import RunStats
 from archive.application.consolidate_day import run
 from archive.application.consolidate_day import run_closed_hours
+from archive.application.nightly import FINDINGS
 from archive.application.ports import CatalogWriter
 from archive.infrastructure.maintenance_lock import MAINTENANCE_LOCK_NAME
 from archive.infrastructure.maintenance_lock import maintenance
@@ -79,8 +86,27 @@ def _run(args: argparse.Namespace) -> RunStats | None:
         return _consolidate(writer, args)
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI entry point; returns the process exit code (1 when any day was refused)."""
+def _exit_code(stats: RunStats) -> int:
+    """
+    1 when a period was refused for another reason than differing schemas or a leaf was abandoned,
+    else 2 (findings) when a period was refused for differing schemas, else 0 -- logged loudly
+    whenever it is not 0 (DATA-07).
+    """
+    failures = stats.days_refused - stats.days_mixed_schema + stats.leaves_failed
+    if not stats.days_refused and not stats.leaves_failed:
+        return 0
+    logger.error(
+        "consolidate: %d %s(s) refused (%d mixed-schema), %d leaf/leaves failed -- see the "
+        "consolidate.* entries above (DATA-07)",
+        stats.days_refused,
+        stats.unit,
+        stats.days_mixed_schema,
+        stats.leaves_failed,
+    )
+    return 1 if failures else FINDINGS
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -103,6 +129,18 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--days must be at least 1")
     if args.closed_hours and (args.days is not None or args.data_type):
         parser.error("--closed-hours takes neither --days nor --data-type")
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    """
+    CLI entry point; returns the process exit code: 1 on any failure (a usage error included), 2
+    when the only problems were mixed-schema refusals, else 0 (module docstring).
+    """
+    try:
+        args = _parse_args(argv)
+    except SystemExit as e:  # argparse exits 2 on a usage error, which the saga reads as FINDINGS
+        return 0 if e.code in (0, None) else 1
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     # Its own durable file (Story 31.8): a child of the nightly saga and the intraday run, whose
     # ledger lines once reached stdout only.
@@ -115,16 +153,7 @@ def main(argv: list[str] | None = None) -> int:
     if stats is None:
         return 1
     logger.info("consolidate: %s", stats.summary(args.apply))
-    if stats.days_refused or stats.leaves_failed:
-        logger.error(
-            "consolidate: %d %s(s) refused, %d leaf/leaves failed -- see the consolidate.* "
-            "entries above (DATA-07)",
-            stats.days_refused,
-            stats.unit,
-            stats.leaves_failed,
-        )
-        return 1
-    return 0
+    return _exit_code(stats)
 
 
 if __name__ == "__main__":

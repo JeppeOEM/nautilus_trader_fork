@@ -16,11 +16,12 @@
 The nightly saga (AD-D9): one venue-day's steps in order, each its own child process, carrying
 the rebuild's proof to the reconcile.
 
-A step's exit 2 means "findings": it finished, but some instruments were refused (rebuild) or
-mismatched / could not be compared (compare) -- all ledgered. The saga continues past findings,
-since one instrument's standing problem must not halt the venue's maintenance every night. Any
-other non-zero exit is a failure and stops the saga at that step. Findings and failures are
-recorded as `nightly.<step>` in the error ledger.
+A step's exit 2 means "findings": it finished, but some instruments were refused (rebuild),
+mismatched / could not be compared (compare), or some periods were refused for differing schemas
+and nothing else went wrong (consolidate, D-24 / DW-213) -- all ledgered. The saga continues past
+findings, since one instrument's standing problem must not halt the venue's maintenance every
+night. Any other non-zero exit is a failure and stops the saga at that step. Findings and
+failures are recorded as `nightly.<step>` in the error ledger.
 
 The proof: the rebuild step writes its `--result-file` (`{"venue", "day", "rebuilt", "refused"}`)
 into the saga's own temporary directory; the saga reads it into that step's `StepResult` as a

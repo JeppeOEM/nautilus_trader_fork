@@ -56,7 +56,8 @@ hour (`consolidate.row_count`, loud, nothing deleted). The nightly day merge usu
 (the day's covering span is then some other file's), but not when the hourly file alone spans the
 whole day -- a sparse leaf, e.g. `instrument_status`, whose every row of the day lies in that one
 hour: then the day is refused the same way every night, and the standalone consolidate fails
-until an operator merges the late file by hand. The intraday slot runs at `nightly_at`'s minute
+(exit 1: unlike a mixed-schema refusal, this is a verification failure, not a finding) until an
+operator merges the late file by hand. The intraday slot runs at `nightly_at`'s minute
 past the hour, several flush periods after the hour closed, so this needs a flush delayed by
 minutes. Upgrade path: merge a late file into the existing merged file (a verified rewrite of it
 plus the late one) instead of refusing, at both the hour and the day grain.
@@ -66,6 +67,7 @@ import logging
 import resource
 import time
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 import pandas as pd
@@ -94,12 +96,30 @@ _MB = 1024 * 1024
 _NEVER_CONSOLIDATED = frozenset({"bar"})
 
 
+class PeriodOutcome(Enum):
+    """
+    How one closed period (a day, or an hour) ended. `MIXED_SCHEMA` is split from `REFUSED`
+    because the CLI's exit code differs (DW-213): a mixed-schema period is a standing finding the
+    nightly saga continues past, every other refusal (a merge or covering file failing
+    verification, a partial commit, an open-day write, an unreadable file) is a failure.
+    """
+
+    DONE = "done"
+    REFUSED = "refused"
+    MIXED_SCHEMA = "mixed_schema"
+
+
 @dataclass
 class RunStats:
-    """What one run did, for its summary line and exit code."""
+    """
+    What one run did, for its summary line and exit code. `days_refused` counts every refused
+    period (the verification context reads it as a failing count); `days_mixed_schema` is the
+    subset refused for differing schemas (D-24), which alone make the CLI exit 2, not 1.
+    """
 
     days_done: int = 0
     days_refused: int = 0
+    days_mixed_schema: int = 0
     leaves_failed: int = 0
     files_before: int = 0
     files_after: int = 0
@@ -109,10 +129,19 @@ class RunStats:
     peak_rss_mb: float = 0.0
     unit: str = "day"  # what `days_done`/`days_refused` count: a day, or an hour (closed hours)
 
+    def count_refusal(self, outcome: PeriodOutcome) -> None:
+        """Count one refused period (`outcome` is not `DONE`)."""
+        if outcome is PeriodOutcome.DONE:
+            raise ValueError("a DONE period is not a refusal")
+        self.days_refused += 1
+        if outcome is PeriodOutcome.MIXED_SCHEMA:
+            self.days_mixed_schema += 1
+
     def summary(self, apply: bool) -> str:
         verb = "consolidated" if apply else "would be consolidated (report only, nothing changed)"
         return (
-            f"{self.days_done} {self.unit}(s) {verb}, {self.days_refused} refused, "
+            f"{self.days_done} {self.unit}(s) {verb}, {self.days_refused} refused "
+            f"({self.days_mixed_schema} mixed-schema), "
             f"{self.leaves_failed} leaf/leaves failed; "
             f"files {self.files_before} -> {self.files_after}; "
             f"{self.bytes_before / _MB:.1f} -> {self.bytes_after / _MB:.1f} MB; "
@@ -165,9 +194,13 @@ def closed_days_needing_work(
 
 
 def _schemas_agree(files: list[Path]) -> bool:
-    """Report whether every file has the same full schema, Arrow metadata included (see above)."""
-    first = pq.read_schema(str(files[0]))
-    return all(pq.read_schema(str(f)).equals(first, check_metadata=True) for f in files[1:])
+    """
+    Report whether every file has the same full schema, Arrow metadata included (see above). Every
+    footer is read before comparing: an unreadable file anywhere in the period raises (a failure,
+    `consolidate.error`) instead of hiding behind an earlier mismatch, which is only a finding.
+    """
+    schemas = [pq.read_schema(str(f)) for f in files]
+    return all(s.equals(schemas[0], check_metadata=True) for s in schemas[1:])
 
 
 def _row_count(files: list[Path]) -> int:
@@ -233,41 +266,43 @@ def _consolidate_day(
     files: list[Path],
     apply: bool,
     scope: MergeScope = MergeScope.CLOSED_DAY,
-) -> bool:
+) -> PeriodOutcome:
     """
-    Consolidate one closed period's files (a day, or an hour in `CLOSED_HOUR` scope); return False
-    when it was refused (recorded in the error ledger, nothing deleted), True when done (or
-    reported without --apply).
+    Consolidate one closed period's files (a day, or an hour in `CLOSED_HOUR` scope); return
+    `MIXED_SCHEMA` or `REFUSED` when it was refused (recorded in the error ledger, nothing
+    deleted), `DONE` when done (or reported without --apply).
     """
-    # Known limit: a refused day stays refused -- every nightly run records it again and exits 1
-    # until an operator rewrites that day's odd file(s) to the common schema (as
-    # `archive.tools.migrate_snapshot_ints` does for the float-layout snapshot files, D-24's
-    # pre-OHLC ones included). Upgrade path: a
-    # per-day re-stamp/split tool for a mid-day precision change (exact `Price.from_raw`, never
-    # float), which no venue has produced yet.
+    # Known limit: a mixed-schema day stays refused -- every run records it again
+    # (`consolidate.mixed_schema`) and the CLI exits 2 (findings, DW-213), so the nightly saga
+    # still runs its later steps for that venue, until an operator rewrites that day's odd file(s)
+    # to the common schema (as `archive.tools.migrate_snapshot_ints` does for the float-layout
+    # snapshot files, D-24's pre-OHLC ones included). The scheduler's watermark advances over
+    # findings; every full-run consolidate (no --days) re-reports the day, so it stays loud.
+    # Upgrade path: a per-day re-stamp/split tool for a mid-day precision change (exact
+    # `Price.from_raw`, never float), which no venue has produced yet.
     if not _schemas_agree(files):
         error_ledger.record(
             "consolidate.mixed_schema", f"{label}: files with differing schemas, refused (D-24)"
         )
-        return False
+        return PeriodOutcome.MIXED_SCHEMA
     big = _covering_file(files)
     sources = [f for f in files if f is not big] if big else files
     expected = _row_count(sources)
     if not apply or writer is None:
         logger.info("%s: %d files, %d rows (report only)", label, len(files), expected)
-        return True
+        return PeriodOutcome.DONE
     if big is None:
         if not _merge(writer, directory, sources, label, scope):
-            return False
+            return PeriodOutcome.REFUSED
     elif pq.read_metadata(str(big)).num_rows != expected or not _is_merge_of(big, sources):
         error_ledger.record(
             "consolidate.row_count",
             f"{label}: covering file {big.name} does not match its sources; nothing deleted",
         )
-        return False
+        return PeriodOutcome.REFUSED
     writer.remove_merged_sources(sources, scope=scope)
     logger.info("%s: %d files -> 1, %d rows", label, len(files), expected)
-    return True
+    return PeriodOutcome.DONE
 
 
 def _consolidate_period(
@@ -277,7 +312,7 @@ def _consolidate_period(
     files: list[Path],
     apply: bool,
     scope: MergeScope,
-) -> bool:
+) -> PeriodOutcome:
     """One period's consolidation, with every tolerated failure confined to it and ledgered."""
     try:
         return _consolidate_day(writer, directory, label, files, apply, scope)
@@ -285,7 +320,7 @@ def _consolidate_period(
         error_ledger.record("consolidate.open_day", f"{label}: {e}; sources kept")
     except (OSError, pa.ArrowException) as e:  # e.g. a truncated file: this period only
         error_ledger.record("consolidate.error", f"{label}: {e!r}; sources kept", exc=e)
-    return False
+    return PeriodOutcome.REFUSED
 
 
 def _consolidate_groups(
@@ -306,10 +341,11 @@ def _consolidate_groups(
         stamp = pd.Timestamp(period * period_ns, unit="ns")
         when = stamp.date() if scope is MergeScope.CLOSED_DAY else stamp.strftime("%Y-%m-%d %H:00")
         label = f"{directory.parent.name}/{directory.name} {when}"
-        if _consolidate_period(writer, directory, label, files, apply, scope):
+        outcome = _consolidate_period(writer, directory, label, files, apply, scope)
+        if outcome is PeriodOutcome.DONE:
             done += 1
         elif stats is not None:
-            stats.days_refused += 1
+            stats.count_refusal(outcome)
     if stats is not None:
         stats.days_done += done
     return done

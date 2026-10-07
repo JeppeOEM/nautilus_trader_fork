@@ -1709,7 +1709,9 @@ resolution-undo: dcc0700427eddf493cae780ae257b14adaad477dcd1d81d72caf42af892bf69
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md` summary: consolidate_catalog exits 1 on any refused day, so one standing mixed-schema day stops candles.rebuild, compare_klines and prune in every nightly saga run, not just the prune the Known limit names. evidence: archive/consolidate_catalog.py exit code and application/nightly.py stop-at-first-failure. This predates 25.1 (collector_core/consolidate_catalog.py:53).
-status: open
+status: done 2026-10-07
+resolution: resolved by sweep bundle dw-consolidate-refusals-exit-findings
+resolution-undo: ce1dd07646eda9038bef1a77c17db91f1bf79210c72047e02c611a29e6f6ab61 2026-10-07 7374617475733a206f70656e
 decision: 2026-10-05 Exit 2 (findings) for refused days — consolidate exits 2 on refused days/leaves so the saga continues past it, ledgered as findings
 
 ### DW-214: The prune's `pruned` marker covers the deleted trade file's raw `ts_init` span, but a trade's `ts_event` can precede its `ts_init` by up to …
