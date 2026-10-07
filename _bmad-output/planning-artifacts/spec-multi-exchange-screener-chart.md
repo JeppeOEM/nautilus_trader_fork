@@ -414,6 +414,27 @@ app.
 email/SMS delivery, "Notify on price change % " and other exotic condition
 types, alert templates library, multi-condition (AND/OR) logic.
 
+> **[amended 2026-10-07: Story 33.8]** The operator's 2026-10-05 review lifts
+> the exclusion of "Notify on price change %" and the other exotic condition
+> types. An alert holds one `condition` of 14 kinds (`alerting/domain/
+> conditions.py`): price crosses, crosses up, crosses down, above and below a
+> level; % move over N closed bars; channel exit; an indicator output `>`/`<`/
+> crosses up/crosses down a value (read through the chart's own indicator
+> replay); a cross of a saved trendline (the chart's own line, extrapolated past its anchors);
+> funding above/below a rate; open-interest change over a window; liquidation
+> notional over a window (optionally one side); and forced share over a window.
+> The existing three frequencies apply to every kind. The Alerts page is no
+> longer list-only: it creates an alert (instrument, timeframe, condition,
+> frequency, expiry, template, webhook) without a chart and edits one in a
+> dialog (`PUT /api/alerts/{id}`, with Re-arm for a triggered alert); a row
+> shows the server's condition text, its status (now also `invalid`, with the
+> reason, when its indicator or drawing is gone) and Delete. The chart's alert
+> dialog offers every kind, and the drawing menu's "Add alert…" prefills it from
+> a clicked horizontal line (a price cross at its price) or trendline (a
+> trendline cross). Templates gain `{{value}}` and `{{condition}}`. Still
+> excluded: multi-condition (AND/OR) alerts and an alert templates library;
+> delivery is unchanged (webhook and Telegram through `observability.notify`).
+
 > **Grounded in this project:** not built yet — a genuinely new epic. Since
 > `troll/data_api` already runs a live Redis-subscriber loop (`ws/live.py`,
 > `redis_bus.py`) for pushing live data to the frontend, the "evaluate

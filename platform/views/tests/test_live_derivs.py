@@ -23,6 +23,7 @@ import json
 from decimal import Decimal
 from typing import Any
 
+from kernel.derivs_wire import DerivsTick
 from kernel.liquidation import LiquidatedSide
 from kernel.liquidation import Liquidation
 from observability import error_ledger
@@ -262,3 +263,88 @@ def test_a_failing_listener_is_ledgered_and_the_candle_fold_goes_on() -> None:
     assert [r.venue_event_id for r in candles.recent_liquidations(_BTC, 0, 1 << 62)] == ["a"]
     assert error_ledger.counts() == {"live_candles.liquidation_listener": 1}
     error_ledger.reset()
+
+
+# --- Story 33.8: the observer hook ----------------------------------------------------------------
+
+
+class _Recorder:
+    """A `DerivsObserver` by shape: records every tick and batch it is handed."""
+
+    def __init__(self) -> None:
+        self.ticks: list[tuple[str, str, Decimal]] = []
+        self.batches: list[list[str]] = []
+
+    def on_deriv(self, tick: DerivsTick) -> None:
+        self.ticks.append((tick.instrument_id, tick.kind, tick.value))
+
+    def on_liquidation(self, rows: list[Liquidation]) -> None:
+        self.batches.append([row.venue_event_id for row in rows])
+
+
+class _BrokenObserver:
+    def on_deriv(self, tick: DerivsTick) -> None:
+        raise RuntimeError("observer bug")
+
+    def on_liquidation(self, rows: list[Liquidation]) -> None:
+        raise RuntimeError("observer bug")
+
+
+def test_an_observer_sees_every_decoded_tick_with_no_listener() -> None:
+    bus, observer = LiveDerivsBus(), _Recorder()
+    bus.attach(observer)
+    bus.attach(observer)  # twice: still called once
+    bus.handle_derivs([_row(_BTC), {"bad": 1}, _row(_ETH, "funding", "0.0001")])
+    assert observer.ticks == [
+        (_BTC, "mark", Decimal("100.50")),
+        (_ETH, "funding", Decimal("0.0001")),
+    ]
+    assert bus._listeners == {}  # observing creates no channel state (MEM-02)
+    error_ledger.reset()
+
+
+def test_an_observer_does_not_change_what_a_listener_receives() -> None:
+    plain, observed = LiveDerivsBus(), LiveDerivsBus()
+    observed.attach(_Recorder())
+    queues = [bus.subscribe(derivs_channel(_BTC)) for bus in (plain, observed)]
+    for bus in (plain, observed):
+        bus.handle_derivs([_row(_BTC), _row(_BTC, "index", "100.00")])
+    assert _drain(queues[0]) == _drain(queues[1])
+
+
+def test_an_observer_sees_each_liquidation_batch_the_candle_bus_decoded() -> None:
+    candles, derivs, observer = (
+        LiveCandleBus("no-catalog-read-in-this-test"),
+        LiveDerivsBus(),
+        _Recorder(),
+    )
+    candles.attach_liquidations(derivs)
+    derivs.attach(observer)
+    candles.handle_liquidations(
+        [Liquidation.to_dict(_liq(key="a")), Liquidation.to_dict(_liq(key="b"))]
+    )
+    assert observer.batches == [["a", "b"]]
+
+
+def test_a_failing_observer_is_ledgered_and_the_relay_goes_on() -> None:
+    error_ledger.reset()
+    bus, recorder = LiveDerivsBus(), _Recorder()
+    bus.attach(_BrokenObserver())
+    bus.attach(recorder)
+    queue = bus.subscribe(derivs_channel(_BTC))
+    bus.handle_derivs([_row(_BTC)])
+    bus.publish_liquidations([_liq()])
+    assert len(_drain(queue)) == 1
+    assert (len(recorder.ticks), len(recorder.batches)) == (1, 1)
+    assert error_ledger.counts() == {"live_derivs.observer": 2}
+    error_ledger.reset()
+
+
+def test_a_detached_observer_is_no_longer_called() -> None:
+    bus, observer = LiveDerivsBus(), _Recorder()
+    bus.attach(observer)
+    bus.detach(observer)
+    bus.detach(observer)  # again: a no-op
+    bus.handle_derivs([_row(_BTC)])
+    bus.publish_liquidations([_liq()])
+    assert (observer.ticks, observer.batches) == ([], [])

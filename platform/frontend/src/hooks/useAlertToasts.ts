@@ -8,17 +8,27 @@ const TOAST_MS = 10_000;
 export interface AlertToast {
   id: string;
   message: string;
+  /** Story 33.8: the server's condition text (`conditions.describe`), when the frame carries it. */
+  condition?: string;
 }
 
-/** `{"channel": "alerts", "alert": {"id", "message"}}` -- pushed by alerting's `AlertEngine` on fire. */
-function parseToast(data: string): AlertToast | null {
+/**
+ * `{"channel": "alerts", "alert": {"id", "message", "condition"?}}` -- pushed by alerting's
+ * `AlertEngine` on fire; `condition` is Story 33.8's appended key, absent from an older server.
+ */
+export function parseToast(data: string): AlertToast | null {
   try {
     const parsed: unknown = JSON.parse(data);
     if (typeof parsed !== "object" || parsed === null) return null;
-    const { channel, alert } = parsed as { channel?: unknown; alert?: { id?: unknown; message?: unknown } };
+    const { channel, alert } = parsed as {
+      channel?: unknown;
+      alert?: { id?: unknown; message?: unknown; condition?: unknown };
+    };
     if (channel !== "alerts" || !alert) return null;
     if (typeof alert.id !== "string" || typeof alert.message !== "string") return null;
-    return { id: alert.id, message: alert.message };
+    const toast: AlertToast = { id: alert.id, message: alert.message };
+    if (typeof alert.condition === "string") toast.condition = alert.condition;
+    return toast;
   } catch {
     return null; // malformed frame -- ignore, same as the sibling live hooks
   }

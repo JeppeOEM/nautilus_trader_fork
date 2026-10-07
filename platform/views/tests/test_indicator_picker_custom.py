@@ -75,7 +75,9 @@ def _placeholder_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(
         ci.CUSTOM_INDICATOR_CATALOG,
         "PlaceholderCustom",
-        CustomIndicatorSpec(params={"scale": 1.0}, panel="histogram", replay=_echo_replay),
+        CustomIndicatorSpec(
+            params={"scale": 1.0}, panel="histogram", replay=_echo_replay, outputs=("value",)
+        ),
     )
 
 
@@ -104,6 +106,7 @@ def test_catalog_json_returns_params_and_panel_per_entry() -> None:
         "panel": "histogram",
         "choices": {},
         "units": {},
+        "outputs": ["value"],
     }
     assert (
         "category" not in ci.custom_catalog_json()["PlaceholderCustom"]
@@ -288,6 +291,7 @@ def test_cvd_registered_in_production_catalog_with_correct_shape() -> None:
         "panel": "oscillator",
         "choices": {"anchor": ["session", "visible", "all"]},
         "units": {"value": "size"},
+        "outputs": ["value"],
     }
 
 
@@ -385,6 +389,7 @@ def test_cancel_pressure_registered_in_production_catalog_with_correct_shape() -
         "panel": "histogram",
         "choices": {},
         "units": {},
+        "outputs": ["bid_pressure", "ask_pressure"],
     }
 
 
@@ -541,6 +546,7 @@ def test_ofi_registered_in_production_catalog_with_correct_shape() -> None:
         "panel": "oscillator",
         "choices": {},
         "units": {},
+        "outputs": ["value"],
     }
 
 
@@ -892,3 +898,17 @@ def test_indicator_units_mirror_the_frontend() -> None:
     assert tuple(part.strip(' "') for part in match.group(1).split(",")) == ci.INDICATOR_UNITS
     used = {unit for spec in ci.CUSTOM_INDICATOR_CATALOG.values() for unit in spec.units.values()}
     assert used <= set(ci.INDICATOR_UNITS)
+
+
+def test_every_custom_entry_lists_its_outputs_and_units_only_name_them() -> None:
+    # Story 33.8: the alert form's output select reads `outputs`; a `units` key the replay never
+    # returns would format nothing, so it must be one of them.
+    for name, spec in ci.CUSTOM_INDICATOR_CATALOG.items():
+        assert spec.outputs, name
+        assert set(spec.units) <= set(spec.outputs), name
+
+
+def test_every_listed_entry_of_the_merged_catalog_carries_outputs() -> None:
+    for name, entry in ci.merged_catalog().items():
+        assert entry["outputs"], name
+        assert set(entry.get("units", {})) <= set(entry["outputs"]), name

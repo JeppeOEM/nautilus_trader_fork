@@ -52,6 +52,7 @@ import { AnchoredVwapPrimitive } from "./primitives/AnchoredVwapPrimitive";
 import { FootprintPrimitive, type FootprintRenderSpec } from "./primitives/FootprintPrimitive";
 import { footprintLegendText } from "../../lib/footprint";
 import type { MarkerSpec } from "./LiquidationMarkers";
+import type { AlertCondition } from "../../lib/alertConditions";
 import { BarGrid, type DrawingPrimitive } from "./primitives/drawingPrimitive";
 import type { VwapPoint } from "../../lib/anchoredVwap";
 import {
@@ -306,6 +307,9 @@ interface LightweightChartProps {
   /** Story 32.5: the menu's "Settings..." entry, shown for the kinds that have a modal (Fibonacci,
    * position). */
   onDrawingSettings?: (id: string) => void;
+  /** Story 33.8: the menu's "Add alert…" entry, on a horizontal line (a `price_cross` at its price)
+   * or a trendline (a `trendline_cross` naming it); the page opens its alert dialog prefilled. */
+  onDrawingAlert?: (condition: AlertCondition) => void;
   /** Story 32.5: the instrument's price/size decimals (the catalog definition's, from the candles
    * response); `null` until known, and then no drawing prints a label. */
   precision?: InstrumentPrecision | null;
@@ -692,6 +696,7 @@ export default function LightweightChart({
   onDrawingColor,
   onDrawingDelete,
   onDrawingSettings,
+  onDrawingAlert,
   precision = null,
   onDrawingDrag,
   fibActive = false,
@@ -1961,6 +1966,28 @@ export default function LightweightChart({
   }, [priceLines, onPriceLineDrag, onDrawingDrag, mode, fibActive]);
 
   useEffect(() => {
+    // Story 33.8: in Cursor mode a right-click on a drawing opens the same edit menu a click does
+    // (the browser's own menu is suppressed only then); anywhere else it stays the browser's.
+    const container = containerRef.current;
+    const chart = chartRef.current;
+    if (!container || !chart || !drawEditable) return;
+    const handleContextMenu = (event: MouseEvent): void => {
+      const point = plotPoint(container, chart, event.clientX, event.clientY); // price pane only
+      if (!point) return;
+      const hitId = findDrawingHit(point, seriesRef.current, drawingRegistryRef.current, editRef.current.priceLines, {
+        hlineReachable: true,
+        primitives: true,
+        bodies: true,
+      })?.id;
+      if (!hitId) return;
+      event.preventDefault();
+      setMenu({ id: hitId, x: event.clientX, y: event.clientY });
+    };
+    container.addEventListener("contextmenu", handleContextMenu);
+    return () => container.removeEventListener("contextmenu", handleContextMenu);
+  }, [drawEditable]);
+
+  useEffect(() => {
     // Story 18.1/18.2: click reporting. `onPriceClick` is candles-only; `onPointClick`
     // works in both modes. Subscribed only while at least one applicable callback is
     // provided -- otherwise the chart's own click behavior is left completely untouched.
@@ -2044,6 +2071,14 @@ export default function LightweightChart({
   // An Anchored VP has no single colour: the menu's one colour is its up colour.
   const specColor = menuSpec && "kind" in menuSpec && menuSpec.kind === "anchored_vp" ? menuSpec.up_color : menuSpec?.color;
   const menuColor = /^#[0-9a-f]{6}$/i.test(specColor ?? "") ? specColor! : chartVar("--chart-drawing");
+  // Story 33.8: the alert a horizontal line (a price line, no `kind`) or a trendline prefills.
+  const menuAlert: AlertCondition | null = !menu || !menuSpec
+    ? null
+    : !("kind" in menuSpec)
+      ? { kind: "price_cross", level: menuSpec.price }
+      : menuSpec.kind === "trendline"
+        ? { kind: "trendline_cross", drawing_id: menu.id }
+        : null;
   return (
     <>
       <div ref={containerRef} />
@@ -2088,6 +2123,18 @@ export default function LightweightChart({
               }}
             >
               Settings…
+            </button>
+          )}
+          {menuAlert && onDrawingAlert && (
+            <button
+              type="button"
+              className="tabbtn"
+              onClick={() => {
+                onDrawingAlert(menuAlert);
+                setMenu(null);
+              }}
+            >
+              Add alert…
             </button>
           )}
           <button

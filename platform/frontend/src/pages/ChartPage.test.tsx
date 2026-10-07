@@ -4304,10 +4304,10 @@ describe("ChartPage order-flow indicators (Story 33.6)", () => {
     baseCatalog = await fetchIndicatorCatalog();
     vi.mocked(fetchIndicatorCatalog).mockResolvedValue({
       ...baseCatalog,
-      VolumeDelta: { params: {}, panel: "histogram", category: "custom", units: { value: "size" } },
-      TradeCount: { params: { split: false }, panel: "histogram", category: "custom", units: { value: "count", buys: "count", sells: "count" } },
-      StoredVWAP: { params: { mode: "session" }, panel: "overlay", category: "custom", units: { value: "price" } },
-      ForcedShare: { params: {}, panel: "histogram", category: "custom", units: { value: "ratio" } },
+      VolumeDelta: { params: {}, panel: "histogram", category: "custom", units: { value: "size" }, outputs: ["value"] },
+      TradeCount: { params: { split: false }, panel: "histogram", category: "custom", units: { value: "count", buys: "count", sells: "count" }, outputs: ["value", "buys", "sells"] },
+      StoredVWAP: { params: { mode: "session" }, panel: "overlay", category: "custom", units: { value: "price" }, outputs: ["value"] },
+      ForcedShare: { params: {}, panel: "histogram", category: "custom", units: { value: "ratio" }, outputs: ["value"] },
     });
   });
   afterEach(() => {

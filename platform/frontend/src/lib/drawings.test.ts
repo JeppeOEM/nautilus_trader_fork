@@ -1,3 +1,9 @@
+/// <reference types="node" />
+// Story 33.8 reads the trendline fixture shared with the Python alert engine off disk (the app
+// tsconfig types only `vite/client`), hence the node types reference above.
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -24,6 +30,7 @@ import {
   positionToForm,
   snapIndex,
   storedTime,
+  trendlinePriceAt,
 } from "./drawings";
 
 function fib(a: number, b: number, overrides: Partial<FibDrawing> = {}): FibDrawing {
@@ -375,5 +382,29 @@ describe("anchored drawings (Story 32.7)", () => {
       up_color: "#111111",
       down_color: "#222222",
     });
+  });
+});
+
+interface TrendlineCase {
+  name: string;
+  anchors: [{ time: number; price: number }, { time: number; price: number }];
+  t: number;
+  expected: number | null;
+}
+
+const TRENDLINE_FIXTURE = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..", "..", "..", "alerting", "tests", "fixtures", "trendline_cases.json",
+);
+
+describe("trendlinePriceAt (Story 33.8, the fixture shared with alerting/domain/geometry.py)", () => {
+  const { cases } = JSON.parse(readFileSync(TRENDLINE_FIXTURE, "utf8")) as { cases: TrendlineCase[] };
+
+  it("reads a non-empty fixture", () => {
+    expect(cases.length).toBeGreaterThan(0);
+  });
+
+  it.each(cases)("$name", ({ anchors, t, expected }) => {
+    expect(trendlinePriceAt(anchors, t)).toBe(expected);
   });
 });

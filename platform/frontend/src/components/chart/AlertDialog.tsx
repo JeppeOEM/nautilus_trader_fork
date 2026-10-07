@@ -1,47 +1,76 @@
 import { useEffect, useRef, useState } from "react";
 
 import { createAlert } from "../../api/client";
+import {
+  type AlertCondition,
+  type ConditionForm,
+  conditionToForm,
+  DEFAULT_TEMPLATE,
+  emptyForm,
+  expiryNs,
+  formToCondition,
+  LEVEL_KINDS,
+} from "../../lib/alertConditions";
+import { catalogEntries, useIndicatorCatalog } from "../../hooks/useIndicatorCatalog";
+import ConditionFields from "../alerts/ConditionFields";
+import DeliveryFields, { type Delivery } from "../alerts/DeliveryFields";
 import type { PriceLineSpec } from "./LightweightChart";
-
-export const DEFAULT_TEMPLATE = "{{ticker}} price crossed {{close}} ({{time}})";
 
 const STATIC_SOURCE = "static";
 
-const FREQUENCIES = [
-  { value: "once_per_bar_close", label: "Once per bar close" },
-  { value: "once_per_bar", label: "Once per bar" },
-  { value: "only_once", label: "Only once" },
-];
+const NEW_DELIVERY: Delivery = { frequency: "once_per_bar_close", expires: "", template: DEFAULT_TEMPLATE, webhookUrl: "" };
 
 interface AlertDialogProps {
   open: boolean;
   onClose: () => void;
   instrumentId: string;
   barSeconds: number;
-  /** The chart's placed horizontal lines (Story 18.1) -- selectable as the crossing target. */
+  /** The chart's placed horizontal lines (Story 18.1) -- selectable as a price kind's level. */
   priceLines: PriceLineSpec[];
+  /**
+   * Story 33.8: the condition the dialog opens with -- a horizontal line's "Add alert…" prefills a
+   * `price_cross` at its price, a trendline's a `trendline_cross` naming it. Absent: an empty price
+   * cross.
+   */
+  initialCondition?: AlertCondition | null;
+  /**
+   * Save the chart's drawings now (`useChartDrawings.saveNow`). The server checks a
+   * `trendline_cross` against the saved drawings file and the engine reads its anchors from it, while
+   * the chart saves a drawn or dragged line only after a debounce: Create awaits this first.
+   */
+  saveDrawings?: () => Promise<void>;
 }
 
-/** Date input value ("YYYY-MM-DD", or "" = never) -> end of that local day in epoch ns. */
-function expiryNs(date: string): number | null {
-  if (!date) return null;
-  return new Date(`${date}T23:59:59`).getTime() * 1_000_000;
-}
-
-export default function AlertDialog({ open, onClose, instrumentId, barSeconds, priceLines }: AlertDialogProps) {
+/**
+ * The chart's Create Alert dialog: every condition kind (`ConditionFields`) on this coin and bar
+ * width, with the horizontal-line target kept in the toolbar for the price kinds.
+ */
+export default function AlertDialog({
+  open,
+  onClose,
+  instrumentId,
+  barSeconds,
+  priceLines,
+  initialCondition,
+  saveDrawings,
+}: AlertDialogProps) {
   const ref = useRef<HTMLDialogElement>(null);
-  const [source, setSource] = useState(STATIC_SOURCE);
-  const [levelText, setLevelText] = useState("");
-  const [frequency, setFrequency] = useState("once_per_bar_close");
-  const [expires, setExpires] = useState("");
-  const [template, setTemplate] = useState(DEFAULT_TEMPLATE);
-  const [webhookUrl, setWebhookUrl] = useState("");
+  const [form, setForm] = useState<ConditionForm>(() => emptyForm("price_cross"));
+  const [target, setTarget] = useState(STATIC_SOURCE);
+  const [delivery, setDelivery] = useState<Delivery>(NEW_DELIVERY);
   const [error, setError] = useState<string | null>(null);
+  const catalog = useIndicatorCatalog(open && form.kind === "indicator");
 
   useEffect(() => {
     const dialog = ref.current;
     if (!dialog) return;
     if (open && !dialog.open) {
+      // Each opening starts from its prefill, never from the last dialog's half-typed form or
+      // delivery.
+      setForm(initialCondition ? conditionToForm(initialCondition) : emptyForm("price_cross"));
+      setTarget(STATIC_SOURCE);
+      setDelivery(NEW_DELIVERY);
+      setError(null);
       // showModal gives Esc-to-close, a backdrop and focus trapping natively; jsdom lacks it.
       if (typeof dialog.showModal === "function") dialog.showModal();
       else dialog.setAttribute("open", "");
@@ -49,27 +78,51 @@ export default function AlertDialog({ open, onClose, instrumentId, barSeconds, p
       if (typeof dialog.close === "function") dialog.close();
       else dialog.removeAttribute("open");
     }
-  }, [open]);
+  }, [open, initialCondition]);
 
-  const line = priceLines.find((l) => l.id === source);
-  // A removed line silently falls back to the typed value rather than a stale price.
-  const level = line ? line.price : Number(levelText);
+  // The chosen horizontal line, while a price kind reads its level from one: the level shown and
+  // saved is the line's price now (a dragged line moves it); a line removed meanwhile leaves the
+  // level it last showed (copied into the form when chosen).
+  const targetLine = LEVEL_KINDS.includes(form.kind) ? priceLines.find((l) => l.id === target) : undefined;
+  const shown = targetLine ? { ...form, fields: { ...form.fields, level: String(targetLine.price) } } : form;
+
+  function chooseTarget(id: string): void {
+    setTarget(id);
+    const line = priceLines.find((l) => l.id === id);
+    if (line) setForm((f) => ({ ...f, fields: { ...f.fields, level: String(line.price) } }));
+  }
+
+  function changeForm(next: ConditionForm): void {
+    // Typing a level detaches it from the line: the typed value is what is saved.
+    if (next.fields.level !== shown.fields.level) setTarget(STATIC_SOURCE);
+    setForm(next);
+  }
 
   async function save(): Promise<void> {
     setError(null);
-    if (!Number.isFinite(level) || (!line && levelText.trim() === "")) {
-      setError("Enter a price level.");
+    const result = formToCondition(shown, catalogEntries(catalog));
+    if ("error" in result) {
+      setError(result.error);
       return;
+    }
+    const { condition } = result;
+    if (condition.kind === "trendline_cross" && saveDrawings) {
+      try {
+        await saveDrawings();
+      } catch (err) {
+        setError(`The trendline is not saved yet, so no alert can watch it: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
     }
     try {
       await createAlert({
         instrument_id: instrumentId,
-        level,
-        frequency,
+        condition,
+        frequency: delivery.frequency,
         bar_seconds: barSeconds,
-        expires_at_ns: expiryNs(expires),
-        template,
-        webhook_url: webhookUrl.trim(),
+        expires_at_ns: expiryNs(delivery.expires),
+        template: delivery.template,
+        webhook_url: delivery.webhookUrl.trim(),
       });
       onClose();
     } catch (err) {
@@ -80,59 +133,21 @@ export default function AlertDialog({ open, onClose, instrumentId, barSeconds, p
   return (
     <dialog ref={ref} aria-label="Create Alert" onClose={onClose}>
       <h3>Create Alert &mdash; {instrumentId}</h3>
-      <label>
-        Price crosses
-        <select aria-label="Condition target" value={source} onChange={(e) => setSource(e.target.value)}>
-          <option value={STATIC_SOURCE}>Value</option>
-          {priceLines.map((l) => (
-            <option key={l.id} value={l.id}>
-              Horizontal line @ {l.price.toFixed(2)}
-            </option>
-          ))}
-        </select>
-      </label>
-      {!line && (
-        <input
-          aria-label="Price level"
-          type="number"
-          step="any"
-          value={levelText}
-          onChange={(e) => setLevelText(e.target.value)}
-        />
+      {LEVEL_KINDS.includes(form.kind) && (
+        <label>
+          Level from
+          <select aria-label="Condition target" value={target} onChange={(e) => chooseTarget(e.target.value)}>
+            <option value={STATIC_SOURCE}>Value</option>
+            {priceLines.map((l) => (
+              <option key={l.id} value={l.id}>
+                Horizontal line @ {l.price}
+              </option>
+            ))}
+          </select>
+        </label>
       )}
-      <label>
-        Frequency
-        <select aria-label="Frequency" value={frequency} onChange={(e) => setFrequency(e.target.value)}>
-          {FREQUENCIES.map((f) => (
-            <option key={f.value} value={f.value}>
-              {f.label}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        Expires (blank = never)
-        <input aria-label="Expiration date" type="date" value={expires} onChange={(e) => setExpires(e.target.value)} />
-      </label>
-      <label>
-        Message ({"{{ticker}} {{close}} {{time}} {{interval}}"})
-        <textarea
-          aria-label="Message template"
-          rows={3}
-          value={template}
-          onChange={(e) => setTemplate(e.target.value)}
-        />
-      </label>
-      <label>
-        Webhook URL (optional -- alerts always go to Telegram when the server has it configured)
-        <input
-          aria-label="Webhook URL"
-          type="url"
-          placeholder="https://"
-          value={webhookUrl}
-          onChange={(e) => setWebhookUrl(e.target.value)}
-        />
-      </label>
+      {open && <ConditionFields instrumentId={instrumentId} form={shown} onChange={changeForm} catalog={catalog} />}
+      <DeliveryFields value={delivery} onChange={setDelivery} />
       {error && <p style={{ color: "var(--color-danger)" }}>{error}</p>}
       <div>
         <button type="button" onClick={() => void save()}>

@@ -1022,3 +1022,18 @@ def funding_annualised(rate: Decimal, interval_s: int | None) -> Decimal | None:
     if interval_s is None or interval_s <= 0:
         return None
     return rate * _SECONDS_PER_YEAR / interval_s
+
+
+def pct_change(base: Decimal, latest: Decimal) -> Decimal | None:
+    """
+    Return `(latest - base) / base * 100`, the percent change from `base` to `latest`, as a
+    `Decimal` division at the default 28-significant-digit context (never through a `float`); None
+    when `base` is 0 (a percent of nothing is undefined, never 0 or an infinity).
+
+    SSOT-02: the one percent-change formula of a derivatives or price series -- ranking's
+    `oi_change_*_pct` (`ranking.domain.derivs.OpenInterestSeries`) and alerting's `pct_move` and
+    `oi_change` conditions (`alerting.domain.conditions`, Story 33.8) all call it.
+    """
+    if base == 0:
+        return None
+    return (latest - base) / base * 100

@@ -115,7 +115,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     It is also the one place the alert engine is wired to the candle bus (Story 24.3): attached as
     a `BarObserver` before the bus task starts, so no batch is folded without it, and detached on
     shutdown. The derivs bus is attached the same way as the candle bus's liquidation listener
-    (Story 33.4): the candle bus stays the one `liquidations:raw` subscriber.
+    (Story 33.4): the candle bus stays the one `liquidations:raw` subscriber. The engine is also
+    the derivs bus's `DerivsObserver` (Story 33.8), attached and detached with the rest, so a
+    funding, open-interest or liquidation alert fires with no `/ws/live` listener open.
     """
     error_ledger.start()
     # Bound once so shutdown detaches exactly what startup attached, even if a test swaps them.
@@ -123,6 +125,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     live_derivs_bus = buses.live_derivs_bus
     live_candle_bus.attach(alert_engine)
     live_candle_bus.attach_liquidations(live_derivs_bus)
+    live_derivs_bus.attach(alert_engine)
+    alert_engine.bind_loop()  # a `forget` before the first batch runs on this loop too
     rankings_task = asyncio.create_task(buses.bus.run(REDIS_URL))
     live_candles_task = asyncio.create_task(live_candle_bus.run(REDIS_URL))
     live_derivs_task = asyncio.create_task(live_derivs_bus.run(REDIS_URL))
@@ -133,6 +137,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         live_candle_bus.detach(alert_engine)
         live_candle_bus.detach_liquidations(live_derivs_bus)
+        live_derivs_bus.detach(alert_engine)
         for task in tasks:
             task.cancel()
         for task in tasks:

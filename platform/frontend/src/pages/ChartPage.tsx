@@ -19,6 +19,7 @@ import LightweightChart, {
 } from "../components/chart/LightweightChart";
 import type { TrendlineAnchor } from "../components/chart/primitives/TrendlinePrimitive";
 import ToolRail from "../components/chart/ToolRail";
+import type { AlertCondition } from "../lib/alertConditions";
 import { type ChartTool, type ChartToolDef, groupOfTool, toolDef } from "../lib/chartTools";
 import VolumeOverlaysDialog, { type SessionSlot, VolumeOverlayNotices } from "../components/chart/VolumeOverlaysDialog";
 import {
@@ -333,6 +334,7 @@ function DerivativeSettingsDialog({
     panel: "",
     category: "derivatives",
     choices: entryKey === "liquidations" ? { measure: ["size", "notional"], markers: ["true", "false"] } : {},
+    outputs: [], // a derivatives pane, not a catalog indicator: no alert reads its outputs
   };
   return (
     <IndicatorSettingsDialog
@@ -451,7 +453,13 @@ function ChartInner({
   const [activeTool, setActiveTool] = useState<ChartTool>("cursor");
   // Story 32.5: every drawing (horizontal lines, trendlines, Fibonacci, positions) is one list in
   // one server-side resource, restored on mount and saved on change by `useChartDrawings`.
-  const { drawings: allDrawings, setDrawings: setAllDrawings, status: drawingsStatus, saveError: drawingsSaveError } = drawingStore;
+  const {
+    drawings: allDrawings,
+    setDrawings: setAllDrawings,
+    status: drawingsStatus,
+    saveError: drawingsSaveError,
+    saveNow: saveDrawingsNow,
+  } = drawingStore;
   const [settingsId, setSettingsId] = useState<string | null>(null);
   const priceLines = useMemo<PriceLineSpec[]>(
     () =>
@@ -465,6 +473,12 @@ function ChartInner({
   const [indicatorDialogOpen, setIndicatorDialogOpen] = useState(false);
   const [overlaysDialogOpen, setOverlaysDialogOpen] = useState(false);
   const [alertDialogOpen, setAlertDialogOpen] = useState(false);
+  // Story 33.8: the condition the alert dialog opens with (a drawing's "Add alert…"); null = empty.
+  const [alertCondition, setAlertCondition] = useState<AlertCondition | null>(null);
+  const openAlertDialog = useCallback((condition: AlertCondition | null) => {
+    setAlertCondition(condition);
+    setAlertDialogOpen(true);
+  }, []);
   const [catalog, setCatalog] = useState<Record<string, IndicatorCatalogEntry>>({});
   // Story 18.2: the trendline's first click, held until the second click completes it
   // (or Esc / a tool change discards it); `drawings` is the placed set.
@@ -1590,7 +1604,7 @@ function ChartInner({
               </button>
             </span>
           )}
-          <button type="button" onClick={() => setAlertDialogOpen(true)}>
+          <button type="button" onClick={() => openAlertDialog(null)}>
             Alert
           </button>
           <button type="button" onClick={() => chart?.timeScale().fitContent()}>
@@ -1649,6 +1663,7 @@ function ChartInner({
             onDrawingColor={handleDrawingColor}
             onDrawingDelete={handleDrawingDelete}
             onDrawingSettings={requestSettings}
+            onDrawingAlert={openAlertDialog}
             precision={precision}
             onDrawingDrag={applyDrag}
             fibActive={activeTool === "fib"}
@@ -1803,6 +1818,8 @@ function ChartInner({
         instrumentId={instrumentId}
         barSeconds={barSeconds}
         priceLines={priceLines}
+        initialCondition={alertCondition}
+        saveDrawings={saveDrawingsNow}
       />
       <IndicatorPicker
         ref={pickerRef}

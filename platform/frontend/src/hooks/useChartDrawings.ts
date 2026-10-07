@@ -45,6 +45,12 @@ export interface ChartDrawings {
   status: DrawingsStatus;
   /** Why the latest save failed (shown to the operator), or null: the drawings on screen are not saved. */
   saveError: string | null;
+  /**
+   * Story 33.8: save the drawings on screen now, skipping the debounce, and resolve once the server
+   * holds them (rejects when they cannot be saved). A trendline alert is checked against the saved
+   * file, so its dialog awaits this before creating it.
+   */
+  saveNow: () => Promise<void>;
 }
 
 /**
@@ -79,6 +85,8 @@ export function useChartDrawings(instrumentId: string): ChartDrawings {
   const savedRef = useRef<Drawing[] | null>(null);
   const legacyPendingRef = useRef(false);
   const savingRef = useRef(false);
+  // The save in flight, settling (after its bookkeeping) to null when it landed or to its error.
+  const inflightRef = useRef<Promise<unknown> | null>(null);
   const statusRef = useRef<DrawingsStatus>("loading");
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const aliveRef = useRef(true);
@@ -145,7 +153,7 @@ export function useChartDrawings(instrumentId: string): ChartDrawings {
     const snapshot = latestRef.current;
     if (snapshot === savedRef.current) return;
     savingRef.current = true;
-    saveCoinDrawings(instrumentId, snapshot, unloading)
+    inflightRef.current = saveCoinDrawings(instrumentId, snapshot, unloading)
       .then(() => {
         savedRef.current = snapshot;
         if (aliveRef.current) setSaveError(null);
@@ -153,6 +161,7 @@ export function useChartDrawings(instrumentId: string): ChartDrawings {
           legacyPendingRef.current = false;
           removeLegacyHlines(instrumentId);
         }
+        return null;
       })
       .catch((err: unknown) => {
         console.error(`useChartDrawings: failed to save the drawings of ${instrumentId}`, err);
@@ -167,6 +176,7 @@ export function useChartDrawings(instrumentId: string): ChartDrawings {
           // A 4xx would fail identically: no retry until the next edit. No retry outliving the page.
           if (!refused) retryTimer.current = setTimeout(() => flush(), SAVE_RETRY_MS);
         }
+        return err;
       })
       .finally(() => {
         savingRef.current = false;
@@ -197,6 +207,25 @@ export function useChartDrawings(instrumentId: string): ChartDrawings {
     };
   }, [flush]);
 
+  const saveNow = useCallback(
+    async function saveNow(): Promise<void> {
+      // Each pass either waits out the save in flight (its `finally` may chain a newer one) or
+      // starts one for the unsaved list; it returns once the list on screen is the saved one.
+      for (;;) {
+        if (savingRef.current && inflightRef.current) {
+          await inflightRef.current;
+          continue;
+        }
+        if (statusRef.current !== "ready") throw new Error("This coin's drawings have not loaded yet.");
+        if (latestRef.current === savedRef.current) return;
+        flush();
+        const failure = await inflightRef.current;
+        if (failure) throw failure instanceof Error ? failure : new Error(String(failure));
+      }
+    },
+    [flush],
+  );
+
   const update = useCallback((fn: (all: Drawing[]) => Drawing[]): void => setDrawings(fn), []);
-  return { drawings, setDrawings: update, status, saveError };
+  return { drawings, setDrawings: update, status, saveError, saveNow };
 }

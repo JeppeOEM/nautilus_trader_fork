@@ -43,6 +43,12 @@ function AlertToasts() {
       {toasts.map((t) => (
         <p key={t.id} style={{ background: "var(--color-surface, #222)", padding: "0.5em 1em", margin: "0.3em 0" }}>
           {t.message}
+          {t.condition && (
+            <>
+              <br />
+              <small>{t.condition}</small>
+            </>
+          )}
         </p>
       ))}
     </div>

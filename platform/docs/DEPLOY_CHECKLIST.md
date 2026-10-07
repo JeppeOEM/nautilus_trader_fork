@@ -1671,6 +1671,39 @@ engine's first write -- no manual migration. The History page tiles `forced_shar
 - [ ] Open one coin's History page (`/history/BTCUSDT-LINEAR.BYBIT`): the Forced share 1h and
       Relative volume tiles draw after the liquidation tile once the series has values.
 
+### 33-8-alert-conditions-beyond-a-price-cross-and-an-alerts-page-that-creates-and-edits (commit: this story's)
+
+An alert gains a `condition` table with 14 kinds (price crosses/above/below, % move, channel exit,
+indicator, trendline cross, funding, OI change, liquidation notional, forced share), appended to
+`alerts.toml` (AD-D12): an alert stored before this story reads as a `price_cross` at its `level`
+and the next save writes its `[alerts.condition]` table. `PUT /api/alerts/{id}` edits an alert; the
+Alerts page creates and edits; the engine also observes `LiveDerivsBus`. Only `data_api` changes
+(the frontend is built into its image). No config key, env var, mount or compose service changes.
+
+- [ ] Back up the alerts file first: `cp platform/data_api/alerts.toml ~/alerts.toml.pre-33-8`.
+- [ ] On the VPS, pull this commit and rebuild/restart the one service:
+      `cd ~/nautilus_trader_fork/platform && docker compose up -d --build data_api`.
+- [ ] Check the existing file loaded: `docker compose logs data_api | grep -c "is not a valid alert"`
+      prints `0` (a bad stored alert refuses start naming `alerts[i]`), and
+      `curl -s localhost:9100/api/alerts | python3 -c 'import json,sys; print([(a["id"], a["condition"], a["status"]) for a in json.load(sys.stdin)])'`
+      lists every alert the operator had, each with `{"kind": "price_cross", "level": <its level>}`
+      and its old status.
+- [ ] Edit one alert over the API (pick an `id` from the list above):
+      `curl -s -X PUT -H 'content-type: application/json' -d '{"condition":{"kind":"price_above","level":100000},"frequency":"once_per_bar","expires_at_ns":null,"template":"{{ticker}} {{condition}} at {{value}}","webhook_url":"","rearm":false}' localhost:9100/api/alerts/<id>`
+      returns the alert with `"condition_text":"close > 100000 on <bar>s bars"`;
+      the same PUT to `localhost:9100/api/alerts/nope` is `{"detail":"alert not found"}`, and with
+      `"condition":{"kind":"pct_move","pct":0,"bars":2}` a 422 whose detail starts `condition.pct`.
+      `cat platform/data_api/alerts.toml` shows the edited `[alerts.condition]`. Restore the
+      original condition with a second PUT (or recreate the alert) afterwards.
+- [ ] In the browser, on Alerts: create an `indicator` alert (RSI > 70 on 1H) without opening a
+      chart; the row shows its condition text and `active`. Edit it to `crosses up`; the row
+      updates. On a chart, right-click a horizontal line in Cursor mode: the drawing menu offers
+      "Add alert…", prefilled with a price cross at the line's price. Delete the test alerts.
+- [ ] After an hour, `curl -s localhost:9100/api/errors` shows no `alerting.engine.invalid`,
+      `alerting.engine.input` or `live_derivs.observer` site (an `alerting.engine.invalid` row is
+      expected only for an alert whose drawing or indicator was deleted, and that alert lists as
+      `invalid` with its reason).
+
 ### 33-14-liquidation-cascade-bot-shorts-into-a-long-liquidation-cascade-backtested-and-paper-run (commit: this story's)
 
 A new paper strategy, `liquidation_cascade` (`research/strategies/liquidation_cascade_strategy.py`,

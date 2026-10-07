@@ -243,6 +243,7 @@ type ChartTestProps = {
   precision?: { price: number; size: number } | null;
   onDrawingDrag?: (id: string, handle: string, point: DragPoint) => void;
   onDrawingSettings?: (id: string) => void;
+  onDrawingAlert?: (condition: { kind: string } & Record<string, unknown>) => void;
   fibActive?: boolean;
   onFibPlace?: (a: { time: Time; price: number }, b: { time: Time; price: number }) => void;
   panes?: IndicatorPaneSpec[];
@@ -2324,6 +2325,57 @@ describe("Fibonacci and position drawings (Story 32.5)", () => {
 
     hit(500, 700); // the horizontal line
     expect(screen.queryByText("Settings…")).toBeNull();
+  });
+
+  it("offers Add alert… on a horizontal line (a price cross at its price) and a trendline, not a Fibonacci", () => {
+    const onDrawingAlert = vi.fn();
+    const hit = (x: number, y: number) => {
+      const click = subscribeClickMock.mock.calls.at(-1)![0];
+      act(() => click({ point: { x, y }, sourceEvent: { clientX: 5, clientY: 5 } }));
+    };
+    render(
+      chartElement({
+        drawings: [fibSpec(), makeTrendlineSpec("trendline-1", { anchors: [{ time: 100, price: 500 }, { time: 300, price: 520 }] })],
+        priceLines: [makePriceLineSpec("hline-1", { price: 700 })],
+        data: bars,
+        drawEditable: true,
+        onDrawingAlert,
+        onDrawingColor: () => {},
+      }),
+    );
+    for (const call of attachPrimitiveMock.mock.calls) attachGeometry(call[0]);
+
+    hit(500, 700); // the horizontal line
+    fireEvent.click(screen.getByText("Add alert…"));
+    expect(onDrawingAlert).toHaveBeenLastCalledWith({ kind: "price_cross", level: 700 });
+    expect(screen.queryByRole("menu")).toBeNull(); // the entry closes the menu
+
+    hit(200, 510); // the trendline
+    fireEvent.click(screen.getByText("Add alert…"));
+    expect(onDrawingAlert).toHaveBeenLastCalledWith({ kind: "trendline_cross", drawing_id: "trendline-1" });
+
+    hit(200, 95); // the fib
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    expect(screen.queryByText("Add alert…")).toBeNull();
+  });
+
+  it("opens the drawing menu on a right-click over a drawing in Cursor mode only", () => {
+    pricePaneMock.getHeight.mockReturnValue(1000);
+    const onDrawingAlert = vi.fn();
+    const { container, rerender } = render(
+      chartElement({ priceLines: [makePriceLineSpec("hline-1", { price: 700 })], data: bars, drawEditable: true, onDrawingAlert }),
+    );
+    const plot = container.firstElementChild!;
+    expect(fireEvent.contextMenu(plot, { clientX: 500, clientY: 300 })).toBe(true); // off any drawing: the browser's menu
+    expect(screen.queryByRole("menu")).toBeNull();
+
+    expect(fireEvent.contextMenu(plot, { clientX: 500, clientY: 700 })).toBe(false); // on the line: prevented
+    fireEvent.click(screen.getByText("Add alert…"));
+    expect(onDrawingAlert).toHaveBeenCalledWith({ kind: "price_cross", level: 700 });
+
+    rerender(chartElement({ priceLines: [makePriceLineSpec("hline-1", { price: 700 })], data: bars, drawEditable: false, onDrawingAlert }));
+    expect(fireEvent.contextMenu(plot, { clientX: 500, clientY: 700 })).toBe(true); // a tool is armed: untouched
+    expect(screen.queryByRole("menu")).toBeNull();
   });
 
   it("snaps a drawing placed after the newest loaded bar back to that bar", () => {

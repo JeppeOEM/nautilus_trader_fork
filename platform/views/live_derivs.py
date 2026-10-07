@@ -42,6 +42,11 @@ against a stale one. Both feeds tick every second or faster on Bybit and Hyperli
 route's bucketed `basis_mi_bps` replaces the forming value once the bar is served. Upgrade path:
 pair only values whose `t` lie within a named tolerance, else None.
 
+Story 33.8: a `DerivsObserver` (alerting's `AlertEngine`, attached by `data_api`'s lifespan) gets
+every decoded tick and every liquidation batch, listener or not, so a derivatives alert fires with
+no browser open; an observer that raises is ledgered at `live_derivs.observer` and never stops the
+relay. The frames listeners receive are unchanged.
+
 Known limit: both channels are Redis pub/sub, at most once, and a stalled listener's queue drops
 its oldest frame (`put_drop_oldest`): a live frame can be lost, never altered. A chart reads the
 stored history through the derivatives routes. Upgrade path: a per-frame sequence number so a
@@ -52,6 +57,7 @@ import asyncio
 import json
 import logging
 from decimal import Decimal
+from typing import Protocol
 
 import redis.asyncio as aioredis
 from kernel.derivs_wire import FUNDING
@@ -74,6 +80,7 @@ logger = logging.getLogger(__name__)
 # published language: views never imports capture, AD-D2).
 DERIVS_CHANNEL = "derivs:raw"
 PARSE_SITE = "live_derivs.parse"
+OBSERVER_SITE = "live_derivs.observer"
 # A frame's bad rows itemised on the ledger (each repr cut at `_REPR_MAX` chars), then one summary
 # line with the total: a payload change must not write one line per row of every frame (capture's
 # `_MALFORMED_SHOWN` rule).
@@ -96,6 +103,26 @@ def liquidations_channel(instrument_id: str) -> str:
     return f"liquidations:{instrument_id}"
 
 
+class DerivsObserver(Protocol):
+    """
+    A consumer of every decoded derivatives tick and liquidation batch, listener or not.
+
+    Invariant (one decode, SSOT-02): an observer (alerting: `data_api`'s lifespan attaches
+    `AlertEngine`) sees exactly the ticks `kernel.derivs_wire.from_wire` decoded for the chart's
+    `derivs:` channels and exactly the `Liquidation` rows `LiveCandleBus` decoded, in frame order,
+    without a second `derivs:raw`/`liquidations:raw` subscription. Both methods run on the event
+    loop: blocking work belongs on a thread.
+    """
+
+    def on_deriv(self, tick: DerivsTick) -> None:
+        """Receive one decoded `derivs:raw` row."""
+        ...
+
+    def on_liquidation(self, rows: list[Liquidation]) -> None:
+        """Receive one decoded `liquidations:raw` batch."""
+        ...
+
+
 class LiveDerivsBus:
     """
     Fans out each instrument's derivatives rows and liquidations to the listeners of its channel.
@@ -105,10 +132,16 @@ class LiveDerivsBus:
     index, exist only while it has a listener -- the last `unsubscribe` deletes them (MEM-02). The
     commands that could violate it are `subscribe`/`unsubscribe` (the set's lifecycle) and
     `handle_derivs`/`publish_liquidations` (the routing).
+
+    Invariant (Story 33.8): every attached observer is called for every decoded tick and batch,
+    listener or not, and one that raises is ledgered and skipped for that call only; `attach`/
+    `detach` are the commands that change who is called.
     """
 
     def __init__(self) -> None:
         self._listeners: dict[str, set[asyncio.Queue[dict]]] = {}
+        # Keyed by id(): an observer need not be hashable (`LiveCandleBus._observers`' rule).
+        self._observers: dict[int, DerivsObserver] = {}
         # `derivs:<iid>` -> {"mark"|"index": the last relayed value}, kept only while listened to.
         self._last_prices: dict[str, dict[str, Decimal]] = {}
 
@@ -127,6 +160,37 @@ class LiveDerivsBus:
         if not listeners:
             del self._listeners[channel]
             self._last_prices.pop(channel, None)
+
+    def attach(self, observer: DerivsObserver) -> None:
+        """Start calling `observer` for every tick and batch; attaching twice is a no-op."""
+        self._observers.setdefault(id(observer), observer)
+
+    def detach(self, observer: DerivsObserver) -> None:
+        """Stop calling `observer`."""
+        self._observers.pop(id(observer), None)
+
+    def _observe_tick(self, tick: DerivsTick) -> None:
+        for observer in list(self._observers.values()):
+            try:
+                observer.on_deriv(tick)
+            except Exception as exc:  # one failing observer must not stop the relay
+                error_ledger.record(
+                    OBSERVER_SITE,
+                    f"{type(observer).__name__}.on_deriv failed for {tick.instrument_id} "
+                    f"{tick.kind} at t={tick.t}",
+                    exc,
+                )
+
+    def _observe_liquidations(self, rows: list[Liquidation]) -> None:
+        for observer in list(self._observers.values()):
+            try:
+                observer.on_liquidation(rows)
+            except Exception as exc:
+                error_ledger.record(
+                    OBSERVER_SITE,
+                    f"{type(observer).__name__}.on_liquidation failed for a batch of {len(rows)}",
+                    exc,
+                )
 
     def _relay(self, channel: str, message: dict) -> None:
         for queue in self._listeners.get(channel, ()):
@@ -153,6 +217,7 @@ class LiveDerivsBus:
                     error_ledger.record(PARSE_SITE, detail, exc)
                 continue
             self._relay_tick(tick)
+            self._observe_tick(tick)
         if failed > _ROWS_SHOWN:
             error_ledger.record(
                 PARSE_SITE,
@@ -193,6 +258,8 @@ class LiveDerivsBus:
                     "notional_precision": row.price_precision + row.size_precision,
                 }
                 self._relay(channel, frame)
+        if rows:
+            self._observe_liquidations(rows)
 
     def handle_message(self, data: object) -> None:
         """Parse one pub/sub message body; bad JSON is ledgered, never raised into `run`."""

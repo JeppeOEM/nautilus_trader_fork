@@ -3074,29 +3074,192 @@ hidden with its removed Technicals column. Save and Delete wait until the stored
 failed load shows a Retry. Delete targets the preset last recalled or saved.
 Whole-list last-write-wins across tabs and processes (audit D-194).
 
-### 2.11 Price alerts (the `alerting/` context, Story 24.3, was `data_api/alerts.py`)
+### 2.11 Alerts (the `alerting/` context, Story 24.3, was `data_api/alerts.py`; conditions Story 33.8)
+
+`[amended 2026-10-07: Story 33.8 -- an alert holds one of 14 condition kinds, not only a price
+cross; `PUT /api/alerts/{id}` edits it; the engine also observes the live derivatives bus]`
 
 **Store:** `alerts.toml` (`ALERTS_PATH`, default `platform/data_api/alerts.toml`; compose sets
 `/app/data_api/alerts.toml`, bind-mounted from `platform/data_api/alerts.toml`). Owner: the
 `alerting` context -- `alerting/infrastructure/toml_store.py`'s `AlertStore` is its only reader and
 writer (full rewrite on every change; a corrupt file raises at load rather than starting empty),
 constructed once per process by `data_api/alert_wiring.py`. Key set, frozen (AD-D12): one
-`[[alerts]]` table per alert with `id`, `instrument_id`, `level`, `frequency`
+`[[alerts]]` table per alert with, in order, `id`, `instrument_id`, `level`, `frequency`
 (`once_per_bar_close` | `once_per_bar` | `only_once`, `alerting.domain.policy.FiringPolicy`),
 `bar_seconds`, `template`, `webhook_url` (may be empty), `created_ns`, optional `expires_at_ns`,
-`triggered`, optional `last_fired_ns` (TOML has no null: an absent optional key is `None`).
+`triggered`, optional `last_fired_ns`, and -- appended by Story 33.8 -- the `[alerts.condition]`
+table and optional `invalid_reason` (TOML has no null: an absent optional key is `None`, and a save
+drops `None` recursively, so a condition's absent optional field is not written).
 
-**Evaluation:** on the forming bar's close `c` (§2.5) for the alert's own `(instrument_id,
-bar_seconds)`, at the producing second's `ts_event`, by `AlertEngine.on_bar` -- never on a raw
-snapshot or a bar folded anywhere else. A second with no trade republishes an unchanged close (or
-no bar at all at a bucket's start), so it can never fire. Run state (the previous price) is
-in-memory: the first bar after a restart cannot fire.
+- **`condition`** is a normalised `{kind, <fields>}` table (`alerting.domain.conditions`,
+  `validate_condition` is the only way in; `bars`/`window_s` ints, every other number a float,
+  `source` defaulted to `close`, an absent `side` omitted). An indicator's `params` is a nested
+  `[alerts.condition.params]` table of flat scalars.
+- **`level`** is `float | None`: it equals `condition.level` for the five price-level kinds and is
+  absent (None) for every other kind. A loaded file where the two disagree raises, as a corrupt
+  file does (`Alert.__post_init__`).
+- **Back-compat read:** an alert stored before 33.8 has no `condition`; it reads as
+  `{"kind": "price_cross", "level": <level>}` and fires on exactly the ticks it fired on before.
+  The next save writes its `condition` table. A bad stored condition raises at load naming the
+  entry (`alerts[i] is not a valid alert: ...`), never dropped.
+
+**Condition kinds** (`CONDITION_KINDS`; mirrored by `data_api/routes/alerts.py`'s pydantic models
+and `frontend/src/lib/alertConditions.ts`, each held to it by a mirror test). A bad field is a
+`ConditionError` naming it, a 422 `detail` such as `condition.upper must be greater than lower`.
+
+| kind | fields | family |
+|---|---|---|
+| `price_cross`, `price_cross_up`, `price_cross_down`, `price_above`, `price_below` | `level` (finite) | bar |
+| `pct_move` | `pct` finite, ≠ 0, \|pct\| ≤ 1000; `bars` int 1..500 | bar |
+| `channel_exit` | `upper` > `lower`, both finite | bar |
+| `indicator` | `name` (1..128 chars), `params` (object of flat scalars), `source` (default `close`), `output` (1..64 chars), `op` ∈ `>` `<` `crosses_up` `crosses_down`, `value` (finite) | closed bar |
+| `trendline_cross` | `drawing_id` (1..128 chars) | bar |
+| `funding_above`, `funding_below` | `rate` (finite) | derivatives |
+| `oi_change` | `pct` (as `pct_move`); `window_s` int 1..86400 | derivatives |
+| `liquidation_notional` | `notional` > 0; `window_s`; optional `side` ∈ `long` `short` | liquidations |
+| `forced_share` | `share` in (0, 10]; `window_s` | bar + liquidations |
+
+**Semantics** (pure, `conditions.evaluate(condition, Observation(prev, cur))`):
+
+- A cross is `prev < x <= cur` (up) or `prev > x >= cur` (down), the pre-33.8 rule; `price_cross`
+  is either direction, and needs two observations. `price_above`/`price_below` are strict.
+- `pct_move` is `kernel.indicators.pct_change(base, close)` (the one percent-change formula,
+  SSOT-02; ranking's `oi_change_*_pct` uses it too). The base is the close N closed bars before
+  the newest closed bar, so a pair keeps N + 1 closed closes and has no sample until it does
+  (closed closes 100, 105, 110 with N = 2 compare a tick against 100). A positive `pct` fires at a
+  change ≥ `pct`, a negative one at ≤ `pct`.
+- `channel_exit` is a cross up through `upper` or a cross down through `lower`.
+- `trendline_cross` crosses `close − line(t)` at 0, `t` the bar's start in seconds and
+  `line(t) = a.price + (b.price − a.price)·(t − a.time)/(b.time − a.time)`, extrapolated beyond
+  both anchors (`alerting/domain/geometry.py`'s `trendline_price_at`, the port of
+  `frontend/src/lib/drawings.ts`'s `trendlinePriceAt`; both test suites read
+  `alerting/tests/fixtures/trendline_cases.json`). `{{value}}` reports the close.
+- `indicator` compares the output at the newest closed bar (`cur`) with the bar before it (`prev`,
+  from the same replay), read once per closed bar through the chart's own replay (below), so its
+  crosses survive a restart.
+- `funding_*` compare each `FUNDING` tick's exact `Decimal` value; a float threshold is read back
+  as the shortest decimal it prints as (`Decimal(repr(x))`), so `0.0003` is `0.0003`.
+- `oi_change` is `pct_change(base, latest)` over the instrument's `OI` ticks; the base is the
+  newest tick at or before `t − window_s`, and there is no sample until the series reaches back
+  that far.
+- `liquidation_notional` is the exact `Decimal` sum of `Liquidation.notional_units()` at each row's
+  precisions over `(t − window_s, t]`, optionally one `side`; it fires at ≥ `notional`. A venue
+  event (`venue_event_id`) is counted once.
+- `forced_share` is `kernel.indicators.units_ratio(Σ liquidated size_units, Σ traded volume units)`
+  over the window. The volume is the per-tick increase of the forming bar's `buy_v + sell_v` (a new
+  bucket counts its whole value); evaluated on each bar tick and each liquidation batch; None (no
+  sample) with no volume; fires at ≥ `share`.
+
+**Inputs and firing.** `AlertEngine` turns every input into a sample per alert and
+`policy.step` decides which samples reach `evaluate`:
+
+- **Bar-fed kinds** (price, `pct_move`, `channel_exit`, `trendline_cross`, `forced_share`'s volume)
+  run on `AlertEngine.on_bar`: the forming bar's close `c` (§2.5) for the alert's own
+  `(instrument_id, bar_seconds)`, at the producing second's `ts_event`, as a
+  `views.live_candles.BarObserver` -- never a raw snapshot or a bar folded anywhere else.
+  `once_per_bar_close` evaluates only a bucket's last sample at rollover; `once_per_bar` every
+  sample, firing at most once per bucket; `only_once` every sample, firing once. A second with no
+  trade republishes an unchanged close, so it can never fire a cross. Time never runs backwards per
+  alert: a sample older than the newest bucket seen (a lagging liquidation row stepping
+  `forced_share` after a bar tick) belongs to that bucket, so `once_per_bar` cannot fire twice in a
+  bucket and `once_per_bar_close` cannot roll over spuriously; in-order streams are unaffected.
+- **`indicator`**: one read per `(instrument_id, bar_seconds, closed bar t)`, batching every
+  distinct series of that pair, run off the event loop (`data_api.alert_inputs.executor_submit`).
+  `ChartIndicatorReader` reads `views.chart_series.indicator_values_page(before_ns = closed bar
+  end, limit = INDICATOR_READ_BARS = 300)` -- the chart's `candle_page` with the live bus's
+  `recent_rows`/`recent_liquidations`, through `values_by_time`/`replay_entry` (SSOT-02); its
+  newest row must be the closed bar, else no reading. The sample is a closed one, so the three
+  frequencies coincide; `only_once` still fires once. At most one read per pair is in flight: a
+  bar that closes while the previous bar's read still runs is skipped and ledgered at
+  `alerting.engine.input` (`Known limit:`, audit D-203).
+- **Derivatives and liquidations** run on `AlertEngine.on_deriv`/`on_liquidation`, a
+  `views.live_derivs.DerivsObserver` attached to the one `LiveDerivsBus` by the `app.py` lifespan:
+  every decoded `derivs:raw` tick and every `liquidations:raw` batch reaches it, `/ws/live`
+  listener or not; an observer that raises is ledgered at `live_derivs.observer` and never stops
+  the relay. These samples bucket by `alert.bar_seconds` on their event time (`tick.t`, the
+  liquidation's `ts_event`, the bar tick's `ts_ns`). A redelivered liquidation (`venue_event_id`
+  already in the window) is neither counted nor evaluated again. Every derivatives tick (mark,
+  index, funding, OI) and every watched bar tick of an instrument is also its event clock: it closes
+  a `once_per_bar_close` bucket of that instrument's funding, OI and liquidation alerts once its
+  time has passed it (`policy.advance`), deciding the bucket on its last sample and stamping the
+  fire with that sample's time, so a sparse series is decided when its bucket ends, not when its
+  next sample arrives hours later; an instrument with no input at all is decided at its next input
+  (`Known limit:`, audit D-204).
+- **`forced_share`'s volume** is tracked from one width per instrument, the narrowest of its active
+  `forced_share` alerts, so another watched width (a 3600 s price alert beside it) never counts a
+  second. The first observation of that width (a start, a new or edited alert) only seeds the
+  baseline: the volume its bucket traded before is never counted as one second's.
+- **Windows** are exact prefix sums in integer units (`alerting.application.windows.SumWindow`):
+  a window sum is two bisects, an append and an eviction O(1) amortised, a late row inserted at its
+  place; the OI base is found by bisect (`AsOfSeries`).
+- **Bounded state (MEM-01/02):** per instrument the OI series, the liquidation window and the
+  volume window exist only while an active alert of that kind names it and are trimmed to that
+  kind's largest `window_s`; a pair's close history holds its largest `bars + 1`; `forget`
+  (delete, PUT) drops an alert's run state. The CRUD routes run in the threadpool and the observers
+  on the event loop, so `forget` is queued onto the loop (`call_soon_threadsafe`), and an edited
+  alert (a new stored object) never reuses the run state of the one it replaced.
+
+**Template placeholders** (`policy.render`, plain replace): `{{ticker}}`, `{{close}}` (the close of
+the bar sample that fired -- under `once_per_bar_close` the closed bucket's last sample, as before
+Story 33.8 -- and for a sample that is not a bar's, a derivatives tick or a liquidation, the newest
+close the engine saw for the instrument, `n/a` when none), `{{time}}` (ISO UTC of the fire),
+`{{interval}}` (bar seconds), `{{value}}` (the triggering value, `str(float)`) and `{{condition}}`
+(`conditions.describe(condition, bar_seconds)`, the one describer, e.g.
+`RelativeStrengthIndex(period=14) value > 70 on 3600s bars`).
+
+**Invalidation (DATA-07).** An alert is marked invalid -- `invalid_reason` set through
+`AlertRepository.mark_invalid` (never raises; a failed persist is ledgered at
+`alerting.store.persist`) and one `alerting.engine.invalid` ledger row naming the alert and reason
+-- when its indicator name is no longer in `merged_catalog()`, its output is absent from the
+replay's outputs, or its drawing is missing, not a `trendline`, or vertical. `status_of` returns
+`invalid` first (before `triggered`/`expired`), and the alert is no longer evaluated or watched. A
+replay or read failure, or a corrupt drawings file, is ledgered at `alerting.engine.input` and
+only skips that sample. A PUT re-validates and clears `invalid_reason`.
+
+**API** (`data_api/routes/alerts.py`; existing keys and `detail` strings frozen, additions only):
+
+- `POST /api/alerts`: the pre-33.8 body unchanged, plus an optional `condition` (a union
+  discriminated on `kind`, unknown fields refused). `level` alone is a `price_cross`; `level` with
+  `condition` is a 422 unless the condition is a price-level kind at an equal level; neither is a
+  422. An `indicator` is also checked against the picker (`check_params`, `check_source`, and
+  `output` in the catalog entry's `outputs`), a `trendline_cross` against the coin's
+  `chart_drawings.toml` (a non-vertical `trendline` of that instrument), each a 422 naming the
+  field; a corrupt drawings file is a 500.
+- `PUT /api/alerts/{id}`: body `{condition, frequency, expires_at_ns, template, webhook_url,
+  rearm}` (the instrument and bar width are the alert's identity and stay). Unknown id 404
+  (`alert not found`), a bad field 422 naming it, no delivery channel 422 (the frozen detail).
+  `rearm: true` clears a triggered alert's `triggered`, and an edit to any frequency other than
+  `only_once` clears it too (only `only_once` is ever triggered); `last_fired_ns` is kept; the run
+  state is reset (`engine.forget`). The edit is one read-modify-write under the store's lock
+  (`AlertRepository.update(alert_id, edit)`), built from the stored alert, so a fire recorded while
+  the request ran is kept. A fire of the object an edit already replaced stamps `last_fired_ns` on
+  the edit but does not trigger it, and an invalidation of a replaced object is not persisted (the
+  edit re-validated its condition). The page offers Re-arm on a `triggered` alert and on an
+  `invalid` `only_once` alert that has fired (`invalid` is shown first); an edit leaves
+  `expires_at_ns` exactly as stored unless its date is changed.
+- Response (GET/POST/PUT): the frozen keys, then appended `condition`, `condition_text`
+  (`describe`; the page never composes its own) and `invalid_reason`; `status` ∈ `active`,
+  `triggered`, `expired`, `invalid`.
+- `GET /api/indicators/catalog` entries carry `outputs`, every output name the entry's replay can
+  return (the alert form's output select).
 
 **Delivery:** a fire is recorded in the store (a failed persist is ledgered at
 `alerting.store.persist`, the fire still happens), sent on the alert's channels through
 `observability.notify` (its webhook, and Telegram when `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` are
 set; a failed send is ledgered at `observability.notify.<transport>`), and toasted on `/ws/live` as
-`{"channel": "alerts", "alert": {"id", "message"}}` (frozen).
+`{"channel": "alerts", "alert": {"id", "message", "condition"}}` (`id`/`message` frozen;
+`condition`, the `describe` text, appended by 33.8).
+
+**Known limits** (audit D-197..D-204): run state and every window are in memory only, so after a
+restart a cross needs two samples, `pct_move` N + 1 closed bars, and the windowed kinds are
+understated until a full window has been observed -- the first forming bar seen only seeds the
+volume baseline (upgrade path: backfill each window from the catalog and the candle store at
+attach); an indicator whose warm-up exceeds the 300 bars of one
+read reads None and never samples (upgrade path: a per-indicator warm-up on the catalog entry);
+a trendline is extrapolated without bound beyond both anchors, while the chart draws only the
+segment between them, so past the second anchor the alert watches a line the chart does not show
+(audit D-198; upgrade path: a per-drawing `extend` setting honoured by the chart's primitive and
+the alert alike).
 
 ### 2.12 Research reads (the six notebooks of `research/notebooks/`, Epic 27)
 

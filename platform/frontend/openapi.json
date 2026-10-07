@@ -309,6 +309,53 @@
       }
     },
     "/api/alerts/{alert_id}": {
+      "put": {
+        "summary": "Update Alert",
+        "operationId": "update_alert_api_alerts__alert_id__put",
+        "parameters": [
+          {
+            "name": "alert_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Alert Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlertUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "summary": "Delete Alert",
         "operationId": "delete_alert_api_alerts__alert_id__delete",
@@ -1738,7 +1785,14 @@
             "title": "Instrument Id"
           },
           "level": {
-            "type": "number",
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Level"
           },
           "frequency": {
@@ -1772,12 +1826,69 @@
           "webhook_url": {
             "type": "string",
             "title": "Webhook Url"
+          },
+          "condition": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/LevelCondition"
+                  },
+                  {
+                    "$ref": "#/components/schemas/PctMoveCondition"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ChannelExitCondition"
+                  },
+                  {
+                    "$ref": "#/components/schemas/IndicatorCondition"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TrendlineCrossCondition"
+                  },
+                  {
+                    "$ref": "#/components/schemas/FundingCondition"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OiChangeCondition"
+                  },
+                  {
+                    "$ref": "#/components/schemas/LiquidationNotionalCondition"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ForcedShareCondition"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "kind",
+                  "mapping": {
+                    "channel_exit": "#/components/schemas/ChannelExitCondition",
+                    "forced_share": "#/components/schemas/ForcedShareCondition",
+                    "funding_above": "#/components/schemas/FundingCondition",
+                    "funding_below": "#/components/schemas/FundingCondition",
+                    "indicator": "#/components/schemas/IndicatorCondition",
+                    "liquidation_notional": "#/components/schemas/LiquidationNotionalCondition",
+                    "oi_change": "#/components/schemas/OiChangeCondition",
+                    "pct_move": "#/components/schemas/PctMoveCondition",
+                    "price_above": "#/components/schemas/LevelCondition",
+                    "price_below": "#/components/schemas/LevelCondition",
+                    "price_cross": "#/components/schemas/LevelCondition",
+                    "price_cross_down": "#/components/schemas/LevelCondition",
+                    "price_cross_up": "#/components/schemas/LevelCondition",
+                    "trendline_cross": "#/components/schemas/TrendlineCrossCondition"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Condition"
           }
         },
         "type": "object",
         "required": [
           "instrument_id",
-          "level",
           "frequency",
           "bar_seconds",
           "template",
@@ -1792,7 +1903,14 @@
             "title": "Instrument Id"
           },
           "level": {
-            "type": "number",
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Level"
           },
           "frequency": {
@@ -1836,7 +1954,8 @@
             "enum": [
               "active",
               "triggered",
-              "expired"
+              "expired",
+              "invalid"
             ],
             "title": "Status"
           },
@@ -1854,21 +1973,185 @@
               }
             ],
             "title": "Last Fired Ns"
+          },
+          "condition": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LevelCondition"
+              },
+              {
+                "$ref": "#/components/schemas/PctMoveCondition"
+              },
+              {
+                "$ref": "#/components/schemas/ChannelExitCondition"
+              },
+              {
+                "$ref": "#/components/schemas/IndicatorCondition"
+              },
+              {
+                "$ref": "#/components/schemas/TrendlineCrossCondition"
+              },
+              {
+                "$ref": "#/components/schemas/FundingCondition"
+              },
+              {
+                "$ref": "#/components/schemas/OiChangeCondition"
+              },
+              {
+                "$ref": "#/components/schemas/LiquidationNotionalCondition"
+              },
+              {
+                "$ref": "#/components/schemas/ForcedShareCondition"
+              }
+            ],
+            "title": "Condition",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "channel_exit": "#/components/schemas/ChannelExitCondition",
+                "forced_share": "#/components/schemas/ForcedShareCondition",
+                "funding_above": "#/components/schemas/FundingCondition",
+                "funding_below": "#/components/schemas/FundingCondition",
+                "indicator": "#/components/schemas/IndicatorCondition",
+                "liquidation_notional": "#/components/schemas/LiquidationNotionalCondition",
+                "oi_change": "#/components/schemas/OiChangeCondition",
+                "pct_move": "#/components/schemas/PctMoveCondition",
+                "price_above": "#/components/schemas/LevelCondition",
+                "price_below": "#/components/schemas/LevelCondition",
+                "price_cross": "#/components/schemas/LevelCondition",
+                "price_cross_down": "#/components/schemas/LevelCondition",
+                "price_cross_up": "#/components/schemas/LevelCondition",
+                "trendline_cross": "#/components/schemas/TrendlineCrossCondition"
+              }
+            }
+          },
+          "condition_text": {
+            "type": "string",
+            "title": "Condition Text"
+          },
+          "invalid_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Invalid Reason"
           }
         },
         "type": "object",
         "required": [
           "instrument_id",
-          "level",
           "frequency",
           "bar_seconds",
           "template",
           "webhook_url",
           "id",
           "status",
-          "created_ns"
+          "created_ns",
+          "condition",
+          "condition_text"
         ],
         "title": "AlertResponse"
+      },
+      "AlertUpdate": {
+        "properties": {
+          "condition": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LevelCondition"
+              },
+              {
+                "$ref": "#/components/schemas/PctMoveCondition"
+              },
+              {
+                "$ref": "#/components/schemas/ChannelExitCondition"
+              },
+              {
+                "$ref": "#/components/schemas/IndicatorCondition"
+              },
+              {
+                "$ref": "#/components/schemas/TrendlineCrossCondition"
+              },
+              {
+                "$ref": "#/components/schemas/FundingCondition"
+              },
+              {
+                "$ref": "#/components/schemas/OiChangeCondition"
+              },
+              {
+                "$ref": "#/components/schemas/LiquidationNotionalCondition"
+              },
+              {
+                "$ref": "#/components/schemas/ForcedShareCondition"
+              }
+            ],
+            "title": "Condition",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "channel_exit": "#/components/schemas/ChannelExitCondition",
+                "forced_share": "#/components/schemas/ForcedShareCondition",
+                "funding_above": "#/components/schemas/FundingCondition",
+                "funding_below": "#/components/schemas/FundingCondition",
+                "indicator": "#/components/schemas/IndicatorCondition",
+                "liquidation_notional": "#/components/schemas/LiquidationNotionalCondition",
+                "oi_change": "#/components/schemas/OiChangeCondition",
+                "pct_move": "#/components/schemas/PctMoveCondition",
+                "price_above": "#/components/schemas/LevelCondition",
+                "price_below": "#/components/schemas/LevelCondition",
+                "price_cross": "#/components/schemas/LevelCondition",
+                "price_cross_down": "#/components/schemas/LevelCondition",
+                "price_cross_up": "#/components/schemas/LevelCondition",
+                "trendline_cross": "#/components/schemas/TrendlineCrossCondition"
+              }
+            }
+          },
+          "frequency": {
+            "type": "string",
+            "enum": [
+              "once_per_bar_close",
+              "once_per_bar",
+              "only_once"
+            ],
+            "title": "Frequency"
+          },
+          "expires_at_ns": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At Ns"
+          },
+          "template": {
+            "type": "string",
+            "title": "Template"
+          },
+          "webhook_url": {
+            "type": "string",
+            "title": "Webhook Url"
+          },
+          "rearm": {
+            "type": "boolean",
+            "title": "Rearm",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "condition",
+          "frequency",
+          "template",
+          "webhook_url"
+        ],
+        "title": "AlertUpdate",
+        "description": "`PUT /api/alerts/{id}`: the editable fields (the instrument and bar width are the alert's\nidentity and stay). `rearm` clears a triggered `only_once` alert's `triggered`."
       },
       "ArchiveRun": {
         "properties": {
@@ -2314,6 +2597,31 @@
         ],
         "title": "CandlesResponse"
       },
+      "ChannelExitCondition": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "channel_exit",
+            "title": "Kind"
+          },
+          "upper": {
+            "type": "number",
+            "title": "Upper"
+          },
+          "lower": {
+            "type": "number",
+            "title": "Lower"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "upper",
+          "lower"
+        ],
+        "title": "ChannelExitCondition"
+      },
       "DrawingsResponse": {
         "properties": {
           "items": {
@@ -2566,6 +2874,54 @@
         ],
         "title": "FootprintRow"
       },
+      "ForcedShareCondition": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "forced_share",
+            "title": "Kind"
+          },
+          "share": {
+            "type": "number",
+            "title": "Share"
+          },
+          "window_s": {
+            "type": "integer",
+            "title": "Window S"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "share",
+          "window_s"
+        ],
+        "title": "ForcedShareCondition"
+      },
+      "FundingCondition": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "funding_above",
+              "funding_below"
+            ],
+            "title": "Kind"
+          },
+          "rate": {
+            "type": "number",
+            "title": "Rate"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "rate"
+        ],
+        "title": "FundingCondition"
+      },
       "FundingItem": {
         "properties": {
           "t": {
@@ -2715,15 +3071,90 @@
             "type": "object",
             "title": "Units",
             "default": {}
+          },
+          "outputs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Outputs"
           }
         },
         "type": "object",
         "required": [
           "params",
           "panel",
-          "category"
+          "category",
+          "outputs"
         ],
         "title": "IndicatorCatalogEntry"
+      },
+      "IndicatorCondition": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "indicator",
+            "title": "Kind"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "params": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "type": "object",
+            "title": "Params"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source",
+            "default": "close"
+          },
+          "output": {
+            "type": "string",
+            "title": "Output"
+          },
+          "op": {
+            "type": "string",
+            "enum": [
+              ">",
+              "<",
+              "crosses_up",
+              "crosses_down"
+            ],
+            "title": "Op"
+          },
+          "value": {
+            "type": "number",
+            "title": "Value"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "name",
+          "params",
+          "output",
+          "op",
+          "value"
+        ],
+        "title": "IndicatorCondition"
       },
       "IndicatorConfigEntry": {
         "properties": {
@@ -2834,6 +3265,32 @@
           "market"
         ],
         "title": "IndicatorValuesResponse"
+      },
+      "LevelCondition": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "price_cross",
+              "price_cross_up",
+              "price_cross_down",
+              "price_above",
+              "price_below"
+            ],
+            "title": "Kind"
+          },
+          "level": {
+            "type": "number",
+            "title": "Level"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "level"
+        ],
+        "title": "LevelCondition"
       },
       "LiquidationBarItem": {
         "properties": {
@@ -3053,6 +3510,46 @@
           "notional_precision"
         ],
         "title": "LiquidationItem"
+      },
+      "LiquidationNotionalCondition": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "liquidation_notional",
+            "title": "Kind"
+          },
+          "notional": {
+            "type": "number",
+            "title": "Notional"
+          },
+          "window_s": {
+            "type": "integer",
+            "title": "Window S"
+          },
+          "side": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "long",
+                  "short"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Side"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "notional",
+          "window_s"
+        ],
+        "title": "LiquidationNotionalCondition"
       },
       "LiquidationsResponse": {
         "properties": {
@@ -3546,6 +4043,31 @@
         ],
         "title": "MetricsHistoryResponse"
       },
+      "OiChangeCondition": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "oi_change",
+            "title": "Kind"
+          },
+          "pct": {
+            "type": "number",
+            "title": "Pct"
+          },
+          "window_s": {
+            "type": "integer",
+            "title": "Window S"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "pct",
+          "window_s"
+        ],
+        "title": "OiChangeCondition"
+      },
       "OpenInterestItem": {
         "properties": {
           "t": {
@@ -3611,6 +4133,31 @@
           "items"
         ],
         "title": "OpenInterestResponse"
+      },
+      "PctMoveCondition": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "pct_move",
+            "title": "Kind"
+          },
+          "pct": {
+            "type": "number",
+            "title": "Pct"
+          },
+          "bars": {
+            "type": "integer",
+            "title": "Bars"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "pct",
+          "bars"
+        ],
+        "title": "PctMoveCondition"
       },
       "RankingModeRequest": {
         "properties": {
@@ -3899,6 +4446,26 @@
           "values"
         ],
         "title": "TechnicalsValuesResponse"
+      },
+      "TrendlineCrossCondition": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "trendline_cross",
+            "title": "Kind"
+          },
+          "drawing_id": {
+            "type": "string",
+            "title": "Drawing Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "drawing_id"
+        ],
+        "title": "TrendlineCrossCondition"
       },
       "ValidationError": {
         "properties": {

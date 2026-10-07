@@ -27,6 +27,12 @@ deprecated `data_api.alerts` re-export shim was deleted in Story 25.1).
 `app.py`'s lifespan attaches the engine; routes and `ws/live.py` reference `alert_wiring.engine`/
 `alert_wiring.service` through this module, so a test can swap either with
 `monkeypatch.setattr(alert_wiring, ...)`.
+
+Story 33.8: the engine also reads the two inputs it cannot compute itself through the adapters of
+`data_api.alert_inputs` -- the chart's own indicator replay (over `buses.live_candle_bus`'s
+unflushed rows, exactly as the indicator values route reads them) and the saved drawings file --
+with its blocking reads run in the default executor (`executor_submit`). The lifespan attaches it
+to `buses.live_derivs_bus` too.
 """
 
 from pathlib import Path
@@ -37,8 +43,23 @@ from alerting.infrastructure.deliverer import NotifyDeliverer
 from alerting.infrastructure.toml_store import ALERTS_PATH
 from alerting.infrastructure.toml_store import AlertStore
 
+from data_api import buses
+from data_api import settings
+from data_api.alert_inputs import ChartIndicatorReader
+from data_api.alert_inputs import DrawingFileReader
+from data_api.alert_inputs import executor_submit
+
 
 store = AlertStore(Path(ALERTS_PATH))
 deliverer = NotifyDeliverer()
-engine = AlertEngine(store, deliverer)
+indicators = ChartIndicatorReader(
+    catalog_path=lambda: settings.CATALOG_PATH,
+    candles_dir=lambda: settings.CANDLES_DB_DIR,
+    recent_rows=buses.live_candle_bus.recent_rows,
+    recent_liquidations=buses.live_candle_bus.recent_liquidations,
+)
+drawings = DrawingFileReader(lambda: Path(settings.CHART_DRAWINGS_PATH))
+engine = AlertEngine(
+    store, deliverer, indicators=indicators, drawings=drawings, submit=executor_submit
+)
 service = AlertService(store, deliverer, engine)

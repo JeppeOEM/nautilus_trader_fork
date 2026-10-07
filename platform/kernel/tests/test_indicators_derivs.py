@@ -20,6 +20,7 @@ import pytest
 
 from kernel.indicators import basis_bps
 from kernel.indicators import funding_annualised
+from kernel.indicators import pct_change
 
 
 def test_basis_of_mark_over_index_is_exact_basis_points() -> None:
@@ -57,3 +58,17 @@ def test_hourly_funding_annualises_over_8760_intervals() -> None:
 @pytest.mark.parametrize("interval_s", [None, 0, -3_600])
 def test_funding_without_a_positive_interval_is_none(interval_s: int | None) -> None:
     assert funding_annualised(Decimal("0.0001"), interval_s) is None
+
+
+def test_pct_change_is_the_exact_percent_from_base_to_latest() -> None:
+    # 200 -> 210 is +5 %, and 0.1 -> 0.3 is +200 % exactly (a float would carry 0.1's error).
+    assert pct_change(Decimal(200), Decimal(210)) == Decimal(5)
+    assert pct_change(Decimal("0.1"), Decimal("0.3")) == Decimal(200)
+
+
+def test_pct_change_of_a_fall_is_negative() -> None:
+    assert pct_change(Decimal(110), Decimal(99)) == Decimal(-10)
+
+
+def test_pct_change_from_a_zero_base_is_none() -> None:
+    assert pct_change(Decimal(0), Decimal(5)) is None

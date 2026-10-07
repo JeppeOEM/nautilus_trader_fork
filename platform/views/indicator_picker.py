@@ -506,6 +506,7 @@ def native_catalog_json() -> dict[str, Any]:
             "panel": spec.panel,
             "choices": {key: _choices(enum) for key, enum in spec.enum_params.items()},
             "source_selectable": is_source_selectable(spec),
+            "outputs": list(spec.outputs),
         }
         for name, spec in INDICATOR_CATALOG.items()
     }
@@ -558,6 +559,10 @@ class CustomIndicatorSpec:
     # Computes every registered output attribute for the given candles/params/window, aligned
     # 1:1 with `candles` -- identical output contract to replay_native.
     replay: ReplayFn
+    # Every output name the replay can return, under any params (Story 33.8): served as the
+    # catalog's `outputs`, the alert form's output select, as a native spec's `outputs` are. A
+    # params-dependent entry lists all of them (`TradeCount`: `value`, or `buys`/`sells` split).
+    outputs: tuple[str, ...]
     # Raises `ValueError` for merged params the replay would refuse; the save-time half of the rule
     # `check_params` applies (a native spec gets it from its constructor). None: nothing to check.
     check_params: Callable[[dict[str, Any]], None] | None = None
@@ -607,6 +612,7 @@ def custom_catalog_json() -> dict[str, Any]:
             "panel": spec.panel,
             "choices": spec.choices,
             "units": spec.units,
+            "outputs": list(spec.outputs),
         }
         for name, spec in CUSTOM_INDICATOR_CATALOG.items()
         if spec.listed
@@ -838,6 +844,7 @@ CUSTOM_INDICATOR_CATALOG["CumulativeVolumeDelta"] = CustomIndicatorSpec(
     params={"anchor": "visible"},
     panel="oscillator",
     replay=_cvd_replay,
+    outputs=("value",),
     check_params=_check_cvd_params,
     choices={"anchor": list(CVD_ANCHORS)},
     units={"value": "size"},
@@ -955,6 +962,7 @@ CUSTOM_INDICATOR_CATALOG["CancelPressure"] = CustomIndicatorSpec(
     params={"window": 200},
     panel="histogram",
     replay=_cancel_pressure_replay,
+    outputs=("bid_pressure", "ask_pressure"),
     check_params=_check_positive_window,
 )
 
@@ -1037,6 +1045,7 @@ CUSTOM_INDICATOR_CATALOG["OrderFlowImbalance"] = CustomIndicatorSpec(
     params={"window": 20},
     panel="oscillator",
     replay=_ofi_replay,
+    outputs=("value",),
     check_params=_check_positive_window,
 )
 
@@ -1344,28 +1353,46 @@ def _depth_within_bps_replay(
 
 
 CUSTOM_INDICATOR_CATALOG["VolumeDelta"] = CustomIndicatorSpec(
-    params={}, panel="histogram", replay=_volume_delta_replay, units={"value": "size"}
+    params={},
+    panel="histogram",
+    replay=_volume_delta_replay,
+    outputs=("value",),
+    units={"value": "size"},
 )
 CUSTOM_INDICATOR_CATALOG["OrganicDelta"] = CustomIndicatorSpec(
-    params={}, panel="histogram", replay=_organic_delta_replay, units={"value": "size"}
+    params={},
+    panel="histogram",
+    replay=_organic_delta_replay,
+    outputs=("value",),
+    units={"value": "size"},
 )
 CUSTOM_INDICATOR_CATALOG["ForcedShare"] = CustomIndicatorSpec(
-    params={}, panel="histogram", replay=_forced_share_replay, units={"value": "ratio"}
+    params={},
+    panel="histogram",
+    replay=_forced_share_replay,
+    outputs=("value",),
+    units={"value": "ratio"},
 )
 CUSTOM_INDICATOR_CATALOG["TradeCount"] = CustomIndicatorSpec(
     params={"split": False},
     panel="histogram",
     replay=_trade_count_replay,
+    outputs=("value", "buys", "sells"),
     check_params=_check_split,
     units={"value": "count", "buys": "count", "sells": "count"},
 )
 CUSTOM_INDICATOR_CATALOG["AverageTradeSize"] = CustomIndicatorSpec(
-    params={}, panel="oscillator", replay=_average_trade_size_replay, units={"value": "size_mean"}
+    params={},
+    panel="oscillator",
+    replay=_average_trade_size_replay,
+    outputs=("value",),
+    units={"value": "size_mean"},
 )
 CUSTOM_INDICATOR_CATALOG["StoredVWAP"] = CustomIndicatorSpec(
     params={"mode": "session"},
     panel="overlay",
     replay=_stored_vwap_replay,
+    outputs=("value",),
     check_params=_check_vwap_mode,
     choices={"mode": list(VWAP_MODES)},
     units={"value": "price"},
@@ -1376,6 +1403,7 @@ CUSTOM_INDICATOR_CATALOG["AnchoredStoredVWAP"] = CustomIndicatorSpec(
     params={"anchor_t": "0"},
     panel="overlay",
     replay=_anchored_vwap_replay,
+    outputs=("value",),
     check_params=_check_anchor_t,
     units={"value": "price"},
     listed=False,
@@ -1384,6 +1412,7 @@ CUSTOM_INDICATOR_CATALOG["DepthWithinBps"] = CustomIndicatorSpec(
     params={"bps": 10.0},
     panel="oscillator",
     replay=_depth_within_bps_replay,
+    outputs=("bid", "ask"),
     check_params=_check_bps,
     units={"bid": "size", "ask": "size"},
 )

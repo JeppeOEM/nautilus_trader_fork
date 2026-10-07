@@ -3,17 +3,18 @@
 
 export interface AlertCreate {
   instrument_id: string;
-  level: number;
+  level?: number | null;
   frequency: string;
   bar_seconds: number;
   expires_at_ns?: number | null;
   template: string;
   webhook_url: string;
+  condition?: unknown | null;
 }
 
 export interface AlertResponse {
   instrument_id: string;
-  level: number;
+  level?: number | null;
   frequency: string;
   bar_seconds: number;
   expires_at_ns?: number | null;
@@ -23,6 +24,18 @@ export interface AlertResponse {
   status: string;
   created_ns: number;
   last_fired_ns?: number | null;
+  condition: unknown;
+  condition_text: string;
+  invalid_reason?: string | null;
+}
+
+export interface AlertUpdate {
+  condition: unknown;
+  frequency: string;
+  expires_at_ns?: number | null;
+  template: string;
+  webhook_url: string;
+  rearm?: boolean;
 }
 
 export interface ArchiveRun {
@@ -88,6 +101,12 @@ export interface CandlesResponse {
   size_precision: number;
 }
 
+export interface ChannelExitCondition {
+  kind: string;
+  upper: number;
+  lower: number;
+}
+
 export interface DrawingsResponse {
   items: Record<string, unknown>[];
 }
@@ -136,6 +155,17 @@ export interface FootprintRow {
   s: number;
 }
 
+export interface ForcedShareCondition {
+  kind: string;
+  share: number;
+  window_s: number;
+}
+
+export interface FundingCondition {
+  kind: string;
+  rate: number;
+}
+
 export interface FundingItem {
   t: number;
   rate: string;
@@ -162,6 +192,17 @@ export interface IndicatorCatalogEntry {
   choices?: Record<string, string[]>;
   source_selectable?: boolean;
   units?: Record<string, string>;
+  outputs: string[];
+}
+
+export interface IndicatorCondition {
+  kind: string;
+  name: string;
+  params: Record<string, boolean | number | number | string>;
+  source?: string;
+  output: string;
+  op: string;
+  value: number;
 }
 
 export interface IndicatorConfigEntry {
@@ -184,6 +225,11 @@ export interface IndicatorValuesResponse {
   errors?: Record<string, string>;
   venue: string;
   market: string;
+}
+
+export interface LevelCondition {
+  kind: string;
+  level: number;
 }
 
 export interface LiquidationBarItem {
@@ -219,6 +265,13 @@ export interface LiquidationItem {
   price_kind: string;
   notional_units: number;
   notional_precision: number;
+}
+
+export interface LiquidationNotionalCondition {
+  kind: string;
+  notional: number;
+  window_s: number;
+  side?: string | null;
 }
 
 export interface LiquidationsResponse {
@@ -282,6 +335,12 @@ export interface MetricsHistoryResponse {
   items: MetricHistoryItem[];
 }
 
+export interface OiChangeCondition {
+  kind: string;
+  pct: number;
+  window_s: number;
+}
+
 export interface OpenInterestItem {
   t: number;
   oi?: string | null;
@@ -293,6 +352,12 @@ export interface OpenInterestResponse {
   venue: string;
   market: string;
   items: OpenInterestItem[];
+}
+
+export interface PctMoveCondition {
+  kind: string;
+  pct: number;
+  bars: number;
 }
 
 export interface RankingModeRequest {
@@ -343,4 +408,9 @@ export interface TechnicalsColumn {
 export interface TechnicalsValuesResponse {
   values: Record<string, Record<string, number | null>>;
   errors?: Record<string, string>;
+}
+
+export interface TrendlineCrossCondition {
+  kind: string;
+  drawing_id: string;
 }

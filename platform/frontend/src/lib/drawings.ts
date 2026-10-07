@@ -39,6 +39,20 @@ export function storedTime(time: number): number {
   return Math.ceil(time);
 }
 
+/**
+ * Story 33.8: the price of the trendline through `anchors` at `t` (UTC seconds), extended beyond
+ * both anchors; null for a vertical line (equal anchor times). The one formula an alert's
+ * `trendline_cross` and the chart share: `alerting/domain/geometry.py`'s `trendline_price_at` is
+ * its port, evaluating the same expression in the same order, and both are tested against one
+ * fixture (`alerting/tests/fixtures/trendline_cases.json`).
+ */
+export function trendlinePriceAt(anchors: readonly [Anchor, Anchor], t: number): number | null {
+  const [a, b] = anchors;
+  const span = b.time - a.time;
+  if (span === 0) return null;
+  return a.price + ((b.price - a.price) * (t - a.time)) / span;
+}
+
 export interface HlineDrawing {
   kind: "hline";
   id: string;

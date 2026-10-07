@@ -61,6 +61,7 @@ from kernel.derivs_wire import OI
 from kernel.derivs_wire import DerivsTick
 from kernel.indicators import basis_bps
 from kernel.indicators import funding_annualised
+from kernel.indicators import pct_change
 from kernel.liquidation import LiquidatedSide
 from kernel.liquidation import Liquidation
 from kernel.venues import market_kind
@@ -143,13 +144,13 @@ def _ratio(numerator: Decimal, denominator: Decimal) -> Decimal | None:
 
 def _percent_change(latest: Decimal | None, base: Decimal | None) -> Decimal | None:
     """
-    Return `(latest - base) / base * 100` exactly in `Decimal`; None when either is missing or the
-    base is 0 (a percent of nothing is undefined, never 0 or infinity).
+    Return `(latest - base) / base * 100` in `Decimal` through the kernel's one formula
+    (`kernel.indicators.pct_change`, SSOT-02); None when either is missing or the base is 0 (a
+    percent of nothing is undefined, never 0 or infinity).
     """
     if latest is None or base is None:
         return None
-    ratio = _ratio(latest - base, base)
-    return None if ratio is None else ratio * 100
+    return pct_change(base, latest)
 
 
 class OpenInterestSeries:

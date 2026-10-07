@@ -1,0 +1,36 @@
+# An alerts.toml as the pre-Story-33.8 AlertStore wrote it (no `condition` table): one alert per
+# frequency, one triggered only_once with a last fire, one with an expiry and a Telegram-only one.
+[[alerts]]
+id = "legacy-close"
+instrument_id = "BTCUSDT-LINEAR.BYBIT"
+level = 100.0
+frequency = "once_per_bar_close"
+bar_seconds = 60
+template = "{{ticker}} crossed {{close}}"
+webhook_url = "https://example.com/h"
+created_ns = 1800000000000000000
+triggered = false
+
+[[alerts]]
+id = "legacy-bar"
+instrument_id = "BTCUSDT-LINEAR.BYBIT"
+level = 65000.5
+frequency = "once_per_bar"
+bar_seconds = 3600
+template = "{{ticker}} {{close}} {{time}} {{interval}}"
+webhook_url = "https://example.com/h"
+created_ns = 1800000000000000001
+expires_at_ns = 1900000000000000000
+triggered = false
+
+[[alerts]]
+id = "legacy-once"
+instrument_id = "SOL-USD-PERP.HYPERLIQUID"
+level = 150.25
+frequency = "only_once"
+bar_seconds = 300
+template = "{{ticker}}"
+webhook_url = ""
+created_ns = 1800000000000000002
+triggered = true
+last_fired_ns = 1800000100000000000

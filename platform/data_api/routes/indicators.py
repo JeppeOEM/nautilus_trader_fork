@@ -94,6 +94,8 @@ class IndicatorCatalogEntry(BaseModel):
     # Output -> `price`/`size`/`size_mean`/`count`/`ratio` (`indicator_picker.INDICATOR_UNITS`, Story 33.6): the
     # legend formats that output at the instrument's precision; `{}` (every native entry) = generic.
     units: dict[str, str] = {}
+    # Every output name the entry's replay can return (Story 33.8): the alert form's output select.
+    outputs: list[str]
 
 
 @router.get("/api/indicators/catalog")

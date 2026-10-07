@@ -6,6 +6,7 @@ import { type ChartLayout, layoutForSave } from "../lib/chartLayout";
 import type {
   AlertCreate,
   AlertResponse,
+  AlertUpdate,
   ArchiveRun,
   ArchiveRunResponse,
   ArchiveStatusResponse,
@@ -43,6 +44,7 @@ export type {
   FilterPresetItem,
   AlertCreate,
   AlertResponse,
+  AlertUpdate,
   ArchiveRun,
   ArchiveRunResponse,
   ArchiveStatusResponse,
@@ -369,13 +371,43 @@ export async function fetchAlerts(): Promise<AlertResponse[]> {
   return (await res.json()) as AlertResponse[];
 }
 
+/**
+ * A refused alert write's message for the form: the server's own `detail` (Story 33.8: a 422 names
+ * the field, `condition.upper must be greater than lower`), or each pydantic error's location and
+ * message, else the bare status.
+ */
+async function alertWriteError(res: Response, what: string): Promise<Error> {
+  const body = (await res.json().catch(() => null)) as { detail?: unknown } | null;
+  const detail = body?.detail;
+  if (typeof detail === "string") return new Error(detail);
+  if (Array.isArray(detail)) {
+    const parts = detail.map((d: { loc?: unknown[]; msg?: string }) =>
+      `${(d.loc ?? []).filter((l) => l !== "body").join(".")}: ${d.msg ?? "invalid"}`,
+    );
+    return new Error(parts.join("; "));
+  }
+  return new Error(`${what} failed: ${res.status}`);
+}
+
 export async function createAlert(body: AlertCreate): Promise<AlertResponse> {
   const res = await fetch("/api/alerts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`POST /api/alerts failed: ${res.status}`);
+  if (!res.ok) throw await alertWriteError(res, "POST /api/alerts");
+  return (await res.json()) as AlertResponse;
+}
+
+// Story 33.8: edit an alert's condition and delivery (its instrument and bar width stay); `rearm`
+// clears a triggered only-once alert. A 404 (deleted meanwhile) or 422 carries the server's detail.
+export async function updateAlert(id: string, body: AlertUpdate): Promise<AlertResponse> {
+  const res = await fetch(`/api/alerts/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await alertWriteError(res, `PUT /api/alerts/${id}`);
   return (await res.json()) as AlertResponse;
 }
 
