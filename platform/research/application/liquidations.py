@@ -727,29 +727,41 @@ class TradeMatch:
         return self.matched / self.total if self.total else None
 
 
-def _trade_index(
-    trades: Sequence[TradeTick],
-) -> dict[tuple[AggressorSide, int], list[tuple[int, int]]]:
-    """Index trades by (aggressor, exact size raw), each list `(ts_event, position)` by time."""
-    index: dict[tuple[AggressorSide, int], list[tuple[int, int]]] = {}
+# One (aggressor, exact size raw) key's trades by time: their `ts_event`s and their positions.
+_TradeEntries = tuple[np.ndarray, list[int]]
+
+
+def _trade_index(trades: Sequence[TradeTick]) -> dict[tuple[AggressorSide, int], _TradeEntries]:
+    """
+    Index trades by (aggressor, exact size raw), each key's `ts_event`s sorted once (with their
+    positions), so a lookup is one binary search, never a per-liquidation rebuild.
+    """
+    grouped: dict[tuple[AggressorSide, int], list[tuple[int, int]]] = {}
     for position, trade in enumerate(trades):
         key = (trade.aggressor_side, trade.size.raw)
-        index.setdefault(key, []).append((trade.ts_event, position))
-    for entries in index.values():
+        grouped.setdefault(key, []).append((trade.ts_event, position))
+    index = {}
+    for key, entries in grouped.items():
         entries.sort()
+        index[key] = (
+            np.array([ts for ts, _ in entries], dtype="int64"),
+            [position for _, position in entries],
+        )
     return index
 
 
 def _earliest_unused(
-    entries: Sequence[tuple[int, int]], ts_event: int, tol_ns: int, used: set[int]
+    entries: _TradeEntries, ts_event: int, tol_ns: int, used: set[int]
 ) -> tuple[int, int] | None:
     """Return the earliest unused entry with `ts_event` in `[ts - tol, ts + tol]`, or None."""
-    low = int(np.searchsorted([ts for ts, _ in entries], ts_event - tol_ns, side="left"))
-    for ts, position in entries[low:]:
+    stamps, positions = entries
+    low = int(np.searchsorted(stamps, ts_event - tol_ns, side="left"))
+    for k in range(low, len(positions)):
+        ts = int(stamps[k])
         if ts > ts_event + tol_ns:
             return None
-        if position not in used:
-            return ts, position
+        if positions[k] not in used:
+            return ts, positions[k]
     return None
 
 
@@ -774,7 +786,12 @@ def match_to_trades(
     out = []
     for row in rows:
         key = (_FORCED_AGGRESSOR[row.side], row.size.raw)
-        found = _earliest_unused(index.get(key, ()), row.ts_event, int(tol_s * NS_PER_S), used)
+        entries = index.get(key)
+        found = (
+            None
+            if entries is None
+            else _earliest_unused(entries, row.ts_event, int(tol_s * NS_PER_S), used)
+        )
         if found is not None:
             used.add(found[1])
         out.append(
@@ -1017,7 +1034,8 @@ class LiquidationStudy:
             f"{self.liquidations} liquidations, {len(self.episodes)} cascade episode(s) at "
             f"{scale}, {self.episodes.attrs.get('unscalable_rows', 0)} unscalable row(s) skipped",
             f"matched to a forced trade: {self.match.matched} of {self.match.total} ({share})",
-            f"liquidations in a second with no snapshot (unattributed): {self.unattributed}",
+            f"liquidations in a second with no single snapshot row (none, or two: unattributed): "
+            f"{self.unattributed}",
             f"cross venue: {self.cross_venue.reason or f'paired with {self.other_id}'}",
         ]
 
@@ -1190,7 +1208,25 @@ def liquidation_study(
     The episodes are scaled at the instrument definition's precisions
     (`MarketFrames.definition_precisions`), the scale the strategies feed the detector at; the OI
     is also read over the bucket before the window, so the first bucket's change is defined.
+    `end_ns <= start_ns` raises `ValueError` (never an empty study that reads as "no
+    liquidations").
+
+    Known limit: the detector starts cold at `start_ns`, as a backtest's strategy does at its
+    start: it is not `initialized` before `baseline_s` has passed, so no episode can open in the
+    window's first `baseline_s` (an hour by default) and a window shorter than that has none;
+    upgrade path: replay from `start_ns - baseline_s` and report only the episodes starting in
+    the window.
+
+    Known limit: the rows are read per UTC day on their venue `ts_event` (`MarketFrames.
+    liquidations`) and replayed on their `ts_init`, so a row whose receive skew carries it across
+    a window edge (stamped before `start_ns` and received after it, or received at or after
+    `end_ns`) is in the read and not the replay, or the reverse -- milliseconds at two edges,
+    where `read_liquidations`/the backtest select on `ts_init` alone; upgrade path: widen the
+    liquidation read by `MAX_TS_INIT_SKEW_NS` and select on `ts_init`, as `read_liquidations`
+    does.
     """
+    if end_ns <= start_ns:
+        raise ValueError(f"end_ns {end_ns} must be after start_ns {start_ns}")
     window = (start_ns, end_ns)
     # The bucket before the window, so the first OI change has a previous reading.
     pre_window = frames.open_interest(

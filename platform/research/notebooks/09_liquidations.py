@@ -204,9 +204,7 @@ oi_fig.show()
 # so its side is empty and the line says so; the pairing runs unchanged once a venue gains one.
 
 # %%
-cross = study.cross_venue
-print(f"{cross.a} vs {cross.b}: {cross.a_episodes} vs {cross.b_episodes} episode(s)")
-print(cross.reason or cross.pairs.to_string(index=False))
+print("\n".join(study.cross_venue.lines()))
 
 # %% [markdown]
 # ## 9. Reading guide
@@ -217,10 +215,13 @@ print(cross.reason or cross.pairs.to_string(index=False))
 # - **Bybit LINEAR only.** No other venue has a liquidation feed: the cross-venue section is empty
 #   by construction, not because the other venue had no cascade.
 # - **Episodes are few.** A window of days holds a few cascades; read `fwd_*` as individual cases.
+#   The detector starts cold at `START`, so no episode can open in the window's first
+#   `baseline_s` (an hour by default).
 #   Notebook 08's OFI `fade` and `follow` gates run the same detector with the same parameters,
 #   but advance it at each snapshot rather than on whole seconds, so their episodes' edges can
 #   differ by about a second and a borderline episode may exist on one side only (audit D-223).
 # - **The organic delta is placed by venue time.** A forced trade stamped in the next second
-#   nets there (audit D-220); the minute view hides most of that boundary.
+#   nets there (audit D-220); the minute view hides most of that boundary. "Unattributed" counts
+#   the liquidations of a second with no snapshot row, or with two.
 # - **A gap is blank.** A second without a snapshot, a mark older than `max_mark_age_s` or an OI
 #   bucket without a reading is NaN, never a carried value or a zero.

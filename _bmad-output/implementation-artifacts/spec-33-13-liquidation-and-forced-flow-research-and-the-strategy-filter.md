@@ -2,7 +2,7 @@
 title: 'Story 33.13: Liquidation and forced-flow research: cascade episodes, implied leverage, the forced/organic split proven on the trade archive, and the OFI strategy filter'
 type: 'feature'
 created: '2026-10-07'
-status: 'done'
+status: 'in-review'
 baseline_revision: '163c9b116e08d35740b7f0e8778847498ae0f33b'
 final_revision: '76a7008739c4ad2196b56a96acd5f57aba0fef54'
 review_loop_iteration: 0
@@ -227,6 +227,24 @@ warnings: ['multiple-goals', 'oversized']
   - `[low]` `[patch]` `backtest_ofi`: an explicit `TypeError` replaces the asserts, `forced_flow_filter` must be a strict bool, and the docstring states the NodeRunner path and the LINEAR requirement.
   - `[low]` `[patch]` The fade-window invariant is reworded (closes at the first snapshot after a gap; tested); direction-0 blocking is documented and tested; `days` became `days_touched` plus `hours`.
 
+### 2026-10-07 — Review pass (follow-up)
+- intent_gap: 0
+- bad_spec: 0
+- patch: 10: (high 0, medium 4, low 6)
+- defer: 0
+- reject: 8
+- addressed_findings:
+  - `[medium]` `[patch]` `OFIStrategy`'s forced-flow filter netted a liquidation received before the previous second's snapshot into that earlier second. Liquidations are now held by their venue second (`ts_event // 1 s`, research's `organic_delta` rule) and netted only in that second's snapshot; D-220, the data dictionary and the module docstring are updated, and the old arrival-order Known limit is gone.
+  - `[medium]` `[patch]` The first snapshot after a feed gap discarded its own second's liquidations, so its delta was raw. Gap-second rows are still discarded, but the snapshot's own rows are now netted (tested).
+  - `[medium]` `[patch]` A liquidation received after its second's snapshot was netted into the next second. It is now counted `unattributed`, never moved (tested).
+  - `[medium]` `[patch]` `match_to_trades` rebuilt every key's timestamp list for each liquidation, which is quadratic on a busy day. Each key's timestamps are now a sorted array built once.
+  - `[low]` `[patch]` Liquidations received before the first snapshot were all netted into it. Only the first snapshot's own second is netted now (tested).
+  - `[low]` `[patch]` `cross_venue_liquidations` paired greedily in `a`'s order, so an early episode could take a later one's only match. It now pairs nearest-first, with a Known limit (not a minimum-cost matching) (tested).
+  - `[low]` `[patch]` Notebook 09's cross-venue cell printed a raw "Empty DataFrame" and a blank venue name. The new `CascadeLeadLag.lines()` says it in words (tested).
+  - `[low]` `[patch]` The study's "unattributed" line said "no snapshot" but also counted seconds with two rows. The wording and notebook 09 now say "none, or two".
+  - `[low]` `[patch]` Two limits were undocumented: the detector's cold start (no episode in the first `baseline_s`) and the read on `ts_event` vs the replay on `ts_init` at the window edges. Both are now Known limits in `liquidation_study`, and the cold start is in notebook 09's reading guide.
+  - `[low]` `[patch]` `liquidation_study` accepted a backwards window and returned an empty study. It now raises `ValueError` (tested).
+
 ## Design Notes
 
 **Why phases for the cascade gate.** With `intensity_threshold > 1`, an episode ends (spent and not active) before the total rate falls below the baseline. A gate built only on the episode would therefore never see the epics' "fade after the rate decays below the baseline". The strategy keeps a pure phase machine (`building → unwinding → fade_window → quiet`) so that both modes are literal:
@@ -248,28 +266,41 @@ Both suppress every other entry while a cascade is detected. The `fade_window` l
 
 Status: done
 
-**Summary:** Liquidations are now a research input:
-- a `MarketFrames.liquidations` frame (bankruptcy `price_kind` stated);
-- `cascade_episodes` with forward returns, `implied_leverage`, `forced_share`, `match_to_trades`, `organic_delta` and the day-sliced `liquidation_study`;
-- `aligned.liquidations_vs_oi` and `cross_venue_liquidations`;
-- notebook 09;
-- `OFIStrategy` gains `forced_flow_filter` and `liquidation_cascade_mode` (pure `next_phase`/`cascade_allows` in `cascade_rules.py`), a `seconds_liquidations` backtest kind, and four OFI rows in gallery/notebook 08.
+**Summary:** This was a follow-up review of Story 33.13 (two independent reviewers, then triage). It applied 10 patches, mainly how `OFIStrategy`'s forced-flow filter attributes liquidations.
+- Each liquidation is now held by its venue second and netted only in that second's snapshot, the same rule as research's `organic_delta`.
+- A liquidation whose second has no usable snapshot is counted as `unattributed`, never netted elsewhere.
 
-**Files:**
-- `research/application/{frames,ports,liquidations,aligned,backtest_runner,gallery}.py`
-- `research/strategies/{ofi_strategy,cascade_rules,liquidation_cascade_strategy,backtest_ofi}.py`, `research/run_backtest.py`
-- `kernel/catalog_files.py` (`LiquidationDuplicateError`)
-- notebooks 08/09 (+ipynb), research tests (new `test_ofi_strategy_forced_flow.py`)
-- docs: DATA_DICTIONARY §2.12, DATA_INTEGRITY_AUDIT D-220..D-223, DEPLOY_CHECKLIST 33-13, NAUTILUS_INDICATOR_BACKTEST_CATALOG, the AD-D1 spine row, research README, `kbData.ts`, `platform/CLAUDE.md`
+**Files changed in this pass:**
+- `platform/research/strategies/ofi_strategy.py`: per-second holding of liquidations, `_take_forced` settlement, and docstrings.
+- `platform/research/application/liquidations.py`: linear-time trade match index, window check, two new Known limits, and the "unattributed" wording.
+- `platform/research/application/aligned.py`: nearest-first cross-venue pairing and `CascadeLeadLag.lines()`.
+- `platform/research/notebooks/09_liquidations.py` (+ `.ipynb`, synced with jupytext): the cross-venue text and reading-guide notes.
+- `platform/research/tests/test_{ofi_strategy_forced_flow,aligned,liquidations}.py`: 8 new tests.
+- `platform/docs/DATA_INTEGRITY_AUDIT.md` (D-220) and `platform/docs/DATA_DICTIONARY.md` (the OFI entry).
 
-**Review:** 16 patches applied (1 high, 7 medium, 8 low), 0 deferred, 0 rejected.
+**Review:**
+- 10 patches applied (medium 4, low 6), 0 deferred.
+- 8 rejected:
+  - unreachable `next_phase` case: an episode cannot start and end in one detector update;
+  - seconds frame index: already a `DatetimeIndex`;
+  - other leg's NaN returns: documented;
+  - `backtest_ofi` routing: documented, and a bad mode still raises;
+  - data-kind tuple drift: speculative;
+  - test-helper import: the `.ipynb` exists;
+  - gallery params override: documented order;
+  - non-`ValueError` reads: they still raise.
 
 **Verification:**
-- `python3 -m pytest research/tests kernel/tests tests/test_boundaries.py tests/test_notebook_rules.py tests/test_images.py verification/tests/test_ofi_parity.py -q -W error` (plus an ignore for the PytestConfigWarning about the unknown asyncio option): 1674 passed, 4 skipped (pre-existing).
-- Frontend `npm test`/`lint`/`build` passed (implementation pass).
-- `ruff format` is clean. mypy is clean on the new code.
+- `cd platform && python3 -m pytest research/tests kernel/tests tests/test_boundaries.py tests/test_notebook_rules.py verification/tests/test_ofi_parity.py -q -W error -W ignore::pytest.PytestConfigWarning`: 1637 passed, 4 skipped (all pre-existing).
+  - The notebooks ran on the fixture.
+  - The PytestConfigWarning ignore is for the root `pyproject.toml`'s unknown `asyncio_default_fixture_loop_scope` option under the system pytest.
+- `ruff format --check research`: clean.
+- `ruff check research`: only the SIM300 in `test_backtest_runner.py`, which was already there.
+- mypy: no errors in the changed files. The 23 it reports are in other modules (e.g. `backtest_dydx.py`).
+- Frontend: not touched in this pass, not re-run.
 
 **Residual risks:**
-- `archive/tests` + `candles/tests` were not re-run in full after the review patches. Their combined run exceeded the 10-minute tool limit. The only kernel change is a `ValueError` subclass.
-- A pre-existing ruff SIM300 remains in `test_backtest_runner.py`.
-- Every result is a research reading of the recorded window, not a claim beyond it.
+- The attribution change alters which liquidations the OFI filter nets. Notebook 08's forced-flow numbers can differ from the first pass's.
+- Same-second netting still depends on the liquidation's and its forced trade's stamps falling in one second (D-220 Known limit).
+- `archive/tests` and `candles/tests` were not re-run; nothing they cover changed.
+- Every result is a research reading of the recorded window.

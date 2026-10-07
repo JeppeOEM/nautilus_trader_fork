@@ -583,3 +583,17 @@ def test_a_study_with_no_other_venue_leg_says_so(tmp_path: Path) -> None:
     assert study.lines()[-1] == f"cross venue: {reason}"
     assert "None" not in "\n".join(study.lines())
     assert (study.days_touched, study.hours) == (1, 2.0)
+
+
+def test_a_study_of_a_backwards_window_raises(tmp_path: Path) -> None:
+    frames = _definition_only_catalog(tmp_path)
+    with pytest.raises(ValueError, match="must be after"):
+        liquidation_study(frames, str(_IID), _T0, _T0, LiquidationStudyConfig())
+
+
+def test_the_no_other_venue_line_names_no_blank_side(tmp_path: Path) -> None:
+    frames = _definition_only_catalog(tmp_path)
+    study = liquidation_study(
+        frames, str(_IID), _T0, _T0 + 3_600 * NS_PER_S, LiquidationStudyConfig()
+    )
+    assert study.cross_venue.lines()[0] == f"{_IID} vs no other venue: 0 vs 0 episode(s)"

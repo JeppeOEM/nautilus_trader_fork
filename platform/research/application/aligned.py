@@ -732,8 +732,9 @@ class CascadeLeadLag:
 
     Invariant: the pairing is one-to-one: `pairs` holds one row per `a` episode that found an
     unused same-direction `b` episode starting within `max_lag_s` of it (`lag_s = (b - a) / 1 s`,
-    positive when `a` leads), in `a`'s start order, and no `b` episode is in two rows; `a_episodes`/`b_episodes` count each side's episodes; `reason` is set
-    exactly when a side has none, naming it, and `pairs` is then empty.
+    positive when `a` leads), in `a`'s start order, and no `b` episode is in two rows;
+    `a_episodes`/`b_episodes` count each side's episodes; `reason` is set exactly when a side has
+    none, naming it, and `pairs` is then empty. `lines()` says it in words.
 
     Known limit: Hyperliquid, the only other venue an asset is collected on, has no liquidation
     feed (Story 33.2, `docs/DATA_DICTIONARY.md` §1.26), so its side is empty and the result is
@@ -748,54 +749,70 @@ class CascadeLeadLag:
     b_episodes: int
     reason: str | None
 
+    def lines(self) -> list[str]:
+        """
+        Return the result in words: the two sides and their counts (`b` empty: no other leg), then
+        `reason`, the pairs, or that no same-direction pair started within the lag.
+        """
+        other = self.b or "no other venue"
+        head = f"{self.a} vs {other}: {self.a_episodes} vs {self.b_episodes} episode(s)"
+        if self.reason is not None:
+            return [head, self.reason]
+        if self.pairs.empty:
+            return [head, "no same-direction episode pair started within the lag"]
+        return [head, self.pairs.to_string(index=False)]
 
-def _nearest_start(
-    b_starts: np.ndarray,
-    b_directions: np.ndarray,
-    unused: np.ndarray,
-    episode: tuple[int, int],
-    max_lag_ns: int,
-) -> int | None:
+
+def _candidate_pairs(
+    a: pd.DataFrame, b: pd.DataFrame, max_lag_ns: int
+) -> list[tuple[int, int, int, int]]:
     """
-    Return the index of the unused `b` start of the same direction nearest `episode`'s start
-    within the lag, a tie going to the later `b` (lag >= 0); None when there is none.
+    Every same-direction `(a, b)` pair of episodes whose starts lie within the lag, as
+    `(|lag|, b before a, a position, b position)`: the nearest first, of two equally near the
+    later `b` first (lag >= 0), then by position, so the order is total.
     """
-    start, direction = episode
-    distance = np.abs(b_starts - start)
-    candidates = np.flatnonzero(unused & (b_directions == direction) & (distance <= max_lag_ns))
-    if not candidates.size:
-        return None
-    # Sort by (distance, -start): the nearest, and of two equally near the later one.
-    best = min(candidates.tolist(), key=lambda k: (int(distance[k]), -int(b_starts[k])))
-    return int(best)
+    a_starts = a["start_ns"].to_numpy(dtype="int64")
+    b_starts = b["start_ns"].to_numpy(dtype="int64")
+    a_directions = a["direction"].to_numpy(dtype="int64")
+    b_directions = b["direction"].to_numpy(dtype="int64")
+    candidates = []
+    for i, (start, direction) in enumerate(zip(a_starts, a_directions, strict=True)):
+        lags = b_starts - start
+        close = (b_directions == direction) & (np.abs(lags) <= max_lag_ns)
+        for j in np.flatnonzero(close).tolist():
+            candidates.append((abs(int(lags[j])), int(lags[j] < 0), i, j))
+    return sorted(candidates)
 
 
 def cross_venue_liquidations(
     a: pd.DataFrame, b: pd.DataFrame, max_lag_s: int, a_name: str = "a", b_name: str = "b"
 ) -> CascadeLeadLag:
     """
-    Pair the episodes of `a` and `b` (two `cascade_episodes` frames) one to one by start, greedily
-    in `a`'s start order: each `a` episode takes the nearest *unused* `b` episode of the same
-    direction whose start lies within `max_lag_s` of its own, a tie going to the later `b` (lag
-    >= 0); `CascadeLeadLag`'s invariant. `a_name`/`b_name` name the sides in `reason`.
+    Pair the episodes of `a` and `b` (two `cascade_episodes` frames) one to one by start, nearest
+    pair first: of every same-direction pair whose starts lie within `max_lag_s`, the closest is
+    taken, then the closest of the rest whose episodes are both unused, and so on, a tie going to
+    the later `b` (lag >= 0) -- so an early `a` episode never takes the only `b` a later one sits
+    on. `CascadeLeadLag`'s invariant. `a_name`/`b_name` name the sides in `reason`.
     `max_lag_s < 0` raises `ValueError`.
+
+    Known limit: nearest-first is a greedy matching, not the assignment with the fewest pairs
+    lost or the smallest total lag; with a venue's few episodes a day the two differ only when
+    three episodes chain within one lag; upgrade path: a minimum-cost bipartite matching.
     """
     if max_lag_s < 0:
         raise ValueError(f"max_lag_s must be >= 0, got {max_lag_s}")
     empty = [name for name, side in ((a_name, a), (b_name, b)) if side.empty]
     reason = f"no cascade episode on {' and '.join(empty)}" if empty else None
+    a_used: set[int] = set()
+    b_used: set[int] = set()
     rows = []
-    b_starts = b["start_ns"].to_numpy(dtype="int64")
-    b_directions = b["direction"].to_numpy(dtype="int64")
-    unused = np.ones(len(b), dtype=bool)
-    episodes = sorted(zip(a["start_ns"].tolist(), a["direction"].tolist(), strict=True))
-    for start, direction in episodes:
-        found = _nearest_start(
-            b_starts, b_directions, unused, (start, direction), max_lag_s * NS_PER_S
-        )
-        if found is not None:
-            unused[found] = False
-            b_start = int(b_starts[found])
-            rows.append((start, b_start, direction, (b_start - start) / NS_PER_S))
+    for _, _, i, j in _candidate_pairs(a, b, max_lag_s * NS_PER_S):
+        if i in a_used or j in b_used:
+            continue
+        a_used.add(i)
+        b_used.add(j)
+        start, b_start = int(a["start_ns"].iloc[i]), int(b["start_ns"].iloc[j])
+        rows.append((start, b_start, int(a["direction"].iloc[i]), (b_start - start) / NS_PER_S))
+    rows.sort()
     pairs = pd.DataFrame(rows, columns=list(CASCADE_PAIR_COLUMNS))
     return CascadeLeadLag(a_name, b_name, pairs, len(a), len(b), reason)

@@ -29,8 +29,9 @@ its `Liquidation` rows through `LIQUIDATION_CLIENT_ID`, the backtest's `seconds_
 
 - `forced_flow_filter`: the cumulative delta (3.) is organic -- each snapshot pushes
   `kernel.indicators.organic_delta_units` of its exact `buy_volume_units`/`sell_volume_units` and
-  the long/short liquidation sizes received since the previous snapshot, rescaled exactly to the
-  snapshot's `size_precision` (`kernel.second_snapshot.units_of`), decoded once. A size that
+  the long/short sizes of the liquidations received so far whose venue second (`ts_event // 1 s`)
+  is the snapshot's own, rescaled exactly to the snapshot's `size_precision`
+  (`kernel.second_snapshot.units_of`), decoded once. A size that
   precision cannot hold is recorded at `FORCED_FLOW_SITE` and that second's delta is NaN, which
   blocks a cum-delta-gated entry while it is in the window, never a value with the row dropped
   (DATA-07).
@@ -40,14 +41,16 @@ its `Liquidation` rows through `LIQUIDATION_CLIENT_ID`, the backtest's `seconds_
   updates folded into `cascade_rules.next_phase`; an entry is submitted only when
   `cascade_rules.cascade_allows` passes it. OFI still decides every entry; the mode only gates.
 
-Known limit: a liquidation counts toward the snapshot that follows its arrival (`ts_init` order,
-what a live strategy knows), while research's `organic_delta` places it in the snapshot second of
-its venue `ts_event`; a liquidation received after its second closed lands one snapshot later here
-(audit D-220). Liquidations received before a one-sided snapshot or before the first snapshot
-after a feed gap (`> OFI_GAP_NS`) belong to seconds that have no usable snapshot: they are not
-netted but discarded, counted in `unattributed_liquidations` and logged at WARNING (the
-research side's `unattributed`). Upgrade path: hold liquidations by `ts_event` second and apply
-them to that second's snapshot, as the capture service holds trades.
+**Attribution** (audit D-220): a liquidation is netted in the snapshot of its own venue second,
+research's `organic_delta` rule (the capture's for trades: a second `S` holds the trades with
+`ts_event` in `[S, S + 1 s)` and is stamped `S + 0.5 s`), and only once received (`ts_init`
+order, what a live strategy knows): one received before the previous second's snapshot is held
+for its own. A liquidation whose second has no usable snapshot when it is settled -- the
+snapshot is one-sided, the second fell in a feed gap or before the first snapshot, or the row
+arrived after its second's snapshot -- is not netted anywhere else but discarded, counted in
+`unattributed_liquidations` and logged at WARNING (the research side's `unattributed`). Known limit:
+a liquidation's stamp and its forced trade's may fall in adjacent seconds, research's
+`organic_delta` limit (the same rule, the same upgrade path).
 
 Known limit: the modes are research-only: no bot runs `OFIStrategy` with them, and live delivery
 order is not checked (a row received before the detector's clock is placed at it, as a backtest
@@ -187,11 +190,12 @@ class OFIStrategy(Strategy):
         self.instrument: Instrument | None = None
         # Liquidation rows whose notional the definition's precisions cannot hold (not fed).
         self.unscalable_rows = 0
-        # The liquidated size per side received since the last snapshot, as `Quantity.raw` sums.
-        self._forced_raw = dict.fromkeys(LiquidatedSide, 0)
-        self._forced_rows = 0
-        # This instrument's liquidation rows received, and those discarded unattributed: received
-        # before a one-sided snapshot or across a feed gap (the module docstring).
+        # The received liquidations not yet settled, per venue second (`ts_event // 1 s`):
+        # [long `Quantity.raw` sum, short sum, rows]. Only seconds after the latest snapshot's
+        # remain once it is settled, so this holds about one second of rows.
+        self._pending: dict[int, list[int]] = {}
+        # This instrument's liquidation rows received, and those discarded unattributed: their
+        # second had no usable snapshot (the module docstring's attribution).
         self.delivered_liquidations = 0
         self.unattributed_liquidations = 0
         self._phase = QUIET
@@ -256,7 +260,7 @@ class OFIStrategy(Strategy):
         # compare against a stale book: clear it first, at the one platform-wide threshold
         # (`kernel.indicators.OFI_GAP_NS`, 3 s since Story 31.3 -- this strategy used 5 s).
         after_gap = self._last_ts is not None and ts - self._last_ts > OFI_GAP_NS
-        delta = self._second_delta(data, attributable=not (one_sided or after_gap))
+        delta = self._second_delta(data, usable=not one_sided)
         if one_sided:
             return
         if after_gap:
@@ -293,8 +297,9 @@ class OFIStrategy(Strategy):
             return
         self.delivered_liquidations += 1
         if self.config.forced_flow_filter:
-            self._forced_raw[row.side] += row.size.raw
-            self._forced_rows += 1
+            held = self._pending.setdefault(row.ts_event // _NS_PER_S, [0, 0, 0])
+            held[0 if row.side == LiquidatedSide.LONG else 1] += row.size.raw
+            held[2] += 1
         if self._cascade is None:
             return
         units = definition_units(row, self.instrument, self.unscalable_rows)
@@ -324,37 +329,38 @@ class OFIStrategy(Strategy):
         )
         self._phase = next_phase(self._phase, view, cascade.clock_ns, self.config.cascade_window_s)
 
-    def _take_forced(self, data: DydxSecondSnapshot, attributable: bool) -> tuple[int, int]:
+    def _take_forced(self, data: DydxSecondSnapshot, usable: bool) -> tuple[int, int]:
         """
-        Return the liquidated (long, short) `Quantity.raw` sums received since the last snapshot
-        and reset them. When the snapshot cannot hold them (`attributable` False: it is one-sided,
-        or follows a gap, so they belong to seconds without a snapshot) they are discarded --
-        counted in `unattributed_liquidations` and logged once at WARNING -- and (0, 0) returned,
-        never netted against a second whose volume does not hold their trades.
+        Settle the held liquidations up to the snapshot's second and return the (long, short)
+        `Quantity.raw` sums of its own second ((0, 0) when `usable` is False: it is one-sided).
+        Every other settled row -- an earlier second's, which has no snapshot left to take it, or
+        this second's when unusable -- is discarded, counted in `unattributed_liquidations` and
+        logged once at WARNING, never netted against a second whose volume does not hold its
+        trade. A later second's rows stay held for their own snapshot.
         """
-        raws = (self._forced_raw[LiquidatedSide.LONG], self._forced_raw[LiquidatedSide.SHORT])
-        rows = self._forced_rows
-        self._forced_raw = dict.fromkeys(LiquidatedSide, 0)
-        self._forced_rows = 0
-        if attributable or rows == 0:
-            return raws
-        self.unattributed_liquidations += rows
-        self.log.warning(
-            f"{rows} liquidation(s) received before the snapshot at {data.ts_event} (one-sided or "
-            f"after a feed gap) not netted: unattributed ({self.unattributed_liquidations} so far)"
-        )
-        return 0, 0
+        second = data.ts_event // _NS_PER_S
+        own = self._pending.pop(second, None) if usable else None
+        settled = [s for s in self._pending if s <= second]
+        rows = sum(self._pending.pop(s)[2] for s in settled)
+        if rows:
+            self.unattributed_liquidations += rows
+            self.log.warning(
+                f"{rows} liquidation(s) settled at the snapshot of {data.ts_event} without a "
+                f"usable snapshot of their own second not netted: unattributed "
+                f"({self.unattributed_liquidations} so far)"
+            )
+        return (0, 0) if own is None else (own[0], own[1])
 
-    def _second_delta(self, data: DydxSecondSnapshot, attributable: bool) -> float:
+    def _second_delta(self, data: DydxSecondSnapshot, usable: bool) -> float:
         """
         Return the snapshot's delta: `buy_volume - sell_volume` without the filter, else its
         organic delta (the module docstring) over the liquidations `_take_forced` attributes to
-        it, NaN when a liquidation size is not exact at the snapshot's precision. Resets the
-        accumulation either way.
+        it, NaN when a liquidation size is not exact at the snapshot's precision. With the
+        filter, the held rows are settled either way.
         """
         if not self.config.forced_flow_filter:
             return data.buy_volume - data.sell_volume
-        long_raw, short_raw = self._take_forced(data, attributable)
+        long_raw, short_raw = self._take_forced(data, usable)
         try:
             liq_long = units_of(long_raw, data.size_precision)
             liq_short = units_of(short_raw, data.size_precision)
@@ -467,8 +473,7 @@ class OFIStrategy(Strategy):
         self._cum_delta_events.clear()
         self._new_indicators()
         self.unscalable_rows = 0
-        self._forced_raw = dict.fromkeys(LiquidatedSide, 0)
-        self._forced_rows = 0
+        self._pending = {}
         self.delivered_liquidations = 0
         self.unattributed_liquidations = 0
         self._phase = QUIET

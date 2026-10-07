@@ -257,6 +257,46 @@ def test_liquidations_before_a_one_sided_snapshot_are_discarded_and_counted() ->
     assert strategy.unattributed_liquidations == 1
 
 
+def test_a_liquidation_received_before_the_previous_seconds_snapshot_waits_for_its_own() -> None:
+    # A long liquidation of second 1 (0.003) arrives before second 0's snapshot (received at
+    # 0.7 s): it is held and netted in second 1, never in second 0's volume.
+    strategy = _strategy(forced_flow_filter=True)
+    strategy.on_data(_liquidation(_T0 + _NS + 50_000_000, LiquidatedSide.LONG, 3, 3))
+    strategy.on_data(_second(0, 0.010, 0.004))
+    strategy.on_data(_second(1, 0.002, 0.005))
+    assert _deltas(strategy) == [0.006, 0.0]
+    assert strategy.unattributed_liquidations == 0
+
+
+def test_the_first_snapshot_after_a_gap_nets_its_own_seconds_liquidation() -> None:
+    # Second 0, a hole, then second 10: the hole's liquidation (second 5) is discarded, second
+    # 10's own one (0.003 long) is netted: (10 - 0) - (4 - 3) = 0.009.
+    strategy = _strategy(forced_flow_filter=True)
+    strategy.on_data(_second(0, 0.001, 0.0))
+    strategy.on_data(_liquidation(_T0 + 5 * _NS, LiquidatedSide.LONG, 3, 3))
+    strategy.on_data(_liquidation(_T0 + 10 * _NS + 100_000_000, LiquidatedSide.LONG, 3, 3))
+    strategy.on_data(_second(10, 0.010, 0.004))
+    assert _deltas(strategy) == [0.001, 0.009]
+    assert strategy.unattributed_liquidations == 1
+
+
+def test_a_liquidation_before_the_first_snapshot_of_an_earlier_second_is_unattributed() -> None:
+    strategy = _strategy(forced_flow_filter=True)
+    strategy.on_data(_liquidation(_T0 - 30 * _NS, LiquidatedSide.SHORT, 2, 3))
+    strategy.on_data(_second(0, 0.010, 0.004))
+    assert _deltas(strategy) == [0.006]
+    assert strategy.unattributed_liquidations == 1
+
+
+def test_a_liquidation_received_after_its_seconds_snapshot_is_unattributed_not_moved() -> None:
+    strategy = _strategy(forced_flow_filter=True)
+    strategy.on_data(_second(0, 0.010, 0.004))
+    strategy.on_data(_liquidation(_T0 + 400_000_000, LiquidatedSide.LONG, 3, 3))  # second 0, late
+    strategy.on_data(_second(1, 0.002, 0.001))
+    assert _deltas(strategy) == [0.006, 0.001]
+    assert strategy.unattributed_liquidations == 1
+
+
 def test_the_fade_window_closes_at_the_first_snapshot_after_a_gap() -> None:
     # A fade window opened at 1 s; the feed then stops for 60 s (> the 10 s window): the
     # detector is advanced and the phase recomputed at the next snapshot before any entry.

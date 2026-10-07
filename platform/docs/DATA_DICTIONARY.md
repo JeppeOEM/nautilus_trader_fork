@@ -3418,8 +3418,9 @@ Story 33.13)
   snapshots (`bid_*`/`ask_*`, `buy_volume_units`/`sell_volume_units`, `size_precision`,
   `ts_event`, `ts_init`) and the `Liquidation` rows, all streamed by `BacktestDataConfig`.
   *Derived on read:* the organic delta per snapshot (`kernel.indicators.organic_delta_units` of
-  the volumes and the liquidated sizes received since the previous snapshot, rescaled exactly to
-  its `size_precision`, audit D-220), the cascade phase (`kernel.indicators.LiquidationCascade`
+  the volumes and the liquidated sizes of the snapshot's own venue second received by then,
+  rescaled exactly to its `size_precision`; a liquidation whose second has no usable snapshot is
+  counted `unattributed_liquidations`, audit D-220), the cascade phase (`kernel.indicators.LiquidationCascade`
   fed at the definition's precisions, `research.strategies.cascade_rules.next_phase`) and the gate
   (`cascade_rules.cascade_allows`, audit D-223); the sample beside the table
   (`gallery.ofi_sample`: `cascade_sample` with the OFI detector fields); the leaderboard metrics

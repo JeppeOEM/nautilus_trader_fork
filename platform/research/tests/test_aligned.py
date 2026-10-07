@@ -486,6 +486,27 @@ def test_cross_venue_pairs_the_nearest_same_direction_episode_within_the_lag() -
     assert (result.a_episodes, result.b_episodes, result.reason) == (3, 3, None)
 
 
+def test_cross_venue_takes_the_nearest_pair_first_so_no_later_episode_loses_its_match() -> None:
+    # a1 at 0 s and a2 at 100 s, one b at 99 s: a2 (lag -1 s) is nearer than a1 (+99 s).
+    a = _episodes([(0, -1), (100 * NS_PER_S, -1)])
+    b = _episodes([(99 * NS_PER_S, -1)])
+    result = aligned.cross_venue_liquidations(a, b, 300, "BYBIT", "OTHER")
+    assert result.pairs.to_dict("records") == [
+        {"a_start_ns": 100 * NS_PER_S, "b_start_ns": 99 * NS_PER_S, "direction": -1, "lag_s": -1.0}
+    ]
+
+
+def test_cross_venue_lines_say_when_no_pair_started_within_the_lag() -> None:
+    a = _episodes([(0, -1)])
+    result = aligned.cross_venue_liquidations(a, _episodes([(900 * NS_PER_S, -1)]), 30, "A", "B")
+    assert result.lines() == [
+        "A vs B: 1 vs 1 episode(s)",
+        "no same-direction episode pair started within the lag",
+    ]
+    empty = aligned.cross_venue_liquidations(a, _episodes([]), 30, "A", "B")
+    assert empty.lines()[1] == "no cascade episode on B"
+
+
 def test_an_empty_side_gives_no_pair_and_names_itself() -> None:
     a = _episodes([(100 * NS_PER_S, -1)])
     result = aligned.cross_venue_liquidations(a, _episodes([]), 30, "BYBIT", "HYPERLIQUID")
