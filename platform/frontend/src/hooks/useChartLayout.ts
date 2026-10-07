@@ -110,7 +110,7 @@ export function useChartLayout(instrumentId: string): ChartLayoutStore {
       fetchCoinLayout(instrumentId)
         .then(({ layout: raw, seeded }) => {
           if (cancelled) return;
-          const { layout: server, fallbacks } = normalizeLayout(raw);
+          const { layout: server, fallbacks } = normalizeLayout(raw, instrumentId);
           // Only a first open takes the browser's old choice; a layout already on the server wins.
           const found = readLegacy(instrumentId);
           const legacy: LegacyChoice = seeded ? found : { present: found.present };
@@ -253,7 +253,7 @@ export function useChartLayout(instrumentId: string): ChartLayoutStore {
     resettingRef.current = true;
     try {
       await chainRef.current.catch(() => undefined);
-      const { layout: fresh, fallbacks } = normalizeLayout(await resetLayoutToDefault(instrumentId));
+      const { layout: fresh, fallbacks } = normalizeLayout(await resetLayoutToDefault(instrumentId), instrumentId);
       savedRef.current = fallbacks.length === 0 ? layoutKey(fresh) : null;
       latestRef.current = fresh;
       setLayout(fresh);

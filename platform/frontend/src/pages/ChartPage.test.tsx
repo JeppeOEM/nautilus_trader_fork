@@ -42,7 +42,10 @@ const liveDerivs = vi.hoisted(() => ({
   onLiquidation: undefined as ((row: unknown) => void) | undefined,
   onTick: undefined as ((tick: unknown) => void) | undefined,
 }));
+// Story 33.9: `GET /api/markets` for the Compare field's suggestions.
+const marketsApi = vi.hoisted(() => ({ get: vi.fn() }));
 vi.mock("../api/client", () => ({
+  fetchMarkets: (...args: unknown[]) => marketsApi.get(...args),
   fetchCoinLayout: (...args: unknown[]) => layoutApi.get(...args),
   saveCoinLayout: (...args: unknown[]) => layoutApi.save(...args),
   saveLayoutAsDefault: (...args: unknown[]) => layoutApi.saveDefault(...args),
@@ -101,6 +104,9 @@ const hooks = vi.hoisted(() => ({
 // replay tests swap in.
 const mocks = vi.hoisted(() => ({
   candles: [] as unknown[],
+  // Story 33.9: a compare symbol's own candles (absent = `candles`), and the ids whose load failed.
+  candlesByIid: {} as Record<string, unknown[]>,
+  failedIids: [] as string[],
   volume: [] as unknown[],
   venueMarket: null as { venue: string; market: string } | null,
   precision: { price: 2, size: 3 } as { price: number; size: number } | null,
@@ -116,10 +122,11 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../hooks/useCandles", () => ({
   BAR_SECONDS: 60,
-  useCandles: (_iid: string, _chart: unknown, _enabled: boolean, bar: number) => {
+  useCandles: (iid: string, _chart: unknown, _enabled: boolean, bar: number) => {
     hooks.candlesBar.push(bar);
     return {
-      candles: mocks.candles,
+      candles: mocks.candlesByIid[iid] ?? mocks.candles,
+      loadFailed: mocks.failedIids.includes(iid),
       volume: mocks.volume,
       venueMarket: mocks.venueMarket,
       precision: mocks.precision,
@@ -296,6 +303,10 @@ interface ChartStubProps {
   onProfileEdgeDrag?: (id: string, edge: "start" | "end", time: number) => void;
   onProfileEdgeCommit?: (id: string, edge: "start" | "end", time: number) => void;
   onProfileEdgeCancel?: () => void;
+  chartType?: string;
+  priceScale?: { mode: string; autoScale: boolean; invert: boolean };
+  onPriceScale?: (patch: Record<string, unknown>) => void;
+  scaleModesLocked?: string | null;
 }
 
 const lastChartProps: { current: ChartStubProps | null } = { current: null };
@@ -398,6 +409,12 @@ beforeEach(() => {
   footprintResult.current = { items: [], precision: null, error: null };
   localStorage.clear();
   mocks.candles = [];
+  mocks.candlesByIid = {};
+  mocks.failedIids = [];
+  marketsApi.get.mockReset().mockResolvedValue({
+    items: [{ instrument_id: "BTC-USD-PERP.HYPERLIQUID", symbol: "BTC", venue: "HYPERLIQUID", same_asset: true }],
+    stale_venues: [],
+  });
   mocks.volume = [];
   mocks.venueMarket = null;
   mocks.precision = { price: 2, size: 3 };
@@ -835,9 +852,13 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
       ...["1m", "5m", "15m", "1H", "4H", "1D", "1W"].map((l) => `Timeframe ${l}`),
       "Candles",
       "Lines",
+      "Auto",
+      "Invert",
+      "Compare",
+      "Spread",
       "Indicators",
       "Volume overlays",
-        "Liquidation tape",
+      "Liquidation tape",
       "Layout",
       "Alert",
       "Fit",
@@ -4486,5 +4507,236 @@ describe("ChartPage order-flow indicators (Story 33.6)", () => {
       cleanup(); // flushes the pending save
       expect(lastSaved().volume_color_by).toBe("delta");
     });
+  });
+});
+
+// Story 33.9: the chart type, the price scale and compare symbols, as the page feeds them to the chart
+// and saves them in the coin's layout.
+describe("chart type, price scale and compare (Story 33.9)", () => {
+  const OTHER = "BTC-USD-PERP.HYPERLIQUID";
+  const bar = (time: number, close: number) => ({ time, open: close, high: close, low: close, close });
+  const comparePane = (iid = OTHER) => lastChartProps.current!.panes!.find((p) => p.id === `compare:${iid}`);
+  const spreadPane = () => lastChartProps.current!.panes!.find((p) => p.id === "compare-spread");
+  async function addCompare(text: string): Promise<void> {
+    if (!screen.queryByRole("combobox", { name: "Compare instrument id" })) {
+      fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+    }
+    await act(async () => {});
+    fireEvent.change(screen.getByRole("combobox", { name: "Compare instrument id" }), { target: { value: text } });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+  }
+
+  it("feeds the chart type and the scale settings to the chart and saves them per coin", async () => {
+    vi.useFakeTimers();
+    render(page());
+    expect(lastChartProps.current!.chartType).toBe("candles");
+    expect(lastChartProps.current!.priceScale).toEqual({ mode: "normal", autoScale: true, invert: false });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Chart type" }), { target: { value: "heikin_ashi" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Price scale" }), { target: { value: "log" } });
+    fireEvent.click(screen.getByRole("button", { name: "Auto" }));
+    fireEvent.click(screen.getByRole("button", { name: "Invert" }));
+    await flushSave();
+
+    expect(lastChartProps.current!.chartType).toBe("heikin_ashi");
+    expect(lastChartProps.current!.priceScale).toEqual({ mode: "log", autoScale: false, invert: true });
+    expect(screen.getByRole("button", { name: "Auto" })).toHaveAttribute("aria-pressed", "false");
+    expect(lastSaved()).toMatchObject({
+      chart_type: "heikin_ashi",
+      price_scale: { mode: "log", auto_scale: false, invert: true },
+    });
+  });
+
+  it("persists a change the chart reports (the scale menu, a double-click restoring auto)", async () => {
+    vi.useFakeTimers();
+    layoutApi.server[IID] = layoutOf({ price_scale: { mode: "normal", auto_scale: false, invert: false } });
+    render(page());
+
+    act(() => lastChartProps.current!.onPriceScale!({ auto_scale: true }));
+    act(() => lastChartProps.current!.onPriceScale!({ mode: "indexed" }));
+    await flushSave();
+
+    expect(lastSaved().price_scale).toEqual({ mode: "indexed", auto_scale: true, invert: false });
+  });
+
+  it("restores the saved type and scale", () => {
+    layoutApi.server[IID] = layoutOf({ chart_type: "area", price_scale: { mode: "percent", auto_scale: true, invert: true } });
+    render(page());
+
+    expect(screen.getByRole("combobox", { name: "Chart type" })).toHaveValue("area");
+    expect(lastChartProps.current!.priceScale).toEqual({ mode: "percent", autoScale: true, invert: true });
+  });
+
+  it("adds a compare as a coloured overlay aligned on the main bars, with gaps, and saves it", async () => {
+    vi.useFakeTimers();
+    mocks.candles = [bar(60, 100), { time: 120 }, bar(180, 102)];
+    mocks.candlesByIid[OTHER] = [bar(60, 50), bar(120, 51), { time: 180 }, bar(240, 53)];
+    render(page());
+    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+    await act(async () => {});
+    expect(marketsApi.get).toHaveBeenCalledWith(IID);
+    expect(document.querySelector(`datalist option[value="${OTHER}"]`)).toHaveTextContent("BTC · HYPERLIQUID (same asset)");
+
+    await addCompare(`  ${OTHER} `);
+    await flushSave();
+
+    const pane = comparePane()!;
+    expect(pane).toMatchObject({ kind: "Line", placement: "overlay", group: `compare:${OTHER}`, groupLabel: OTHER });
+    expect(pane.color).toBe(CHART_TOKENS["--chart-compare-1"]);
+    expect(pane.data).toEqual([{ time: 60, value: 50 }, { time: 120 }, { time: 180 }]);
+    expect(pane.format!(50.5, 60)).toBe("50.50");
+    expect(lastSaved().compare).toEqual({ symbols: [OTHER], spread: false });
+  });
+
+  it("forces the percent scale while a compare is drawn, keeping the stored mode for when it goes", async () => {
+    vi.useFakeTimers();
+    layoutApi.server[IID] = layoutOf({ price_scale: { mode: "log", auto_scale: true, invert: false } });
+    render(page());
+
+    await addCompare(OTHER);
+    expect(lastChartProps.current!.priceScale!.mode).toBe("percent");
+    expect(lastChartProps.current!.scaleModesLocked).toMatch(/percent scale/);
+    expect(screen.getByRole("option", { name: "Log" })).toBeDisabled();
+    await flushSave();
+    expect(lastSaved().price_scale.mode).toBe("log");
+
+    act(() => lastChartProps.current!.onLegendAction!("remove", `compare:${OTHER}`));
+    await flushSave();
+    expect(comparePane()).toBeUndefined();
+    expect(lastChartProps.current!.priceScale!.mode).toBe("log");
+    expect(lastChartProps.current!.scaleModesLocked).toBeNull();
+    expect(lastSaved().compare.symbols).toEqual([]);
+  });
+
+  it("keeps Indexed to 100 as the compare scale when it is the stored mode", async () => {
+    layoutApi.server[IID] = layoutOf({ price_scale: { mode: "indexed", auto_scale: true, invert: false }, compare: { symbols: [OTHER], spread: false } });
+    render(page());
+
+    expect(lastChartProps.current!.priceScale!.mode).toBe("indexed");
+  });
+
+  it("refuses the chart's own id, a duplicate, a fourth symbol and text without a venue, saving nothing", async () => {
+    vi.useFakeTimers();
+    layoutApi.server[IID] = layoutOf({ compare: { symbols: ["A.BYBIT", "B.BYBIT"], spread: false } });
+    render(page());
+
+    for (const [text, reason] of [
+      [IID, "own instrument"],
+      ["A.BYBIT", "already compared"],
+      ["NOVENUE", ".VENUE suffix"],
+    ] as const) {
+      await addCompare(text);
+      expect(screen.getByRole("alert")).toHaveTextContent(reason);
+    }
+    await addCompare("C.BYBIT");
+    await addCompare("D.BYBIT");
+    expect(screen.getByRole("alert")).toHaveTextContent("At most 3");
+    await flushSave();
+    expect(lastSaved().compare.symbols).toEqual(["A.BYBIT", "B.BYBIT", "C.BYBIT"]);
+  });
+
+  it("still accepts free text when the market list fails, saying so inline", async () => {
+    marketsApi.get.mockRejectedValue(new Error("down"));
+    render(page());
+
+    await addCompare(OTHER);
+    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+    await act(async () => {});
+
+    expect(screen.getByRole("status")).toHaveTextContent("could not be loaded");
+    expect(comparePane()).toBeDefined();
+  });
+
+  it("keeps a compare whose load failed as a removable row reading no data", () => {
+    mocks.failedIids = [OTHER];
+    layoutApi.server[IID] = layoutOf({ compare: { symbols: [OTHER], spread: false } });
+    render(page());
+
+    expect(comparePane()).toMatchObject({ text: "no data", data: [] });
+  });
+
+  it("offers Spread for exactly one compare: a bps pane with a zero line, gaps where either side has none", async () => {
+    vi.useFakeTimers();
+    mocks.candles = [bar(60, 101), bar(120, 102), { time: 180 }];
+    mocks.candlesByIid[OTHER] = [bar(60, 100), { time: 120 }, bar(180, 100)];
+    render(page());
+    expect(screen.getByRole("button", { name: "Spread" })).toBeDisabled();
+
+    await addCompare(OTHER);
+    fireEvent.click(screen.getByRole("button", { name: "Spread" }));
+    await flushSave();
+
+    const pane = spreadPane()!;
+    expect(pane).toMatchObject({ placement: "pane", zeroLine: true });
+    expect(pane.data[0].value).toBeCloseTo(100, 9);
+    expect(pane.data.slice(1)).toEqual([{ time: 120 }, { time: 180 }]);
+    expect(lastSaved().compare.spread).toBe(true);
+
+    await addCompare("ETHUSDT-LINEAR.BYBIT");
+    expect(screen.getByRole("button", { name: "Spread" })).toBeDisabled();
+    expect(spreadPane()).toBeUndefined();
+    await flushSave();
+    expect(lastSaved().compare.spread).toBe(true); // kept as stored
+
+    act(() => lastChartProps.current!.onLegendAction!("remove", "compare:ETHUSDT-LINEAR.BYBIT"));
+    act(() => lastChartProps.current!.onLegendAction!("remove", "compare-spread"));
+    await flushSave();
+    expect(spreadPane()).toBeUndefined();
+    expect(lastSaved().compare).toEqual({ symbols: [OTHER], spread: false });
+  });
+
+  it("adds a compare once for a double click on Add queued before a re-render", async () => {
+    vi.useFakeTimers();
+    render(page());
+    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+    await act(async () => {});
+    fireEvent.change(screen.getByRole("combobox", { name: "Compare instrument id" }), { target: { value: OTHER } });
+    const add = screen.getByRole("button", { name: "Add" });
+
+    act(() => {
+      add.click();
+      add.click(); // the control still holds the render that had no compare
+    });
+    await flushSave();
+
+    expect(lastSaved().compare.symbols).toEqual([OTHER]);
+  });
+
+  it("forgets a removed compare's hidden flag, so re-adding it draws it shown", async () => {
+    layoutApi.server[IID] = layoutOf({ compare: { symbols: [OTHER], spread: false } });
+    render(page());
+    act(() => lastChartProps.current!.onLegendAction!("hide", `compare:${OTHER}`));
+    expect(comparePane()!.hidden).toBe(true);
+
+    act(() => lastChartProps.current!.onLegendAction!("remove", `compare:${OTHER}`));
+    expect(comparePane()).toBeUndefined();
+    await addCompare(OTHER);
+
+    expect(comparePane()!.hidden).toBe(false);
+  });
+
+  it("hides a compare line in place from its legend eye, without changing the layout", () => {
+    layoutApi.server[IID] = layoutOf({ compare: { symbols: [OTHER], spread: false } });
+    render(page());
+
+    act(() => lastChartProps.current!.onLegendAction!("hide", `compare:${OTHER}`));
+
+    expect(comparePane()!.hidden).toBe(true);
+  });
+
+  it("disables the chart type and Compare in Lines mode and draws no compare, keeping them stored", async () => {
+    vi.useFakeTimers();
+    layoutApi.server[IID] = layoutOf({ chart_type: "bars", compare: { symbols: [OTHER], spread: false } });
+    render(page());
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    await flushSave();
+
+    expect(screen.getByRole("combobox", { name: "Chart type" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Compare" })).toBeDisabled();
+    expect(comparePane()).toBeUndefined();
+    expect(lastChartProps.current!.priceScale!.mode).toBe("normal");
+    expect(screen.getByRole("combobox", { name: "Price scale" })).toBeEnabled();
+    expect(lastSaved()).toMatchObject({ chart_type: "bars", compare: { symbols: [OTHER] } });
   });
 });

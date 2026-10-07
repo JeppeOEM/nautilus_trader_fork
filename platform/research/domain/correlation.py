@@ -349,7 +349,9 @@ def basis_bps(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """
     Return `(a / b - 1) * 1e4` per aligned row: how far price `a` sits above price `b`, in basis points
     of `b`. NaN where either is NaN (a gap stays a gap); a price that is infinite or not positive
-    is a defect and raises `ValueError`, never a basis.
+    is a defect and raises `ValueError`, never a basis. Its TS twin is the chart's cross-venue
+    Spread pane, `frontend/src/lib/compare.ts` `spreadBps` (Story 33.9: one formula, a shared
+    hand-computed fixture -- main 101 over compare 100 is 100 bps -- asserted on both sides).
     """
     x = np.asarray(a, dtype=np.float64)
     y = np.asarray(b, dtype=np.float64)

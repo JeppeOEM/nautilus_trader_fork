@@ -298,6 +298,18 @@ export interface MarkIndexResponse {
   items: MarkIndexItem[];
 }
 
+export interface MarketItem {
+  instrument_id: string;
+  symbol: string;
+  venue: string;
+  same_asset: boolean;
+}
+
+export interface MarketsResponse {
+  items: MarketItem[];
+  stale_venues: string[];
+}
+
 export interface MetricHistoryItem {
   ts: number;
   price?: number | null;

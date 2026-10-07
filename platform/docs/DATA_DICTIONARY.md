@@ -3864,6 +3864,57 @@ formats them through `lib/units.ts`; funding is held per bar between change-dedu
 **Ledger sites.** `derivatives.read` (a failed page read), `live_derivs.parse` (an undecodable
 `derivs:raw` frame or row), `live_candles.liquidation_listener` (a listener that raised).
 
+### 2.17 Chart scale modes, chart types and compare symbols; the markets list (Story 33.9)
+
+`[added 2026-10-07: Story 33.9]` Not stored market data: three chart-layout keys and one read
+model of the ranking engine's `markets:live` lists (§3.6).
+
+**`GET /api/markets?instrument_id=<iid>`** (`data_api/routes/markets.py`, the chart's Compare
+picker). Served from `buses.markets_bus` (`views/markets_bus.py`'s `MarketsBus`), the process's one
+`markets:live` subscriber, started in `data_api/app.py`'s lifespan beside `archive_bus`.
+- Response `{items: [{instrument_id, symbol, venue, same_asset}], stale_venues: [venue]}`. With
+  `instrument_id`, that id is left out and `same_asset` is `kernel.venues.same_asset` against it;
+  the same-asset rows come first, then by venue, then by id. Without it every row's `same_asset`
+  is false.
+- The bus keeps each venue's newest message, validated whole by `bot_tui`'s `_validated` rules
+  (a string venue, an int `ts`, a `markets` list whose every entry is a string `instrument_id` of
+  that venue and a string `symbol`). A malformed or unparseable message is ledgered at
+  `views.markets` (DATA-07) and the venue's previous list is kept, never truncated.
+- Freshness is by arrival (`time.monotonic()`), never the publisher's `ts`: a venue silent past
+  180 s is still listed and named in `stale_venues`; past 900 s it is dropped (`bot_tui`'s
+  `MARKETS_STALE_SECONDS`/`MARKETS_EXPIRE_SECONDS`, copied; audit D-209). With no live venue the
+  route answers **503**, never an empty list posing as "no markets"; a malformed `instrument_id`
+  is a 400. The subscription resubscribes after 180 s of channel-wide silence (the
+  `ArchiveStatusBus` discipline), keeping the cache.
+- The channel name is a local copy: `views` imports neither `ranking` nor `bot_tui`.
+
+**Layout keys** (`chart_layouts.toml`, `views.preferences.validate_layout`, all optional, AD-D12:
+a layout saved before them loads with the defaults; mirrored by `frontend/src/lib/chartTypes.ts`
+and `lib/chartLayout.ts`, pinned by `views/tests/test_chart_layouts.py`):
+- `chart_type`: one of `CHART_TYPES` -- `candles`, `hollow`, `bars`, `line`, `area`, `baseline`,
+  `heikin_ashi`. Default `candles`. Heikin Ashi, Hollow colours and the Line/Area/Baseline close
+  values are display transforms handed only to the main series (AD-F6): indicators, drawings,
+  alerts, profiles, measure, gaps and markers read the real OHLC (audit D-206).
+- `price_scale`: `{mode, auto_scale, invert}`, `mode` one of `PRICE_SCALE_MODES` -- `normal`, `log`,
+  `percent`, `indexed` (Indexed to 100). Default `{mode: "normal", auto_scale: true, invert:
+  false}`. A present table carries all three keys. With a compare symbol drawn the effective mode
+  is `percent` (or `indexed` when stored); the stored mode is kept. Percent and Indexed normalise
+  every price-pane series by its own first visible value (audit D-207).
+- `compare`: `{symbols, spread}`, at most `MAX_COMPARE_SYMBOLS` (3) distinct instrument ids with a
+  `.VENUE` suffix, and a boolean `spread` (the cross-venue Spread pane, drawn only with exactly one
+  compare). Default `{symbols: [], spread: false}`; an empty list is written as `[]`. A duplicate,
+  a 4th id or an id without a venue is a 422 naming `compare.symbols[.<n>]`, never dropped. A
+  coin's own PUT refuses its own id (422); the `[default]` template keeps any id, and a template
+  symbol equal to the coin is dropped from the copy a seed or reset stores, and by the client on load.
+- Compare values align on the main series' bar times: a compare bar at a time the main lacks is not
+  drawn, a main bar the compare lacks is whitespace, never interpolated (audit D-208 for the paging
+  limit). Spread is `(a / b - 1) * 1e4` bps of the compare close b, the same formula as
+  `research.domain.correlation.basis_bps` (its TS twin `frontend/src/lib/compare.ts`
+  `spreadBps`), whitespace where either side has no bar. The closes are compared as quoted: across
+  quote currencies (a `USDT` market against a `USD` one) the spread also holds the USDT/USD rate.
+
+**Ledger sites.** `views.markets` (a malformed or unparseable `markets:live` message).
+
 ---
 
 ## 3. Ranking engine (`platform/ranking/`, the `ranking_engine` service)
@@ -4157,6 +4208,9 @@ can find and add a coin without looking its id up elsewhere.
   missed polls) and the venue leaves the browser after `MARKETS_EXPIRE_SECONDS` = 900 s -- never
   earlier. Redis pub/sub keeps no history, so a TUI started between two cycles waits up to 60 s
   for the first list ("waiting for markets:live…").
+- **Second reader (Story 33.9):** `data_api`'s `views.markets_bus.MarketsBus`, behind
+  `GET /api/markets` (§2.17), with the same validation and thresholds; a malformed message is
+  ledgered there (`views.markets`) rather than logged.
 
 ---
 

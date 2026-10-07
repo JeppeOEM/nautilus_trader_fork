@@ -30,6 +30,8 @@ import type {
   LiquidationsResponse,
   MarkIndexItem,
   MarkIndexResponse,
+  MarketItem,
+  MarketsResponse,
   MetricsHistoryResponse,
   OpenInterestItem,
   OpenInterestResponse,
@@ -65,6 +67,8 @@ export type {
   LiquidationsResponse,
   MarkIndexItem,
   MarkIndexResponse,
+  MarketItem,
+  MarketsResponse,
   MetricsHistoryResponse,
   OpenInterestItem,
   OpenInterestResponse,
@@ -423,6 +427,19 @@ export async function fetchArchiveStatus(): Promise<ArchiveStatusResponse> {
   const res = await fetch("/api/archive/status");
   if (!res.ok) throw new HttpError(res.status, `GET /api/archive/status failed: ${res.status}`);
   return (await res.json()) as ArchiveStatusResponse;
+}
+
+// Story 33.9: every live venue's market names (the chart's Compare picker), from the ranking
+// engine's `markets:live` lists. With `instrumentId`, that id is left out and its same-asset markets
+// on other venues come first (`same_asset`). 503 while no venue's list is live, never an empty list.
+export async function fetchMarkets(instrumentId?: string): Promise<MarketsResponse> {
+  // Two literal fetches (not one templated path) so `test_frontend_contract.py` checks the route.
+  const res =
+    instrumentId === undefined
+      ? await fetch("/api/markets")
+      : await fetch(`/api/markets?instrument_id=${encodeURIComponent(instrumentId)}`);
+  if (!res.ok) throw new HttpError(res.status, `GET /api/markets failed: ${res.status}`);
+  return (await res.json()) as MarketsResponse;
 }
 
 // Well above data_api's own 2 s Redis connect/publish bound (as SET_RANKING_MODE_TIMEOUT_MS).

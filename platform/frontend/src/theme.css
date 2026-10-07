@@ -109,6 +109,10 @@
   --chart-pane-6: #00838f; /* indicator slot 6 (teal: TradingView's #00bcd4 reads 2.3:1 on white) */
   --chart-pane-7: #795548; /* indicator slot 7 */
   --chart-pane-8: #131722; /* indicator slot 8 */
+  --chart-line: #2962ff; /* Story 33.9: the Line and Area main series (TradingView's line blue) */
+  --chart-compare-1: #ad1457; /* Story 33.9: compare symbol 1 (pink), apart from the candle and indicator slots */
+  --chart-compare-2: #4527a0; /* Story 33.9: compare symbol 2 (deep purple) */
+  --chart-compare-3: #827717; /* Story 33.9: compare symbol 3 (olive) */
 }
 
 @font-face {

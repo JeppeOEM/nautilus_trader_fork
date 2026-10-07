@@ -1572,6 +1572,59 @@
         }
       }
     },
+    "/api/markets": {
+      "get": {
+        "summary": "Get Markets",
+        "description": "503 when no venue is live -- an empty list would pose as \"no markets\" while the ranking engine\nis down. A malformed `instrument_id` raises `MalformedInstrumentId`, the app's 400 handler.\nRead through `buses` (not an imported name) so tests can swap the bus.",
+        "operationId": "get_markets_api_markets_get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Instrument Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarketsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`instrument_id` has no `.VENUE` suffix"
+          },
+          "503": {
+            "description": "No venue's `markets:live` list received in the last 900 s"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/snapshots/{instrument_id}": {
       "get": {
         "summary": "Get Snapshots",
@@ -3693,6 +3746,60 @@
           "items"
         ],
         "title": "MarkIndexResponse"
+      },
+      "MarketItem": {
+        "properties": {
+          "instrument_id": {
+            "type": "string",
+            "title": "Instrument Id"
+          },
+          "symbol": {
+            "type": "string",
+            "title": "Symbol"
+          },
+          "venue": {
+            "type": "string",
+            "title": "Venue"
+          },
+          "same_asset": {
+            "type": "boolean",
+            "title": "Same Asset"
+          }
+        },
+        "type": "object",
+        "required": [
+          "instrument_id",
+          "symbol",
+          "venue",
+          "same_asset"
+        ],
+        "title": "MarketItem",
+        "description": "One market; `same_asset` is `kernel.venues.same_asset` against the request's id."
+      },
+      "MarketsResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MarketItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "stale_venues": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Stale Venues"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "stale_venues"
+        ],
+        "title": "MarketsResponse",
+        "description": "`items` omit the requested `instrument_id` itself, same-asset markets first, then by venue and\nid. `stale_venues` names each listed venue whose list arrived over 180 s ago."
       },
       "MetricHistoryItem": {
         "properties": {

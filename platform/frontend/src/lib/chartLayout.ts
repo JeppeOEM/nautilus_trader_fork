@@ -4,6 +4,7 @@ import { DEFAULT_IB_MINUTES, MAX_IB_MINUTES, MIN_IB_MINUTES } from "./tpo";
 import { DEFAULT_VOLUME_PROFILE_SETTINGS } from "./volumeProfile";
 import { type OutputStyle, LINE_STYLES } from "./indicatorStyle";
 import { TIMEFRAMES } from "../timeframes";
+import { CHART_TYPES, type ChartType, MAX_COMPARE_SYMBOLS, PRICE_SCALE_MODES, type PriceScaleModeName } from "./chartTypes";
 
 // Story 32.6: one coin's chart layout, the shape of `GET/PUT /api/coin/{iid}/layout`
 // (`views.preferences.validate_layout`). The OpenAPI schema types the body as a free-form object,
@@ -54,6 +55,29 @@ export const MAX_FOOTPRINT_ROW_TICKS = 1000000;
 // (`test_volume_color_modes_mirror_the_frontend`).
 export type VolumeColorMode = "direction" | "delta";
 export const VOLUME_COLOR_MODES: readonly VolumeColorMode[] = ["direction", "delta"];
+
+// Story 33.9: the price pane's right scale and compare symbols, the optional `price_scale` and
+// `compare` tables of the layout (plus the optional `chart_type` key, `lib/chartTypes.ts`). Mirrored by
+// `views/preferences.py` (`PRICE_SCALE_DEFAULTS`, `COMPARE_DEFAULTS`;
+// `test_chart_type_and_scale_settings_mirror_the_frontend` reads the two literals below, so keep each
+// on its one line).
+export interface PriceScaleLayout {
+  /** The operator's own pick; a compare present forces Percent on screen without changing it. */
+  mode: PriceScaleModeName;
+  /** Off = the vertical range the operator dragged to is kept through scrolls. */
+  auto_scale: boolean;
+  invert: boolean;
+}
+
+export interface CompareLayout {
+  /** Up to `MAX_COMPARE_SYMBOLS` distinct instrument ids, drawn as lines in the palette's order. */
+  symbols: string[];
+  /** The cross-venue Spread pane, drawn only with exactly one compare (kept as stored otherwise). */
+  spread: boolean;
+}
+
+export const DEFAULT_PRICE_SCALE: PriceScaleLayout = { mode: "normal", auto_scale: true, invert: false };
+export const DEFAULT_COMPARE: CompareLayout = { symbols: [], spread: false };
 
 export interface FootprintSettings {
   on: boolean;
@@ -129,6 +153,12 @@ export interface ChartLayout {
   derivatives: DerivativesLayout;
   /** Story 33.6: how the Volume pane colours its bars. Optional on the wire (absent = `direction`). */
   volume_color_by: VolumeColorMode;
+  /** Story 33.9: the main series' chart type. Optional on the wire (absent = `candles`). */
+  chart_type: ChartType;
+  /** Story 33.9: optional on the wire (absent = `DEFAULT_PRICE_SCALE`). */
+  price_scale: PriceScaleLayout;
+  /** Story 33.9: optional on the wire (absent = `DEFAULT_COMPARE`). */
+  compare: CompareLayout;
 }
 
 export const BUILT_IN_LAYOUT: ChartLayout = {
@@ -170,6 +200,9 @@ export const BUILT_IN_LAYOUT: ChartLayout = {
     liquidations: { on: false, measure: "size", markers: true },
   },
   volume_color_by: "direction",
+  chart_type: "candles",
+  price_scale: DEFAULT_PRICE_SCALE,
+  compare: DEFAULT_COMPARE,
 };
 
 export const PROFILE_KINDS: readonly ProfileKind[] = ["off", "visible", "fixed", "session", "auto", "tpo"];
@@ -384,6 +417,67 @@ function volumeColorByOf(raw: unknown, present: boolean, fallbacks: string[]): V
   return mode ?? BUILT_IN_LAYOUT.volume_color_by;
 }
 
+/** The chart type: absent (a layout saved before Story 33.9) is `candles`, silently; an unknown value
+ * falls back to it by name. */
+function chartTypeOf(raw: unknown, present: boolean, fallbacks: string[]): ChartType {
+  if (!present) return BUILT_IN_LAYOUT.chart_type;
+  const type = CHART_TYPES.find((t) => t === raw);
+  if (type === undefined) fallbacks.push("chart_type");
+  return type ?? BUILT_IN_LAYOUT.chart_type;
+}
+
+/** The price scale table: absent is the default, silently; each unusable field falls back by name. */
+function priceScaleOf(raw: unknown, present: boolean, fallbacks: string[]): PriceScaleLayout {
+  if (!present) return { ...DEFAULT_PRICE_SCALE };
+  if (!isRecord(raw)) {
+    fallbacks.push("price_scale");
+    return { ...DEFAULT_PRICE_SCALE };
+  }
+  for (const key of Object.keys(raw)) {
+    if (!(key in DEFAULT_PRICE_SCALE)) fallbacks.push(`price_scale.${key}`);
+  }
+  const mode = PRICE_SCALE_MODES.find((m) => m === raw.mode);
+  if (mode === undefined) fallbacks.push("price_scale.mode");
+  const flag = (key: "auto_scale" | "invert"): boolean => {
+    if (typeof raw[key] === "boolean") return raw[key];
+    fallbacks.push(`price_scale.${key}`);
+    return DEFAULT_PRICE_SCALE[key];
+  };
+  return { mode: mode ?? DEFAULT_PRICE_SCALE.mode, auto_scale: flag("auto_scale"), invert: flag("invert") };
+}
+
+/** A stored compare id this client can draw: a non-empty string with a `.VENUE` suffix. */
+const isCompareId = (value: unknown): value is string =>
+  typeof value === "string" && value.lastIndexOf(".") > 0 && !value.endsWith(".");
+
+/**
+ * The compare table: absent is the default, silently; an unusable, repeated or surplus symbol is
+ * dropped by name (a fallback), like an unusable `spread`. `instrumentId` (the coin being opened):
+ * a symbol equal to it -- a template saved on another coin that compared this one -- is left out
+ * quietly, never a fallback, and the stored template is not touched.
+ */
+function compareOf(raw: unknown, present: boolean, fallbacks: string[], instrumentId: string | undefined): CompareLayout {
+  if (!present) return { symbols: [], spread: DEFAULT_COMPARE.spread };
+  if (!isRecord(raw)) {
+    fallbacks.push("compare");
+    return { symbols: [], spread: DEFAULT_COMPARE.spread };
+  }
+  for (const key of Object.keys(raw)) {
+    if (!(key in DEFAULT_COMPARE)) fallbacks.push(`compare.${key}`);
+  }
+  const symbols: string[] = [];
+  const listed = Array.isArray(raw.symbols) ? (raw.symbols as unknown[]) : null;
+  if (listed === null) fallbacks.push("compare.symbols");
+  (listed ?? []).forEach((symbol, i) => {
+    if (!isCompareId(symbol) || symbols.includes(symbol) || symbols.length >= MAX_COMPARE_SYMBOLS) {
+      fallbacks.push(`compare.symbols.${i}`);
+    } else if (symbol !== instrumentId) symbols.push(symbol);
+  });
+  const spread = typeof raw.spread === "boolean" ? raw.spread : DEFAULT_COMPARE.spread;
+  if (typeof raw.spread !== "boolean") fallbacks.push("compare.spread");
+  return { symbols, spread };
+}
+
 /**
  * The layout the server returned, made safe to render: any field this client cannot use (a
  * `bar_seconds` outside `TIMEFRAMES`, an unknown `mode`, a malformed number) falls back to the
@@ -391,7 +485,7 @@ function volumeColorByOf(raw: unknown, present: boolean, fallbacks: string[]): V
  * `console.error` (visible in the ErrorBar) and reported in `fallbacks`, so the caller saves the
  * corrected layout back instead of failing the same way on every open.
  */
-export function normalizeLayout(raw: unknown): { layout: ChartLayout; fallbacks: string[] } {
+export function normalizeLayout(raw: unknown, instrumentId?: string): { layout: ChartLayout; fallbacks: string[] } {
   const fallbacks: string[] = [];
   const source: Raw = isRecord(raw) ? raw : {};
   if (!isRecord(raw)) fallbacks.push("layout");
@@ -415,6 +509,9 @@ export function normalizeLayout(raw: unknown): { layout: ChartLayout; fallbacks:
     footprint: footprintOf(source.footprint, fallbacks),
     derivatives: derivativesOf(source.derivatives, fallbacks),
     volume_color_by: volumeColorByOf(source.volume_color_by, "volume_color_by" in source, fallbacks),
+    chart_type: chartTypeOf(source.chart_type, "chart_type" in source, fallbacks),
+    price_scale: priceScaleOf(source.price_scale, "price_scale" in source, fallbacks),
+    compare: compareOf(source.compare, "compare" in source, fallbacks, instrumentId),
   };
   if (fallbacks.length > 0) {
     console.error(

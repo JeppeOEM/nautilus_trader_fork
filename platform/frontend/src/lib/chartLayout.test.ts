@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AUTO_ANCHOR_PRESETS } from "./autoAnchor";
 import {
   BUILT_IN_LAYOUT,
+  DEFAULT_COMPARE,
+  DEFAULT_PRICE_SCALE,
   DERIVATIVE_KEYS,
   DERIVATIVE_OUTPUTS,
   FOOTPRINT_DEFAULT_IMBALANCE_RATIO,
@@ -292,5 +294,75 @@ describe("the volume colour mode (Story 33.6)", () => {
     expect(fallbacks).toEqual(["volume_color_by"]);
     expect(layout.volume_color_by).toBe("direction");
     expect(errors).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the chart type, price scale and compare keys (Story 33.9)", () => {
+  const { chart_type: _t, price_scale: _p, compare: _c, ...pre339 } = BUILT_IN_LAYOUT;
+  const IID = "BTCUSDT-LINEAR.BYBIT";
+
+  it("loads a layout saved before them with candles, the default scale and no compare, silently", () => {
+    const { layout, fallbacks } = normalizeLayout(pre339);
+
+    expect(fallbacks).toEqual([]);
+    expect(errors).not.toHaveBeenCalled();
+    expect(layout.chart_type).toBe("candles");
+    expect(layout.price_scale).toEqual({ mode: "normal", auto_scale: true, invert: false });
+    expect(layout.compare).toEqual({ symbols: [], spread: false });
+    expect(DEFAULT_PRICE_SCALE).toEqual(layout.price_scale);
+    expect(DEFAULT_COMPARE).toEqual(layout.compare);
+  });
+
+  it("round-trips every setting through the save, and each change is a change", () => {
+    const saved = {
+      ...BUILT_IN_LAYOUT,
+      chart_type: "heikin_ashi",
+      price_scale: { mode: "log", auto_scale: false, invert: true },
+      compare: { symbols: ["BTC-USD-PERP.HYPERLIQUID", "ETHUSDT-LINEAR.BYBIT"], spread: true },
+    };
+    const { layout, fallbacks } = normalizeLayout(saved, IID);
+
+    expect(fallbacks).toEqual([]);
+    expect(layoutForSave(layout)).toMatchObject({
+      chart_type: "heikin_ashi",
+      price_scale: saved.price_scale,
+      compare: saved.compare,
+    });
+    expect(sameLayout(layout, { ...layout, chart_type: "bars" })).toBe(false);
+    expect(sameLayout(layout, { ...layout, price_scale: { ...layout.price_scale, invert: false } })).toBe(false);
+    expect(sameLayout(layout, { ...layout, compare: { ...layout.compare, symbols: ["BTC-USD-PERP.HYPERLIQUID"] } })).toBe(false);
+  });
+
+  it("falls back by name for an unknown type, mode, flag or table", () => {
+    const { layout, fallbacks } = normalizeLayout({
+      ...BUILT_IN_LAYOUT,
+      chart_type: "renko",
+      price_scale: { mode: "x", auto_scale: 1, invert: false, extra: true },
+      compare: 5,
+    });
+
+    expect(fallbacks).toEqual(["chart_type", "price_scale.extra", "price_scale.mode", "price_scale.auto_scale", "compare"]);
+    expect(layout.chart_type).toBe("candles");
+    expect(layout.price_scale).toEqual(DEFAULT_PRICE_SCALE);
+    expect(layout.compare).toEqual(DEFAULT_COMPARE);
+    expect(errors).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops an unusable, repeated or fourth compare symbol by name", () => {
+    const symbols = ["A.BYBIT", "nosuffix", "A.BYBIT", "B.BYBIT", "C.BYBIT", "D.BYBIT"];
+    const { layout, fallbacks } = normalizeLayout({ ...BUILT_IN_LAYOUT, compare: { symbols, spread: "on" } });
+
+    expect(layout.compare).toEqual({ symbols: ["A.BYBIT", "B.BYBIT", "C.BYBIT"], spread: false });
+    expect(fallbacks).toEqual(["compare.symbols.1", "compare.symbols.2", "compare.symbols.5", "compare.spread"]);
+  });
+
+  it("leaves out a template's compare symbol equal to the coin being opened, quietly", () => {
+    const template = { ...BUILT_IN_LAYOUT, compare: { symbols: [IID, "BTC-USD-PERP.HYPERLIQUID"], spread: true } };
+    const { layout, fallbacks } = normalizeLayout(template, IID);
+
+    expect(fallbacks).toEqual([]);
+    expect(errors).not.toHaveBeenCalled();
+    expect(layout.compare).toEqual({ symbols: ["BTC-USD-PERP.HYPERLIQUID"], spread: true });
+    expect(template.compare.symbols).toEqual([IID, "BTC-USD-PERP.HYPERLIQUID"]);
   });
 });

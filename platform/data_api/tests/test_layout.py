@@ -48,6 +48,9 @@ _LAYOUT_KEYS = {
     "footprint",  # optional on the wire, always served (Story 32.8)
     "derivatives",  # likewise (Story 33.5)
     "volume_color_by",  # likewise (Story 33.6)
+    "chart_type",  # likewise (Story 33.9)
+    "price_scale",
+    "compare",
 }
 
 
@@ -134,6 +137,95 @@ def test_put_with_a_bad_mode_is_a_422_naming_it_and_writes_nothing(
     assert response.status_code == 422
     assert "mode" in response.json()["detail"]
     assert not (tmp_path / "chart_layouts.toml").exists()
+
+
+_SCALE = {"mode": "normal", "auto_scale": True, "invert": False}
+_ONE_COMPARE = {"symbols": ["BTC-USD-PERP.HYPERLIQUID"], "spread": False}
+
+
+_HL_BTC = "BTC-USD-PERP.HYPERLIQUID"
+
+
+@pytest.mark.parametrize(
+    ("over", "key", "reason"),
+    [
+        ({"chart_type": "renko"}, "chart_type", None),
+        ({"price_scale": {**_SCALE, "mode": "x"}}, "price_scale.mode", None),
+        ({"price_scale": None}, "price_scale", "must be an object"),
+        ({"compare": None}, "compare", "must be an object"),
+        (
+            {"compare": {"symbols": ["A.X", "B.X", "C.X", "D.X"], "spread": False}},
+            "compare.symbols",
+            None,
+        ),
+        # Two valid identical ids: the duplicate rule itself, not a per-symbol rejection.
+        (
+            {"compare": {"symbols": [_HL_BTC, _HL_BTC], "spread": False}},
+            "compare.symbols",
+            "must not repeat an instrument id",
+        ),
+        ({"compare": {**_ONE_COMPARE, "colour": "red"}}, "compare.colour", None),
+        (
+            {"compare": {"symbols": [_IID], "spread": False}},
+            "compare.symbols",
+            "must not contain the coin's own instrument id",
+        ),
+    ],
+)
+def test_put_with_a_bad_story_33_9_key_is_a_422_naming_it(
+    client: TestClient, tmp_path: Path, over: dict[str, object], key: str, reason: str | None
+) -> None:
+    response = client.put(f"/api/coin/{_IID}/layout", json={"layout": _layout(**over)})
+    assert response.status_code == 422
+    named, _, said = response.json()["detail"].partition(": ")
+    assert named == key
+    if reason is not None:
+        assert said == reason
+    assert not (tmp_path / "chart_layouts.toml").exists()
+
+
+def test_the_default_template_keeps_a_compare_of_any_coin(client: TestClient) -> None:
+    """Only a coin's own PUT refuses its own id; a template saved here may compare another coin."""
+    other = "ETH-USD-PERP.DYDX"
+    _put(client, _IID, _layout(compare={"symbols": [other], "spread": False}))
+    response = client.post(f"/api/coin/{_IID}/layout/save-as-default")
+    assert response.status_code == 200
+    assert response.json()["default"]["compare"]["symbols"] == [other]
+
+
+def test_a_seed_or_reset_drops_the_coins_own_id_from_the_template_compare(
+    client: TestClient,
+) -> None:
+    """
+    A template comparing the coin itself seeds and resets that coin without it, never storing a
+    layout the coin's own PUT refuses; the template keeps the id.
+    """
+    _put(client, _IID, _layout(compare={"symbols": [_ETH], "spread": True}))
+    assert client.post(f"/api/coin/{_IID}/layout/save-as-default").status_code == 200
+
+    seeded = client.get(f"/api/coin/{_ETH}/layout").json()
+    assert seeded["seeded"] is True
+    assert seeded["layout"]["compare"] == {"symbols": [], "spread": True}
+    reset = client.post(f"/api/coin/{_ETH}/layout/reset-to-default").json()["layout"]
+    assert reset["compare"] == {"symbols": [], "spread": True}
+
+    stored = preferences.load_chart_layouts(Path(settings.CHART_LAYOUTS_PATH))
+    assert stored.layouts[_ETH]["compare"]["symbols"] == []
+    assert stored.default is not None
+    assert stored.default["compare"]["symbols"] == [_ETH]
+
+
+def test_put_round_trips_chart_type_scale_and_compare(client: TestClient) -> None:
+    layout = _layout(
+        chart_type="baseline", price_scale={**_SCALE, "mode": "log"}, compare=_ONE_COMPARE
+    )
+    _put(client, _IID, layout)
+    body = client.get(f"/api/coin/{_IID}/layout").json()["layout"]
+    assert (body["chart_type"], body["price_scale"], body["compare"]) == (
+        "baseline",
+        {**_SCALE, "mode": "log"},
+        _ONE_COMPARE,
+    )
 
 
 def test_put_with_a_bad_volume_color_by_is_a_422_naming_it(client: TestClient) -> None:

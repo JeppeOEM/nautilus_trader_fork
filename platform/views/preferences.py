@@ -92,6 +92,8 @@ from pathlib import Path
 from typing import Any
 
 import tomli_w
+from kernel.venues import MalformedInstrumentId
+from kernel.venues import venue_of
 
 
 DEFAULT_BAR_SECONDS = 3600
@@ -655,6 +657,25 @@ DERIVATIVES_DEFAULTS: dict[str, dict[str, Any]] = {
 # `test_volume_color_modes_mirror_the_frontend` pins them). Absent loads as the first, `direction`.
 VOLUME_COLOR_MODES = ("direction", "delta")
 
+# Story 33.9: the optional `chart_type`, `price_scale` and `compare` keys, how the price pane draws
+# the main series, its right scale's mode and up to three compare symbols (plus the cross-venue
+# Spread pane). Mirror the frontend's `lib/chartTypes.ts` (`CHART_TYPES`, `PRICE_SCALE_MODES`,
+# `MAX_COMPARE_SYMBOLS`) and `lib/chartLayout.ts` (`DEFAULT_PRICE_SCALE`, `DEFAULT_COMPARE`);
+# `test_chart_type_and_scale_settings_mirror_the_frontend` pins the pairs. A layout saved before
+# them loads with `candles`, `PRICE_SCALE_DEFAULTS` and `COMPARE_DEFAULTS`.
+CHART_TYPES = ("candles", "hollow", "bars", "line", "area", "baseline", "heikin_ashi")
+PRICE_SCALE_MODES = ("normal", "log", "percent", "indexed")
+MAX_COMPARE_SYMBOLS = 3
+# A compare symbol is an instrument id (`SYMBOL.VENUE`, venue ids run to ~30 characters); no kernel
+# bound exists, so this cap only bounds a hostile value. Mirrors the frontend's
+# `MAX_INSTRUMENT_ID_LENGTH` (`lib/compare.ts`; `test_instrument_id_length_mirrors_the_frontend`).
+MAX_INSTRUMENT_ID_LENGTH = 512
+PRICE_SCALE_DEFAULTS: dict[str, Any] = {"mode": "normal", "auto_scale": True, "invert": False}
+COMPARE_DEFAULTS: dict[str, Any] = {"symbols": [], "spread": False}
+_OPTIONAL_LAYOUT_KEYS = frozenset(
+    {"footprint", "derivatives", "volume_color_by", "chart_type", "price_scale", "compare"}
+)
+
 BUILTIN_DEFAULT_LAYOUT: dict[str, Any] = {
     "bar_seconds": 60,
     "mode": "candles",
@@ -675,6 +696,9 @@ BUILTIN_DEFAULT_LAYOUT: dict[str, Any] = {
     "footprint": dict(FOOTPRINT_DEFAULTS),
     "derivatives": copy.deepcopy(DERIVATIVES_DEFAULTS),
     "volume_color_by": VOLUME_COLOR_MODES[0],
+    "chart_type": CHART_TYPES[0],
+    "price_scale": dict(PRICE_SCALE_DEFAULTS),
+    "compare": copy.deepcopy(COMPARE_DEFAULTS),
 }
 
 
@@ -894,7 +918,8 @@ def validate_layout(layout: Any, *, tolerant: bool = False) -> dict[str, Any]:
     Return a normalized copy of `layout` (the optional fixed-range anchors always present, `None`
     when unset; the optional `footprint` table always present, `FOOTPRINT_DEFAULTS` when absent,
     likewise the optional `derivatives` table, `DERIVATIVES_DEFAULTS` when absent, and the optional
-    `volume_color_by`, `direction` when absent),
+    `volume_color_by`, `direction` when absent; Story 33.9's `chart_type`, `price_scale` and
+    `compare`, `candles`, `PRICE_SCALE_DEFAULTS` and `COMPARE_DEFAULTS` when absent),
     else raise `LayoutError` naming the key. Strict by design (DATA-07): an unknown or missing key
     or a wrong type is refused rather than dropped or defaulted.
 
@@ -906,9 +931,7 @@ def validate_layout(layout: Any, *, tolerant: bool = False) -> dict[str, Any]:
     """
     if not isinstance(layout, dict):
         raise LayoutError("layout", "must be an object")
-    _check_keys(
-        layout, _LAYOUT_KEYS, _LAYOUT_KEYS | {"footprint", "derivatives", "volume_color_by"}
-    )
+    _check_keys(layout, _LAYOUT_KEYS, _LAYOUT_KEYS | _OPTIONAL_LAYOUT_KEYS)
     _check_timeframe_and_mode(layout, tolerant=tolerant)
     for key in ("volume", "crosshair"):
         if not isinstance(layout[key], bool):
@@ -930,6 +953,9 @@ def validate_layout(layout: Any, *, tolerant: bool = False) -> dict[str, Any]:
         "volume_color_by": _validate_volume_color_by(
             layout.get("volume_color_by", VOLUME_COLOR_MODES[0])
         ),
+        "chart_type": _validate_chart_type(layout.get("chart_type", CHART_TYPES[0])),
+        "price_scale": _validate_price_scale(layout.get("price_scale", PRICE_SCALE_DEFAULTS)),
+        "compare": _validate_compare(layout.get("compare", COMPARE_DEFAULTS)),
     }
 
 
@@ -941,6 +967,64 @@ def _validate_volume_color_by(mode: Any) -> str:
     if mode not in VOLUME_COLOR_MODES:
         raise LayoutError("volume_color_by", f"must be one of {list(VOLUME_COLOR_MODES)}")
     return str(mode)
+
+
+def _validate_chart_type(chart_type: Any) -> str:
+    """Return the main series' chart type (`candles` passed when absent), else raise naming it."""
+    if chart_type not in CHART_TYPES:
+        raise LayoutError("chart_type", f"must be one of {list(CHART_TYPES)}")
+    return str(chart_type)
+
+
+def _validate_price_scale(scale: Any) -> dict[str, Any]:
+    """
+    Return the right price scale's settings (the caller passes `PRICE_SCALE_DEFAULTS` when the
+    table is absent), else raise `LayoutError` naming `price_scale.<key>`: a present table carries
+    all three keys, and an explicit null is a wrong value, refused (strict by design).
+    """
+    if not isinstance(scale, dict):
+        raise LayoutError("price_scale", "must be an object")
+    keys = frozenset(PRICE_SCALE_DEFAULTS)
+    _check_keys(scale, keys, keys, "price_scale.")
+    if scale["mode"] not in PRICE_SCALE_MODES:
+        raise LayoutError("price_scale.mode", f"must be one of {list(PRICE_SCALE_MODES)}")
+    for key in ("auto_scale", "invert"):
+        if not isinstance(scale[key], bool):
+            raise LayoutError(f"price_scale.{key}", "must be a boolean")
+    return {key: scale[key] for key in PRICE_SCALE_DEFAULTS}
+
+
+def _check_compare_symbol(index: int, symbol: Any) -> None:
+    name = f"compare.symbols.{index}"
+    if not isinstance(symbol, str) or not 1 <= len(symbol) <= MAX_INSTRUMENT_ID_LENGTH:
+        raise LayoutError(name, f"must be a string of 1..{MAX_INSTRUMENT_ID_LENGTH} characters")
+    try:
+        venue_of(symbol)
+    except MalformedInstrumentId as exc:
+        raise LayoutError(name, "must be an instrument id with a .VENUE suffix") from exc
+
+
+def _validate_compare(compare: Any) -> dict[str, Any]:
+    """
+    Return the compare settings (the caller passes `COMPARE_DEFAULTS` when the table is absent),
+    else raise `LayoutError` naming `compare.<key>`: at most `MAX_COMPARE_SYMBOLS` distinct
+    instrument ids and a boolean `spread`. A duplicate is refused, never deduplicated (DATA-07), and
+    an explicit null is a wrong value, refused.
+    """
+    if not isinstance(compare, dict):
+        raise LayoutError("compare", "must be an object")
+    keys = frozenset(COMPARE_DEFAULTS)
+    _check_keys(compare, keys, keys, "compare.")
+    symbols = compare["symbols"]
+    if not isinstance(symbols, list) or len(symbols) > MAX_COMPARE_SYMBOLS:
+        raise LayoutError("compare.symbols", f"must be a list of at most {MAX_COMPARE_SYMBOLS} ids")
+    for index, symbol in enumerate(symbols):
+        _check_compare_symbol(index, symbol)
+    if len(set(symbols)) != len(symbols):
+        raise LayoutError("compare.symbols", "must not repeat an instrument id")
+    if not isinstance(compare["spread"], bool):
+        raise LayoutError("compare.spread", "must be a boolean")
+    return {"symbols": list(symbols), "spread": compare["spread"]}
 
 
 def _layout_table(layout: dict[str, Any]) -> dict[str, Any]:

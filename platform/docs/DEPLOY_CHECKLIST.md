@@ -1704,6 +1704,34 @@ Alerts page creates and edits; the engine also observes `LiveDerivsBus`. Only `d
       expected only for an alert whose drawing or indicator was deleted, and that alert lists as
       `invalid` with its reason).
 
+### 33-9-price-scale-modes-chart-types-and-a-compare-symbol-on-the-percent-scale (commit: this story's)
+
+The chart gains a price-scale mode (Normal, Log, Percent, Indexed to 100, Auto, Invert), seven chart
+types (Candles, Hollow, Bars, Line, Area, Baseline, Heikin Ashi) and up to three compare symbols on
+the percent scale with an optional Spread pane. `data_api` gains `GET /api/markets` (a new
+`markets:live` subscriber, `views/markets_bus.py`) and three optional layout keys, `chart_type`,
+`price_scale` and `compare`. Only `data_api` changes (the frontend is built into its image). No
+config key, env var, mount or compose service changes, and `chart_layouts.toml` needs no migration:
+a layout saved before this story loads with the defaults (`candles`, normal scale, no compares).
+
+- [ ] On the VPS, pull this commit and rebuild/restart the one service:
+      `cd ~/nautilus_trader_fork/platform && docker compose up -d --build data_api`.
+- [ ] Smoke-check the markets list:
+      `curl -s 'localhost:9100/api/markets?instrument_id=BTCUSDT-LINEAR.BYBIT' | python3 -c 'import json,sys; b=json.load(sys.stdin); print(b.get("detail") or (b["stale_venues"], b["items"][:3]))'`
+      prints `([], [...])` with the Hyperliquid `BTC-USD-PERP.HYPERLIQUID` row first and
+      `"same_asset": true`. Within a minute of a `ranking_engine` restart it prints the 503's
+      `No venue's market list is live` instead, which is expected: the list appears after the
+      engine's first 60 s volume cycle. `curl -s -o /dev/null -w '%{http_code}' 'localhost:9100/api/markets?instrument_id=BTCUSDT'`
+      prints `400`.
+- [ ] Check the stored layouts still load: `curl -s localhost:9100/api/coin/BTCUSDT-LINEAR.BYBIT/layout | python3 -c 'import json,sys; l=json.load(sys.stdin)["layout"]; print(l["chart_type"], l["price_scale"], l["compare"])'`
+      prints `candles {'mode': 'normal', 'auto_scale': True, 'invert': False} {'symbols': [], 'spread': False}`
+      for a coin saved before this story.
+- [ ] In the browser, on a Bybit BTC chart: pick Log, then Heikin Ashi (the legend reads
+      `Heikin Ashi (derived)`), add the compare `BTC-USD-PERP.HYPERLIQUID` (the scale switches to
+      Percent), turn Spread on (a bps pane), reload: all of it is restored. Remove the compare from
+      its legend row: the scale returns to Log. Reset the type and scale afterwards.
+- [ ] After an hour, `curl -s localhost:9100/api/errors` shows no `views.markets` site.
+
 ### 33-14-liquidation-cascade-bot-shorts-into-a-long-liquidation-cascade-backtested-and-paper-run (commit: this story's)
 
 A new paper strategy, `liquidation_cascade` (`research/strategies/liquidation_cascade_strategy.py`,

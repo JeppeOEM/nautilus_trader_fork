@@ -56,7 +56,9 @@ placement/operation-parity tables — is the original spec, unmodified.
 - v5 creates every series via `chart.addSeries(SeriesType, options)`, e.g.
   `chart.addSeries(CandlestickSeries, {...})` — not `addCandlestickSeries()`.
 - Built-in series types: Candlestick, Bar, Line, Area, Baseline, Histogram.
-  Part A only ever instantiates Candlestick and Line (§A2).
+  Part A only ever instantiates Candlestick and Line (§A2). **[amended
+  2026-10-07: Story 33.9]** It now instantiates Candlestick, Bar, Line, Area
+  and Baseline for the main series (§A2).
 - Native multi-pane support (`chart.addPane()`, or a `paneIndex` on
   `addSeries`) — use this for the volume pane and indicator panes.
 - Volume Profile (§A7) has **no native support at all** — it's a from-
@@ -197,6 +199,22 @@ menu of 13 types like TradingView):
 
 **Explicitly not offered:** Bar, Area, Baseline, Heikin Ashi, Renko, Kagi,
 Point & Figure, Range bars, Hollow candles, Volume candles.
+
+> **[amended 2026-10-07: Story 33.9]** The operator's 2026-10-05 review lifts
+> part of this restriction. A `Chart type` select offers seven types:
+> **Candles, Hollow candles, Bars, Line, Area, Baseline, Heikin Ashi**
+> (`lib/chartTypes.ts`, the layout key `chart_type`). Heikin Ashi, Hollow's
+> colours and the Line/Area/Baseline close values are display transforms
+> handed only to the main series: indicators, drawings, alerts, profiles and
+> gaps stay on the real OHLC (AD-F6). Hollow's rule: close >= open is a
+> hollow body, close < open filled; the colour is up when the close is at or
+> above the previous bar's close. The right price scale gains Normal / Log /
+> Percent / Indexed to 100, Auto and Invert (`price_scale`), and up to three
+> **compare symbols** draw as lines on the Percent (or Indexed) scale,
+> aligned on the main bar times with gaps, plus an optional cross-venue
+> Spread pane in bps (`compare`). Still excluded: **Renko, Kagi, Point &
+> Figure, Range bars and Volume candles.** The Candles/Lines toggle below
+> stays as the Lines (snapshot-seconds) mode, unchanged.
 
 ### Candle appearance — deliberately fixed, not customizable
 
@@ -725,10 +743,15 @@ the code review if any of these sneak back in:
 - **Watchlist and Screener** — excluded entirely this round; different task.
 - **Candle customization** — no body/border/wick color pickers, no
   "color based on previous close" toggle, no hollow-candle or volume-candle
-  variants. One fixed up/down color pair, period.
-- **Extra chart types** — no Bar, Area, Baseline, Heikin Ashi, Renko, Kagi,
-  Point & Figure, Range bars, Hollow/Volume candles. Candlestick and Line
-  only.
+  variants. One fixed up/down color pair, period. **[amended 2026-10-07:
+  Story 33.9]** The Hollow candles chart type (§A2) is the one hollow
+  variant, with the same fixed pair; colour pickers stay excluded.
+- **Extra chart types** — no ~~Bar, Area, Baseline, Heikin Ashi,~~ Renko, Kagi,
+  Point & Figure, Range bars, ~~Hollow/~~Volume candles. ~~Candlestick and Line
+  only.~~ **[amended 2026-10-07: Story 33.9]** Bars, Area, Baseline, Heikin
+  Ashi and Hollow candles are built (§A2), with the price-scale modes and
+  compare symbols; Renko, Kagi, Point & Figure, Range bars and Volume candles
+  stay excluded.
 - **Extra drawing tools** — no Fibonacci retracement/extension tools, no
   shapes, no text annotations, no pitchforks, no Gann/Elliott wave tools, no
   brush/highlighter, no pattern-drawing helpers. Line, horizontal line, and
@@ -745,7 +768,8 @@ the code review if any of these sneak back in:
   indefinitely" mode.~~ **[amended 2026-10-05: Story 32.7]** Built: Anchored
   VP, Auto Anchored VP, Anchored VWAP and TPO are §A7.6.
 - **Volume Candles** — the chart-type variant that encodes volume into
-  candle width/shape. Not one of the two chart types in §A2, and not
+  candle width/shape. Not one of the ~~two~~ chart types in §A2 **[amended
+  2026-10-07: Story 33.9: seven since, Volume candles still not one]**, and not
   confused with the Volume Profile *indicators* in §A7, which are a
   completely different feature despite the similar name.
 - **Volume Footprint** — per-bar bid/ask order-flow breakdown inside each

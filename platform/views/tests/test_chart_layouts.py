@@ -25,6 +25,8 @@ from typing import Any
 import pytest
 
 from views.preferences import BUILTIN_DEFAULT_LAYOUT
+from views.preferences import CHART_TYPES
+from views.preferences import COMPARE_DEFAULTS
 from views.preferences import DERIVATIVE_KEYS
 from views.preferences import DERIVATIVE_LINE_STYLES
 from views.preferences import DERIVATIVE_OUTPUTS
@@ -34,14 +36,18 @@ from views.preferences import FOOTPRINT_DEFAULTS
 from views.preferences import FOOTPRINT_MODES
 from views.preferences import LAYOUT_BAR_SECONDS
 from views.preferences import LIQUIDATION_MEASURES
+from views.preferences import MAX_COMPARE_SYMBOLS
 from views.preferences import MAX_DERIVATIVE_LINE_WIDTH
 from views.preferences import MAX_FOOTPRINT_ROW_TICKS
 from views.preferences import MAX_IB_MINUTES
+from views.preferences import MAX_INSTRUMENT_ID_LENGTH
 from views.preferences import MAX_PANE_ID_LENGTH
 from views.preferences import MAX_PROFILE_ROWS
 from views.preferences import MAX_PROFILE_SESSIONS
 from views.preferences import MIN_IB_MINUTES
 from views.preferences import MIN_PROFILE_ROWS
+from views.preferences import PRICE_SCALE_DEFAULTS
+from views.preferences import PRICE_SCALE_MODES
 from views.preferences import PROFILE_ANCHORS
 from views.preferences import PROFILE_KINDS
 from views.preferences import PROFILE_SESSIONS
@@ -733,3 +739,147 @@ def test_volume_color_modes_mirror_the_frontend() -> None:
     modes = re.search(r"VOLUME_COLOR_MODES: readonly VolumeColorMode\[\] = \[([^\]]*)\]", source)
     assert modes is not None
     assert tuple(re.findall(r'"(\w+)"', modes.group(1))) == VOLUME_COLOR_MODES
+
+
+# -- Story 33.9: the optional chart_type, price_scale and compare keys -----------------------------
+
+_SOL = "SOL-PERP.HYPERLIQUID"
+_BYBIT_BTC = "BTCUSDT-LINEAR.BYBIT"
+
+
+def test_a_layout_saved_before_story_33_9_loads_with_the_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    path.write_text(_PRE_32_8_FILE)  # no chart_type, price_scale or compare
+    layout = load_chart_layouts(path).layouts[_IID]
+    assert layout["chart_type"] == "candles"
+    assert layout["price_scale"] == {"mode": "normal", "auto_scale": True, "invert": False}
+    assert layout["compare"] == {"symbols": [], "spread": False}
+
+
+def test_the_builtin_default_carries_the_story_33_9_defaults() -> None:
+    assert BUILTIN_DEFAULT_LAYOUT["chart_type"] == CHART_TYPES[0] == "candles"
+    assert BUILTIN_DEFAULT_LAYOUT["price_scale"] == PRICE_SCALE_DEFAULTS
+    assert BUILTIN_DEFAULT_LAYOUT["compare"] == COMPARE_DEFAULTS
+
+
+def test_chart_type_price_scale_and_compare_round_trip_through_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    layout = _layout(
+        chart_type="heikin_ashi",
+        price_scale={"mode": "indexed", "auto_scale": False, "invert": True},
+        compare={"symbols": [_BYBIT_BTC, _SOL], "spread": True},
+    )
+    save_chart_layouts(ChartLayouts({_IID: layout}, default=layout), path)
+    loaded = load_chart_layouts(path)
+    for got in (loaded.layouts[_IID], loaded.default):
+        assert got is not None
+        assert got["chart_type"] == "heikin_ashi"
+        assert got["price_scale"] == layout["price_scale"]
+        assert got["compare"] == layout["compare"]
+
+
+def test_an_empty_compare_list_is_written_as_an_empty_array(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    save_chart_layouts(ChartLayouts({_IID: _layout()}), path)
+    table = tomllib.loads(path.read_text())[_IID]
+    assert table["compare"] == {"symbols": [], "spread": False}
+    assert load_chart_layouts(path).layouts[_IID]["compare"]["symbols"] == []
+
+
+@pytest.mark.parametrize("chart_type", ["renko", "", None, 1, True, ["line"], "Candles"])
+def test_a_bad_chart_type_is_refused_naming_it(chart_type: Any) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(chart_type=chart_type))
+    assert raised.value.key == "chart_type"
+
+
+@pytest.mark.parametrize(
+    ("scale", "key"),
+    [
+        ("log", "price_scale"),
+        ({"mode": "x", "auto_scale": True, "invert": False}, "price_scale.mode"),
+        ({"mode": None, "auto_scale": True, "invert": False}, "price_scale.mode"),
+        ({"mode": "log", "auto_scale": 1, "invert": False}, "price_scale.auto_scale"),
+        ({"mode": "log", "auto_scale": True, "invert": "no"}, "price_scale.invert"),
+        ({"mode": "log", "auto_scale": True}, "price_scale.invert"),
+        ({"mode": "log", "auto_scale": True, "invert": False, "lock": 1}, "price_scale.lock"),
+        (None, "price_scale"),
+    ],
+)
+def test_a_bad_price_scale_is_refused_naming_the_key(scale: Any, key: str) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(price_scale=scale))
+    assert raised.value.key == key
+
+
+@pytest.mark.parametrize(
+    ("compare", "key"),
+    [
+        ([_SOL], "compare"),
+        ({"symbols": [_SOL]}, "compare.spread"),
+        ({"symbols": [_SOL], "spread": False, "colors": []}, "compare.colors"),
+        ({"symbols": _SOL, "spread": False}, "compare.symbols"),
+        ({"symbols": [_SOL, _ETH, _BYBIT_BTC, _IID], "spread": False}, "compare.symbols"),
+        ({"symbols": [_SOL, _SOL], "spread": False}, "compare.symbols"),
+        ({"symbols": ["BTCUSDT"], "spread": False}, "compare.symbols.0"),
+        ({"symbols": [_SOL, ""], "spread": False}, "compare.symbols.1"),
+        ({"symbols": [_SOL, 7], "spread": False}, "compare.symbols.1"),
+        ({"symbols": [_SOL], "spread": 0}, "compare.spread"),
+        (
+            {"symbols": ["A" * MAX_INSTRUMENT_ID_LENGTH + ".X"], "spread": False},
+            "compare.symbols.0",
+        ),
+        (None, "compare"),
+    ],
+)
+def test_a_bad_compare_is_refused_naming_the_key(compare: Any, key: str) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(compare=compare))
+    assert raised.value.key == key
+
+
+def test_three_compare_symbols_are_the_maximum() -> None:
+    symbols = [_SOL, _ETH, _BYBIT_BTC]
+    assert len(symbols) == MAX_COMPARE_SYMBOLS
+    layout = validate_layout(_layout(compare={"symbols": symbols, "spread": False}))
+    assert layout["compare"]["symbols"] == symbols
+
+
+def test_an_absent_price_scale_or_compare_defaults() -> None:
+    layout = _layout()
+    layout.pop("price_scale", None)
+    layout.pop("compare", None)
+    validated = validate_layout(layout)
+    assert validated["price_scale"] == PRICE_SCALE_DEFAULTS
+    assert validated["compare"] == COMPARE_DEFAULTS
+
+
+def test_a_compare_id_of_the_maximum_length_is_kept() -> None:
+    iid = "A" * (MAX_INSTRUMENT_ID_LENGTH - 2) + ".X"
+    layout = validate_layout(_layout(compare={"symbols": [iid], "spread": False}))
+    assert layout["compare"]["symbols"] == [iid]
+
+
+def test_instrument_id_length_mirrors_the_frontend() -> None:
+    source = (_FRONTEND / "lib/compare.ts").read_text()
+    assert int(_ts_value(source, "export const MAX_INSTRUMENT_ID_LENGTH")) == (
+        MAX_INSTRUMENT_ID_LENGTH
+    )
+
+
+def test_chart_type_and_scale_settings_mirror_the_frontend() -> None:
+    source = (_FRONTEND / "lib/chartTypes.ts").read_text()
+    types = re.search(r"CHART_TYPES: readonly ChartType\[\] = \[([^\]]*)\]", source)
+    modes = re.search(r"PRICE_SCALE_MODES: readonly PriceScaleModeName\[\] = \[([^\]]*)\]", source)
+    assert types is not None
+    assert modes is not None
+    assert tuple(re.findall(r'"(\w+)"', types.group(1))) == CHART_TYPES
+    assert tuple(re.findall(r'"(\w+)"', modes.group(1))) == PRICE_SCALE_MODES
+    assert int(_ts_value(source, "export const MAX_COMPARE_SYMBOLS")) == MAX_COMPARE_SYMBOLS
+    scale = _ts_block("lib/chartLayout.ts", "export const DEFAULT_PRICE_SCALE")
+    assert _ts_value(scale, "mode") == PRICE_SCALE_DEFAULTS["mode"]
+    assert _ts_value(scale, "auto_scale") == str(PRICE_SCALE_DEFAULTS["auto_scale"]).lower()
+    assert _ts_value(scale, "invert") == str(PRICE_SCALE_DEFAULTS["invert"]).lower()
+    compare = _ts_block("lib/chartLayout.ts", "export const DEFAULT_COMPARE")
+    assert _ts_value(compare, "symbols") == "[]"
+    assert _ts_value(compare, "spread") == str(COMPARE_DEFAULTS["spread"]).lower()

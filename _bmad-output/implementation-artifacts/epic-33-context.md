@@ -16,7 +16,7 @@ The backend captures far more than the frontend shows. This epic adds Bybit line
 - Story 33.5: Chart panes for OI, funding, basis and liquidations, and the mark/index overlay (done)
 - Story 33.6: Order-flow indicators from the stored per-bar aggregates (done)
 - Story 33.7: Rankings sorts every column, gains derivatives/flow/range columns and saved filter presets (done)
-- Story 33.8: Alert conditions beyond a price cross, and an Alerts page that creates and edits
+- Story 33.8: Alert conditions beyond a price cross, and an Alerts page that creates and edits (done)
 - Story 33.9: Price-scale modes, chart types, and a compare symbol on the percent scale
 - Story 33.10: Drawing tools II, with magnet snapping, undo/redo, lock and hide-all
 - Story 33.11: Missing indicators, candle patterns as markers, dead code removed
@@ -32,7 +32,7 @@ The backend captures far more than the frontend shows. This epic adds Bybit line
 - **Added fields only (AD-D12):** messages, stored schemas, TOML stores and API items only gain keys. Existing stored data must load unchanged (for example, an alert without `condition` reads as `price_cross`). `rankings:live` replay bytes must still pass.
 - **Boundaries:** no new dependency (NFR12; dialogs, shortcuts and SVG are hand-rolled inline). `nautilus_trader/` and `crates/` are untouchable (FORK-01). Check `nautilus_trader.indicators` before any custom indicator.
 - **Every story (MR4, OPS-01, DESIGN-03):**
-  - Add risks to `docs/DATA_INTEGRITY_AUDIT.md`. It runs to D-196, so the next row is **D-197**.
+  - Add risks to `docs/DATA_INTEGRITY_AUDIT.md`. It runs to D-205, so the next row is **D-206**.
   - Register types and read models in `docs/DATA_DICTIONARY.md`: §1.26 liquidations, §1.27 `derivs:raw`, §2.10 ranking columns, §2.11 alerts, §2.12 research, §2.15 per-bar aggregates, §2.16 derivatives read models.
   - Put VPS steps in `docs/DEPLOY_CHECKLIST.md` as deferred operator actions, and keep the Docs page truthful.
 - **Verification:**
@@ -61,11 +61,12 @@ The backend captures far more than the frontend shows. This epic adds Bybit line
   - Routes: `GET /api/coin/{iid}/funding|open-interest|mark-index|liquidations|liquidation-bars`. They follow the `/api/candles` cursor contract, are bounded by `MAX_QUERY_SPAN_SECONDS` and carry gap markers.
   - `/ws/live` has `derivs:{iid}` and `liquidations:{iid}` channels.
   - Durable preferences (filter presets, watchlist, layouts, drawings) are TOML in `views/preferences.py`'s one preferences directory and never `localStorage`. Use `localStorage` only for per-viewer conveniences like the sort key.
-- **Alerts (33.8):**
+- **Alerts (33.8, built):**
   - Each condition is a pure `evaluate(state, inputs) -> bool` in `alerting/domain/conditions.py`.
   - Price and indicator conditions run on the bar observer. Indicator values are cached per bar and evaluated through `views.indicator_picker.replay_entry`.
   - Derivatives conditions run on a second observer of the 33.4 live bus.
   - Trendline geometry is ported to Python with a cross-language fixture.
+  - An alert holds one `condition` of 14 kinds; an alert stored without one reads as `price_cross`. Statuses include `invalid` (with a reason). `PUT /api/alerts/{id}` edits and re-arms. Templates support `{{value}}` and `{{condition}}`. Still excluded: AND/OR multi-condition alerts and a templates library.
 - **Indicators (33.11):** add custom streaming `Indicator`s in `kernel/ta.py` (O(1) per bar, `update_raw`) only where Nautilus lacks one. ADX reuses `DirectionalMovement`. Register each in the `views/indicator_picker.py` catalog.
 - **Charts never fabricate (AD-F6):**
   - Heikin Ashi is a pure transform. Every indicator and drawing stays on the real OHLC.
@@ -75,7 +76,7 @@ The backend captures far more than the frontend shows. This epic adds Bybit line
 ## UX & Interaction Patterns
 
 - **Original spec exclusions:** the original chart/screener spec excluded much of what 33.8–33.12 build: extra chart types, extra drawing tools, watchlist, candle-pattern recognition and exotic alert kinds.
-  - The operator's 2026-10-05 review lifts those exclusions. Each story amends `spec-multi-exchange-screener-chart.md` in place with a dated `[amended <date>: Story 33.x]` note citing the decision (precedent: §A7/§A9 for 32.7, §B3/§B4/§B5 for 33.7).
+  - The operator's 2026-10-05 review lifts those exclusions. Each story amends `spec-multi-exchange-screener-chart.md` in place with a dated `[amended <date>: Story 33.x]` note citing the decision (precedents: §A7/§A9 for 32.7, §B3/§B4/§B5 for 33.7, the alerts section for 33.8).
   - 33.12 amends §A1/§A9 and records that multi-chart layouts, synced crosshair and CSV export were dropped. These stay excluded, along with the right sidebar, candle colour customisation, Volume Candles and order entry.
 - **TradingView operation parity** (pan, zoom, legend gear/eye/×, Esc cancels a tool, replay controls) stays binding. Visual style is the app's own retro theme.
 - **Panes:** new panes reuse the existing pane mechanism. That covers the per-pane gap painter, persisted heights and 32.6 per-coin layouts, plus cursor pagination, live-bar follow and the Bar Replay cut.
@@ -95,9 +96,9 @@ The backend captures far more than the frontend shows. This epic adds Bybit line
 
 ## Cross-Story Dependencies
 
-- **Remaining order:** 33.8 → 33.9 → 33.10 → 33.11 → 33.12 → 33.13. Every other story is done, and Epic 32 is merged into `epic-33`.
+- **Remaining order:** 33.9 → 33.10 → 33.11 → 33.12 → 33.13. Every other story is done, and Epic 32 is merged into `epic-33`.
 - **What feeds what:**
-  - 33.4's routes, channels and ranking fields feed 33.8's derivatives conditions.
+  - 33.4's routes, channels and ranking fields fed 33.8's derivatives conditions (done).
   - 33.3's per-bar columns and 33.6's organic delta feed 33.13.
   - 33.14's `LiquidationCascade` is reused by 33.13's `cascade_episodes` and the OFI strategy's cascade mode.
 - **Frontend extends Epic 32's work:** the settings modal (32.3), the left rail, context menu and preferences dir (32.5), pane heights and layouts (32.6), and drawings persistence via `PUT /api/coin/{iid}/drawings`.

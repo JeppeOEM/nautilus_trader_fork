@@ -7,6 +7,9 @@ import AlertDialog from "../components/chart/AlertDialog";
 import IndicatorPicker, { type IndicatorPickerHandle } from "../components/chart/IndicatorPicker";
 import IndicatorSettingsDialog, { type SettingsOutput, type SettingsPatch } from "../components/chart/IndicatorSettingsDialog";
 import LiquidationTape from "../components/chart/LiquidationTape";
+import CompareControl from "../components/chart/CompareControl";
+import CompareFeed, { type CompareFeedState } from "../components/chart/CompareFeed";
+import { comparePaneSpecs, mainSlots, spreadPaneSpec } from "../components/chart/comparePanes";
 import { DERIVATIVE_OUTPUT_TOKENS, DERIVATIVE_PANE_IDS, MARK_INDEX_GROUP } from "../components/chart/derivativePanes";
 import type { LegendAction } from "../components/chart/legend";
 import LightweightChart, {
@@ -16,6 +19,7 @@ import LightweightChart, {
   type VolumeProfileSpec,
   type IndicatorPaneSpec,
   type PriceLineSpec,
+  type PriceScalePatch,
 } from "../components/chart/LightweightChart";
 import type { TrendlineAnchor } from "../components/chart/primitives/TrendlinePrimitive";
 import ToolRail from "../components/chart/ToolRail";
@@ -96,7 +100,11 @@ import {
   type LiquidationMeasure,
   type VolumeColorMode,
   type VolumeProfileLayout,
+  type CompareLayout,
+  type PriceScaleLayout,
 } from "../lib/chartLayout";
+import { CHART_TYPES, CHART_TYPE_LABELS, type ChartType, PRICE_SCALE_LABELS, PRICE_SCALE_MODES, type PriceScaleModeName } from "../lib/chartTypes";
+import { COMPARE_GROUP_PREFIX, SPREAD_GROUP, withCompareAdded } from "../lib/compare";
 import { useChartDerivatives } from "../hooks/useChartDerivatives";
 import { useFootprint } from "../hooks/useFootprint";
 import { useChartLayout } from "../hooks/useChartLayout";
@@ -261,6 +269,13 @@ const DERIVATIVE_OF_GROUP: Record<string, DerivativeKey> = {
   [MARK_INDEX_GROUP]: "mark_index",
   deriv_liquidations: "liquidations",
 };
+
+/** A copy of `set` with `item` added, or removed when present. */
+function toggled(set: ReadonlySet<string>, item: string): ReadonlySet<string> {
+  const next = new Set(set);
+  if (!next.delete(item)) next.add(item);
+  return next;
+}
 
 function derivativeOfGroup(group: string): DerivativeKey | null {
   return Object.hasOwn(DERIVATIVE_OF_GROUP, group) ? DERIVATIVE_OF_GROUP[group] : null;
@@ -858,9 +873,72 @@ function ChartInner({
     derivativesRefreshRef.current = derivativesData.refreshNewest;
     derivativesAfterCloseRef.current = derivativesData.refreshAfterClose;
   }, [derivativesData.refreshNewest, derivativesData.refreshAfterClose]);
+
+  // Story 33.9: the price pane's chart type, right scale and compare symbols, each a field of the
+  // coin's layout. Lines mode keeps them stored but draws no compare and no chart type.
+  const [chartType, setChartType] = useState<ChartType>(initialLayout.chart_type);
+  useEffect(() => patchLayout({ chart_type: chartType }), [chartType, patchLayout]);
+  const [priceScale, setPriceScale] = useState<PriceScaleLayout>(initialLayout.price_scale);
+  useEffect(() => patchLayout({ price_scale: priceScale }), [priceScale, patchLayout]);
+  const [compare, setCompare] = useState<CompareLayout>(initialLayout.compare);
+  useEffect(() => patchLayout({ compare }), [compare, patchLayout]);
+  const patchPriceScale = useCallback(
+    (patch: PriceScalePatch): void => setPriceScale((prev) => ({ ...prev, ...patch })),
+    [],
+  );
+  const [compareFeeds, setCompareFeeds] = useState<Record<string, CompareFeedState>>({});
+  const onCompareFeed = useCallback((iid: string, state: CompareFeedState | null): void => {
+    setCompareFeeds((prev) => {
+      if (state !== null) return { ...prev, [iid]: state };
+      const { [iid]: _gone, ...rest } = prev;
+      return rest;
+    });
+  }, []);
+  // The legend eye hides a compare line in place; view state, never saved.
+  const [compareHidden, setCompareHidden] = useState<ReadonlySet<string>>(() => new Set());
+  const comparesDrawn = mode === "candles" && compare.symbols.length > 0;
+  // A compare draws on the Percent scale (each line from 0 % at the left edge); Indexed to 100 is the
+  // other scale that compares series. Only an explicit pick writes `price_scale.mode`, so removing the
+  // last compare brings back the operator's own mode.
+  const effectiveScaleMode: PriceScaleModeName = comparesDrawn
+    ? priceScale.mode === "indexed"
+      ? "indexed"
+      : "percent"
+    : priceScale.mode;
+  const scaleLockReason = comparesDrawn ? "A compare symbol draws on the percent scale: remove it to use Normal or Log" : null;
+  const spreadAvailable = mode === "candles" && compare.symbols.length === 1;
+  const mainLiveShown = replay.mode === "active" ? null : liveBar;
+  const comparePanes = useMemo<IndicatorPaneSpec[]>(() => {
+    if (!comparesDrawn) return NONE;
+    const slots = mainSlots(replay.displayed, mainLiveShown);
+    const liveShown = mainLiveShown !== null;
+    const specs = comparePaneSpecs(compare.symbols, compareFeeds, slots, liveShown, compareHidden);
+    if (!compare.spread || !spreadAvailable) return specs;
+    const [only] = compare.symbols;
+    return [...specs, spreadPaneSpec(instrumentId, only, replay.displayed, mainLiveShown, compareFeeds[only], slots, liveShown)];
+  }, [comparesDrawn, compare, compareFeeds, compareHidden, replay.displayed, mainLiveShown, spreadAvailable, instrumentId]);
+  // The add re-checks duplicate and maximum against the latest state, not the render the control saw.
+  const addCompare = useCallback(
+    (iid: string): void => setCompare((prev) => withCompareAdded(prev, iid, instrumentId)),
+    [instrumentId],
+  );
+  const removeCompare = useCallback((iid: string): void => {
+    setCompare((prev) => ({ ...prev, symbols: prev.symbols.filter((s) => s !== iid) }));
+    // A re-added symbol starts shown: its hidden flag goes with it.
+    setCompareHidden((prev) => {
+      if (!prev.has(iid)) return prev;
+      const next = new Set(prev);
+      next.delete(iid);
+      return next;
+    });
+  }, []);
+
   const chartPanes = useMemo(
-    () => (derivativesData.panes.length === 0 ? panes : [...panes, ...derivativesData.panes]),
-    [panes, derivativesData.panes],
+    () =>
+      derivativesData.panes.length === 0 && comparePanes.length === 0
+        ? panes
+        : [...panes, ...comparePanes, ...derivativesData.panes],
+    [panes, comparePanes, derivativesData.panes],
   );
 
   // The legend's eye / gear / x. Picker indicators go through the picker's own persist path (the
@@ -869,6 +947,18 @@ function ChartInner({
   const pickerRef = useRef<IndicatorPickerHandle>(null);
   const handleLegendAction = useCallback(
     (action: LegendAction, group: string): void => {
+      // Story 33.9: a compare's x removes it from the layout, its eye hides the line; the Spread pane's
+      // eye and x both turn the spread off (the Spread toggle brings it back).
+      if (group.startsWith(COMPARE_GROUP_PREFIX)) {
+        const iid = group.slice(COMPARE_GROUP_PREFIX.length);
+        if (action === "remove") removeCompare(iid);
+        else if (action === "hide") setCompareHidden((prev) => toggled(prev, iid));
+        return;
+      }
+      if (group === SPREAD_GROUP) {
+        if (action !== "settings") setCompare((prev) => ({ ...prev, spread: false }));
+        return;
+      }
       const derivative = derivativeOfGroup(group);
       if (derivative !== null) {
         // The eye and the x both turn the entry off in the layout (its pane goes; the Indicators
@@ -895,7 +985,7 @@ function ChartInner({
       else if (action === "settings") picker?.openSettings(group);
       else picker?.remove(group);
     },
-    [changeVolumeOn, changeFootprintOn, changeDerivativeOn],
+    [changeVolumeOn, changeFootprintOn, changeDerivativeOn, removeCompare],
   );
   // Seeded with what the chart draws while the entry stores nothing: the palette colour, which a
   // histogram also paints both signs with (and the side whose colour is not set keeps).
@@ -1553,6 +1643,65 @@ function ChartInner({
         >
           Lines
         </button>
+        {/* Story 33.9: how the price pane draws: the chart type, the right scale and compare symbols. */}
+        <select
+          aria-label="Chart type"
+          value={chartType}
+          disabled={mode === "lines"}
+          title={mode === "lines" ? "Chart types draw candle bars: switch to Candles" : undefined}
+          onChange={(e) => setChartType(e.target.value as ChartType)}
+        >
+          {CHART_TYPES.map((t) => (
+            <option key={t} value={t}>
+              {CHART_TYPE_LABELS[t]}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Price scale"
+          value={effectiveScaleMode}
+          title={scaleLockReason ?? undefined}
+          onChange={(e) => patchPriceScale({ mode: e.target.value as PriceScaleModeName })}
+        >
+          {PRICE_SCALE_MODES.map((m) => (
+            <option key={m} value={m} disabled={scaleLockReason !== null && (m === "normal" || m === "log")}>
+              {PRICE_SCALE_LABELS[m]}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          className={priceScale.auto_scale ? "tabbtn active" : "tabbtn"}
+          aria-pressed={priceScale.auto_scale}
+          title="Auto-scale the price axis to the visible bars"
+          onClick={() => patchPriceScale({ auto_scale: !priceScale.auto_scale })}
+        >
+          Auto
+        </button>
+        <button
+          type="button"
+          className={priceScale.invert ? "tabbtn active" : "tabbtn"}
+          aria-pressed={priceScale.invert}
+          onClick={() => patchPriceScale({ invert: !priceScale.invert })}
+        >
+          Invert
+        </button>
+        <CompareControl
+          instrumentId={instrumentId}
+          symbols={compare.symbols}
+          disabled={mode === "lines"}
+          onAdd={addCompare}
+        />
+        <button
+          type="button"
+          className={compare.spread && spreadAvailable ? "tabbtn active" : "tabbtn"}
+          aria-pressed={compare.spread && spreadAvailable}
+          disabled={!spreadAvailable}
+          title={spreadAvailable ? "The main close over the compare close, in bps" : "Spread needs exactly one compare symbol"}
+          onClick={() => setCompare((prev) => ({ ...prev, spread: !prev.spread }))}
+        >
+          Spread
+        </button>
         </div>
         <div className="chart-cluster">
           <button type="button" onClick={() => setIndicatorDialogOpen(true)}>
@@ -1696,7 +1845,15 @@ function ChartInner({
             footprint={footprintSpec}
             liquidationMarkers={derivativesData.markers}
             onBarSpacing={setBarSpacing}
+            chartType={chartType}
+            priceScale={{ mode: effectiveScaleMode, autoScale: priceScale.auto_scale, invert: priceScale.invert }}
+            onPriceScale={patchPriceScale}
+            scaleModesLocked={scaleLockReason}
           />
+          {mode === "candles" &&
+            compare.symbols.map((iid) => (
+              <CompareFeed key={iid} instrumentId={iid} chart={chart} barSeconds={barSeconds} onState={onCompareFeed} />
+            ))}
         </div>
         {tapeOn && derivativesData.available && <LiquidationTape {...derivativesData.tape} />}
       </div>

@@ -21,20 +21,23 @@ live-candle subscription, the candle pages' unflushed tails (`recent_rows` and, 
 behind every `/ws/live` `derivs:{iid}` and `liquidations:{iid}` subscription (Story 33.4: it
 subscribes no `liquidations:raw` of its own -- `live_candle_bus` hands it the rows it decoded,
 attached by `app.py`'s lifespan), and `archive_bus`, the one `archive:status` subscriber behind
-`GET /api/archive/status` (Story 25.1b).
+`GET /api/archive/status` (Story 25.1b), and `markets_bus`, the one `markets:live` subscriber behind
+`GET /api/markets` (Story 33.9).
 
 Invariant: one subscriber per channel per process -- every reader shares these objects, so no
 request or WebSocket ever opens a Redis subscription of its own, and no two of them subscribe the
 same channel. They are constructed here, in the interface's composition module, because the
 `views` context that defines these classes holds no module state and reads no interface settings
 (`CATALOG_PATH` is passed in). `app.py`'s lifespan starts them; routes and `ws/live.py` reference
-them as `buses.bus`/`buses.live_candle_bus`/`buses.live_derivs_bus`/`buses.archive_bus` through
+them as `buses.bus`/`buses.live_candle_bus`/`buses.live_derivs_bus`/`buses.archive_bus`/`buses.markets_bus`
+through
 this module, so a test can swap any with `monkeypatch.setattr(buses, ...)`.
 """
 
 from views.archive_status_bus import ArchiveStatusBus
 from views.live_candles import LiveCandleBus
 from views.live_derivs import LiveDerivsBus
+from views.markets_bus import MarketsBus
 from views.rankings_bus import RankingsBus
 
 from data_api import settings
@@ -44,3 +47,4 @@ bus = RankingsBus()
 live_candle_bus = LiveCandleBus(settings.CATALOG_PATH)
 live_derivs_bus = LiveDerivsBus()
 archive_bus = ArchiveStatusBus()
+markets_bus = MarketsBus()

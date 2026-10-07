@@ -67,6 +67,7 @@ from data_api.routes import drawings as drawings_routes
 from data_api.routes import footprint as footprint_routes
 from data_api.routes import indicators as indicators_routes
 from data_api.routes import layout as layout_routes
+from data_api.routes import markets as markets_routes
 from data_api.routes import metrics as metrics_routes
 from data_api.routes import rankings as rankings_routes
 from data_api.routes import snapshots as snapshots_routes
@@ -104,9 +105,9 @@ FRONTEND_DIST_PATH: str = os.environ.get("FRONTEND_DIST_PATH", "frontend_dist")
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
-    Start the four shared Redis subscribers for the app's whole lifetime: `RankingsBus`
-    (Story 15.2), `LiveCandleBus` (Story 15.5), `ArchiveStatusBus` (Story 25.1b) and
-    `LiveDerivsBus` (Story 33.4, `derivs:raw`). Every
+    Start the five shared Redis subscribers for the app's whole lifetime: `RankingsBus`
+    (Story 15.2), `LiveCandleBus` (Story 15.5), `ArchiveStatusBus` (Story 25.1b),
+    `LiveDerivsBus` (Story 33.4, `derivs:raw`) and `MarketsBus` (Story 33.9, `markets:live`). Every
     `GET /api/rankings`/`GET /api/archive/status` request and every `/ws/live` connection
     read/subscribe against these same `buses.bus` / `buses.live_candle_bus` /
     `buses.archive_bus` instances, never opening a per-request or per-websocket Redis
@@ -131,7 +132,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     live_candles_task = asyncio.create_task(live_candle_bus.run(REDIS_URL))
     live_derivs_task = asyncio.create_task(live_derivs_bus.run(REDIS_URL))
     archive_status_task = asyncio.create_task(buses.archive_bus.run(REDIS_URL))
-    tasks = (rankings_task, live_candles_task, live_derivs_task, archive_status_task)
+    markets_task = asyncio.create_task(buses.markets_bus.run(REDIS_URL))
+    tasks = (rankings_task, live_candles_task, live_derivs_task, archive_status_task, markets_task)
     try:
         yield
     finally:
@@ -260,7 +262,7 @@ def errors(since_ns: int | None = None) -> ErrorsResponse:
 # Story 15.2: rankings REST + WS relay. Story 15.3: candles REST. Story 33.4: the derivatives
 # and liquidations read models (`routes/derivatives.py`). Story 15.7: snapshots
 # (Lines mode) REST. Story 17.2/15.8: metrics history/nearest REST. Story 25.1b: archive
-# maintenance status + run-now. All must register
+# maintenance status + run-now. Story 33.9: the markets list (Compare picker). All must register
 # above the /api/* catch-all below -- a route registered after it would silently 404
 # (confirmed failure mode from Story 15.1's own SPA-fallback investigation; the same
 # "declared routes win over the catch-all" rule applies here).
@@ -280,6 +282,7 @@ app.include_router(footprint_routes.router)
 app.include_router(drawings_routes.router)
 app.include_router(indicators_routes.router)
 app.include_router(layout_routes.router)
+app.include_router(markets_routes.router)
 app.include_router(snapshots_routes.router)
 app.include_router(metrics_routes.router)
 app.include_router(live_ws.router)

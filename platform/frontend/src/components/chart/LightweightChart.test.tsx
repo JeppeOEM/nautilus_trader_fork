@@ -32,17 +32,21 @@ import { GapPrimitive } from "./primitives/GapPrimitive";
 import { MeasurementPrimitive } from "./primitives/MeasurementPrimitive";
 import { FootprintPrimitive, type FootprintRenderSpec } from "./primitives/FootprintPrimitive";
 import type { MarkerSpec } from "./LiquidationMarkers";
+import type { ChartType } from "../../lib/chartTypes";
 
 const addSeriesMock = vi.fn();
 const seriesUpdateMock = vi.fn();
 const applyOptionsMock = vi.fn();
 const removeMock = vi.fn();
 const removeSeriesMock = vi.fn();
+const setSeriesOrderMock = vi.fn();
 const setDataMock = vi.fn();
 const createChartMock = vi.fn();
 const addPaneMock = vi.fn();
 const removePaneMock = vi.fn();
 const getVisibleLogicalRangeMock = vi.fn();
+// Story 33.9: the visible time range, the Baseline's left edge (null: nothing laid out).
+const getVisibleRangeMock = vi.fn();
 const setVisibleLogicalRangeMock = vi.fn();
 // Story 18.1: the chart's click/crosshair subscriptions and the main series'
 // price-line API surface -- module-level shared mocks (same convention as setDataMock
@@ -76,6 +80,11 @@ const setMarkersMock = vi.fn();
 const detachMarkersMock = vi.fn();
 const createSeriesMarkersMock = vi.fn();
 let barSpacingPx = 6;
+// Story 33.9: the right price scale's options round-trip (what the component applied, and the
+// library's own auto-scale flag a drag of the scale turns off).
+const RIGHT_SCALE_PX = 60;
+const rightScaleApplyMock = vi.fn();
+let rightScaleState: Record<string, unknown> = {};
 
 // One shared counter so each chart.addPane() call gets its own, stable, ever-increasing
 // index -- mirrors the real library's paneIndex() behaviour closely enough for the
@@ -145,6 +154,7 @@ function makeSeriesMock(initial: Record<string, unknown> | undefined) {
     options: vi.fn(() => ({ ...state })),
     createPriceLine: createPriceLineMock,
     removePriceLine: removePriceLineMock,
+    setSeriesOrder: setSeriesOrderMock,
     priceToCoordinate: priceToCoordinateMock,
     coordinateToPrice: coordinateToPriceMock,
     attachPrimitive: (p: unknown) => (p instanceof GapPrimitive ? gapAttachMock(p, series) : attachPrimitiveMock(p)),
@@ -174,6 +184,10 @@ vi.mock("lightweight-charts", () => ({
   CandlestickSeries: "CandlestickSeries-sentinel",
   LineSeries: "LineSeries-sentinel",
   HistogramSeries: "HistogramSeries-sentinel",
+  BarSeries: "BarSeries-sentinel",
+  AreaSeries: "AreaSeries-sentinel",
+  BaselineSeries: "BaselineSeries-sentinel",
+  PriceScaleMode: { Normal: 0, Logarithmic: 1, Percentage: 2, IndexedTo100: 3 },
   LineStyle: { Solid: 0, Dotted: 1, Dashed: 2 },
   createChart: (...args: unknown[]) => createChartMock(...args),
   createSeriesMarkers: (...args: unknown[]) => createSeriesMarkersMock(...args),
@@ -216,6 +230,7 @@ function makePriceLineSpec(id: string, overrides: Partial<PriceLineSpec> = {}): 
 type ChartTestProps = {
   priceLines?: PriceLineSpec[];
   mode?: ChartMode;
+  chartType?: ChartType;
   onPriceClick?: (price: number) => void;
   onPriceLineDrag?: (id: string, price: number) => void;
   drawings?: DrawingSpec[];
@@ -270,9 +285,11 @@ beforeEach(() => {
   applyOptionsMock.mockReset();
   removeMock.mockReset();
   removeSeriesMock.mockReset();
+  setSeriesOrderMock.mockReset();
   addPaneMock.mockReset().mockImplementation(() => makePaneMock());
   removePaneMock.mockReset();
   getVisibleLogicalRangeMock.mockReset().mockReturnValue({ from: 10, to: 50 });
+  getVisibleRangeMock.mockReset().mockReturnValue(null);
   setVisibleLogicalRangeMock.mockReset();
   subscribeClickMock.mockReset();
   unsubscribeClickMock.mockReset();
@@ -308,11 +325,22 @@ beforeEach(() => {
     unsubscribeClick: unsubscribeClickMock,
     subscribeCrosshairMove: subscribeCrosshairMoveMock,
     unsubscribeCrosshairMove: unsubscribeCrosshairMoveMock,
-    priceScale: () => ({ width: () => leftScaleWidthPx }),
+    priceScale: (id: string) =>
+      id === "right"
+        ? {
+            width: () => RIGHT_SCALE_PX,
+            applyOptions: (opts: Record<string, unknown>) => {
+              rightScaleApplyMock(opts);
+              Object.assign(rightScaleState, opts);
+            },
+            options: () => ({ ...rightScaleState }),
+          }
+        : { width: () => leftScaleWidthPx },
     timeScale: () => ({
       height: timeScaleHeightMock,
       width: () => PLOT_WIDTH_PX,
       getVisibleLogicalRange: getVisibleLogicalRangeMock,
+      getVisibleRange: getVisibleRangeMock,
       setVisibleLogicalRange: setVisibleLogicalRangeMock,
       coordinateToTime: coordinateToTimeMock,
       timeToCoordinate: timeToCoordinateMock,
@@ -329,6 +357,8 @@ beforeEach(() => {
   detachMarkersMock.mockReset();
   createSeriesMarkersMock.mockReset().mockImplementation(() => ({ setMarkers: setMarkersMock, detach: detachMarkersMock }));
   barSpacingPx = 6;
+  rightScaleApplyMock.mockReset();
+  rightScaleState = { autoScale: true };
 });
 
 afterEach(() => {
@@ -1053,6 +1083,22 @@ describe("drawings registry (Story 18.2)", () => {
     rerender(chartElement({ drawings, mode: "lines" }));
 
     expect(attachPrimitiveMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the drawings attached once when the chart type changes in Lines mode (Story 33.9)", () => {
+    const drawings = [makeTrendlineSpec("trendline-1")];
+    const { rerender } = render(chartElement({ drawings, mode: "lines" }));
+    const added = addSeriesMock.mock.calls.length;
+    const removed = removeSeriesMock.mock.calls.length;
+    const attached = attachPrimitiveMock.mock.calls.length;
+
+    rerender(chartElement({ drawings, mode: "lines", chartType: "line" }));
+
+    // No host series exists to swap: nothing is removed, added, detached or attached beside the live one.
+    expect(addSeriesMock).toHaveBeenCalledTimes(added);
+    expect(removeSeriesMock).toHaveBeenCalledTimes(removed);
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(attached);
+    expect(detachPrimitiveMock).not.toHaveBeenCalled();
   });
 
   it("reports a click as a {time, price} point, falling back to coordinateToTime (AC #2)", () => {
@@ -2861,5 +2907,308 @@ describe("derivatives support (Story 33.5)", () => {
     barSpacingPx = 3;
     for (const [handler] of subscribeRangeMock.mock.calls) act(() => handler({ from: 0, to: 10 }));
     expect(onBarSpacing).toHaveBeenLastCalledWith(3);
+  });
+});
+
+// Story 33.9: chart types, the right price scale and compare overlays.
+describe("chart types, price scale and compare (Story 33.9)", () => {
+  const candle = (time: number, open: number, high: number, low: number, close: number) => ({
+    time: time as Time,
+    open,
+    high,
+    low,
+    close,
+  });
+  // Hand-computed HA: bar0 (10.5, 12, 9, 10.5), bar1 (10.5, 13, 10, 11.5).
+  const DATA = [candle(60, 10, 12, 9, 11), candle(120, 11, 13, 10, 12)];
+  const HA = [
+    { time: 60, open: 10.5, high: 12, low: 9, close: 10.5 },
+    { time: 120, open: 10.5, high: 13, low: 10, close: 11.5 },
+  ];
+  type SeriesWithOwnData = ReturnType<typeof makeSeriesMock> & { setData: ReturnType<typeof vi.fn> };
+  // Each series records its own setData, so the main series' rows can be told from an overlay's.
+  const ownSetData = (): void => {
+    addSeriesMock.mockImplementation((_definition: unknown, options?: Record<string, unknown>) => ({
+      ...makeSeriesMock(options),
+      setData: vi.fn(),
+    }));
+  };
+  const seriesAdded = (n: number): SeriesWithOwnData => addSeriesMock.mock.results[n].value as SeriesWithOwnData;
+  const element = (props: Record<string, unknown>) => (
+    <LightweightChart data={DATA} onChartApi={() => {}} {...props} />
+  );
+
+  it.each([
+    ["candles", "CandlestickSeries-sentinel"],
+    ["hollow", "CandlestickSeries-sentinel"],
+    ["heikin_ashi", "CandlestickSeries-sentinel"],
+    ["bars", "BarSeries-sentinel"],
+    ["line", "LineSeries-sentinel"],
+    ["area", "AreaSeries-sentinel"],
+    ["baseline", "BaselineSeries-sentinel"],
+  ])("draws %s with the %s definition and token colours", (chartType, definition) => {
+    render(element({ chartType }));
+
+    expect(addSeriesMock).toHaveBeenCalledTimes(1);
+    const [added, options] = addSeriesMock.mock.calls[0] as [string, Record<string, string>];
+    expect(added).toBe(definition);
+    // A line colour is a token's hex; a fill under a line is that token at an alpha (`chartVarAlpha`).
+    for (const value of Object.values(options)) expect(value).toMatch(/^(#[0-9a-f]{6}|rgba\(\d{1,3}, \d{1,3}, \d{1,3}, [\d.]+\))$/);
+  });
+
+  it("feeds each type its rows: OHLC, close lines, hollow colours", () => {
+    ownSetData();
+    const { rerender } = render(element({ chartType: "line" }));
+    expect(seriesAdded(0).setData).toHaveBeenLastCalledWith([
+      { time: 60, value: 11 },
+      { time: 120, value: 12 },
+    ]);
+
+    rerender(element({ chartType: "bars" }));
+    expect(seriesAdded(1).setData).toHaveBeenLastCalledWith(DATA);
+
+    rerender(element({ chartType: "hollow" }));
+    expect(seriesAdded(2).setData).toHaveBeenLastCalledWith([
+      expect.objectContaining({ color: "transparent", borderColor: CHART_TOKENS["--chart-up"] }),
+      expect.objectContaining({ color: "transparent", borderColor: CHART_TOKENS["--chart-up"] }),
+    ]);
+  });
+
+  it("replaces the main series on a type switch and keeps the view; a same-definition switch keeps the series", () => {
+    getVisibleLogicalRangeMock.mockReturnValue({ from: -5, to: 1.5 });
+    const { rerender } = render(element({ chartType: "candles" }));
+    setVisibleLogicalRangeMock.mockReset();
+
+    rerender(element({ chartType: "heikin_ashi" }));
+    expect(removeSeriesMock).not.toHaveBeenCalled();
+
+    rerender(element({ chartType: "line" }));
+    expect(removeSeriesMock).toHaveBeenCalledTimes(1);
+    expect(addSeriesMock).toHaveBeenLastCalledWith("LineSeries-sentinel", { color: CHART_TOKENS["--chart-line"] });
+    expect(setVisibleLogicalRangeMock).toHaveBeenCalledWith({ from: -5, to: 1.5 });
+    expect(fitContentMock).not.toHaveBeenCalled();
+  });
+
+  it("puts a swapped-in main series back first on the pane, under the overlays and owning the scale's format", () => {
+    const overlay = makePaneSpec("sma", { placement: "overlay", group: "sma" });
+    const { rerender } = render(element({ chartType: "candles", panes: [overlay] }));
+    setSeriesOrderMock.mockReset();
+
+    rerender(element({ chartType: "line", panes: [overlay] }));
+
+    expect(setSeriesOrderMock).toHaveBeenCalledTimes(1);
+    expect(setSeriesOrderMock).toHaveBeenCalledWith(0);
+  });
+
+  it("re-attaches price lines and drawings on the new series after a type switch", () => {
+    const priceLines = [makePriceLineSpec("hline-1", { price: 11 })];
+    const drawings: DrawingSpec[] = [
+      {
+        id: "t1",
+        kind: "trendline",
+        anchors: [
+          { time: 60, price: 10 },
+          { time: 120, price: 12 },
+        ],
+        color: "#123456",
+      },
+    ];
+    const { rerender } = render(element({ chartType: "candles", priceLines, drawings }));
+    rerender(element({ chartType: "area", priceLines, drawings }));
+
+    expect(createPriceLineMock).toHaveBeenCalledTimes(2);
+    expect(attachPrimitiveMock.mock.calls.filter(([p]) => p instanceof TrendlinePrimitive)).toHaveLength(2);
+  });
+
+  it("keeps Heikin Ashi to the main series: overlays, price lines, clicks and the forming volume stay real", () => {
+    ownSetData();
+    const onPointClick = vi.fn();
+    const sma = makePaneSpec("sma", { placement: "overlay", data: [{ time: 60 as Time, value: 11 }] });
+    const live = { time: 180 as Time, open: 12, high: 14, low: 11, close: 13, volume: 7 };
+    render(
+      element({
+        chartType: "heikin_ashi",
+        panes: [sma, makePaneSpec("volume", { kind: "Histogram", data: [{ time: 60 as Time, value: 1 }] })],
+        priceLines: [makePriceLineSpec("hline-1", { price: 11 })],
+        onPointClick,
+        liveBar: live,
+      }),
+    );
+
+    expect(seriesAdded(0).setData).toHaveBeenLastCalledWith(HA);
+    expect(seriesAdded(1).setData).toHaveBeenLastCalledWith(sma.data);
+    expect(createPriceLineMock).toHaveBeenCalledWith(expect.objectContaining({ price: 11 }));
+    // The forming HA bar chains on the last closed HA bar: open (10.5+11.5)/2 = 11, close 50/4 = 12.5.
+    expect(seriesUpdateMock).toHaveBeenCalledWith({ time: 180, open: 11, high: 14, low: 11, close: 12.5 });
+    expect(seriesUpdateMock).toHaveBeenCalledWith({ time: 180, value: 7 });
+    coordinateToPriceMock.mockReturnValue(11.25);
+    subscribeClickMock.mock.calls[0][0]({ point: { x: 5, y: 40 }, time: 60 });
+    expect(onPointClick).toHaveBeenCalledWith({ time: 60, price: 11.25 });
+  });
+
+  it("names Heikin Ashi as derived in a read-only legend row, only while it is the type", () => {
+    const paneEl = document.createElement("div");
+    document.body.appendChild(paneEl);
+    const base = createChartMock.getMockImplementation()!;
+    createChartMock.mockImplementation((...args: unknown[]) => ({
+      ...base(...args),
+      panes: () => [{ ...pricePaneMock, getHTMLElement: () => paneEl }],
+    }));
+    const { rerender } = render(element({ chartType: "heikin_ashi" }));
+    const row = paneEl.querySelector('.chart-legend-row[data-group="heikin-ashi"]');
+    expect(row?.textContent).toBe("Heikin Ashi (derived)display only");
+    expect(row?.querySelector("button")).toBeNull();
+
+    rerender(element({ chartType: "candles" }));
+    expect(paneEl.querySelector('.chart-legend-row[data-group="heikin-ashi"]')).toBeNull();
+    paneEl.remove();
+  });
+
+  it("re-applies the Baseline's base value at the first visible bar's close, found by time", () => {
+    getVisibleRangeMock.mockReturnValue({ from: 60, to: 120 });
+    render(element({ chartType: "baseline" }));
+    const series = seriesAdded(0);
+    expect(series.applyOptions).toHaveBeenLastCalledWith({ baseValue: { type: "price", price: 11 } });
+
+    // Another series' extra time (90) on the shared scale: the logical index no longer maps to the
+    // data index, but the left edge's time still finds the bar at 120.
+    getVisibleRangeMock.mockReturnValue({ from: 90, to: 120 });
+    for (const [handler] of subscribeRangeMock.mock.calls) act(() => handler({ from: 1, to: 2 }));
+    expect(series.applyOptions).toHaveBeenLastCalledWith({ baseValue: { type: "price", price: 12 } });
+  });
+
+  it("keeps a type switch's view pending while the data is empty, and restores it when bars arrive", () => {
+    getVisibleLogicalRangeMock.mockReturnValue({ from: -5, to: 1.5 });
+    const { rerender } = render(element({ chartType: "candles" }));
+    setVisibleLogicalRangeMock.mockReset();
+
+    rerender(element({ chartType: "line", data: [] }));
+    getVisibleLogicalRangeMock.mockReturnValue({ from: 0, to: 0 }); // the empty series' own range
+    rerender(element({ chartType: "area", data: [] }));
+    expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled();
+
+    rerender(element({ chartType: "area" }));
+    expect(setVisibleLogicalRangeMock).toHaveBeenCalledTimes(1);
+    expect(setVisibleLogicalRangeMock).toHaveBeenCalledWith({ from: -5, to: 1.5 });
+  });
+
+  it.each([
+    ["normal", 0],
+    ["log", 1],
+    ["percent", 2],
+    ["indexed", 3],
+  ])("applies the %s mode, auto and invert to the right price scale", (mode, libraryMode) => {
+    const { rerender } = render(element({ priceScale: { mode, autoScale: true, invert: false } }));
+    expect(rightScaleApplyMock).toHaveBeenLastCalledWith({ mode: libraryMode, autoScale: true, invertScale: false });
+
+    rerender(element({ priceScale: { mode, autoScale: false, invert: true } }));
+    expect(rightScaleApplyMock).toHaveBeenLastCalledWith({ mode: libraryMode, autoScale: false, invertScale: true });
+  });
+
+  it("opens the scale menu on a right-click on the scale strip, and closes it on Esc and an outside press", () => {
+    pricePaneMock.getHeight.mockReturnValue(LAID_OUT_PANE_PX);
+    const onPriceScale = vi.fn();
+    const { container } = render(element({ onPriceScale, scaleModesLocked: "A compare draws on the percent scale" }));
+    const host = container.firstElementChild!;
+
+    expect(fireEvent.contextMenu(host, { clientX: 500, clientY: 100 })).toBe(true); // the plot: not ours
+    expect(screen.queryByRole("menu", { name: "Price scale" })).toBeNull();
+    expect(fireEvent.contextMenu(host, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 })).toBe(false);
+    expect(screen.getByRole("menuitemradio", { name: "Log" })).toBeDisabled();
+    expect(screen.getByRole("menuitemradio", { name: "Normal" })).toHaveAttribute("title", "A compare draws on the percent scale");
+
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Indexed to 100" }));
+    expect(onPriceScale).toHaveBeenLastCalledWith({ mode: "indexed" });
+    expect(screen.queryByRole("menu", { name: "Price scale" })).toBeNull();
+
+    fireEvent.contextMenu(host, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 });
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Invert scale" }));
+    expect(onPriceScale).toHaveBeenLastCalledWith({ invert: true });
+
+    fireEvent.contextMenu(host, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 });
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("menu", { name: "Price scale" })).toBeNull();
+    fireEvent.contextMenu(host, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 });
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole("menu", { name: "Price scale" })).toBeNull();
+  });
+
+  it("leaves the browser's menu on the scale strip when no onPriceScale is given", () => {
+    pricePaneMock.getHeight.mockReturnValue(LAID_OUT_PANE_PX);
+    const { container } = render(element({}));
+
+    expect(fireEvent.contextMenu(container.firstElementChild!, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 })).toBe(true);
+    expect(screen.queryByRole("menu", { name: "Price scale" })).toBeNull();
+  });
+
+  it("hit-tests the right scale strip after a visible left price scale", () => {
+    pricePaneMock.getHeight.mockReturnValue(LAID_OUT_PANE_PX);
+    leftScaleWidthPx = 40;
+    const { container } = render(element({ onPriceScale: vi.fn() }));
+    const host = container.firstElementChild!;
+
+    // Past the plot's width but still on the plot: the strip starts at 40 + PLOT_WIDTH_PX.
+    expect(fireEvent.contextMenu(host, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 })).toBe(true);
+    expect(screen.queryByRole("menu", { name: "Price scale" })).toBeNull();
+    expect(fireEvent.contextMenu(host, { clientX: 40 + PLOT_WIDTH_PX + RIGHT_SCALE_PX + 1, clientY: 100 })).toBe(true);
+    expect(fireEvent.contextMenu(host, { clientX: 40 + PLOT_WIDTH_PX + 1, clientY: 100 })).toBe(false);
+    expect(screen.getByRole("menu", { name: "Price scale" })).toBeInTheDocument();
+  });
+
+  it("keeps the scale menu inside the viewport", () => {
+    pricePaneMock.getHeight.mockReturnValue(LAID_OUT_PANE_PX);
+    const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(150);
+    try {
+      const { container } = render(element({ onPriceScale: vi.fn() }));
+      const host = container.firstElementChild!;
+      const nearBottom = window.innerHeight - 20;
+      vi.spyOn(host, "getBoundingClientRect").mockReturnValue({ left: 0, top: nearBottom - 100 } as DOMRect);
+
+      fireEvent.contextMenu(host, { clientX: PLOT_WIDTH_PX + 10, clientY: nearBottom });
+
+      expect(screen.getByRole("menu", { name: "Price scale" }).style.top).toBe(`${window.innerHeight - 150}px`);
+    } finally {
+      height.mockRestore();
+    }
+  });
+
+  it("reports auto back on for a double-click on the scale, and off for a drag the library ended without it", () => {
+    pricePaneMock.getHeight.mockReturnValue(LAID_OUT_PANE_PX);
+    const onPriceScale = vi.fn();
+    const { container } = render(element({ onPriceScale }));
+    const host = container.firstElementChild!;
+
+    fireEvent.pointerDown(host, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 });
+    rightScaleState.autoScale = false; // the library's own scale drag
+    fireEvent.pointerUp(window);
+    expect(onPriceScale).toHaveBeenLastCalledWith({ auto_scale: false });
+
+    // A drag the browser cancels ended the library's drag all the same.
+    rightScaleState.autoScale = true;
+    onPriceScale.mockClear();
+    fireEvent.pointerDown(host, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 });
+    rightScaleState.autoScale = false;
+    fireEvent.pointerCancel(window);
+    expect(onPriceScale).toHaveBeenCalledTimes(1);
+    expect(onPriceScale).toHaveBeenLastCalledWith({ auto_scale: false });
+
+    fireEvent.doubleClick(host, { clientX: 500, clientY: 100 });
+    expect(onPriceScale).toHaveBeenCalledTimes(1); // the plot is not the scale
+    fireEvent.doubleClick(host, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 });
+    expect(onPriceScale).toHaveBeenLastCalledWith({ auto_scale: true });
+  });
+
+  it("draws a compare overlay as a Line on the price pane, its whitespace kept", () => {
+    ownSetData();
+    const aligned = [{ time: 60 as Time, value: 50 }, { time: 120 as Time }];
+    render(
+      element({
+        panes: [makePaneSpec("compare:BTC-USD-PERP.HYPERLIQUID", { placement: "overlay", group: "compare:BTC-USD-PERP.HYPERLIQUID", data: aligned })],
+      }),
+    );
+
+    expect(addSeriesMock).toHaveBeenLastCalledWith("LineSeries-sentinel", expect.objectContaining({ color: "#123456" }), 0);
+    expect(addPaneMock).not.toHaveBeenCalled();
+    expect(seriesAdded(1).setData).toHaveBeenLastCalledWith(aligned);
   });
 });
