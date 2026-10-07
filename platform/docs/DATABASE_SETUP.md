@@ -51,11 +51,12 @@ ever back up or migrate.
 | `bots:control` | `bot_tui` | `bots/application/supervise.py` | `{"bot_id": "...", "action": "start"\|"stop"}` |
 | `bots:status` | `bots/application/supervise.py` — every 5s heartbeat and on each of the bot's order events (Story 29.6) | `bot_tui` | `{bot_id, strategy, symbol, mode, running, position_side, net_exposure, realized_pnl, unrealized_pnl, win_rate, closed_trades, started_at, updated_at, stop_loss, take_profit, entry_price, mark_price, position_qty, stop_loss_orders, take_profit_orders, open_orders, last_fill_at}` — the last nine appended in Story 29.6 (fields are only ever appended): the five price/quantity fields are `str(Price)`/`str(Quantity)` strings or `null` (flat, no such protective order, no mid yet), the three counts ints, `last_fill_at` UNIX ns or `null` (`docs/BOT_OPERATIONS.md` §1) |
 
-### 1.2 Plain keys (GET/SET, no TTL)
+### 1.2 Plain keys (GET/SET, no TTL except `bots:owner:*`)
 
 | Key | Writer | Reader | Shape |
 |---|---|---|---|
 | `bots:incidents:{bot_id}` | `bots/application/supervise.py` (the log itself: `bots/domain/bot.py`) | `bot_tui` (polled) | JSON list of `{type: "data_stale"\|"process_start", started_at, ended_at}`, capped at 50 entries |
+| `bots:owner:{bot_id}` | `bots/application/ownership.py` (claimed before the node runs, released at shutdown) and `bots/application/supervise.py` (renewed every heartbeat), only through the atomic compare-on-value Lua scripts in `bots/infrastructure/redis.py` | `python3 -m bots` at start (DW-78) | JSON `{mode, config, host, token, claimed_at}` naming the one process life hosting the bot, `PX` 15 s (3 heartbeats); a start that still finds another holder's lease after one TTL + one heartbeat refuses to run (`docs/BOT_OPERATIONS.md` §1) |
 | `bots:history:{bot_id}:{day\|week\|month\|all}` | `bots/application/history.py` | `bot_tui` (polled) | JSON blob of performance stats derived from `fills.db` |
 
 ### 1.3 Who owns what
@@ -72,7 +73,7 @@ ever back up or migrate.
   and consumes `collector:control`, acting only on the messages addressed to its own venue
   (Story 29.4; a message without `venue` is dYdX's).
 - **`bots`** (the bots context, `python3 -m bots`; was `live_paper` until Story 25.3) is the sole writer of `bots:status`/`bots:incidents:*`/
-  `bots:history:*`, and the sole actor on `bots:control`.
+  `bots:history:*`/`bots:owner:*`, and the sole actor on `bots:control`.
 - **`bot_tui`** never writes status data — it only publishes control messages and
   reads everything else. It never touches SQLite or the catalog directly either;
   every value it shows arrives via Redis.

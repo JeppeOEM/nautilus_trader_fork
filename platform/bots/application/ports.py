@@ -42,6 +42,11 @@ def incidents_key(bot_id: str) -> str:
     return f"bots:incidents:{bot_id}"
 
 
+def owner_key(bot_id: str) -> str:
+    """Name the ownership lease (DW-78) of `bot_id`: which live process hosts it."""
+    return f"bots:owner:{bot_id}"
+
+
 @dataclass(frozen=True)
 class PositionSnapshot:
     """
@@ -144,6 +149,19 @@ class BusConnection(Protocol):
     async def get(self, key: str) -> str | None: ...
 
     async def set(self, key: str, value: str) -> None: ...
+
+    async def hold(self, key: str, value: str, ttl_ms: int) -> bool:
+        """
+        Claim or renew a lease, atomically: when `key` is absent, set it to `value` expiring in
+        `ttl_ms` and return True; when it already holds exactly `value`, renew its expiry to
+        `ttl_ms` and return True; when it holds anything else, change nothing and return False.
+        Never a GET-then-SET: two processes racing for one absent key cannot both win.
+        """
+        ...
+
+    async def release(self, key: str, value: str) -> None:
+        """Delete `key` only while it still holds exactly `value` (compare-and-delete, atomic)."""
+        ...
 
     def control_messages(self) -> AsyncIterator[str]:
         """Every `bots:control` message body, from subscription on, until the connection drops."""

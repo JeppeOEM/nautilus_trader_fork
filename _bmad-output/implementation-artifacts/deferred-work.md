@@ -589,7 +589,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: code review of 4-4-bots-pane-with-start-stop-control.md (2026-09-01)"), 2026-10-05
 location: config.toml
 reason: **`bot_id` uniqueness between a bot's paper and live-mode configs is unenforced** -- restating the architecture's own already-flagged operator-discipline gap (epic-4-context.md's Technical Decisions) now that Story 4.4 is the first story to actually wire `bot_id` into a live, addressable Redis identity. A cloned config that keeps the same `bot_id` across `config.toml`/a real-money config would silently merge that bot's status/control history across paper and real-money trading. No automated check exists. `troll/live_paper/config.py`.
-status: open
+status: done 2026-10-07
+resolution: resolved by sweep bundle dw-bot-id-collision-guard
+resolution-undo: fd028024f90e6292adc9ecc2b8da84736b14431843b0558d204d256376c65e4e 2026-10-07 7374617475733a206f70656e
 decision: 2026-10-05 Detect collision at startup via Redis bots:status presence from another config/mode — Refuse to start (or warn loudly) when a live bot_id is already heartbeating from a different mode/config
 
 ### DW-79: `usePickerIndicatorValues`'s `resetAndLoad` wipes and re-fetches history for every configured picker indicator whenever any one indicator is …

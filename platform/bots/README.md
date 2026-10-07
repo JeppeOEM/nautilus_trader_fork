@@ -210,6 +210,12 @@ This builds the image (if needed) and starts the `live-paper` container in the
 background. It is **not** part of plain `make up` — it's gated behind the `live-paper`
 Compose profile so it's never started by accident.
 
+Each `bot_id` runs in one process at a time (DW-78): startup claims the Redis lease
+`bots:owner:{bot_id}` for every hosted bot before the node runs, and refuses to start (exit
+non-zero, `[bots.ownership] refusing to start: ...` naming the bot and both processes' mode,
+config and host) when another live process holds one. After a crash the restart waits up to
+~20 s for the old lease to expire; see the troubleshooting table.
+
 ### Signal log (`BOT_SIGNAL_LOG_DIR`, Story 31.9)
 
 Set `BOT_SIGNAL_LOG_DIR` in the `live-paper` environment and every paper `dummy` bot appends one JSON
@@ -425,4 +431,6 @@ host-dependent `test_node.py` tests; see the Makefile).
 | `[bots.fill_lost] fill permanently lost` or `[bots.history_refresh] ...: unable to open database file` | `platform/data/live_paper/` is root-owned | `sudo rm -rf platform/data/live_paper && mkdir platform/data/live_paper` (parent dir is user-owned, so no `sudo` needed for the `mkdir` itself if you can remove the root-owned one) |
 | `[bots.status_build] bots:status not built this tick` a couple of times right at startup | A race: the heartbeat loop's first tick can land before the first quote price. Self-heals within ~1-2 ticks; since Story 25.3 each skipped tick is counted in the error ledger rather than logged at debug. | Nothing if it stops after boot — it no longer tears down the Redis connection (fixed 2026-09-02). A count that keeps rising is a real failure: read the traceback. |
 | Container restarts right after the very first fill | Old bug (fixed 2026-09-02): the on-fill handler had no error handling, so any fill-store write failure crashed the whole node | Rebuild the image if you're on an older one — `docker compose -f docker-compose.yml --profile live-paper build live-paper` |
+| `[bots.ownership] refusing to start: bot_id already owned by another live process` and the container exits | Another live process (the paper fleet beside an exec config, or a second copy of the same config) hosts that `bot_id` and renews its `bots:owner:{bot_id}` lease | Stop the other process, or rename one of the `bot_id`s. A crashed process's lease expires within ~20 s on its own and never causes this. After five refused restarts (`restart: on-failure:5`) the container stays down -- the whole fleet, not only the colliding bot -- until restarted by hand. |
+| `[bots.ownership] bots:owner:... is held by another process` while running | This process lost its lease (Redis unreachable, or the node's event loop blocked, for over 15 s; or Redis restarted) and another process claimed the `bot_id` meanwhile. Known limit: the strategy keeps running; both now share the bot's Redis keys | Stop one of the two processes. A `regained` line follows once the lease is this process's again. |
 | Code edits don't seem to take effect | `bots.dockerfile` `COPY`s source into the image at build time — it's not bind-mounted like `config.toml`/`data/` are | Rebuild: `docker compose -f docker-compose.yml --profile live-paper build live-paper` |

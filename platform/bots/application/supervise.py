@@ -13,8 +13,8 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Bot supervision: the `bots:status` heartbeat, the `bots:incidents:*` log and `bots:control`
-start/stop (architecture AD-10).
+Bot supervision: the `bots:status` heartbeat, the `bots:incidents:*` log, the `bots:owner:*`
+lease refresh (DW-78) and `bots:control` start/stop (architecture AD-10).
 
 The only place in `platform/` that builds a `bots:status` payload or calls a strategy's
 `start()`/`stop()` in response to `bots:control` -- bot_tui and the web dashboard are pure Redis
@@ -43,6 +43,7 @@ from bots.application.ports import BusConnection
 from bots.application.ports import Connect
 from bots.application.ports import FillsStore
 from bots.application.ports import incidents_key
+from bots.application.ports import owner_key
 from bots.domain.bot import Bot
 
 
@@ -58,6 +59,10 @@ STATUS_HEARTBEAT_SECONDS = 5.0
 # instead of one Cache read, two fills.db queries and one publish per event on the node's loop.
 MIN_PUBLISH_SPACING_SECONDS = 0.1
 RECONNECT_SECONDS = 2.0
+# The ownership lease outlives this many missed heartbeats (DW-78): long enough that one slow tick
+# or a short Redis blip never frees it, short enough that a crashed life's lease expires while
+# the restarted process is still waiting to claim it (`bots.application.ownership`).
+OWNER_TTL_HEARTBEATS = 3
 
 
 @dataclass(frozen=True)
@@ -144,7 +149,20 @@ class Supervisor:
     looks like a data gap or a restart), and only after the prior life's log was read -- an unread
     prior log is never overwritten by a short new one (DW-228); `bots:status` is published on
     every heartbeat tick while connected; only a well-formed `bots:control` message addressed to
-    this bot starts or stops it.
+    this bot starts or stops it; every heartbeat tick holds the bot's `bots:owner` lease with this
+    process's `owner` value -- renewing it, re-claiming it once free, never overwriting another
+    holder's -- and a change of ownership is error-ledgered once per transition, both into and
+    out of the lost state (DW-78).
+
+    Known limit: a lease lost at runtime is ledgered, not acted on: the strategy keeps running and
+    both processes share the bot's Redis keys until an operator stops one. It takes this process
+    going a whole lease TTL without renewing (its Redis connection down, or its event loop or a
+    heartbeat tick blocked, that long) or a Redis restart (it keeps no data, so every lease
+    vanishes at once) while another process of the same bot_id is starting: that one retries
+    every second, faster than this heartbeat re-claims, so it can win. Upgrade path: persist
+    Redis or re-claim on reconnect before anything else, and stop or flatten the strategy on loss
+    through an explicit operator-approved policy -- never automatically, since a takeover by a
+    paper process must never close a real-money position.
     """
 
     def __init__(
@@ -155,6 +173,7 @@ class Supervisor:
         fills: FillsStore,
         connect: Connect,
         *,
+        owner: str,
         clock: Callable[[], float] = time.time,
         clock_ns: Callable[[], int] = time.time_ns,
         heartbeat_seconds: float = STATUS_HEARTBEAT_SECONDS,
@@ -169,6 +188,13 @@ class Supervisor:
         self._heartbeat_seconds = heartbeat_seconds
         self._min_publish_spacing = min_publish_spacing
         self._reconnect_seconds = reconnect_seconds
+        # Compared verbatim by the lease scripts: built once per process (`ownership.owner_value`).
+        self._owner = owner
+        ttl = OWNER_TTL_HEARTBEATS * heartbeat_seconds
+        # PX refuses 0: a 1 ms floor keeps a zero-heartbeat test configuration valid on real Redis.
+        self._owner_ttl_ms = max(1, round(ttl * 1000))
+        # `python3 -m bots` claims every lease before the node runs, so a life starts owning it.
+        self._owns_lease = True
         self.bot = Bot(bot_id, mode, started_at=clock())
         # Set by the strategy's order events; wakes the heartbeat loop before its next tick.
         self._changed = asyncio.Event()
@@ -249,6 +275,9 @@ class Supervisor:
                 await asyncio.sleep(self._reconnect_seconds)
 
     async def heartbeat_tick(self, connection: BusConnection) -> None:
+        # Like `publish`, a failed hold raises into the reconnect loop: the lease cannot be
+        # renewed without Redis, and nothing else on this connection works either.
+        await self.hold_lease(connection)
         now_ns = self._clock_ns()
         # A deliberately stopped bot legitimately receives no fresh data: staleness is only a
         # question while it runs (Bot.observe), or every stop would read as a feed outage.
@@ -275,6 +304,38 @@ class Supervisor:
             )
             return
         await connection.publish(STATUS_CHANNEL, json.dumps(status))
+
+    async def hold_lease(self, connection: BusConnection) -> None:
+        """
+        Renew (or re-claim, once free) this bot's lease; ledger the transition when ownership
+        changed since the last tick, never on every tick (a lost lease stays lost for minutes).
+        """
+        key = owner_key(self.bot.id)
+        owns = await connection.hold(key, self._owner, self._owner_ttl_ms)
+        if owns == self._owns_lease:
+            return
+        if owns:
+            self._owns_lease = True
+            error_ledger.record(
+                "bots.ownership",
+                f"{key} regained by this process ({self._owner})",
+                RuntimeError(f"ownership of {self.bot.id} regained"),
+            )
+            return
+        # Read before the state flips: a failed GET raises into the reconnect, and the next tick
+        # still sees the transition, so the loss is never left unledgered.
+        holder = await connection.get(key)
+        if holder is None:
+            # The other lease expired between the two calls: free now, so no loss to record --
+            # the next tick claims it.
+            return
+        self._owns_lease = False
+        error_ledger.record(
+            "bots.ownership",
+            f"{key} is held by another process ({holder}), not this one ({self._owner}); "
+            "not overwritten, the strategy keeps running",
+            RuntimeError(f"ownership of {self.bot.id} lost"),
+        )
 
     def handle_control(self, data: str) -> None:
         try:

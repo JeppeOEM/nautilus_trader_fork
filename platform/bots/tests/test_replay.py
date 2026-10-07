@@ -249,6 +249,6 @@ def test_an_unparseable_control_message_is_now_ledgered(store: SqliteFillsStore)
     """The one deliberate change on this path: a bad message is counted, not only logged."""
     error_ledger.reset()
     runtime = cast(BotRuntime, _Runtime())
-    supervisor = Supervisor("bot-01", "paper", runtime, store, unused_connect)
+    supervisor = Supervisor("bot-01", "paper", runtime, store, unused_connect, owner="test-owner")
     supervisor.handle_control("not json")
     assert error_ledger.counts() == {"bots.control_message": 1}

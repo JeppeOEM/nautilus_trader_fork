@@ -14,17 +14,27 @@
 # -------------------------------------------------------------------------------------------------
 """
 Port contracts (DDD spine AD-D2): the `FillsStore` behaviour the application relies on, run
-against its adapter `SqliteFillsStore`, and the bus adapter's shape against `BusConnection`.
+against its adapter `SqliteFillsStore`, and the bus adapter's shape against `BusConnection` --
+plus its ownership-lease scripts against a real Redis, skipped when none answers at `REDIS_URL`.
 """
 
+import asyncio
 import inspect
+import os
+import uuid
 from pathlib import Path
+
+import pytest
+import redis
+import redis.asyncio as aioredis
 
 from bots.application.ports import BusConnection
 from bots.application.ports import FillsStore
+from bots.application.ports import owner_key
 from bots.domain.fill_ledger import FillRecord
 from bots.infrastructure.fills_store import SqliteFillsStore
 from bots.infrastructure.redis import RedisBus
+from bots.infrastructure.redis import connect
 
 
 _DAY = 24 * 3600 * 1_000_000_000
@@ -71,5 +81,73 @@ def test_redis_bus_implements_every_bus_connection_method() -> None:
         for name, member in inspect.getmembers(BusConnection)
         if not name.startswith("_") and callable(member)
     }
-    assert wanted == {"publish", "get", "set", "control_messages"}
+    assert wanted == {"publish", "get", "set", "hold", "release", "control_messages"}
     assert all(callable(getattr(RedisBus, name, None)) for name in wanted)
+
+
+def _redis_url_or_skip() -> str:
+    url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
+    # Short timeouts: a box without Redis skips at once instead of hanging the suite.
+    client = redis.Redis.from_url(url, socket_connect_timeout=0.5, socket_timeout=0.5)
+    try:
+        client.ping()
+    except (redis.RedisError, OSError) as exc:
+        pytest.skip(f"no Redis answers at {url}: {exc!r}")
+    finally:
+        client.close()
+    return url
+
+
+async def _lease_contract(url: str, key: str) -> list[object]:
+    """Every observable step of one lease's life, as the scripts leave it on the server."""
+    async with connect(url) as bus, aioredis.Redis.from_url(url, decode_responses=True) as raw:
+        try:
+            claimed = await bus.hold(key, "ours", 5_000)
+            claimed_ttl = await raw.pttl(key)
+            foreign = await bus.hold(key, "theirs", 60_000)
+            renewed = await bus.hold(key, "ours", 60_000)
+            renewed_ttl = await raw.pttl(key)
+            await bus.release(key, "theirs")
+            kept = await raw.get(key)
+            await bus.release(key, "ours")
+            gone = await raw.exists(key)
+            renewed_longer = renewed_ttl > 5_000
+            return [claimed, 0 < claimed_ttl <= 5_000, foreign, renewed, renewed_longer, kept, gone]
+        finally:
+            await raw.delete(key)
+
+
+async def _expiry_contract(url: str, key: str) -> list[object]:
+    """Let an unrenewed lease lapse on its PX, then try both holders on it."""
+    async with connect(url) as bus, aioredis.Redis.from_url(url, decode_responses=True) as raw:
+        try:
+            await bus.hold(key, "ours", 50)
+            await asyncio.sleep(0.2)
+            taken = await bus.hold(key, "theirs", 60_000)
+            ours_again = await bus.hold(key, "ours", 60_000)
+            await bus.release(key, "ours")
+            return [taken, ours_again, await raw.get(key)]
+        finally:
+            await raw.delete(key)
+
+
+def test_an_expired_redis_lease_is_claimable_by_another_holder() -> None:
+    url = _redis_url_or_skip()
+    key = owner_key(f"test-dw78-{uuid.uuid4().hex}")
+
+    steps = asyncio.run(_expiry_contract(url, key))
+
+    # the PX is milliseconds: after 200 ms a 50 ms lease is gone; its old holder can neither
+    # renew nor delete the new one
+    assert steps == [True, False, "theirs"]
+
+
+def test_the_redis_lease_scripts_claim_renew_refuse_and_compare_and_delete() -> None:
+    url = _redis_url_or_skip()
+    key = owner_key(f"test-dw78-{uuid.uuid4().hex}")
+
+    steps = asyncio.run(_lease_contract(url, key))
+
+    # claimed with a PX expiry; a foreign value refused; renewed by its holder only; a foreign
+    # release keeps it, the holder's deletes it
+    assert steps == [True, True, False, True, True, "ours", 0]

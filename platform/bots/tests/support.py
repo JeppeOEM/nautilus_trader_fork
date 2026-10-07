@@ -18,6 +18,7 @@ import asyncio
 import itertools
 import threading
 from collections.abc import AsyncIterator
+from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from contextlib import asynccontextmanager
 
@@ -96,7 +97,10 @@ class ThreadRecordingStore:
 
 
 class FakeBus:
-    """An in-memory `BusConnection`: published messages, a key space, queued control bodies."""
+    """
+    An in-memory `BusConnection`: published messages, a key space, queued control bodies, and
+    leases (`hold`/`release`) that expire against `now`, a clock in seconds a test may replace.
+    """
 
     def __init__(self, control: list[str] | None = None) -> None:
         self.published: list[tuple[str, str]] = []
@@ -105,6 +109,35 @@ class FakeBus:
         self.fail_set = False
         # How many more `get` calls raise, as an unreachable Redis does.
         self.fail_get = 0
+        # Kept apart from `keys` so a test reading the plain key space never sees a lease.
+        self.leases: dict[str, tuple[str, float]] = {}
+        self.now: Callable[[], float] = lambda: 0.0
+        # How many more `hold` calls raise, as an unreachable Redis does.
+        self.fail_hold = 0
+
+    def lease(self, key: str) -> str | None:
+        """Return the lease's value while unexpired, else None (as Redis's PX expiry drops it)."""
+        held = self.leases.get(key)
+        if held is None or held[1] <= self.now():
+            return None
+        return held[0]
+
+    def lease_ttl(self, key: str) -> float | None:
+        held = self.leases.get(key)
+        return None if held is None else held[1] - self.now()
+
+    async def hold(self, key: str, value: str, ttl_ms: int) -> bool:
+        if self.fail_hold > 0:
+            self.fail_hold -= 1
+            raise ConnectionError("hold failed")
+        if self.lease(key) not in (None, value):
+            return False
+        self.leases[key] = (value, self.now() + ttl_ms / 1000)
+        return True
+
+    async def release(self, key: str, value: str) -> None:
+        if self.lease(key) == value:
+            del self.leases[key]
 
     async def publish(self, channel: str, message: str) -> None:
         self.published.append((channel, message))
@@ -113,6 +146,8 @@ class FakeBus:
         if self.fail_get > 0:
             self.fail_get -= 1
             raise ConnectionError("get failed")
+        if key in self.leases:
+            return self.lease(key)
         return self.keys.get(key)
 
     async def set(self, key: str, value: str) -> None:

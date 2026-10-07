@@ -1581,3 +1581,18 @@ removed. Nothing changes on the VPS except the next `make tui` image; the cleanu
       the TUI opens with no `open_listener` error and `pgrep -f open_listener` prints nothing.
 - [ ] Remove `DASHBOARD_BASE_URL` and `BOT_TUI_OPEN_URL_PORT` from `platform/.env` on the desktop
       and the VPS if present (nothing reads them any more).
+
+### DW-78 bot_id ownership lease `bots:owner:{bot_id}` (commit: this change's)
+
+`python3 -m bots` now claims a Redis lease per hosted bot before its node runs and refuses to start
+(exit 1, `[bots.ownership] refusing to start`) while another live process holds one; a crash
+restart waits up to ~20 s for its old lease to expire. Live only once `live-paper` is rebuilt.
+
+- [ ] On the VPS: `cd platform && docker compose --profile live-paper up -d --build live-paper`, then
+      `docker logs dydx-live-paper` shows the node starting (no `refusing to start`) and
+      `docker exec dydx-redis redis-cli --scan --pattern 'bots:owner:*' | wc -l` prints the paper
+      fleet's bot count (`grep -c '^\[\[bots\]\]' bots/config.toml`), each with
+      `redis-cli pttl` between 0 and 15000.
+- [ ] Before ever starting an exec config (`LIVE_PAPER_REAL_MONEY_CONFIG`) beside the paper fleet,
+      confirm its `bot_id` is not one of `config.toml`'s: a collision now refuses that start, and
+      after five refused restarts (`restart: on-failure:5`) the container stays down.

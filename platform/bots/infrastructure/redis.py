@@ -13,8 +13,9 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-The bots' Redis adapter: one `BusConnection` per `connect()` -- publish/GET/SET plus, for the
-supervisor's connection only, the `bots:control` subscription -- over `redis.asyncio`.
+The bots' Redis adapter: one `BusConnection` per `connect()` -- publish/GET/SET, the ownership
+lease's hold/release, plus, for the supervisor's connection only, the `bots:control` subscription
+-- over `redis.asyncio`.
 """
 
 from collections.abc import AsyncIterator
@@ -25,6 +26,30 @@ import redis.asyncio as aioredis
 
 from bots.application.ports import CONTROL_CHANNEL
 from bots.application.ports import BusConnection
+
+
+# Claim-or-renew in one server-side step: a GET-then-SET from the client would let two processes
+# both see an absent key and both believe they own it. PX: the lease's TTL is milliseconds.
+_HOLD_SCRIPT = """
+local current = redis.call('GET', KEYS[1])
+if not current then
+    redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+    return 1
+end
+if current == ARGV[1] then
+    redis.call('PEXPIRE', KEYS[1], ARGV[2])
+    return 1
+end
+return 0
+"""
+# Compare-and-delete: a process whose lease already expired and was claimed by another must not
+# delete the new holder's key on its way out.
+_RELEASE_SCRIPT = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
 
 
 class RedisBus:
@@ -44,6 +69,12 @@ class RedisBus:
 
     async def set(self, key: str, value: str) -> None:
         await self._client.set(key, value)
+
+    async def hold(self, key: str, value: str, ttl_ms: int) -> bool:
+        return bool(await self._client.eval(_HOLD_SCRIPT, 1, key, value, str(ttl_ms)))
+
+    async def release(self, key: str, value: str) -> None:
+        await self._client.eval(_RELEASE_SCRIPT, 1, key, value)
 
     async def control_messages(self) -> AsyncIterator[str]:
         if self._pubsub is None:

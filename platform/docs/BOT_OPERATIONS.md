@@ -34,6 +34,19 @@ docker compose -f platform/docker-compose.yml --profile live-paper down live-pap
 This kills the container. Fill history (`data/live_paper/fills.db`) and Cache state
 (Redis) both persist across restarts.
 
+**One process per `bot_id` (DW-78).** Before the node runs, each process claims a Redis lease
+`bots:owner:{bot_id}` for every bot it hosts (renewed every 5 s heartbeat, expiring after 15 s).
+If another live process already holds one -- the paper fleet and an exec config naming the same
+`bot_id`, or a second copy of the same config -- the start is refused before any strategy runs
+and the process exits non-zero, logging `[bots.ownership] refusing to start: bot_id already owned
+by another live process: 'bot-01' by mode=... config=... host=... since ...` followed by this
+process's own mode/config/host. Resolve it by stopping the other process or renaming one of the
+`bot_id`s. A restart after a crash waits up to ~20 s (one lease TTL plus one heartbeat) for the
+dead process's lease to expire, then starts normally; a clean stop releases its leases, so a
+restart after it is immediate -- unless the stop outlasted Docker's stop grace period (10 s by
+default; SIGKILL skips the release) or Redis did not answer it, in which case the restart waits
+like a crash restart.
+
 **Pause/resume without killing the container** — the strategy stops trading but the
 process, WS connection, and Redis heartbeat stay up:
 ```bash
