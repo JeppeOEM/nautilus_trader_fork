@@ -2351,6 +2351,10 @@ source_spec: `_bmad-output/implementation-artifacts/spec-dw-197-199-alert-store-
 reason: Runtime-rewritten data files are git-tracked (`platform/data/alerts/alerts.toml`, as `platform/data/preferences/*.toml` already are), so any upstream change to a tracked copy makes the VPS `git pull` refuse the locally rewritten file. Evidence: The 32-5 and DW-197 DEPLOY_CHECKLIST entries both need `git checkout --` surgery for exactly this; upgrade path is gitignoring the files (keeping a `.gitkeep`), since `AlertStore._load` and the preference readers already start empty on a missing file.
 status: open
 
-- source_spec: `_bmad-output/implementation-artifacts/spec-dw-208-215-archive-retention-rule-ordering.md`
-  summary: `mypy platform/kernel/catalog_files.py` fails with one pre-existing error at line 382: `SecondOHLC(...)` gets a `*Generator[float | None, ...]` star-arg where it expects `float`, so a None open/high/low/close is not excluded by the types.
-  evidence: The error is reproduced on HEAD 6ca8d50d6a with this review's patches stashed (`../.venv/bin/mypy archive/domain/retention.py archive/application/prune.py kernel/catalog_files.py` from `platform/`: 1 error, `[arg-type]`). Line 382 is outside the DW-208/215 diff, which only adds `DEFINITION_DIRNAMES` near line 98. It surfaced because this pass ran mypy over the whole module.
+### DW-292: `mypy platform/kernel/catalog_files.py` fails at line 382: `SecondOHLC(...)` gets a `*Generator[float | None, ...]` star-arg where it expects `float`, so a None open/high/low/close is not excluded by the types
+
+origin: migrated from legacy ledger (flat append from spec-dw-208-215-archive-retention-rule-ordering.md), 2026-10-07
+location: platform/kernel/catalog_files.py:382
+source_spec: `_bmad-output/implementation-artifacts/spec-dw-208-215-archive-retention-rule-ordering.md`
+reason: `mypy platform/kernel/catalog_files.py` fails with one pre-existing error at line 382: `SecondOHLC(...)` gets a `*Generator[float | None, ...]` star-arg where it expects `float`, so a None open/high/low/close is not excluded by the types. Evidence: The error is reproduced on HEAD 6ca8d50d6a with this review's patches stashed (`../.venv/bin/mypy archive/domain/retention.py archive/application/prune.py kernel/catalog_files.py` from `platform/`: 1 error, `[arg-type]`). Line 382 is outside the DW-208/215 diff, which only adds `DEFINITION_DIRNAMES` near line 98. It surfaced because this pass ran mypy over the whole module.
+status: open
