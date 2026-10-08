@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { lazy, Suspense } from "react";
-import { BrowserRouter, Link, Route, Routes } from "react-router";
+import { lazy, type ReactNode, Suspense } from "react";
+import { BrowserRouter, Link, Route, Routes, useLocation } from "react-router";
 
 import ArchiveStatus from "./components/ArchiveStatus";
+import CrashBoundary from "./components/CrashBoundary";
 import ErrorBar from "./components/ErrorBar";
 import { useAlertToasts } from "./hooks/useAlertToasts";
 
@@ -55,6 +56,17 @@ function AlertToasts() {
   );
 }
 
+// A page's crash replaces only that page: the nav and the error bar stay up, and leaving the page
+// (a new path) mounts a fresh boundary, so the next page renders normally.
+function PageCrashBoundary({ children }: { children: ReactNode }) {
+  const { pathname } = useLocation();
+  return (
+    <CrashBoundary key={pathname} area="page">
+      {children}
+    </CrashBoundary>
+  );
+}
+
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
@@ -62,15 +74,17 @@ export default function App() {
         <TopNav />
         <ErrorBar />
         <AlertToasts />
-        <Suspense fallback={<p className="term-loading">Loading</p>}>
-          <Routes>
-            <Route path="/" element={<RankingsPage />} />
-            <Route path="/chart/:iid" element={<ChartPage />} />
-            <Route path="/history/:iid" element={<HistoryPage />} />
-            <Route path="/alerts" element={<AlertsPage />} />
-            <Route path="/docs/*" element={<DocsPage />} />
-          </Routes>
-        </Suspense>
+        <PageCrashBoundary>
+          <Suspense fallback={<p className="term-loading">Loading</p>}>
+            <Routes>
+              <Route path="/" element={<RankingsPage />} />
+              <Route path="/chart/:iid" element={<ChartPage />} />
+              <Route path="/history/:iid" element={<HistoryPage />} />
+              <Route path="/alerts" element={<AlertsPage />} />
+              <Route path="/docs/*" element={<DocsPage />} />
+            </Routes>
+          </Suspense>
+        </PageCrashBoundary>
       </BrowserRouter>
     </QueryClientProvider>
   );
