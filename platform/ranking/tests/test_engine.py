@@ -584,9 +584,17 @@ def test_a_slow_row_is_stamped_when_the_board_is_read_not_when_the_cycle_began()
 class _DirtyPrices(FakePrices):
     """A catalog series with a duplicate ts and a non-positive price, unsorted."""
 
-    def series(self, instrument_id: str, start_ns: int) -> list[tuple[int, float]]:
+    def series(self, instrument_id: str, start_ns: int) -> list[PricePoint]:
         super().series(instrument_id, start_ns)
-        return [(NOW_NS - SEC_NS, 101.0), (NOW_NS - 3 * SEC_NS, 0.0), (NOW_NS - SEC_NS, 101.0)]
+        return [
+            _point(NOW_NS - SEC_NS, "101"),
+            _point(NOW_NS - 3 * SEC_NS, "0"),
+            _point(NOW_NS - SEC_NS, "101"),
+        ]
+
+
+def _point(ts_event: int, close: str) -> PricePoint:
+    return PricePoint(ts_event, float(close), Decimal(close), Decimal("1.5"))
 
 
 def test_every_backfill_drop_is_ledgered() -> None:

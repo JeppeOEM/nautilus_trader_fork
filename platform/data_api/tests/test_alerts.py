@@ -104,21 +104,24 @@ def _inline(job: Callable[[], Any], done: Callable[[Any], None]) -> None:
     done(job())
 
 
-def _new_engine(store: AlertStore, deliverer: Deliverer, drawings_path: Path) -> AlertEngine:
-    """Return an engine on the real input adapters: the chart's indicator page, the drawings."""
+def _engine_inputs(drawings_path: Path) -> dict[str, Any]:
+    """Return the real input adapters an engine takes: the chart's indicator page, the drawings."""
     indicators = ChartIndicatorReader(
         catalog_path=lambda: _NO_CATALOG,
         candles_dir=lambda: _NO_CATALOG,
         recent_rows=lambda *_: [],
         recent_liquidations=lambda *_: [],
     )
-    return AlertEngine(
-        store,
-        deliverer,
-        indicators=indicators,
-        drawings=DrawingFileReader(lambda: drawings_path),
-        submit=_inline,
-    )
+    return {
+        "indicators": indicators,
+        "drawings": DrawingFileReader(lambda: drawings_path),
+        "submit": _inline,
+    }
+
+
+def _new_engine(store: AlertStore, deliverer: Deliverer, drawings_path: Path) -> AlertEngine:
+    """Return an engine on the real input adapters: the chart's indicator page, the drawings."""
+    return AlertEngine(store, deliverer, **_engine_inputs(drawings_path))
 
 
 def _engine(store: AlertStore, deliverer: Deliverer | None = None) -> AlertEngine:
@@ -256,7 +259,7 @@ def test_routes_create_list_delete(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 class _ForgetRecordingEngine(AlertEngine):
     def __init__(self, store: AlertStore) -> None:
-        super().__init__(store, _RecordingDeliverer())
+        super().__init__(store, _RecordingDeliverer(), **_engine_inputs(_NO_DRAWINGS))
         self.forgotten: list[str] = []
 
     def forget(self, alert_id: str) -> None:

@@ -25,9 +25,14 @@ allowlisted separately and must never share code with the production ones.
 The detector is AST-based and runs over every module `_source_tree.python_modules()` walks (tests
 included). A function (or method) is a fold when it holds both a max and a min reduction
 (`max(...)`, `.max()`, `np.maximum`/`np.fmax`/`np.nanmax` and their `.reduceat` forms; min
-symmetric) and either builds a record whose keyword arguments or dict-literal keys cover one whole
-OHLC key set, or buckets its rows (`bucket_start*(...)`, any `*.reduceat`). Nested functions are
-judged on their own bodies.
+symmetric) and either builds a record whose keyword arguments, dict-literal keys or assigned
+attributes (`entry.h = ...`) cover one whole OHLC key set, or buckets its rows (`bucket_start*(...)`,
+any `*.reduceat`). A max nested in a min's arguments or the reverse (`max(1, min(a, b))`) is a clamp
+of one value, not a reduction, and does not count. Nested functions are judged on their own bodies.
+
+`fold_arrays` delegates its OHLCV reduction to `_fold_ohlcv` since Story 33.3 (the order-flow and
+liquidation sums beside it are exact integer sums, not a bar's high/low), so the allowlist names
+that helper: the one place the 1 s rows' high and low are reduced into wider bars.
 
 Adding a fold: a new *production* fold is almost always wrong -- call `fold_arrays` instead. A new
 verification reference fold goes into `REFERENCE_FOLDS` as `module.qualname` with the reason it
@@ -51,8 +56,9 @@ from _source_tree import python_modules
 
 PRODUCTION_FOLDS: dict[str, str] = {
     "kernel.fold.fold_trades": "Story 24.1 AD: trades -> the 1 s row, the one trade fold",
-    "candles.domain.fold.fold_arrays": (
-        "Story 24.1 AD: 1 s rows -> every wider bar; every other bar comes from these two"
+    "candles.domain.fold._fold_ohlcv": (
+        "Story 24.1 AD: 1 s rows -> every wider bar, the OHLCV half of `fold_arrays` (split out by"
+        " Story 33.3); every other bar comes from these two"
     ),
 }
 
@@ -119,20 +125,54 @@ def _record_keys(node: ast.AST) -> set[str]:
     return set()
 
 
+def _assigned_attributes(nodes: list[ast.AST]) -> set[str]:
+    """Return the attribute names the function assigns (`entry.h = ...`): a record filled in place."""
+    return {
+        target.attr
+        for node in nodes
+        if isinstance(node, ast.Assign | ast.AugAssign | ast.AnnAssign)
+        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        if isinstance(target, ast.Attribute)
+    }
+
+
 def _buckets(call: ast.Call) -> bool:
     callee = _callee(call.func) or ""
     return callee.startswith("bucket_start") or callee == "reduceat"
 
 
+def _clamp_calls(calls: list[ast.Call]) -> set[int]:
+    """
+    Return the ids of the max and min calls that form a clamp, one nested inside an argument of
+    the other (`max(lo, min(x, hi))`, `max(1, min(a, b) // c)`): a bound on one value, never a
+    reduction over rows.
+    """
+    clamped: set[int] = set()
+    for outer, inner_names in ((_MAX_NAMES, _MIN_NAMES), (_MIN_NAMES, _MAX_NAMES)):
+        for call in calls:
+            if not _is_reduction(call, outer):
+                continue
+            for arg in call.args:
+                for node in ast.walk(arg):
+                    if isinstance(node, ast.Call) and _is_reduction(node, inner_names):
+                        clamped.update((id(call), id(node)))
+    return clamped
+
+
 def _is_fold(function: _Function) -> bool:
     nodes = list(_own_nodes(function))
     calls = [node for node in nodes if isinstance(node, ast.Call)]
+    clamped = _clamp_calls(calls)
+    calls = [c for c in calls if id(c) not in clamped]
     reduces = any(_is_reduction(c, _MAX_NAMES) for c in calls) and any(
         _is_reduction(c, _MIN_NAMES) for c in calls
     )
     if not reduces:
         return False
-    builds_ohlc = any(keys <= _record_keys(node) for node in nodes for keys in _OHLC_KEY_SETS)
+    assigned = _assigned_attributes(nodes)
+    builds_ohlc = any(
+        keys <= _record_keys(node) or keys <= assigned for node in nodes for keys in _OHLC_KEY_SETS
+    )
     return builds_ohlc or any(_buckets(c) for c in calls)
 
 
@@ -211,6 +251,26 @@ def sample(rows, bar):
     return buckets
 """
 
+# The shape of `views.derivatives._store_liquidation_rows` (Story 33.5): a page span clamped with
+# `max(1, min(...))` beside a bucket start. The clamp bounds one value; nothing is folded.
+_CLAMPED_SPAN_BESIDE_A_BUCKET = """
+def page(rows, bar, limit, cap, before):
+    span = max(1, min(limit * bar, cap) // bar) * bar
+    end = bucket_start_ms(before, bar) + bar
+    return [r for r in rows if end - span <= r.t < end]
+"""
+
+# A fold that fills its bar in place, as `candles.domain.fold._fold_ohlcv` does.
+_ATTRIBUTE_FOLD = """
+def fold(acc, rows):
+    for key, part in rows:
+        entry = acc[key]
+        entry.o = part[0]
+        entry.h = part.max()
+        entry.l = part.min()
+        entry.c = part[-1]
+"""
+
 _CLAMP = """
 def clamp(x, lo, hi):
     return {"value": max(lo, min(x, hi))}
@@ -232,3 +292,20 @@ def test_a_max_and_min_without_a_bar_record_is_not_a_fold() -> None:
 def test_a_per_bucket_sampler_is_not_a_fold() -> None:
     """DW-192's admission, kept as a self-test now that the sampler itself is deleted."""
     assert _folds_in(_BUCKET_SAMPLER, "synthetic") == set()
+
+
+def test_a_clamped_span_beside_a_bucket_start_is_not_a_fold() -> None:
+    assert _folds_in(_CLAMPED_SPAN_BESIDE_A_BUCKET, "synthetic") == set()
+
+
+def test_a_reduceat_fold_with_a_clamp_beside_it_is_still_caught() -> None:
+    """Only the clamp's own calls are set aside: a real high/low reduction still counts."""
+    source = _REDUCEAT_FOLD.replace(
+        "    starts =", "    bar = max(1, min(bar, 86_400))\n    starts =", 1
+    )
+    assert "max(1, min(bar" in source
+    assert _folds_in(source, "synthetic") == {"synthetic.fold_bars"}
+
+
+def test_a_fold_that_fills_its_bar_by_attribute_is_caught() -> None:
+    assert _folds_in(_ATTRIBUTE_FOLD, "synthetic") == {"synthetic.fold"}
