@@ -1224,6 +1224,12 @@ def liquidation_study(
     where `read_liquidations`/the backtest select on `ts_init` alone; upgrade path: widen the
     liquidation read by `MAX_TS_INIT_SKEW_NS` and select on `ts_init`, as `read_liquidations`
     does.
+
+    Known limit: the seconds and the liquidations are both cut on `ts_event`, but a second's row
+    is stamped `S + 0.5 s`, so a window edge that is not a whole second can leave a liquidation of
+    the edge second in the read while its row is out (or the reverse), counting it `unattributed`;
+    every UTC-date `START`/`END` (notebook 09's) is whole; upgrade path: floor both edges to the
+    second before reading.
     """
     if end_ns <= start_ns:
         raise ValueError(f"end_ns {end_ns} must be after start_ns {start_ns}")

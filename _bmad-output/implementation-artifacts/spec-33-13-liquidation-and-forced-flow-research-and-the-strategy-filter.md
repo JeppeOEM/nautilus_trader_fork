@@ -6,7 +6,7 @@ status: 'done'
 baseline_revision: '163c9b116e08d35740b7f0e8778847498ae0f33b'
 final_revision: '334d89d578278b179f0f161f8dfeb6b79066f187'
 review_loop_iteration: 0
-followup_review_recommended: true
+followup_review_recommended: false
 context:
   - '{project-root}/platform/CLAUDE.md'
   - '{project-root}/_bmad-output/implementation-artifacts/epic-33-context.md'
@@ -244,6 +244,20 @@ warnings: ['multiple-goals', 'oversized']
   - `[low]` `[patch]` The study's "unattributed" line said "no snapshot" but also counted seconds with two rows. The wording and notebook 09 now say "none, or two".
   - `[low]` `[patch]` Two limits were undocumented: the detector's cold start (no episode in the first `baseline_s`) and the read on `ts_event` vs the replay on `ts_init` at the window edges. Both are now Known limits in `liquidation_study`, and the cold start is in notebook 09's reading guide.
   - `[low]` `[patch]` `liquidation_study` accepted a backwards window and returned an empty study. It now raises `ValueError` (tested).
+
+### 2026-10-08 — Review pass (follow-up, by hand after run c4e7 stop)
+- intent_gap: 0
+- bad_spec: 0
+- patch: 4: (high 0, medium 0, low 4)
+- defer: 0
+- reject: 0
+- addressed_findings:
+  - `[low]` `[patch]` `OFIStrategy` never settled the liquidations still held when the run stopped (their second's snapshot past the window), so `delivered_liquidations` exceeded netted + `unattributed_liquidations`. `on_stop` now counts them unattributed (WARNING); D-220 and the module docstring say so (tested).
+  - `[low]` `[patch]` `docs/DATA_DICTIONARY.md` §2.12 (notebook 09) still described the pre-334d89d578 cross-venue pairing ("greedily in start order"); it now states nearest pair first and its Known limit.
+  - `[low]` `[patch]` `CascadeLeadLag`'s invariant still read as the old per-`a` greedy pairing; reworded to nearest-pair-first, one-to-one on both sides, sorted by `a`'s start.
+  - `[low]` `[patch]` `liquidation_study`: a window edge that is not a whole second can split an edge second's liquidation from its `S + 0.5 s` row and count it unattributed; now a `Known limit:` (every UTC-date window is whole; upgrade path: floor both edges).
+- verified correct, no change: venue-second attribution in `OFIStrategy._take_forced` and `organic_delta` (one rule, `ts_event // 1 s`, matching `SecondSampler._row`'s `S + 0.5 s` stamp and `TradeIntake.fold`; snapshot `ts_init` is the wall close `S + 1 + hold_back`, so no look-ahead); `match_to_trades` mirrors `verification.domain.liquidation_check` (earliest liquidation first, earliest unused trade in `[ts - tol, ts + tol]`, exact raws); nearest-first pairing and its tie rule; `liquidations_vs_oi` bucket alignment (pre-window bucket dropped, `change` length = buckets); `_episode_returns` grid positions; `next_phase`'s quiet-from-ended branch is defensive only (an episode cannot start and end in one detector update: start needs `active`, end needs not `active`).
+- verification: `research/tests` alone 827 passed, 3 skipped at HEAD 6233a28f0f; after the patches `research/tests kernel/tests tests/test_boundaries.py tests/test_notebook_rules.py verification/tests/test_ofi_parity.py -W error` 1638 passed, 4 skipped (notebooks 08/09 ran on the fixture); ruff check/format clean on the touched files; mypy reports nothing in them.
 
 ## Design Notes
 

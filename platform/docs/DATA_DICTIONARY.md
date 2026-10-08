@@ -3457,8 +3457,10 @@ Story 33.13)
   (`research.application.aligned.liquidations_vs_oi`: size, notional, `bucket_last` change --
   the first bucket's against the bucket before the window, read for it (`aligned.oi_window_start`)
   and left out of the output -- `deleveraging`, `share_of_oi_drop`); the cross-venue pairing of
-  episodes by start, one to one, greedily in start order with the nearest unused episode, a tie
-  to the later one (`aligned.cross_venue_liquidations`), against the other venue's leg with a
+  episodes by start, one to one, nearest pair first (of every same-direction pair within
+  `max_lag_s`, the closest whose episodes are both unused, a tie to the later one; a greedy
+  matching, not a minimum-cost one, Known limit) (`aligned.cross_venue_liquidations`), against
+  the other venue's leg with a
   feed, else Hyperliquid's; its `reason` names the empty side, or says that no other-venue leg
   exists. The sample line reports the UTC days touched and the window's hours. An id without a feed
   reports NaN/NA liquidation columns and counts of 0, never zeros as data.

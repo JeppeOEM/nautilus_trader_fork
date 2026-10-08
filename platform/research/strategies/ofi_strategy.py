@@ -47,10 +47,11 @@ research's `organic_delta` rule (the capture's for trades: a second `S` holds th
 order, what a live strategy knows): one received before the previous second's snapshot is held
 for its own. A liquidation whose second has no usable snapshot when it is settled -- the
 snapshot is one-sided, the second fell in a feed gap or before the first snapshot, or the row
-arrived after its second's snapshot -- is not netted anywhere else but discarded, counted in
-`unattributed_liquidations` and logged at WARNING (the research side's `unattributed`). Known limit:
-a liquidation's stamp and its forced trade's may fall in adjacent seconds, research's
-`organic_delta` limit (the same rule, the same upgrade path).
+arrived after its second's snapshot, or the run stopped before it -- is not netted anywhere
+else but discarded, counted in `unattributed_liquidations` and logged at WARNING (the research
+side's `unattributed`), so with the filter on every delivered row is netted or counted.
+Known limit: a liquidation's stamp and its forced trade's may fall in adjacent seconds,
+research's `organic_delta` limit (the same rule, the same upgrade path).
 
 Known limit: the modes are research-only: no bot runs `OFIStrategy` with them, and live delivery
 order is not checked (a row received before the detector's clock is placed at it, as a backtest
@@ -342,14 +343,18 @@ class OFIStrategy(Strategy):
         own = self._pending.pop(second, None) if usable else None
         settled = [s for s in self._pending if s <= second]
         rows = sum(self._pending.pop(s)[2] for s in settled)
-        if rows:
-            self.unattributed_liquidations += rows
-            self.log.warning(
-                f"{rows} liquidation(s) settled at the snapshot of {data.ts_event} without a "
-                f"usable snapshot of their own second not netted: unattributed "
-                f"({self.unattributed_liquidations} so far)"
-            )
+        self._discard_unattributed(rows, f"settled at the snapshot of {data.ts_event}")
         return (0, 0) if own is None else (own[0], own[1])
+
+    def _discard_unattributed(self, rows: int, where: str) -> None:
+        """Count `rows` held liquidations as unattributed and log it once at WARNING (none: no-op)."""
+        if not rows:
+            return
+        self.unattributed_liquidations += rows
+        self.log.warning(
+            f"{rows} liquidation(s) {where} without a usable snapshot of their own second not "
+            f"netted: unattributed ({self.unattributed_liquidations} so far)"
+        )
 
     def _second_delta(self, data: DydxSecondSnapshot, usable: bool) -> float:
         """
@@ -466,6 +471,13 @@ class OFIStrategy(Strategy):
                 quantity=self.instrument.make_qty(self.config.trade_size),
             ),
         )
+
+    def on_stop(self) -> None:
+        # The rows still held belong to seconds whose snapshot the run never delivered (past its
+        # end): settle them as unattributed, so every delivered row is netted or counted.
+        rows = sum(held[2] for held in self._pending.values())
+        self._pending = {}
+        self._discard_unattributed(rows, "held at stop")
 
     def on_reset(self) -> None:
         self._first_ts = self._last_ts = self._minute = self._trend_bull = None

@@ -297,6 +297,17 @@ def test_a_liquidation_received_after_its_seconds_snapshot_is_unattributed_not_m
     assert strategy.unattributed_liquidations == 1
 
 
+def test_a_liquidation_still_held_at_stop_is_counted_unattributed() -> None:
+    # Second 1's liquidation arrives after second 0's snapshot and the run stops before second
+    # 1's: it is settled as unattributed, so delivered == netted + unattributed.
+    strategy = _strategy(forced_flow_filter=True)
+    strategy.on_data(_second(0, 0.010, 0.004))
+    strategy.on_data(_liquidation(_T0 + _NS + 100_000_000, LiquidatedSide.LONG, 3, 3))
+    strategy.on_stop()
+    assert (strategy.delivered_liquidations, strategy.unattributed_liquidations) == (1, 1)
+    assert strategy._pending == {}
+
+
 def test_the_fade_window_closes_at_the_first_snapshot_after_a_gap() -> None:
     # A fade window opened at 1 s; the feed then stops for 60 s (> the 10 s window): the
     # detector is advanced and the phase recomputed at the next snapshot before any entry.

@@ -730,9 +730,10 @@ class CascadeLeadLag:
     """
     Two venues' cascade episodes paired by start (`cross_venue_liquidations`).
 
-    Invariant: the pairing is one-to-one: `pairs` holds one row per `a` episode that found an
-    unused same-direction `b` episode starting within `max_lag_s` of it (`lag_s = (b - a) / 1 s`,
-    positive when `a` leads), in `a`'s start order, and no `b` episode is in two rows;
+    Invariant: the pairing is one-to-one: `pairs` holds one row per pair of same-direction
+    episodes whose starts lie within `max_lag_s` of each other, chosen nearest pair first
+    (`cross_venue_liquidations`; `lag_s = (b - a) / 1 s`, positive when `a` leads), sorted by `a`'s
+    start, and no `a` or `b` episode is in two rows;
     `a_episodes`/`b_episodes` count each side's episodes; `reason` is set exactly when a side has
     none, naming it, and `pairs` is then empty. `lines()` says it in words.
 
