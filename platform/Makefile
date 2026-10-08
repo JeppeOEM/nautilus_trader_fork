@@ -193,10 +193,28 @@ build-insecure:
 ## Story 23.1)
 ## read the whole checkout, mounted read-only at /src: no image holds every package, and /app is
 ## not named `platform`, so reading the image would silently check a subset.
+## docker-compose.test.yml lifts the `collector` service's runtime mem_limit to the suite's own
+## measured bound (DW-244): the suite outgrew the dYdX collector's 1690m.
+## pandas 3 (platform/requirements.txt pins 3.0.4 over nautilus_trader's own <3.0.0, DW-244) is held
+## by the image runs: any pandas.errors.Pandas4Warning is an error, except the two that compiled
+## nautilus_trader 1.229.0 raises itself and FORK-01 forbids fixing here, ignored by exact message
+## (TEST-04): `pd.Timestamp.utcnow()` (backtest/engine.pyx:1418, :1601, backtest/node.py:347) and
+## `floor(freq="d")` (data/aggregation.pyx:1626, :1634, :1646, :1786, data/engine.pyx:2041).
+## research/tests/test_notebooks.py's UPSTREAM_PANDAS4_DEPRECATIONS holds the same two messages for
+## the notebook harness; change both together. pytest escapes a -W message and matches it as a
+## prefix, and a later -W wins, so `error::` comes first; a message must not contain a colon
+## (tests/test_pandas_pin.py holds both lists equal and colon-free). By message, not by module:
+## pandas attributes the warning to the first Python frame outside pandas, the caller of the
+## compiled nautilus_trader code, so no module filter can name nautilus_trader. Known limit: -W
+## reaches the pytest process only, not a `python3 -m ...` a test spawns. Upgrade path: pass the
+## same filters as PYTHONWARNINGS once a spawned interpreter's pandas use needs proving.
+PANDAS4_WARNINGS := -W error::pandas.errors.Pandas4Warning \
+	-W "ignore:Timestamp.utcnow is deprecated and will be removed in a future version. Use Timestamp.now('UTC') instead.:pandas.errors.Pandas4Warning" \
+	-W "ignore:'d' is deprecated and will be removed in a future version, please use 'D' instead.:pandas.errors.Pandas4Warning"
 TEST_SOURCE_MOUNT := -v $(REPO_ROOT):/src:ro -e PLATFORM_SOURCE_DIR=/src/platform
 test:
-	$(COMPOSE) run --rm --no-deps -e HOME=/tmp -e USER=collector $(TEST_SOURCE_MOUNT) collector \
-		python3 -m pytest archive/tests research/tests alerting/tests views/tests candles/tests capture/tests capture/venues/dydx/tests capture/venues/bybit/tests capture/venues/hyperliquid/tests collection_control/tests ranking/tests bot_tui/tests data_api/tests observability/tests kernel/tests verification/tests tests -q
+	$(COMPOSE) -f $(PLATFORM_DIR)docker-compose.test.yml run --rm --no-deps -e HOME=/tmp -e USER=collector $(TEST_SOURCE_MOUNT) collector \
+		python3 -m pytest $(PANDAS4_WARNINGS) archive/tests research/tests alerting/tests views/tests candles/tests capture/tests capture/venues/dydx/tests capture/venues/bybit/tests capture/venues/hyperliquid/tests collection_control/tests ranking/tests bot_tui/tests data_api/tests observability/tests kernel/tests verification/tests tests -q
 
 ## The verification stack (Epic 31, Story 31.1): a clean-slate capture of this checkout's data/
 ## side by side with a live stack -- the Bybit and Hyperliquid collectors, archive, ranking_engine,
@@ -410,7 +428,7 @@ tui:
 ## by `test_cache_config_*` in the same file.
 test-live-paper:
 	$(COMPOSE) --profile live-paper run --rm --no-deps -e HOME=/tmp -e USER=collector $(TEST_SOURCE_MOUNT) live-paper \
-		python3 -m pytest bots/tests observability/tests kernel/tests tests --ignore=tests/test_hotpath.py --ignore=tests/test_capture_archive_handoff.py \
+		python3 -m pytest $(PANDAS4_WARNINGS) bots/tests observability/tests kernel/tests tests --ignore=tests/test_hotpath.py --ignore=tests/test_capture_archive_handoff.py \
 		--deselect bots/tests/test_node.py::test_build_node_configures_redis_backed_cache \
 		--deselect bots/tests/test_node.py::test_build_node_passes_redis_credentials_and_ssl_from_url -q
 

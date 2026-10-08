@@ -1,0 +1,19 @@
+# `make test`'s override of docker-compose.yml (DW-244): the suite runs inside the `collector`
+# service's image, but not under that service's runtime `mem_limit` (1690m, the dYdX collector's
+# measured peak x 1.5). The test run is a different workload: the research notebooks' backtests
+# alone reach past that limit, and an exceeded limit is a bare `Error 137` at whichever test is
+# running, not a failure naming a test.
+#
+# Measured 2026-10-08 on the dev box (the full `make test` suite in platform-collector:latest,
+# pandas 3.0.4): cgroup memory.peak 2185670656 B = 2084.4 MiB; x 1.5 = 3126.6 MiB, rounded up.
+# Bounded rather than unlimited, as every capture service is, so a leaking test fails this one
+# container instead of starving the live stack beside it. Known limit: the figure grows with the
+# suite. Upgrade path: when `make test` ends in `Error 137`, re-measure (`cat
+# /sys/fs/cgroup/memory.peak` after the pytest run in the same container) and raise both values.
+# Known limit: the bound protects neighbours only on a host with that much memory free beside them;
+# on the 3.7 GB VPS it exceeds what the running live stack leaves, so run `make test` on a host with
+# 3.1 GB free (the dev box), not beside the live stack there.
+services:
+  collector:
+    mem_limit: 3127m
+    memswap_limit: 3127m

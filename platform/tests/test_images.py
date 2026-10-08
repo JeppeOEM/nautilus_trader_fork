@@ -449,8 +449,31 @@ _PYTEST_VALUE_OPTIONS = frozenset(
 )
 
 
+def _makefile_variables() -> dict[str, str]:
+    """`NAME := value` definitions of the Makefile, backslash continuations joined."""
+    joined = _MAKEFILE.read_text().replace("\\\n", " ")
+    return dict(re.findall(r"^([A-Za-z_]\w*)\s*:=\s*(.*)$", joined, re.MULTILINE))
+
+
+def _expand(tokens: list[str]) -> list[str]:
+    """
+    Replace each whole-token `$(NAME)` by its definition's tokens (e.g. `$(PANDAS4_WARNINGS)`'s
+    `-W` options), so a variable is never read as a test path; an undefined one fails here.
+    """
+    variables = _makefile_variables()
+    expanded: list[str] = []
+    for token in tokens:
+        match = re.fullmatch(r"\$\((\w+)\)", token)
+        if match is None:
+            expanded.append(token)
+            continue
+        assert match.group(1) in variables, f"Makefile has no `{match.group(1)} :=` definition"
+        expanded.extend(shlex.split(variables[match.group(1)]))
+    return expanded
+
+
 def _pytest_paths(line: str) -> list[str]:
-    tokens = shlex.split(line)
+    tokens = _expand(shlex.split(line))
     args = tokens[tokens.index("pytest") + 1 :]
     values = {i + 1 for i, token in enumerate(args) if token in _PYTEST_VALUE_OPTIONS}
     return [

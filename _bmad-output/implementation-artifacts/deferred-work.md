@@ -1990,7 +1990,9 @@ resolution-undo: 0048a9d04f44fc28ce1ff055a57d3d109c101be1016932f3bf35d6b4fc4e643
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: platform/requirements.txt:2
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-26-3-closeout-shims-gone-spines-reconciled.md` summary: The platform images install `pandas==3.0.4` (`platform/requirements.txt:2`) over nautilus_trader 1.229.0's own `pandas>=2.3.3,<3.0.0` (`pyproject.toml:31`, `uv.lock` 2.3.3), so `pip check` fails in the collector image and host-side test runs (pandas 2.3.3) never exercise the pandas major version production runs. Resolve by pinning `pandas==2.3.3` or by proving pandas 3.x on the catalog read/backtest path; recorded as a DDD spine Deferred entry. evidence: `pip check` inside `platform-collector:latest` built 2026-09-28: "nautilus-trader 1.229.0 has requirement pandas<3.0.0 … but you have pandas 3.0.4" (reviews/review-versions-2026-09-28.md H-1); predates 26.3, which changed no dependency.
-status: open
+status: done 2026-10-08
+resolution: resolved by sweep bundle dw-pandas-3-prove-and-document
+resolution-undo: 597fcc352f16d793125065514dfcd167cd67ab3e0aafba8780a49ccec359251f 2026-10-08 7374617475733a206f70656e
 decision: 2026-10-05 Prove 3.x — Run catalog read/backtest suite on pandas 3.x and document override
 
 ### DW-245: `platform/views/tests/test_live_candles.py::test_seed_wide_bar_reads_raw_seconds_plus_unflushed_tail` is wall-clock flaky -- it floors `time.time_ns()` to a …

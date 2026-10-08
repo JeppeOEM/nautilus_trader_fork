@@ -23,18 +23,25 @@ from nautilus_trader.config import LoggingConfig
 
 
 # Known upstream deprecation warnings (platform/CLAUDE.md TEST-04: tracked explicitly,
-# never blanket-suppressed) -- both are internal nautilus_trader calls, off-limits to
-# fix here per FORK-01 (never modify nautilus_trader/crates), and both fire on every
-# BacktestEngine.run() so they show up across test_bot_status.py/test_strategy.py/
-# test_trade_history.py:
-#   - nautilus_trader/backtest/engine.pyx:1601 (and :1418) -- `pd.Timestamp.utcnow()`,
-#     deprecated by pandas in favor of `Timestamp.now('UTC')`.
-#   - nautilus_trader/data/engine.pyx:2041 -- `state.start.floor(freq="d")`, pandas
-#     deprecated the lowercase 'd' frequency alias in favor of 'D'.
-# Revisit when this project's nautilus_trader pin (currently 1.229.0) bumps past
-# whatever version fixes these upstream -- confirmed via a forced `-W error` run
-# 2026-09-11 that both originate inside compiled nautilus_trader .pyx files, not in
-# any platform/ code.
+# never blanket-suppressed) -- both are internal nautilus_trader 1.229.0 calls, off-limits
+# to fix here per FORK-01 (never modify nautilus_trader/crates). Both are pandas 3
+# `pandas.errors.Pandas4Warning`s (a DeprecationWarning subclass): they fire only under the
+# images' pinned pandas 3.0.4 (platform/requirements.txt, DW-244), never under the host's
+# 2.3.3. Every site:
+#   - `pd.Timestamp.utcnow()`, deprecated in favor of `Timestamp.now('UTC')`:
+#     nautilus_trader/backtest/engine.pyx:1418 and :1601 (every BacktestEngine.run(), so
+#     test_bot_status.py/test_strategy.py/test_trade_history.py) and
+#     nautilus_trader/backtest/node.py:347 (every BacktestNode run).
+#   - `floor(freq="d")`, the lowercase 'd' alias deprecated in favor of 'D':
+#     nautilus_trader/data/aggregation.pyx:1626, :1634, :1646 and :1786
+#     (`find_closest_smaller_time`, every time-bar subscription) and
+#     nautilus_trader/data/engine.pyx:2041 (date-range requests).
+# Both are ignored by exact message, and every other Pandas4Warning is an error, in the image
+# runs (platform/Makefile's PANDAS4_WARNINGS on `make test`/`make test-live-paper`) and in
+# the notebook harness (research/tests/test_notebooks.py's UPSTREAM_PANDAS4_DEPRECATIONS).
+# platform/tests/test_pandas_pin.py fails any platform/ source making either call, so the
+# filters only ever hide these upstream sites. Revisit when this project's nautilus_trader
+# pin (currently 1.229.0) bumps past a version that fixes them upstream.
 
 
 @pytest.fixture(autouse=True)

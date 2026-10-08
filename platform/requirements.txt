@@ -1,4 +1,30 @@
 plotly==6.8.0
+# pandas 3 over nautilus_trader 1.229.0's own `pandas>=2.3.3,<3.0.0` (pyproject.toml:31): a
+# deliberate override, operator decision 2026-10-05 (DW-244: prove 3.x and keep it).
+# Proven 2026-10-08 on pandas 3.0.4 + pyarrow 25.0.1: the full `make test` suite in the rebuilt
+# collector image (catalog reads, BacktestNode runs, the data_api/views readers, the notebooks)
+# and bots/tests in the live-paper image, first with every warning shown (`-W always`), then
+# with Pandas4Warning an error. The only pandas-3 signal (no FutureWarning, no other pandas
+# deprecation, no behaviour-change failure) is two upstream Pandas4Warnings raised inside
+# compiled nautilus_trader, which FORK-01 forbids fixing here:
+# `pd.Timestamp.utcnow()` (backtest/engine.pyx:1418, :1601, backtest/node.py:347) and
+# `floor(freq="d")` (data/aggregation.pyx:1626, :1634, :1646, :1786, data/engine.pyx:2041). Both
+# are ignored by exact message (TEST-04) in the Makefile's PANDAS4_WARNINGS, which makes every
+# other Pandas4Warning an error in `make test`/`make test-live-paper`, and in the notebook
+# harness's UPSTREAM_PANDAS4_DEPRECATIONS (research/tests/test_notebooks.py).
+# `pip check` therefore prints exactly one line, "nautilus-trader 1.229.0 has requirement
+# pandas<3.0.0,>=2.3.3, but you have pandas 3.0.4.", in every image installing this file over
+# nautilus-trader-base (collector, data_api, bots); tests/test_pandas_pin.py holds that line, this
+# pin and the installed version, and fails on any second conflict, in the two images whose tests
+# run (`make test`: collector, `make test-live-paper`: bots). Known limit: the data_api image runs
+# no test, so it is held only by installing the same file over the same base. A host run
+# from the checkout uses the repo's uv.lock pandas (2.3.3), so only the image runs prove 3.x.
+# Upgrade path: when nautilus_trader lifts its <3.0.0 cap, test_pandas_pin.py fails; drop this
+# override note and the sanctioned pip-check line then. Revert path: pin pandas==2.3.3 here,
+# remove PANDAS4_WARNINGS from the Makefile and delete tests/test_pandas_pin.py (it holds this
+# override, so it fails on a 2.x pin); the notebook harness's ignores are then inert.
+# Known limit: pandas 4 removes both `Timestamp.utcnow` and the "d" alias, so a pandas 4 bump is
+# blocked until nautilus_trader ships its own fix for both upstream calls.
 pandas==3.0.4
 # paired with the redis broker image tag in docker-compose.yml -- bump both together, RESP3 (8.x) is not wire-compatible with 7.x servers
 redis>=8.0.1

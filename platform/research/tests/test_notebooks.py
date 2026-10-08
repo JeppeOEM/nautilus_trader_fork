@@ -17,7 +17,9 @@ Every numbered notebook runs, and every notebook is a reviewed pair (Story 27.2)
 
 Each `research/notebooks/<nn>_<name>.py` (jupytext percent format, the source of truth) is executed
 with `runpy` against the session fixture archive (`fixture_catalog`) under
-`warnings.simplefilter("error")` (TEST-04) with plotly headless, and must finish in under 60 s. The
+`warnings.simplefilter("error")` (TEST-04), less the two upstream pandas-3 deprecations named in
+`UPSTREAM_PANDAS4_DEPRECATIONS` (by exact message), with plotly headless, and must finish in under
+60 s. The
 pairing check holds every `.ipynb` to its `.py` twin: no stored output or execution count, and the
 same cells as jupytext reads from the `.py`. It needs jupytext (installed in the collector image
 through `platform/requirements.txt` and in the repo `.venv`); a host python without it skips that
@@ -27,6 +29,7 @@ one test, never the runs. The fixture's planted defects are asserted against
 
 import json
 import math
+import re
 import runpy
 import time
 import warnings
@@ -57,6 +60,25 @@ from research.tests.source_tree import SOURCE_TREE
 
 NOTEBOOKS_DIR = Path(__file__).resolve().parents[1] / "notebooks"
 RUN_SECONDS_LIMIT = 60.0
+
+# The two deprecations pandas 3 raises (as `pandas.errors.Pandas4Warning`) from inside compiled
+# nautilus_trader 1.229.0, which FORK-01 forbids fixing here. The harness ignores exactly these
+# messages and turns every other warning into an error (TEST-04). Under pandas 2.3.3 (the host
+# interpreter) neither is raised. `platform/Makefile`'s `PANDAS4_WARNINGS` holds the same two
+# messages for the image test runs; `platform/tests/test_pandas_pin.py` holds the two equal.
+UPSTREAM_PANDAS4_DEPRECATIONS = (
+    # `pd.Timestamp.utcnow()`: nautilus_trader/backtest/engine.pyx:1418, :1601 and
+    # nautilus_trader/backtest/node.py:347 (every BacktestEngine/BacktestNode run).
+    "Timestamp.utcnow is deprecated and will be removed in a future version. "
+    "Use Timestamp.now('UTC') instead.",
+    # `floor(freq="d")`: nautilus_trader/data/aggregation.pyx:1626, :1634, :1646, :1786
+    # (`find_closest_smaller_time`, every time-bar subscription) and
+    # nautilus_trader/data/engine.pyx:2041 (date-range requests).
+    "'d' is deprecated and will be removed in a future version, please use 'D' instead.",
+)
+# pandas 2.3.3 has no `Pandas4Warning` class (and raises neither message), so the host falls back
+# to its base class; under pandas 3 the filter is exactly the Makefile's category.
+_PANDAS4_WARNING: type[Warning] = getattr(pd.errors, "Pandas4Warning", DeprecationWarning)
 
 # `.ipynb` with no `.py` twin -> the story whose `done` retires it (it is deleted by then). Empty
 # since Story 27.7 deleted `candlestick_pattern_scanner.ipynb`, the last legacy notebook.
@@ -240,6 +262,8 @@ def _run(notebook: Path, fixture: FixturePaths, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(pio.renderers, "default", pio.renderers.default)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
+        for message in UPSTREAM_PANDAS4_DEPRECATIONS:
+            warnings.filterwarnings("ignore", re.escape(message), _PANDAS4_WARNING)
         return runpy.run_path(str(notebook), run_name="__main__")
 
 
