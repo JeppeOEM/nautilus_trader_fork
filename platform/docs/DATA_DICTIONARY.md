@@ -604,8 +604,9 @@ Bybit's and Hyperliquid's since Story 29.4). Published language, frozen
     `{"ts": <wall-clock ns>, "subscribed": [...], "unsubscribed": [...], "failed": [...]}` for the
     most recent apply (startup or command), each id list sorted. It is history: a failed id
     capture's retry has since subscribed loses its row's `pending` while this still lists it;
-  - `last_refusal` — `null` until the plan refuses a command (`PlanRejected`) after the collector
-    started, then `{"ts": <wall-clock ns, time.time_ns()>, "action": ..., "id": ..., "reason":
+  - `last_refusal` — `null` until the plan refuses a command (`PlanRejected`, or a save the plan
+    store refused over a hand edit, `PlanFileChanged` `[amended 2026-10-08: DW-231/DW-232/DW-256]`)
+    after the collector started, then `{"ts": <wall-clock ns, time.time_ns()>, "action": ..., "id": ..., "reason":
     <the refusal's text>}` for the most recent one (`id` `null` for `pin_top_liquid`). Held in
     memory only, so a restarted collector publishes `null` again. `bot_tui` shows it under the
     venue's last apply and, for its own market-browser adds, as the row's `failed: <reason>`: a
@@ -636,7 +637,16 @@ Bybit's and Hyperliquid's since Story 29.4). Published language, frozen
   and Hyperliquid's plans, which have no liquidity threshold: "admits no pins"). A refused command
   -- including an id of another venue than the receiving plan's -- or an unknown action logs a
   WARNING and changes nothing; a refused command (not an unknown action) is also recorded as the
-  aggregate's `last_refusal` and published at once `[amended 2026-09-29: Story 29.5]`. The
+  aggregate's `last_refusal` and published at once `[amended 2026-09-29: Story 29.5]`. A `start`
+  for an id the venue does not list (capture's fetched instruments, `CaptureStatus.listed`) is such
+  a refusal ("not listed on the <venue> venue"), and so is every `start` before capture has
+  fetched them ("markets are not known yet"), so a typo sent as a command never holds a slot that
+  stays `pending` (a hand edit of the file is not checked);
+  `stop`/`unpin` are not checked, so an unlisted id already in the plan stays removable. A command
+  whose save finds the file holding another plan than the collector runs (a hand edit the reload
+  has not adopted yet, or a file that no longer parses) writes and applies nothing, is ledgered
+  `collector.control` and is published as `last_refusal` too (as is a save that fails for any
+  other reason); once the reload adopts the edit the command can be retried `[amended 2026-10-08: DW-231/DW-232/DW-256]`. The
   market browser's `a` sends the existing `start`, addressed with `venue`: the channel gained no
   action. A valid one is saved to the venue's plan file (dYdX
   `data/dydx_config.toml`; Bybit and Hyperliquid the committed

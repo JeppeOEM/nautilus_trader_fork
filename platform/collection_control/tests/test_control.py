@@ -35,9 +35,11 @@ from observability import error_ledger
 import collection_control.application.control as control_module
 from collection_control.application.control import ControlService
 from collection_control.application.ports import STATUS_CHANNEL
+from collection_control.application.ports import PlanFileChanged
 from collection_control.application.status import StatusPublisher
 from collection_control.domain.plan import CollectionPlan
 from collection_control.domain.plan import InstrumentEntry
+from collection_control.infrastructure.plan_store import TomlPlanStore
 
 
 _CAP = 30
@@ -59,14 +61,23 @@ def _plan(*ids: str, excluded: frozenset[str] = frozenset()) -> CollectionPlan:
     )
 
 
+class _EveryId(frozenset[str]):
+    """A venue listing that holds every id: the default, so a test not about listing ignores it."""
+
+    def __contains__(self, item: object) -> bool:
+        return True
+
+
 class _Capture:
     """
     Records every diff; everything planned counts as applied unless listed in `pending`. Reports
-    the last diff as its last apply, time-stamped with the apply count.
+    the last diff as its last apply, time-stamped with the apply count, and `listed` as the
+    venue's listing (every id unless a test narrows it; None as before capture fetched it).
     """
 
     def __init__(self) -> None:
         self.diffs: list[PlanDiff] = []
+        self.listed: frozenset[str] | None = _EveryId()
         self.planned: tuple[str, ...] = ()
         self.pending: frozenset[str] = frozenset()
         self.lingering: frozenset[str] = frozenset()
@@ -86,6 +97,7 @@ class _Capture:
             lingering=self.lingering,
             last_applied=self.last_applied,
             last_applied_ns=len(self.diffs),  # a fake clock: one tick per apply
+            listed=self.listed,
         )
 
 
@@ -100,9 +112,11 @@ class _Store:
             raise self.fail
         return self.plan
 
-    def save(self, plan: CollectionPlan) -> None:
+    def save(self, plan: CollectionPlan, *, expected: CollectionPlan) -> None:
         if self.fail is not None:
             raise self.fail
+        if self.plan != expected:  # the `PlanStore` contract: a hand edit not yet reloaded
+            raise PlanFileChanged("the plan was edited since it was last loaded or saved")
         self.saved.append(plan)
         self.plan = plan
 
@@ -329,8 +343,11 @@ def test_a_failed_save_applies_nothing_and_keeps_the_plan() -> None:
     rig = _Rig(plan)
     rig.store.fail = ValueError("file invalid mid-edit")
     rig.handle("stop", "BTC-USD-PERP.DYDX")
-    assert (rig.control.plan, rig.capture.diffs, rig.bus.published) == (plan, [], [])
+    assert (rig.control.plan, rig.capture.diffs) == (plan, [])
     assert error_ledger.counts() == {"collector.control": 1}
+    refusal = rig.payloads()[-1]["last_refusal"]
+    assert (refusal["action"], refusal["id"]) == ("stop", "BTC-USD-PERP.DYDX")
+    assert refusal["reason"] == "plan save failed: ValueError: file invalid mid-edit"
 
 
 def test_a_reload_of_a_bad_file_keeps_the_current_plan() -> None:
@@ -744,3 +761,149 @@ def test_a_recorded_payload_with_the_dydx_venue_appended_acts_as_the_recorded_on
         plans.append(rig.control.plan)
     assert plans[0] == plans[1]
     assert plans[0] != (_plan() if index in (0, 3) else _plan(_BTC))
+
+
+# -- the venue's listing (DW-232/DW-256) ---------------------------------------------------------
+
+
+def _refusal(rig: _Rig) -> dict[str, Any]:
+    refusal = rig.payloads()[-1]["last_refusal"]
+    assert refusal is not None
+    return refusal
+
+
+@pytest.mark.parametrize(
+    ("plan", "listed", "iid"),
+    [
+        # A typo carrying the plan's venue suffix.
+        (_plan(), frozenset({"BTC-USD-PERP.DYDX"}), "BTC-USD-PREP.DYDX"),
+        # A real Bybit market type the venue's listing (here: linear only) does not hold.
+        (_bybit_plan(), frozenset({_SOL_BYBIT}), "BTCUSD-INVERSE.BYBIT"),
+    ],
+)
+def test_a_start_of_an_id_the_venue_does_not_list_is_refused_and_published(
+    plan: CollectionPlan, listed: frozenset[str], iid: str, caplog: Any
+) -> None:
+    error_ledger.reset()
+    rig = _Rig(plan)
+    rig.capture.listed = listed
+    with caplog.at_level(logging.WARNING, logger=control_module.__name__):
+        rig.handle("start", iid)
+    assert "not listed" in caplog.text
+    assert (rig.control.plan, rig.store.saved, rig.capture.diffs) == (plan, [], [])
+    refusal = _refusal(rig)
+    assert (refusal["action"], refusal["id"]) == ("start", iid)
+    assert f"not listed on the {plan.venue} venue" in refusal["reason"]
+    assert error_ledger.counts() == {}  # a refused command, not a fault
+
+
+def test_a_start_before_capture_fetched_the_markets_is_refused() -> None:
+    rig = _Rig(_plan())
+    rig.capture.listed = None
+    rig.handle("start", "SOL-USD-PERP.DYDX")
+    assert (rig.store.saved, rig.capture.diffs) == ([], [])
+    assert "DYDX markets are not known yet" in _refusal(rig)["reason"]
+
+
+def test_a_start_of_a_listed_id_is_saved_and_applied() -> None:
+    rig = _Rig(_plan())
+    rig.capture.listed = frozenset({"SOL-USD-PERP.DYDX"})
+    rig.handle("start", "SOL-USD-PERP.DYDX")
+    assert rig.store.saved == [rig.control.plan]
+    assert [d.added for d in rig.capture.diffs] == [{"SOL-USD-PERP.DYDX"}]
+
+
+@pytest.mark.parametrize("listed", [frozenset(), None])
+def test_a_start_of_an_id_already_collected_is_refused_as_collected_not_as_unlisted(
+    listed: frozenset[str] | None,
+) -> None:
+    rig = _Rig(_plan("BTC-USD-PREP.DYDX"))
+    rig.capture.listed = listed
+    rig.handle("start", "BTC-USD-PREP.DYDX")
+    assert (rig.store.saved, rig.capture.diffs) == ([], [])
+    assert _refusal(rig)["reason"] == "Cannot start BTC-USD-PREP.DYDX: already collected"
+
+
+@pytest.mark.parametrize("action", ["stop", "unpin"])
+@pytest.mark.parametrize("listed", [frozenset(), None])
+def test_an_unlisted_id_already_in_the_plan_can_still_be_removed(
+    action: str, listed: frozenset[str] | None
+) -> None:
+    """A typo saved before the check (or hand-edited in) must stay removable."""
+    rig = _Rig(_plan("BTC-USD-PREP.DYDX"))
+    rig.capture.listed = listed
+    rig.handle(action, "BTC-USD-PREP.DYDX")
+    assert rig.control.plan.collected == ()
+    assert [d.removed for d in rig.capture.diffs] == [{"BTC-USD-PREP.DYDX"}]
+
+
+# -- a hand edit the reload has not adopted yet (DW-231) -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("action", "iid", "refused_id"),
+    [
+        ("start", "SOL-USD-PERP.DYDX", "SOL-USD-PERP.DYDX"),
+        ("stop", "BTC-USD-PERP.DYDX", "BTC-USD-PERP.DYDX"),
+        ("pin_top_liquid", None, None),
+    ],
+)
+def test_a_command_over_a_pending_hand_edit_is_refused_ledgered_and_published(
+    action: str, iid: str | None, refused_id: str | None
+) -> None:
+    error_ledger.reset()
+    plan = _plan("BTC-USD-PERP.DYDX")
+    rig = _Rig(plan, {"AAA": 500_000.0})
+    hand_edit = _plan("BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX")
+    rig.store.plan = hand_edit
+    rig.handle(action, iid)
+    assert (rig.control.plan, rig.store.plan, rig.store.saved) == (plan, hand_edit, [])
+    assert rig.capture.diffs == []
+    assert error_ledger.counts() == {"collector.control": 1}
+    refusal = _refusal(rig)
+    assert (refusal["action"], refusal["id"]) == (action, refused_id)
+    assert "edited since it was last loaded or saved" in refusal["reason"]
+
+
+_DYDX_FILE = """network = "testnet"
+liquidity_min_oi_usd = 100000.0
+
+[[instruments]]
+id = "BTC-USD-PERP.DYDX"
+"""
+
+
+def _toml_rig(tmp_path: Path) -> tuple[_Rig, Path]:
+    """Build a rig whose `ControlService` saves to a real `config.toml` via `TomlPlanStore`."""
+    path = tmp_path / "config.toml"
+    path.write_text(_DYDX_FILE)
+    store = TomlPlanStore(path, "DYDX")
+    plan = store.load()
+    rig = _Rig(plan)
+    rig.control = ControlService(plan, store, rig.capture, rig.status, rig.markets)
+    return rig, path
+
+
+def test_a_hand_edit_in_the_file_survives_a_command_and_the_reload_adopts_it(
+    tmp_path: Path,
+) -> None:
+    error_ledger.reset()
+    rig, path = _toml_rig(tmp_path)
+    # The operator adds ETH by hand; a command lands before the next reload tick.
+    path.write_text(_DYDX_FILE + '\n[[instruments]]\nid = "ETH-USD-PERP.DYDX"\n')
+    edited = path.read_bytes()
+    rig.handle("start", "SOL-USD-PERP.DYDX")
+    assert path.read_bytes() == edited
+    assert rig.capture.diffs == []
+    assert error_ledger.counts() == {"collector.control": 1}
+    assert "not saved" in _refusal(rig)["reason"]
+
+    asyncio.run(rig.control.reload())
+    rig.handle("start", "SOL-USD-PERP.DYDX")
+    collected = ("BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX", "SOL-USD-PERP.DYDX")
+    assert rig.control.plan.collected == collected
+    assert TomlPlanStore(path, "DYDX").load().collected == collected
+    assert [d.added for d in rig.capture.diffs] == [
+        {"ETH-USD-PERP.DYDX"},
+        {"SOL-USD-PERP.DYDX"},
+    ]

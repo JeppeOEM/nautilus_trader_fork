@@ -2750,6 +2750,7 @@ class CaptureService:
                 if hasattr(self._client, "liquidation_state")
                 else None
             ),
+            listed=self._listed,
         )
 
     # -- composition -------------------------------------------------------------------------

@@ -810,6 +810,19 @@ def test_run_without_a_sink_has_nothing_to_close(
     assert sites.SECOND_SINK_CLOSE not in counts
 
 
+def test_capture_status_lists_the_venue_s_ids_only_once_run_fetched_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """None before `run()` reads as "not known yet" to collection control (DW-232/DW-256)."""
+    monkeypatch.setattr(collector_mod, "instruments_from_pyo3", lambda pyo3: [])
+    c = _collector(tmp_path, client=_LifecycleClient([]), second_sink=_NO_SINK)
+    assert c.capture_status().listed is None
+    c._applied.clear()  # `run()` applies the plan itself
+    c.stop()
+    asyncio.run(c.run())
+    assert c.capture_status().listed == {_BYBIT}
+
+
 def test_a_collector_without_a_sink_still_flushes(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

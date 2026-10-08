@@ -371,6 +371,12 @@ class CaptureStatus:
     first, and `last_applied_ns` its wall-clock time (0 before the first). It is history, not the
     live truth: an id it lists as failed may since have been subscribed by the retry loop, which
     `pending` reflects.
+
+    `listed` is every id the venue lists, as capture fetched it at `run()` (`CaptureService._listed`,
+    already an immutable frozenset, passed as is): `None` until that fetch, so a reader can tell
+    "not known yet" from "not listed". Collection control refuses a `start` for an id outside it
+    (DW-232/DW-256), so a typo sent as a command never holds a plan slot that stays `pending`
+    forever (a hand edit of the plan file is not checked).
     """
 
     applied: frozenset[str]
@@ -383,3 +389,5 @@ class CaptureStatus:
     # Story 33.1: the liquidation socket's state, `connected`/`reconnecting`/`down`, from the
     # client's `liquidation_state()`; None for a client without the feed (a venue without one).
     liquidations: str | None = None
+    # DW-232/DW-256: the venue's listed ids; None before `run()` fetched the instruments.
+    listed: frozenset[str] | None = None

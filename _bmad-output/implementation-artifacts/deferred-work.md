@@ -1879,14 +1879,18 @@ resolution-undo: b98e299a1973c6cd760dd890fe03e85313515bcb9f8a9937413ae821024a54e
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-4-collection-control-plan-intent-vs-applied-set.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-4-collection-control-plan-intent-vs-applied-set.md` summary: A `collector:control` command arriving within `config_reload_seconds` (30 s) of a hand edit of the dYdX plan file overwrites that edit silently -- `TomlPlanStore.save` re-reads the file but replaces the plan keys with the service's in-memory plan without checking the file still holds the plan last loaded or saved (no optimistic-concurrency check). evidence: platform/collection_control/infrastructure/plan_store.py `save` (re-read, `raw.update(plan_toml_fields(plan))`, no compare against the previous plan); the same last-writer-wins race existed in dydx_collector/config.py `save_config` at baseline c9fab9c5d7.
-status: open
+status: done 2026-10-08
+resolution: resolved by sweep bundle dw-collection-control-plan-integrity
+resolution-undo: eb2f16247fb68736ab7f5da11af445dd55533e1490425ccce68bfca42a482c6f 2026-10-08 7374617475733a206f70656e
 
 ### DW-232: `collector:control start` accepts any non-empty id -- a typo (`BTC-USD-PERP` without `.DYDX`) or another venue's id is saved to the dYdX plan file, holds one …
 
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-25-4-collection-control-plan-intent-vs-applied-set.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-4-collection-control-plan-intent-vs-applied-set.md` summary: `collector:control start` accepts any non-empty id -- a typo (`BTC-USD-PERP` without `.DYDX`) or another venue's id is saved to the dYdX plan file, holds one of the 30 slots and stays `pending` across restarts until someone removes it, although capture already knows the venue's listed markets (`Collector._listed`) and could refuse it at command time. evidence: platform/collection_control/domain/plan.py `CollectionPlan.add` and application/control.py `_command` (no listed-market check); the same unchecked append existed in dydx_collector/collector.py `_handle_control_message` at baseline c9fab9c5d7 (it then subscribed and raised on the wire).
-status: open
+status: done 2026-10-08
+resolution: resolved by sweep bundle dw-collection-control-plan-integrity
+resolution-undo: eb2f16247fb68736ab7f5da11af445dd55533e1490425ccce68bfca42a482c6f 2026-10-08 7374617475733a206f70656e
 
 ### DW-233: Turning `store_order_book_deltas` on for an instrument that is already collected (a hand edit picked up by the reload) starts its raw `OrderBookDeltas` archive …
 
@@ -2082,7 +2086,9 @@ status: open
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-29-4-runtime-collection-control-bybit-hyperliquid.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-29-4-runtime-collection-control-bybit-hyperliquid.md` summary: `collection_control`'s `ControlService` accepts a `start` for any id carrying the plan's venue suffix, whether or not the venue lists it or the client can subscribe it (e.g. `BTCUSD-INVERSE.BYBIT`, a Hyperliquid spot id, a typo), saves it to the plan file, and capture then keeps it `pending` forever with one "not listed on the venue ... never retried" ledger entry; the id survives restarts, and a market listed later is never retried until a restart. evidence: `ControlService._command` checks only `venue_of(id) == plan.venue` (and the domain's cap/exclude rules); `CaptureService._subscribe_added` (`capture/application/capture_service.py`) ledgers and returns False for an id outside `self._listed`, and `_subscription_retry_loop` retries only failed subscribes of listed ids. The same path predates 29.4 for dYdX; 29.4 exposes it on Bybit/Hyperliquid. Fix: a `listed` query on the `Capture` port, refused at command time; Story 29.5's market browser reduces but does not remove it (`:start` stays typed).
-status: open
+status: done 2026-10-08
+resolution: resolved by sweep bundle dw-collection-control-plan-integrity
+resolution-undo: eb2f16247fb68736ab7f5da11af445dd55533e1490425ccce68bfca42a482c6f 2026-10-08 7374617475733a206f70656e
 
 ### DW-257: `bot_tui`'s collector actions report `sent: <action> <id>` even when the publish failed: `collector_state.publish_control` only logs a WARNING on a Redis error …
 

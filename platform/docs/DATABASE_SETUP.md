@@ -197,7 +197,12 @@ runtime command leaves the VPS checkout modified (`docs/DEPLOY_CHECKLIST.md`'s 2
   (`collection_control/infrastructure/plan_store.py`) loads and saves the plan through the one
   venue loader, `capture.infrastructure.config.load_venue_config` (`tomllib`/`tomli_w`). A save
   re-reads the file, replaces only the plan keys, validates the result and rewrites the file in
-  place, not a patch — hand-added comments won't survive a control action.
+  place, not a patch — hand-added comments won't survive a control action. It writes only when the
+  file's plan still equals the plan the collector runs: a hand edit of the plan keys the reload has
+  not adopted yet (or a file that no longer parses) refuses the save (`PlanFileChanged`), writes
+  nothing and is published as `last_refusal`; an edit of non-plan keys only (capture thresholds)
+  is kept -- dYdX's `liquidity_min_oi_usd` and `non_config_retain_hours` are plan keys
+  `[amended 2026-10-08: DW-231/DW-232/DW-256]`.
 - **Read:** `collection_control`'s `reload_loop` re-reads it every `config_reload_seconds`
   (30 s; Bybit/Hyperliquid `PLAN_RELOAD_SECONDS`, also 30 s), so a hand-edit of the plan is picked up without a restart (the thresholds are read
   once per start).

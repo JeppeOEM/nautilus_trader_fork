@@ -51,6 +51,15 @@ class Capture(Protocol):
     def capture_status(self) -> CaptureStatus: ...
 
 
+class PlanFileChanged(ValueError):
+    """
+    A `PlanStore.save` refused because the stored plan is no longer the one the caller holds: the
+    file was hand-edited (or broken) since the plan was last loaded or saved (DW-231). Nothing was
+    written; once the reload adopts the edit (it may refuse it too, ledgered) the command can be
+    retried.
+    """
+
+
 class PlanStore(Protocol):
     """
     Where a venue's plan is persisted (the venue `config.toml`).
@@ -59,11 +68,16 @@ class PlanStore(Protocol):
     `CollectionPlan` invariant, every config key known), and `save` writes only a plan that reads
     back equal through that same loader -- so a saved plan is always one the collector would start
     from. Either raises rather than write or return anything else.
+
+    `save` is optimistic concurrency against a hand edit (DW-231): it writes only when the stored
+    plan, read once in that same save, still equals `expected` (the plan the caller runs), and
+    otherwise raises `PlanFileChanged` and writes nothing -- also when the stored file no longer
+    parses -- so a command never silently overwrites an edit the reload has not adopted yet.
     """
 
     def load(self) -> CollectionPlan: ...
 
-    def save(self, plan: CollectionPlan) -> None: ...
+    def save(self, plan: CollectionPlan, *, expected: CollectionPlan) -> None: ...
 
 
 class StatusBus(Protocol):

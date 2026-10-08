@@ -14,7 +14,8 @@
 # -------------------------------------------------------------------------------------------------
 """
 The `PlanStore` contract (`collection_control.application.ports`), run against every adapter:
-`load` returns only a plan the one loader accepts, `save` writes only a plan that reads back equal.
+`load` returns only a plan the one loader accepts, `save` writes only a plan that reads back equal,
+and only over the plan it expects the file to hold.
 """
 
 import tomllib
@@ -23,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from collection_control.application.ports import PlanFileChanged
 from collection_control.application.ports import PlanStore
 from collection_control.domain.plan import InstrumentEntry
 from collection_control.infrastructure.plan_store import TomlPlanStore
@@ -66,14 +68,15 @@ def test_a_saved_plan_loads_back_equal(adapter: str, tmp_path: Path) -> None:
     store, _path = _store(adapter, tmp_path)
     plan = store.load()
     changed = plan.add("SOL-USD-PERP.DYDX").plan.unpin("ETH-USD-PERP.DYDX").plan
-    store.save(changed)
+    store.save(changed, expected=plan)
     assert store.load() == changed
 
 
 @pytest.mark.parametrize("adapter", sorted(_ADAPTERS))
 def test_save_keeps_every_non_plan_key(adapter: str, tmp_path: Path) -> None:
     store, path = _store(adapter, tmp_path)
-    store.save(store.load().remove("ETH-USD-PERP.DYDX").plan)
+    plan = store.load()
+    store.save(plan.remove("ETH-USD-PERP.DYDX").plan, expected=plan)
     raw = tomllib.loads(path.read_text())
     assert (raw["network"], raw["stale_book_seconds"], raw["liquidity_check_seconds"]) == (
         "testnet",
@@ -94,9 +97,48 @@ def test_save_over_a_file_that_no_longer_parses_is_refused_and_writes_nothing(
     plan = store.load()
     broken = _FILE.replace("stale_book_seconds", "stale_book_secs")
     path.write_text(broken)
-    with pytest.raises(ValueError, match="stale_book_secs"):
-        store.save(plan.remove("ETH-USD-PERP.DYDX").plan)
+    with pytest.raises(PlanFileChanged, match="stale_book_secs"):
+        store.save(plan.remove("ETH-USD-PERP.DYDX").plan, expected=plan)
     assert path.read_text() == broken
+
+
+@pytest.mark.parametrize("adapter", sorted(_ADAPTERS))
+def test_save_over_a_file_that_is_no_longer_toml_is_refused_and_writes_nothing(
+    adapter: str, tmp_path: Path
+) -> None:
+    store, path = _store(adapter, tmp_path)
+    plan = store.load()
+    broken = _FILE + "\nexclude = [\n"
+    path.write_text(broken)
+    with pytest.raises(PlanFileChanged, match="no longer parses"):
+        store.save(plan.remove("ETH-USD-PERP.DYDX").plan, expected=plan)
+    assert path.read_text() == broken
+
+
+@pytest.mark.parametrize("adapter", sorted(_ADAPTERS))
+def test_save_over_a_hand_edited_plan_is_refused_and_writes_nothing(
+    adapter: str, tmp_path: Path
+) -> None:
+    """DW-231: a command landing before the reload adopted a hand edit must not overwrite it."""
+    store, path = _store(adapter, tmp_path)
+    plan = store.load()
+    edited = _FILE + '\n[[instruments]]\nid = "SOL-USD-PERP.DYDX"\n'
+    path.write_text(edited)
+    with pytest.raises(PlanFileChanged, match="edited since it was last loaded or saved"):
+        store.save(plan.remove("ETH-USD-PERP.DYDX").plan, expected=plan)
+    assert path.read_text() == edited
+
+
+@pytest.mark.parametrize("adapter", sorted(_ADAPTERS))
+def test_save_over_a_non_plan_edit_keeps_the_edit(adapter: str, tmp_path: Path) -> None:
+    """Only a plan-key edit can be lost, so a threshold-only hand edit never refuses a save."""
+    store, path = _store(adapter, tmp_path)
+    plan = store.load()
+    path.write_text(_FILE.replace("stale_book_seconds = 7.5", "stale_book_seconds = 9.0"))
+    changed = plan.remove("ETH-USD-PERP.DYDX").plan
+    store.save(changed, expected=plan)
+    assert tomllib.loads(path.read_text())["stale_book_seconds"] == 9.0
+    assert store.load() == changed
 
 
 @pytest.mark.parametrize("adapter", sorted(_ADAPTERS))
@@ -161,8 +203,9 @@ def _flat(tmp_path: Path) -> tuple[TomlPlanStore, Path]:
 
 def test_a_flat_plan_writes_exclude_only_when_it_has_one(tmp_path: Path) -> None:
     store, path = _flat(tmp_path)
-    unpinned = store.load().unpin("ETHUSDT-SPOT.BYBIT").plan
-    store.save(unpinned)
+    plan = store.load()
+    unpinned = plan.unpin("ETHUSDT-SPOT.BYBIT").plan
+    store.save(unpinned, expected=plan)
     assert tomllib.loads(path.read_text())["exclude"] == ["ETHUSDT-SPOT.BYBIT"]
     assert store.load() == unpinned
 
@@ -170,8 +213,10 @@ def test_a_flat_plan_writes_exclude_only_when_it_has_one(tmp_path: Path) -> None
 def test_an_emptied_exclude_leaves_the_file_with_its_committed_key_set(tmp_path: Path) -> None:
     store, path = _flat(tmp_path)
     committed = list(tomllib.loads(path.read_text()))
-    store.save(store.load().unpin("ETHUSDT-SPOT.BYBIT").plan)
-    store.save(store.load().add("ETHUSDT-SPOT.BYBIT").plan)
+    plan = store.load()
+    unpinned = plan.unpin("ETHUSDT-SPOT.BYBIT").plan
+    store.save(unpinned, expected=plan)
+    store.save(unpinned.add("ETHUSDT-SPOT.BYBIT").plan, expected=unpinned)
     raw = tomllib.loads(path.read_text())
     assert list(raw) == committed
     assert raw["instruments"] == ["BTCUSDT-LINEAR.BYBIT", "ETHUSDT-SPOT.BYBIT"]

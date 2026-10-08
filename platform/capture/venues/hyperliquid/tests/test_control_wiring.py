@@ -127,6 +127,7 @@ def _rigged(path: Path) -> tuple[ControlService, _Client, _Bus]:
     wired = _wired(collector)
     client, bus = _Client(), _Bus()
     collector._client = client
+    collector._listed = frozenset((*_IDS, _NEW))  # as `run()`'s `fetch_instruments` leaves it
     _owner(wired["StatusPublisher.loop"])._bus = bus
     return _owner(wired["ControlService.control_loop"]), client, bus
 
