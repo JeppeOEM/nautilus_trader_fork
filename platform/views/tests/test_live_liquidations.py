@@ -345,7 +345,8 @@ def _no_archive_read_on_the_loop(monkeypatch: pytest.MonkeyPatch, thread: list[s
     """Record the thread every archive feed-start read runs on."""
     real = lc.liquidation_feed_since_ns
 
-    def read(catalog_path: str, iid: str) -> int | None:
+    def read(catalog_path: str, iid: str, *, on_foreign: object) -> int | None:
+        assert on_foreign is error_ledger.record  # a stray file name is ledgered, then skipped
         thread.append(threading.current_thread().name)
         return real(catalog_path, iid)
 
@@ -384,7 +385,7 @@ async def test_a_stale_feed_start_is_refreshed_and_a_failed_read_keeps_the_old_o
     bus._archive_feed_read_at[_LINEAR] -= lc.FEED_SINCE_REFRESH_SECONDS + 1
     calls: list[str] = []
 
-    def failing(catalog_path: str, iid: str) -> int | None:
+    def failing(catalog_path: str, iid: str, *, on_foreign: object) -> int | None:
         calls.append(iid)
         raise OSError("catalog unreadable")
 

@@ -18,12 +18,14 @@ spec's I/O matrix it owns, over a real `ParquetDataCatalog` and a real candle st
 expected value is computed by hand in its comment (TEST-01).
 """
 
+import shutil
 from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from candles.infrastructure import sqlite_store
+from kernel import catalog_files
 from kernel.liquidation import LiquidatedSide
 from kernel.liquidation import Liquidation
 from kernel.open_interest import OpenInterest
@@ -881,7 +883,10 @@ def test_a_sparse_series_jumps_a_gap_inside_one_file_in_a_bounded_number_of_read
     reads: list[tuple[int, int]] = []
     real = derivatives.catalog_files.query_open_interest
 
-    def counted(path: str, iid: str, start_ns: int, end_ns: int) -> list[OpenInterest]:
+    def counted(
+        path: str, iid: str, start_ns: int, end_ns: int, *, on_foreign: object
+    ) -> list[OpenInterest]:
+        assert on_foreign is error_ledger.record  # a stray file name is ledgered, then skipped
         reads.append((start_ns, end_ns))
         return real(path, iid, start_ns, end_ns)
 
@@ -892,6 +897,23 @@ def test_a_sparse_series_jumps_a_gap_inside_one_file_in_a_bounded_number_of_read
     assert items == [{"t": _TEN_MS + 4 * 3_600_000, "oi": "130", "oi_change": "30"}]
     assert has_more is True
     assert len(reads) == 3
+
+
+def test_a_foreign_file_name_in_a_derivatives_leaf_is_ledgered_and_the_page_served(
+    tmp_path: Path,
+) -> None:
+    """DW-181's policy on Story 33.4's readers: a stray `*.parquet` costs a ledger line, no page."""
+    _catalog(tmp_path).write_data([_oi("100", _TEN), _oi("130", _TEN + 4 * 3600 * _S)])
+    before_ns = _TEN + 4 * 3600 * _S + _S
+    expected = derivatives.open_interest_page(_LINEAR, before_ns, 1, 1, catalog_path=str(tmp_path))
+    leaf = tmp_path / "data" / catalog_files.OPEN_INTEREST_DIRNAME / _LINEAR
+    (real,) = leaf.glob("*.parquet")
+    shutil.copy(real, leaf / "notes.parquet")
+    error_ledger.reset()
+    page = derivatives.open_interest_page(_LINEAR, before_ns, 1, 1, catalog_path=str(tmp_path))
+    assert page == expected
+    assert set(error_ledger.counts()) == {"catalog.foreign_file"}
+    error_ledger.reset()
 
 
 def test_open_interest_and_funding_text_is_positional_never_scientific(tmp_path: Path) -> None:

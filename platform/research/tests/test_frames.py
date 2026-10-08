@@ -512,7 +512,8 @@ def test_any_other_refused_read_is_ledgered_at_the_read_site(
     liquidation_frames: CatalogFrames, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The kernel's other refusal: a listing that kept losing files during a consolidation.
-    def refused(*_args: object) -> list[Liquidation]:
+    def refused(*_args: object, on_foreign: object) -> list[Liquidation]:
+        assert on_foreign is error_ledger.record  # a stray file name is ledgered, then skipped
         raise ValueError("liquidations: files kept disappearing during the read (3 listings)")
 
     monkeypatch.setattr(frames_module, "query_liquidations", refused)

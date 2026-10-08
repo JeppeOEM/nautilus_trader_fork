@@ -235,7 +235,9 @@ def _read_candles(
         liquidations, since_ns = None, None
         if has_liquidation_feed(instrument_id):
             liquidations, since_ns = archive_liquidations(
-                catalog_files.query_liquidations(catalog_path, instrument_id, start_ns, now_ns),
+                catalog_files.query_liquidations(
+                    catalog_path, instrument_id, start_ns, now_ns, on_foreign=error_ledger.record
+                ),
                 liquidation_feed_start(catalog_path, candles_dir, instrument_id),
             )
         return bars_from_rows(rows, bar_seconds, liquidations, liquidations_since_ns=since_ns)[

@@ -19,6 +19,7 @@ import glob
 import math
 import shutil
 from collections.abc import Callable
+from decimal import Decimal
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +35,7 @@ from kernel.clocks import NS_PER_S
 from kernel.clocks import READ_SPAN_MARGIN_NS
 from kernel.liquidation import LiquidatedSide
 from kernel.liquidation import Liquidation
+from kernel.open_interest import OpenInterest
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import LegacySnapshotLayoutError
 from kernel.second_snapshot import SecondOHLC
@@ -42,6 +44,7 @@ from kernel.second_snapshot import quantity_of
 from kernel.tests.snapshot_factory import make_snapshot
 from kernel.tests.snapshot_factory import units
 from nautilus_trader.model.data import IndexPriceUpdate
+from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.identifiers import InstrumentId
@@ -381,6 +384,61 @@ def _index_catalog(tmp_path: Path) -> str:
             for k in (0, 1)
         ]
     )
+    return str(tmp_path)
+
+
+def _mark_catalog(tmp_path: Path) -> str:
+    """Two mark-price files (Story 33.4's `query_price_columns` and `newest_ts_event_before`)."""
+    writer = ParquetDataCatalog(str(tmp_path))
+    iid = InstrumentId.from_str(_IID)
+    for pair in ((0, 1), (2, 3)):
+        writer.write_data(
+            [
+                MarkPriceUpdate(
+                    iid, Price.from_str("100.25"), _DAY0 + k * NS_PER_S, _DAY0 + k * NS_PER_S
+                )
+                for k in pair
+            ]
+        )
+    return str(tmp_path)
+
+
+def _open_interest_catalog(tmp_path: Path) -> str:
+    """Two open-interest files (Story 33.4's `query_open_interest`)."""
+    writer = ParquetDataCatalog(str(tmp_path))
+    iid = InstrumentId.from_str(_IID)
+    for pair in ((0, 1), (2, 3)):
+        writer.write_data(
+            [
+                OpenInterest(
+                    iid, Decimal(f"{100 + k}.5"), _DAY0 + k * NS_PER_S, _DAY0 + k * NS_PER_S
+                )
+                for k in pair
+            ]
+        )
+    return str(tmp_path)
+
+
+def _liquidation_catalog(tmp_path: Path) -> str:
+    """Two liquidation files (Story 33.3's `query_liquidations` and `liquidation_feed_since_ns`)."""
+    writer = ParquetDataCatalog(str(tmp_path))
+    iid = InstrumentId.from_str(_IID)
+    for pair in ((0, 1), (2, 3)):
+        writer.write_data(
+            [
+                Liquidation.from_wire_text(
+                    iid,
+                    LiquidatedSide.LONG,
+                    "0.001",
+                    "84000.00",
+                    (2, 3),
+                    f"e{k}",
+                    _DAY0 + k * NS_PER_S,
+                    _DAY0 + k * NS_PER_S,
+                )
+                for k in pair
+            ]
+        )
     return str(tmp_path)
 
 
@@ -866,6 +924,72 @@ _SELF_LISTING_READERS = [
         ),
         id="price_precision_labels",
     ),
+    pytest.param(
+        _snapshot_catalog,
+        _SNAP,
+        "snapshot_files",
+        lambda root, hook: catalog_files.query_snapshot_times(
+            root, _IID, *_SNAPSHOT_WINDOW, on_foreign=hook
+        ).tolist(),
+        id="query_snapshot_times",
+    ),
+    pytest.param(
+        _snapshot_catalog,
+        _SNAP,
+        "snapshot_files",
+        lambda root, hook: catalog_files.query_books_at(
+            root, _IID, [_DAY0 + 10 * NS_PER_S, _DAY0 + 20 * NS_PER_S], on_foreign=hook
+        ),
+        id="query_books_at",
+    ),
+    pytest.param(
+        _liquidation_catalog,
+        catalog_files.LIQUIDATION_DIRNAME,
+        "_leaf_files",
+        lambda root, hook: [
+            Liquidation.to_dict(row)
+            for row in catalog_files.query_liquidations(root, _IID, *_WHOLE, on_foreign=hook)
+        ],
+        id="query_liquidations",
+    ),
+    pytest.param(
+        _liquidation_catalog,
+        catalog_files.LIQUIDATION_DIRNAME,
+        "_leaf_files",
+        lambda root, hook: catalog_files.liquidation_feed_since_ns(root, _IID, on_foreign=hook),
+        id="liquidation_feed_since_ns",
+    ),
+    pytest.param(
+        _open_interest_catalog,
+        catalog_files.OPEN_INTEREST_DIRNAME,
+        "_leaf_files",
+        lambda root, hook: [
+            OpenInterest.to_dict(row)
+            for row in catalog_files.query_open_interest(root, _IID, *_WHOLE, on_foreign=hook)
+        ],
+        id="query_open_interest",
+    ),
+    pytest.param(
+        _mark_catalog,
+        catalog_files.MARK_PRICE_DIRNAME,
+        "_leaf_files",
+        lambda root, hook: [
+            column.tolist()
+            for column in catalog_files.query_price_columns(
+                root, catalog_files.MARK_PRICE_DIRNAME, _IID, *_WHOLE, on_foreign=hook
+            )
+        ],
+        id="query_price_columns",
+    ),
+    pytest.param(
+        _mark_catalog,
+        catalog_files.MARK_PRICE_DIRNAME,
+        "_leaf_files",
+        lambda root, hook: catalog_files.newest_ts_event_before(
+            root, _IID, (catalog_files.MARK_PRICE_DIRNAME,), 1 << 62, on_foreign=hook
+        ),
+        id="newest_ts_event_before",
+    ),
 ]
 # The self-listing readers plus the trade reader, which lists again too but refuses exhaustion with
 # its own `TradeDecodeError` (covered by its own tests above).
@@ -987,11 +1111,16 @@ def test_a_listing_that_keeps_losing_files_is_refused_naming_the_instrument(
     monkeypatch.setattr(catalog_files, listing, lambda *_: gone)
     with pytest.raises(catalog_files.CatalogReadError, match="kept disappearing") as raised:
         read(root, None)
-    assert f"{_IID}:" in str(raised.value)
+    # The label is the instrument, followed by the data kind for a non-snapshot directory.
+    assert str(raised.value).startswith(_IID)
     assert f"{catalog_files._LISTING_ATTEMPTS} listings" in str(raised.value)
 
 
-_SNAPSHOT_READERS = [p for p in _SELF_LISTING_READERS if p.values[1] == _SNAP]
+# The snapshot readers that return whole rows, so a disagreeing copy is visible to them (the stamp
+# and book readers see only `ts_event` and the book; `query_books_at` has its own copy test).
+_SNAPSHOT_READERS = [
+    p for p in _SELF_LISTING_READERS if p.id in {"query_second_ohlc", "query_top_of_book"}
+]
 
 
 @pytest.mark.parametrize(("build", "dirname", "listing", "read"), _SNAPSHOT_READERS)
@@ -1158,3 +1287,29 @@ def test_liquidation_feed_since_is_the_earliest_ts_event_across_files(tmp_path: 
     since = catalog_files.liquidation_feed_since_ns(str(tmp_path), "BTCUSDT-LINEAR.BYBIT")
     assert since == t + 10 * NS_PER_S
     assert MAX_TS_INIT_SKEW_NS == 300 * NS_PER_S
+
+
+def test_query_books_at_refuses_a_stamp_stored_twice_with_different_books(catalog: str) -> None:
+    second = _DAY0 + 10 * NS_PER_S
+    other = make_snapshot(
+        _IID,
+        bid_prices=[1.5],
+        bid_sizes=[1.0],
+        ask_prices=[2.0],
+        ask_sizes=[1.0],
+        ts_event=second,
+        ts_init=second + 2 * NS_PER_S,
+    )
+    ParquetDataCatalog(catalog).write_data([other])
+    with pytest.raises(catalog_files.CatalogReadError, match="stored twice") as raised:
+        catalog_files.query_books_at(catalog, _IID, [second])
+    assert str(raised.value).startswith(f"{_IID}: second {second} ")
+
+
+def test_query_snapshot_times_returns_a_stamp_two_files_hold_once(catalog: str) -> None:
+    """A day file beside its source: the per-bar book pass reads each stamp once."""
+    expected = catalog_files.query_snapshot_times(catalog, _IID, *_SNAPSHOT_WINDOW).tolist()
+    real = _real_files(catalog, _SNAP)
+    day_file = str(_leaf(catalog, _SNAP) / _timestamps_to_filename(_DAY0, _DAY0 + NS_PER_DAY - 1))
+    shutil.copy(real[0], day_file)
+    assert catalog_files.query_snapshot_times(catalog, _IID, *_SNAPSHOT_WINDOW).tolist() == expected

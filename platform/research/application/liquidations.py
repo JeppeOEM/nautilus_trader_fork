@@ -162,7 +162,9 @@ def read_liquidations(
     while day_start < end_ns:
         day_end = min((day_start // NS_PER_DAY + 1) * NS_PER_DAY, end_ns)
         try:
-            day = query_liquidations(catalog_path, instrument_id, day_start, day_end - 1)
+            day = query_liquidations(
+                catalog_path, instrument_id, day_start, day_end - 1, on_foreign=error_ledger.record
+            )
         except LiquidationDuplicateError as exc:
             error_ledger.record(DUPLICATE_SITE, f"{instrument_id} liquidations not read", exc)
             raise

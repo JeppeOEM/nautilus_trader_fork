@@ -103,7 +103,11 @@ def rebuild_instrument(
     first_day, last_day = start_ns // DAY_NS, end_ns // DAY_NS
     window = (first_day * DAY_NS, (last_day + 1) * DAY_NS - 1)
     feed = has_liquidation_feed(iid)
-    since_ns = liquidation_feed_since_ns(catalog_path, iid) if feed else None
+    since_ns = (
+        liquidation_feed_since_ns(catalog_path, iid, on_foreign=error_ledger.record)
+        if feed
+        else None
+    )
     try:
         days = files_by_day(catalog_path, iid, *window, on_foreign=error_ledger.record)
         for day, paths in sorted(days.items()):
@@ -113,7 +117,9 @@ def rebuild_instrument(
             liquidations = None
             if feed:
                 day_ns = day * DAY_NS
-                liquidations = query_liquidations(catalog_path, iid, day_ns, day_ns + DAY_NS - 1)
+                liquidations = query_liquidations(
+                    catalog_path, iid, day_ns, day_ns + DAY_NS - 1, on_foreign=error_ledger.record
+                )
             seconds += store.rebuild_day(
                 iid, cols, day * DAY_MS, allow_open_day, liquidations, since_ns
             )

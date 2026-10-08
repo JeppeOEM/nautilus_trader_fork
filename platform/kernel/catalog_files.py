@@ -498,40 +498,45 @@ def _top_rows(path: str, start_ns: int, end_ns: int) -> list[TopOfBook]:
     ]
 
 
-def _overlapping_snapshot_files(
-    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int
-) -> list[str]:
-    """Return the instrument's snapshot files whose span meets [start_ns, end_ns] within the margin."""
-    return [
-        path
-        for path in snapshot_files(catalog_path, instrument_id)
-        if CatalogFileSpan.from_path(path).overlaps(start_ns, end_ns, READ_SPAN_MARGIN_NS)
-    ]
-
-
 def query_snapshot_times(
-    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int
+    catalog_path: str,
+    instrument_id: str,
+    start_ns: int,
+    end_ns: int,
+    *,
+    on_foreign: ForeignFileReporter | None = None,
 ) -> np.ndarray:
     """
-    Return the `ts_event` of every second-snapshot row in [start_ns, end_ns], ascending, as an
-    int64 array: the first pass of a per-bar book read (Story 33.6's `DepthWithinBps` picks each bar's
-    last row from it). One column leaves the files, so a 7-day window is ~600k integers, never a
-    book (MEM-01); the same file selection as `query_top_of_book`.
+    Return the `ts_event` of every second-snapshot row in [start_ns, end_ns], ascending and each
+    once, as an int64 array: the first pass of a per-bar book read (Story 33.6's `DepthWithinBps`
+    picks each bar's last row from it). One column leaves the files, so a 7-day window is ~600k
+    integers, never a book (MEM-01); the same file selection and file-fault handling as
+    `query_top_of_book` (a foreign name reported through `on_foreign` and skipped, a vanished file
+    relisted, an unreadable one refused).
     """
-    arrays = [
-        _read_snapshot_columns(path, ["ts_event"], start_ns, end_ns)
-        .column("ts_event")
-        .to_numpy()
-        .astype(np.int64)
-        for path in _overlapping_snapshot_files(catalog_path, instrument_id, start_ns, end_ns)
-    ]
+    arrays = _read_overlapping(
+        lambda: snapshot_files(catalog_path, instrument_id),
+        instrument_id,
+        (start_ns, end_ns, READ_SPAN_MARGIN_NS),
+        lambda path: [
+            _read_snapshot_columns(path, ["ts_event"], start_ns, end_ns)
+            .column("ts_event")
+            .to_numpy()
+            .astype(np.int64)
+        ],
+        on_foreign,
+    )
     if not arrays:
         return np.empty(0, dtype=np.int64)
-    return np.sort(np.concatenate(arrays))
+    return np.unique(np.concatenate(arrays))
 
 
 def query_books_at(
-    catalog_path: str, instrument_id: str, ts_events: Sequence[int]
+    catalog_path: str,
+    instrument_id: str,
+    ts_events: Sequence[int],
+    *,
+    on_foreign: ForeignFileReporter | None = None,
 ) -> dict[int, dict[str, Any]]:
     """
     `ts_event` -> the book of the second-snapshot row stamped exactly then, for the given stamps
@@ -544,19 +549,39 @@ def query_books_at(
     Known limit: a file is still read whole within the stamps' span (its row groups' statistics
     cannot prune scattered stamps), one file at a time in Arrow memory; upgrade path: the Parquet
     page index, or a per-bar book column written by the fold.
+
+    File faults as `query_snapshot_times`; a stamp two files hold (a day file beside its source) is
+    one book, and two copies that differ are refused (`CatalogReadError`), never one picked.
     """
     wanted = sorted(set(ts_events))
     if not wanted:
         return {}
+    rows = _read_overlapping(
+        lambda: snapshot_files(catalog_path, instrument_id),
+        instrument_id,
+        (wanted[0], wanted[-1], READ_SPAN_MARGIN_NS),
+        lambda path: _book_rows(path, wanted),
+        on_foreign,
+    )
     books: dict[int, dict[str, Any]] = {}
-    for path in _overlapping_snapshot_files(catalog_path, instrument_id, wanted[0], wanted[-1]):
+    for book in rows:
+        kept = books.setdefault(book["ts_event"], book)
+        if kept != book:
+            raise CatalogReadError(
+                f"{instrument_id}: second {book['ts_event']} is stored twice with different "
+                "books, refused"
+            )
+    return books
+
+
+def _book_rows(path: str, wanted: list[int]) -> list[dict[str, Any]]:
+    """One file's book rows at the `wanted` stamps (`book_float_rows`' dicts)."""
+    with _reading(path):
         require_integer_layout(pq.read_schema(path), path)
         table = pq.read_table(
             path, columns=list(TOP_OF_BOOK_COLUMNS), filters=[("ts_event", "in", wanted)]
         )
-        for book in book_float_rows(table):
-            books[book["ts_event"]] = book
-    return books
+    return book_float_rows(table)
 
 
 class IndexPrice(NamedTuple):
@@ -1038,7 +1063,12 @@ def _require_agreeing_copies(
 
 
 def query_liquidations(
-    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int
+    catalog_path: str,
+    instrument_id: str,
+    start_ns: int,
+    end_ns: int,
+    *,
+    on_foreign: ForeignFileReporter | None = None,
 ) -> list[Liquidation]:
     """
     Every archived `Liquidation` of the instrument with `ts_event` in the inclusive
@@ -1053,32 +1083,45 @@ def query_liquidations(
     `[]`.
 
     A file removed between the listing and its read (the consolidation) makes the read list again
-    (`_relisting`).
+    (`_relisting`); a foreign file name is reported through `on_foreign` and skipped (refused
+    without a hook), an unreadable file refused (`CatalogReadError`), as the snapshot readers do.
 
     MEM-01: the caller bounds the window (a day at most); this reads all of it at once.
     """
+    report = _reporting_once(on_foreign)
     return _relisting(
         f"{instrument_id} liquidations",
-        lambda: _read_liquidations(catalog_path, instrument_id, start_ns, end_ns),
+        lambda: _read_liquidations(catalog_path, instrument_id, start_ns, end_ns, report),
     )
 
 
 def _read_liquidations(
-    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int
+    catalog_path: str,
+    instrument_id: str,
+    start_ns: int,
+    end_ns: int,
+    report: ForeignFileReporter | None,
 ) -> list[Liquidation]:
-    directory = os.path.join(catalog_path, "data", LIQUIDATION_DIRNAME, instrument_id)
     kept: dict[str, Liquidation] = {}
-    for path in sorted(glob.glob(os.path.join(directory, "*.parquet"))):
-        if not CatalogFileSpan.from_path(path).overlaps(start_ns, end_ns, MAX_TS_INIT_SKEW_NS):
+    for path, span in _named_leaf(catalog_path, LIQUIDATION_DIRNAME, instrument_id, report):
+        if not span.overlaps(start_ns, end_ns, MAX_TS_INIT_SKEW_NS):
             continue
-        table = pq.read_table(
-            path,
-            columns=list(Liquidation.schema().names),
-            filters=[("ts_event", ">=", start_ns), ("ts_event", "<=", end_ns)],
-        )
+        with _reading(path):
+            table = pq.read_table(
+                path,
+                columns=list(Liquidation.schema().names),
+                filters=[("ts_event", ">=", start_ns), ("ts_event", "<=", end_ns)],
+            )
         for values in table.to_pylist():
             _keep_once(kept, Liquidation.from_dict(values), instrument_id)
     return sorted(kept.values(), key=lambda row: (row.ts_event, row.venue_event_id))
+
+
+def _named_leaf(
+    catalog_path: str, dirname: str, instrument_id: str, report: ForeignFileReporter | None
+) -> list[tuple[str, CatalogFileSpan]]:
+    """One data directory's instrument leaf, by path, with each catalog file name's span."""
+    return named_spans(sorted(_leaf_files(catalog_path, dirname, instrument_id)), report)
 
 
 class LiquidationDuplicateError(ValueError):
@@ -1106,7 +1149,9 @@ def _keep_once(kept: dict[str, Liquidation], row: Liquidation, instrument_id: st
         )
 
 
-def liquidation_feed_since_ns(catalog_path: str, instrument_id: str) -> int | None:
+def liquidation_feed_since_ns(
+    catalog_path: str, instrument_id: str, *, on_foreign: ForeignFileReporter | None = None
+) -> int | None:
     """
     Return the earliest archived `Liquidation.ts_event` of the instrument, or None when none is
     archived: the archive's part of a feed instrument's feed start, from which its bars may say "no
@@ -1128,15 +1173,27 @@ def liquidation_feed_since_ns(catalog_path: str, instrument_id: str) -> int | No
     the first liquidation, unless it starts exactly at it (that liquidation is counted in no bar).
     Upgrade path: a durable per-id "feed confirmed since" marker written by capture when the liquidation
     socket subscribes, read here instead of the first row.
+
+    File faults as `query_liquidations` (a foreign name reported and skipped, a vanished file
+    relisted, an unreadable one refused).
     """
-    directory = os.path.join(catalog_path, "data", LIQUIDATION_DIRNAME, instrument_id)
-    paths = glob.glob(os.path.join(directory, "*.parquet"))
-    spans = sorted((CatalogFileSpan.from_path(path).start_ns, path) for path in paths)
+    report = _reporting_once(on_foreign)
+    return _relisting(
+        f"{instrument_id} liquidation feed start",
+        lambda: _earliest_liquidation(catalog_path, instrument_id, report),
+    )
+
+
+def _earliest_liquidation(
+    catalog_path: str, instrument_id: str, report: ForeignFileReporter | None
+) -> int | None:
+    named = _named_leaf(catalog_path, LIQUIDATION_DIRNAME, instrument_id, report)
     earliest: int | None = None
-    for start_ns, path in spans:
+    for start_ns, path in sorted((span.start_ns, path) for path, span in named):
         if earliest is not None and start_ns - MAX_TS_INIT_SKEW_NS > earliest:
             break
-        column = pq.read_table(path, columns=["ts_event"]).column("ts_event")
+        with _reading(path):
+            column = pq.read_table(path, columns=["ts_event"]).column("ts_event")
         if column.null_count:
             raise ValueError(f"{path}: a liquidation row without `ts_event`, refused")
         if len(column):
@@ -1149,7 +1206,12 @@ def liquidation_feed_since_ns(catalog_path: str, instrument_id: str) -> int | No
 
 
 def query_open_interest(
-    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int
+    catalog_path: str,
+    instrument_id: str,
+    start_ns: int,
+    end_ns: int,
+    *,
+    on_foreign: ForeignFileReporter | None = None,
 ) -> list[OpenInterest]:
     """
     Every archived `OpenInterest` row of the instrument with `ts_event` in the inclusive
@@ -1163,29 +1225,35 @@ def query_open_interest(
     picks one (DATA-07). No open-interest directory (a spot id, or none archived yet): `[]`.
 
     A file removed between the listing and its read (the consolidation) makes the read list again
-    (`_relisting`).
+    (`_relisting`); a foreign file name is reported through `on_foreign` and skipped, an unreadable
+    file refused (`CatalogReadError`).
 
     MEM-01: the caller bounds the window (25 h at most); this reads all of it at once.
     """
+    report = _reporting_once(on_foreign)
     return _relisting(
         f"{instrument_id} open interest",
-        lambda: _read_open_interest(catalog_path, instrument_id, start_ns, end_ns),
+        lambda: _read_open_interest(catalog_path, instrument_id, start_ns, end_ns, report),
     )
 
 
 def _read_open_interest(
-    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int
+    catalog_path: str,
+    instrument_id: str,
+    start_ns: int,
+    end_ns: int,
+    report: ForeignFileReporter | None,
 ) -> list[OpenInterest]:
-    directory = os.path.join(catalog_path, "data", OPEN_INTEREST_DIRNAME, instrument_id)
     kept: dict[tuple[int, int], OpenInterest] = {}
-    for path in sorted(glob.glob(os.path.join(directory, "*.parquet"))):
-        if not CatalogFileSpan.from_path(path).overlaps(start_ns, end_ns, MAX_TS_INIT_SKEW_NS):
+    for path, span in _named_leaf(catalog_path, OPEN_INTEREST_DIRNAME, instrument_id, report):
+        if not span.overlaps(start_ns, end_ns, MAX_TS_INIT_SKEW_NS):
             continue
-        table = pq.read_table(
-            path,
-            columns=list(OpenInterest.schema().names),
-            filters=[("ts_event", ">=", start_ns), ("ts_event", "<=", end_ns)],
-        )
+        with _reading(path):
+            table = pq.read_table(
+                path,
+                columns=list(OpenInterest.schema().names),
+                filters=[("ts_event", ">=", start_ns), ("ts_event", "<=", end_ns)],
+            )
         for values in table.to_pylist():
             row = OpenInterest.from_dict(values)
             first = kept.setdefault((row.ts_event, row.ts_init), row)
@@ -1217,7 +1285,13 @@ class PriceColumns(NamedTuple):
 
 
 def query_price_columns(
-    catalog_path: str, dirname: str, instrument_id: str, start_ns: int, end_ns: int
+    catalog_path: str,
+    dirname: str,
+    instrument_id: str,
+    start_ns: int,
+    end_ns: int,
+    *,
+    on_foreign: ForeignFileReporter | None = None,
 ) -> PriceColumns:
     """
     Every mark (`MARK_PRICE_DIRNAME`) or index (`INDEX_PRICE_DIRNAME`) price row of the instrument
@@ -1231,7 +1305,8 @@ def query_price_columns(
     `(ts_event, ts_init)`; two copies with that key but a different price raise `ValueError` naming
     them -- the caller ledgers it, never picks one (DATA-07). Copies compare by value, so the same
     price under two precision labels is one row. No directory: empty arrays. A file removed between
-    the listing and its read (the consolidation) makes the read list again (`_relisting`).
+    the listing and its read (the consolidation) makes the read list again (`_relisting`); a
+    foreign file name is reported through `on_foreign` and skipped, an unreadable file refused.
 
     Known limit: the window's columns are held at once (about 32 bytes a row: a day of a Bybit
     linear id's marks is ~28 MB of arrays), so the caller bounds the window (`views.derivatives`
@@ -1240,19 +1315,26 @@ def query_price_columns(
     """
     if dirname not in _PRICE_DIRNAMES:
         raise ValueError(f"{dirname!r} is not a fixed-point price directory")
+    report = _reporting_once(on_foreign)
     return _relisting(
         f"{instrument_id} {dirname}",
-        lambda: _read_price_columns(catalog_path, dirname, instrument_id, start_ns, end_ns),
+        lambda: _read_price_columns(
+            catalog_path, dirname, instrument_id, (start_ns, end_ns), report
+        ),
     )
 
 
 def _read_price_columns(
-    catalog_path: str, dirname: str, instrument_id: str, start_ns: int, end_ns: int
+    catalog_path: str,
+    dirname: str,
+    instrument_id: str,
+    window: tuple[int, int],
+    report: ForeignFileReporter | None,
 ) -> PriceColumns:
-    directory = os.path.join(catalog_path, "data", dirname, instrument_id)
+    start_ns, end_ns = window
     parts: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
-    for path in sorted(glob.glob(os.path.join(directory, "*.parquet"))):
-        if not CatalogFileSpan.from_path(path).overlaps(start_ns, end_ns, MAX_TS_INIT_SKEW_NS):
+    for path, span in _named_leaf(catalog_path, dirname, instrument_id, report):
+        if not span.overlaps(start_ns, end_ns, MAX_TS_INIT_SKEW_NS):
             continue
         part = _price_part(path, start_ns, end_ns)
         if part is not None:
@@ -1266,11 +1348,12 @@ def _read_price_columns(
 def _price_part(
     path: str, start_ns: int, end_ns: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
-    table = pq.read_table(
-        path,
-        columns=["value", "ts_event", "ts_init"],
-        filters=[("ts_event", ">=", start_ns), ("ts_event", "<=", end_ns)],
-    )
+    with _reading(path):
+        table = pq.read_table(
+            path,
+            columns=["value", "ts_event", "ts_init"],
+            filters=[("ts_event", ">=", start_ns), ("ts_event", "<=", end_ns)],
+        )
     if table.num_rows == 0:
         return None
     precision = _price_precision_label(path, table)
@@ -1311,7 +1394,12 @@ def _unique_price_rows(
 
 
 def newest_ts_event_before(
-    catalog_path: str, instrument_id: str, dirnames: tuple[str, ...], before_ns: int
+    catalog_path: str,
+    instrument_id: str,
+    dirnames: tuple[str, ...],
+    before_ns: int,
+    *,
+    on_foreign: ForeignFileReporter | None = None,
 ) -> int | None:
     """
     Return the newest stored `ts_event < before_ns` of the instrument across the `dirnames` data
@@ -1322,31 +1410,36 @@ def newest_ts_event_before(
     once no file left can hold a newer row: a row's `ts_event` is at most its `ts_init` plus
     `MAX_TS_INIT_SKEW_NS`, so a file whose span ends that far below the best found is never opened.
     Each file is read at most once per listing; a file removed between the listing and its read (the
-    consolidation) makes the scan list again (`_relisting`).
+    consolidation) makes the scan list again (`_relisting`); a foreign file name is reported
+    through `on_foreign` and skipped, an unreadable file refused.
     """
+    report = _reporting_once(on_foreign)
     return _relisting(
         f"{instrument_id} {'/'.join(dirnames)}",
-        lambda: _newest_ts_event_before(catalog_path, instrument_id, dirnames, before_ns),
+        lambda: _newest_ts_event_before(catalog_path, instrument_id, dirnames, before_ns, report),
     )
 
 
 def _newest_ts_event_before(
-    catalog_path: str, instrument_id: str, dirnames: tuple[str, ...], before_ns: int
+    catalog_path: str,
+    instrument_id: str,
+    dirnames: tuple[str, ...],
+    before_ns: int,
+    report: ForeignFileReporter | None,
 ) -> int | None:
     candidates: list[tuple[int, str]] = []
     for dirname in dirnames:
-        directory = os.path.join(catalog_path, "data", dirname, instrument_id)
-        for path in glob.glob(os.path.join(directory, "*.parquet")):
-            span = CatalogFileSpan.from_path(path)
+        for path, span in _named_leaf(catalog_path, dirname, instrument_id, report):
             if span.start_ns - MAX_TS_INIT_SKEW_NS < before_ns:
                 candidates.append((span.end_ns, path))
     best: int | None = None
     for end_ns, path in sorted(candidates, reverse=True):
         if best is not None and end_ns + MAX_TS_INIT_SKEW_NS <= best:
             break
-        column = pq.read_table(
-            path, columns=["ts_event"], filters=[("ts_event", "<", before_ns)]
-        ).column("ts_event")
+        with _reading(path):
+            column = pq.read_table(
+                path, columns=["ts_event"], filters=[("ts_event", "<", before_ns)]
+            ).column("ts_event")
         if len(column):
             newest = int(pc.max(column).as_py())
             best = newest if best is None else max(best, newest)

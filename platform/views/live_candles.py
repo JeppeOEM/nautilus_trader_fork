@@ -253,8 +253,10 @@ def _catalog_rows_for_seed(
         return _SeedRows(seconds, [], None)
     return _SeedRows(
         seconds,
-        query_liquidations(catalog_path, instrument_id, start_ns, end_ns),
-        liquidation_feed_since_ns(catalog_path, instrument_id),
+        query_liquidations(
+            catalog_path, instrument_id, start_ns, end_ns, on_foreign=error_ledger.record
+        ),
+        liquidation_feed_since_ns(catalog_path, instrument_id, on_foreign=error_ledger.record),
     )
 
 
@@ -711,7 +713,10 @@ class LiveCandleBus:
         """One refresh, in a thread; a failure is ledgered once and keeps the previous value."""
         try:
             since = await asyncio.to_thread(
-                liquidation_feed_since_ns, self._catalog_path, instrument_id
+                liquidation_feed_since_ns,
+                self._catalog_path,
+                instrument_id,
+                on_foreign=error_ledger.record,
             )
         except Exception as exc:
             error_ledger.record(

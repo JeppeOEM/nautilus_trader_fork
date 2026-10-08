@@ -99,6 +99,7 @@ from kernel.ta import Supertrend
 from kernel.ta import WilliamsPercentR
 from kernel.ta import ZigZag
 from kernel.venues import venue_of
+from observability import error_ledger
 
 from nautilus_trader import indicators as _ind
 from nautilus_trader.indicators import MovingAverageType
@@ -1359,7 +1360,11 @@ def _last_snapshot_per_bar(
     pass one of the two-pass read (`kernel.catalog_files.query_snapshot_times`, one column).
     """
     times = catalog_files.query_snapshot_times(
-        _CATALOG_PATH, window.instrument_id, read_from_ms * 1_000_000, end_ms * 1_000_000 - 1
+        _CATALOG_PATH,
+        window.instrument_id,
+        read_from_ms * 1_000_000,
+        end_ms * 1_000_000 - 1,
+        on_foreign=error_ledger.record,
     )
     bar_ms = window.bar_seconds * 1000
     picks: list[int | None] = []
@@ -1411,7 +1416,9 @@ def _depth_within_bps_replay(
     read_from = max(window.start_ms, window.end_ms - MAX_QUERY_SPAN_SECONDS * 1000)
     picks = _last_snapshot_per_bar(candles, window, read_from, window.end_ms)
     stamps = [p for p in picks if p is not None]
-    books = catalog_files.query_books_at(_CATALOG_PATH, window.instrument_id, stamps)
+    books = catalog_files.query_books_at(
+        _CATALOG_PATH, window.instrument_id, stamps, on_foreign=error_ledger.record
+    )
     depths = [_depth_at(None if p is None else books.get(p), params["bps"]) for p in picks]
     return {"bid": [d[0] for d in depths], "ask": [d[1] for d in depths]}
 

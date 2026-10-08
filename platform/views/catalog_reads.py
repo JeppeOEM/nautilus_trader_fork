@@ -29,6 +29,7 @@ from kernel.catalog_files import liquidation_feed_since_ns
 from kernel.clocks import READ_SPAN_MARGIN_NS
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.venues import venue_of
+from observability import error_ledger
 
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -80,7 +81,7 @@ def liquidation_feed_start(catalog_path: str, candles_dir: str, instrument_id: s
         stored = None if db is None else queries.liquidation_feed_since(db, instrument_id)
     if stored is not None:
         return stored
-    return liquidation_feed_since_ns(catalog_path, instrument_id)
+    return liquidation_feed_since_ns(catalog_path, instrument_id, on_foreign=error_ledger.record)
 
 
 def query_second_snapshots(

@@ -1493,7 +1493,10 @@ class CaptureService:
         """
         try:
             self._second_sink.apply_liquidations(  # type: ignore[union-attr]
-                iid, query_liquidations(catalog_path, iid, now_ns - _CATCH_UP_MAX_NS, now_ns)
+                iid,
+                query_liquidations(
+                    catalog_path, iid, now_ns - _CATCH_UP_MAX_NS, now_ns, on_foreign=self._ledger
+                ),
             )
         except Exception as e:
             self._ledger(

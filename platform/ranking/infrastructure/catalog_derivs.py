@@ -22,6 +22,7 @@ from kernel.catalog_files import query_liquidations
 from kernel.catalog_files import query_open_interest
 from kernel.liquidation import Liquidation
 from kernel.open_interest import OpenInterest
+from observability import error_ledger
 
 
 class CatalogDerivsHistory:
@@ -36,7 +37,11 @@ class CatalogDerivsHistory:
         self._catalog_path = catalog_path
 
     def open_interest(self, instrument_id: str, start_ns: int, end_ns: int) -> list[OpenInterest]:
-        return query_open_interest(self._catalog_path, instrument_id, start_ns, end_ns)
+        return query_open_interest(
+            self._catalog_path, instrument_id, start_ns, end_ns, on_foreign=error_ledger.record
+        )
 
     def liquidations(self, instrument_id: str, start_ns: int, end_ns: int) -> list[Liquidation]:
-        return query_liquidations(self._catalog_path, instrument_id, start_ns, end_ns)
+        return query_liquidations(
+            self._catalog_path, instrument_id, start_ns, end_ns, on_foreign=error_ledger.record
+        )

@@ -137,7 +137,13 @@ NewestBefore = Callable[[int], int | None]
 
 def _newest_before(catalog_path: str, instrument_id: str, *dirnames: str) -> NewestBefore:
     """Bind `catalog_files.newest_ts_event_before` to one instrument's data directories."""
-    return partial(catalog_files.newest_ts_event_before, catalog_path, instrument_id, dirnames)
+    return partial(
+        catalog_files.newest_ts_event_before,
+        catalog_path,
+        instrument_id,
+        dirnames,
+        on_foreign=error_ledger.record,
+    )
 
 
 def _first_window[T](
@@ -275,7 +281,9 @@ def _unique_ticks(instrument_id: str, ticks: Iterable[DerivsTick]) -> list[Deriv
 def _oi_ticks(
     catalog_path: str, instrument_id: str, start_ns: int, end_ns: int
 ) -> list[DerivsTick]:
-    rows = catalog_files.query_open_interest(catalog_path, instrument_id, start_ns, end_ns - 1)
+    rows = catalog_files.query_open_interest(
+        catalog_path, instrument_id, start_ns, end_ns - 1, on_foreign=error_ledger.record
+    )
     return [tick for tick in map(to_tick, rows) if tick is not None]
 
 
@@ -314,7 +322,9 @@ def _last_prices(
     """
     last: dict[int, Decimal] = {}
     for lo, hi in day_slices(start_ns, end_ns):
-        rows = catalog_files.query_price_columns(catalog_path, dirname, instrument_id, lo, hi - 1)
+        rows = catalog_files.query_price_columns(
+            catalog_path, dirname, instrument_id, lo, hi - 1, on_foreign=error_ledger.record
+        )
         if not len(rows.ts_event):
             continue
         buckets = bucket_start_ms(rows.ts_event // _MS, bar_seconds)
@@ -377,7 +387,9 @@ def funding_page(
         dirname = catalog_files.FUNDING_RATE_DIRNAME
         fetch = partial(_catalog_ticks, catalog_path, FundingRateUpdate, instrument_id)
         newest = _newest_before(catalog_path, instrument_id, dirname)
-        ranges = catalog_files.data_file_ranges(catalog_path, instrument_id, dirname)
+        ranges = catalog_files.data_file_ranges(
+            catalog_path, instrument_id, dirname, on_foreign=error_ledger.record
+        )
         ticks = _walk_back(fetch, newest, before_ns, limit, (NS_PER_DAY, _same), lambda t: t.t)
         kept, has_more = _kept(ticks, limit, ranges, lambda t: t.t)
         return [_funding_item(tick) for tick in kept], has_more
@@ -430,7 +442,9 @@ def open_interest_page(
         ticks = partial(_oi_ticks, catalog_path, instrument_id)
         fetch = partial(_oi_rows, ticks, bar_seconds, before_ns)
         newest = _newest_before(catalog_path, instrument_id, dirname)
-        ranges = catalog_files.data_file_ranges(catalog_path, instrument_id, dirname)
+        ranges = catalog_files.data_file_ranges(
+            catalog_path, instrument_id, dirname, on_foreign=error_ledger.record
+        )
         window = _bucket_window(bar_seconds, limit)
         rows = _walk_back(fetch, newest, before_ns, limit, window, _bucket_ns)
         kept, has_more = _kept(rows, limit, ranges, _bucket_ns)
@@ -540,7 +554,9 @@ def mark_index_page(
         ranges = sorted(
             span
             for dirname in dirnames
-            for span in catalog_files.data_file_ranges(catalog_path, instrument_id, dirname)
+            for span in catalog_files.data_file_ranges(
+                catalog_path, instrument_id, dirname, on_foreign=error_ledger.record
+            )
         )
         rows = _walk_back(
             fetch, newest, before_ns, limit, _bucket_window(bar_seconds, limit), _bucket_ns
@@ -599,7 +615,9 @@ def liquidations_page(
     def read() -> tuple[list[dict], bool]:
         dirname = catalog_files.LIQUIDATION_DIRNAME
         newest = _newest_before(catalog_path, instrument_id, dirname)
-        ranges = catalog_files.data_file_ranges(catalog_path, instrument_id, dirname)
+        ranges = catalog_files.data_file_ranges(
+            catalog_path, instrument_id, dirname, on_foreign=error_ledger.record
+        )
         rows = _walk_back(
             fetch, newest, before_ns, limit, (NS_PER_DAY, _same), lambda r: r.ts_event
         )
@@ -857,7 +875,9 @@ def liquidation_bars(
             rows = [
                 row
                 for lo, hi in day_slices(bars[0]["t"] * _MS, end_ns)
-                for row in catalog_files.query_liquidations(catalog_path, instrument_id, lo, hi - 1)
+                for row in catalog_files.query_liquidations(
+                    catalog_path, instrument_id, lo, hi - 1, on_foreign=error_ledger.record
+                )
             ]
             archived = _by_bucket(rows, bar_seconds)
         items = [_liquidation_bar_item(bar, archived.get(bar["t"], [])) for bar in bars]

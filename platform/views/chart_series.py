@@ -436,7 +436,9 @@ def liquidations_plus_recent(
     flushed yet, each venue event once (`venue_event_id`, D-150): the archive's copy wins, a tail row the
     archive already holds is not added again.
     """
-    rows = catalog_files.query_liquidations(catalog_path, instrument_id, start_ns, end_ns)
+    rows = catalog_files.query_liquidations(
+        catalog_path, instrument_id, start_ns, end_ns, on_foreign=error_ledger.record
+    )
     have = {row.venue_event_id for row in rows}
     tail = recent_liquidations(instrument_id, start_ns, end_ns)
     fresh = {row.venue_event_id: row for row in tail if row.venue_event_id not in have}

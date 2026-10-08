@@ -482,7 +482,11 @@ class CatalogFrames:
             try:
                 # `query_liquidations` bounds are inclusive: the day ends a nanosecond early.
                 rows += query_liquidations(
-                    self._catalog_path, instrument_id, day_start, day_end - 1
+                    self._catalog_path,
+                    instrument_id,
+                    day_start,
+                    day_end - 1,
+                    on_foreign=error_ledger.record,
                 )
             except LiquidationDuplicateError as exc:
                 error_ledger.record(
