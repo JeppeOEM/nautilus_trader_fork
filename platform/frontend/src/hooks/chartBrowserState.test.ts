@@ -8,7 +8,7 @@ const files = {
   ...import.meta.glob(["./*.ts", "!./*.test.ts"], { query: "?raw", import: "default", eager: true }),
   ...import.meta.glob(["../pages/ChartPage.tsx"], { query: "?raw", import: "default", eager: true }),
   // Story 33.12: the watchlist rail, the symbol search, the shortcut sheet, the compare picker and the
-  // time and shortcut modules -- the watchlist is server-side, fullscreen is never kept anywhere.
+  // time and shortcut modules -- the watchlist is server-side, the focus view is never kept anywhere.
   ...import.meta.glob(
     [
       "../components/chart/{WatchlistRail,SymbolSearch,ShortcutSheet,CompareControl}.tsx",
@@ -20,7 +20,7 @@ const files = {
 
 /** Story 33.12's files: they touch no browser storage at all. */
 const STORY_33_12_FILES = [
-  "./useFullscreen.ts",
+  "./useFocusView.ts",
   "./useWatchlist.ts",
   "../components/chart/WatchlistRail.tsx",
   "../components/chart/SymbolSearch.tsx",
@@ -54,7 +54,7 @@ describe("no chart setting is kept in the browser", () => {
     expect(code).not.toMatch(/sessionStorage/);
   });
 
-  it("keeps the watchlist, fullscreen and the Story 33.12 settings out of browser storage", () => {
+  it("keeps the watchlist, the focus view and the Story 33.12 settings out of browser storage", () => {
     for (const name of STORY_33_12_FILES) {
       expect(Object.keys(files)).toContain(name);
       expect(stripComments(files[name])).not.toMatch(/localStorage|sessionStorage|indexedDB/);

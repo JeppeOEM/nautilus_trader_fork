@@ -4,12 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchIndicatorValues } from "../api/client";
 import type { IndicatorConfigEntry, IndicatorValuesItem } from "../api/schema";
 import { gapRun } from "../lib/gaps";
-import { DEFAULT_SOURCE } from "../lib/indicatorId";
+import { DEFAULT_SOURCE, entryId, valuesId } from "../lib/indicatorId";
 
 // Mirrors useCandles.ts's own constants exactly -- co-paging (AD-F3)
 // depends on every chart-history hook sharing the identical before_ns/limit/bar_seconds
 // tuple, not just a similarly-shaped one.
-const INITIAL_LIMIT = 120;
+const INITIAL_LIMIT = 500;
 const DEFAULT_BAR_SECONDS = 60;
 const REFILL_MARGIN_BARS = 20;
 
@@ -30,6 +30,21 @@ function toDatum(timeMs: number, value: number | null | undefined): PickerDatum 
   // per this route's own I/O matrix row) is passed straight through as native whitespace
   // data -- never filtered or reshaped (same discipline as useCandles' toChartDatum).
   return value == null ? { time } : { time, value };
+}
+
+/** `series` plus, for each copy of an indicator added more than once, its values' series under the
+ * copy's own keys (`<values id>#<n>.<output>`): the copies share one request entry and one series. */
+function withCopies(series: Record<string, PickerDatum[]>, entries: IndicatorConfigEntry[]): Record<string, PickerDatum[]> {
+  const copies = entries.filter((e) => entryId(e) !== valuesId(e));
+  if (copies.length === 0) return series;
+  const out = { ...series };
+  for (const entry of copies) {
+    const prefix = `${valuesId(entry)}.`;
+    for (const [key, data] of Object.entries(series)) {
+      if (key.startsWith(prefix)) out[`${entryId(entry)}.${key.slice(prefix.length)}`] = data;
+    }
+  }
+  return out;
 }
 
 function toSeriesByKey(items: IndicatorValuesItem[]): Record<string, PickerDatum[]> {
@@ -78,12 +93,14 @@ export function usePickerIndicatorValues(
 
   // Entries compared by value, not by array identity -- ChartPage/IndicatorPicker may
   // rebuild the `entries` array on every render even when its content hasn't changed.
-  const entriesKey = useMemo(() => JSON.stringify(entries.map(toRequest)), [entries]);
+  // Copies of one indicator (same name, params and source) are one request entry: their values are
+  // one series, drawn under each copy's own keys (`withCopies`).
+  const entriesKey = useMemo(() => JSON.stringify([...new Set(entries.map((e) => JSON.stringify(toRequest(e))))]), [entries]);
   const requestEntries = useMemo(
-    () => entries.map(toRequest),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    () => (JSON.parse(entriesKey) as string[]).map((text) => JSON.parse(text) as ReturnType<typeof toRequest>),
     [entriesKey],
   );
+  const copiesKey = useMemo(() => entries.map(entryId).join("\n"), [entries]);
 
   const loadPage = useCallback(
     (beforeNs: number, prepend: boolean): Promise<void> => {
@@ -181,5 +198,12 @@ export function usePickerIndicatorValues(
     return () => timeScale.unsubscribeVisibleLogicalRangeChange(handler);
   }, [chart, loadPage]);
 
-  return seriesByKey;
+  const entriesRef = useRef(entries);
+  entriesRef.current = entries;
+  return useMemo(
+    () => withCopies(seriesByKey, entriesRef.current),
+    // `copiesKey` stands for `entries`' copies (the array itself is rebuilt on every render).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [seriesByKey, copiesKey],
+  );
 }

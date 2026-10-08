@@ -27,6 +27,7 @@ import redis.asyncio as aioredis
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
+from collection_control.application.ports import COLLECTED_KEY_PREFIX
 from collection_control.application.ports import STATUS_CHANNEL
 from collection_control.infrastructure.redis import RedisStatusBus
 
@@ -74,3 +75,27 @@ def test_a_timeout_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(RedisTimeoutError):
         asyncio.run(_bus(monkeypatch, client).publish("row"))
     assert client.attempts == 1
+
+
+class _SetClient(_Client):
+    """`_Client` with `set`, raising the same planned errors."""
+
+    def __init__(self, errors: list[Exception]) -> None:
+        super().__init__(errors)
+        self.stored: dict[str, str] = {}
+
+    async def set(self, key: str, value: str) -> bool:
+        self.attempts += 1
+        if self.errors:
+            raise self.errors.pop(0)
+        self.stored[key] = value
+        return True
+
+
+def test_the_collected_snapshot_is_stored_under_the_venues_key_retried_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _SetClient([RedisConnectionError("Error UNKNOWN while writing to socket.")])
+    monkeypatch.setattr(aioredis.Redis, "from_url", staticmethod(lambda *a, **k: client))
+    asyncio.run(RedisStatusBus("redis://127.0.0.1:6379").store_collected("BYBIT", "{}"))
+    assert client.stored == {f"{COLLECTED_KEY_PREFIX}BYBIT": "{}"}

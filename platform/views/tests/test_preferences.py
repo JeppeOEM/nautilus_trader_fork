@@ -187,6 +187,32 @@ def test_source_hidden_and_style_round_trip_and_are_written_only_when_not_defaul
     assert text.count("hidden") == 1
 
 
+def test_instance_round_trips_and_is_written_only_above_one(tmp_path: Path) -> None:
+    path = tmp_path / "chart_indicators.toml"
+    sma = IndicatorEntry("SimpleMovingAverage", {"period": 20}, "native")
+    config = {
+        "BTC-USD-PERP.DYDX": [sma, IndicatorEntry(sma.name, sma.params, "native", instance=2)]
+    }
+
+    save_chart_indicators(config, path)
+
+    assert load_chart_indicators(path) == config
+    assert path.read_text().count("instance") == 1
+
+
+def test_an_invalid_instance_falls_back_to_one_with_a_warning(tmp_path: Path, caplog) -> None:
+    path = tmp_path / "chart_indicators.toml"
+    path.write_text(
+        '[["BTC-USD-PERP.DYDX"]]\nname = "SimpleMovingAverage"\ncategory = "native"\ninstance = 0\n'
+    )
+
+    with caplog.at_level("WARNING", logger="views.preferences"):
+        entry = load_chart_indicators(path)["BTC-USD-PERP.DYDX"][0]
+
+    assert entry.instance == 1
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 1
+
+
 def test_wrong_typed_source_hidden_style_fall_back_to_defaults_with_one_warning_each(
     tmp_path: Path, caplog
 ) -> None:

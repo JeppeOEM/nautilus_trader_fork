@@ -34,6 +34,11 @@ from collection_control.domain.plan import CollectionPlan
 
 STATUS_CHANNEL = "collector:status"
 CONTROL_CHANNEL = "collector:control"
+# Chart UX rework (2026-10-08): each venue's last published collected set, a Redis key per venue
+# (`<prefix><VENUE>`) holding `collected_snapshot`'s JSON, so a reader that starts between two
+# publishes (data_api's symbol search) knows what is collected at once. Mirrored by
+# `views/collected_markets.py` (a local copy: `views` never imports `collection_control`).
+COLLECTED_KEY_PREFIX = "collector:collected:"
 
 
 class Capture(Protocol):
@@ -87,6 +92,10 @@ class StatusBus(Protocol):
     """
 
     async def publish(self, message: str) -> None: ...
+
+    async def store_collected(self, venue: str, snapshot: str) -> None:
+        """Replace `venue`'s `COLLECTED_KEY_PREFIX` key with `snapshot`, verbatim."""
+        ...
 
     async def aclose(self) -> None: ...
 

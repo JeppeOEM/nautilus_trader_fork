@@ -21,7 +21,7 @@ describe("shortcutFor (Story 33.12)", () => {
 
   it("maps Shift+L, Shift+F, /, Ctrl+K, Cmd+K and ?", () => {
     expect(shortcutFor(key({ shiftKey: true, code: "KeyL", key: "L" }))).toEqual({ kind: "log_scale" });
-    expect(shortcutFor(key({ shiftKey: true, code: "KeyF", key: "F" }))).toEqual({ kind: "fullscreen" });
+    expect(shortcutFor(key({ shiftKey: true, code: "KeyF", key: "F" }))).toEqual({ kind: "focus" });
     expect(shortcutFor(key({ code: "Slash", key: "/" }))).toEqual({ kind: "search" });
     expect(shortcutFor(key({ ctrlKey: true, code: "KeyK", key: "k" }))).toEqual({ kind: "search" });
     expect(shortcutFor(key({ metaKey: true, code: "KeyK", key: "k" }))).toEqual({ kind: "search" });
@@ -48,7 +48,7 @@ describe("shortcutFor (Story 33.12)", () => {
     expect(shortcutFor(key({ shiftKey: true, code: "Minus", key: "?" }))).toEqual({ kind: "sheet" });
     // Shift+L / Shift+F still reach their actions on every layout.
     expect(shortcutFor(key({ shiftKey: true, code: "KeyL", key: "L" }))).toEqual({ kind: "log_scale" });
-    expect(shortcutFor(key({ shiftKey: true, code: "KeyF", key: "F" }))).toEqual({ kind: "fullscreen" });
+    expect(shortcutFor(key({ shiftKey: true, code: "KeyF", key: "F" }))).toEqual({ kind: "focus" });
     expect(shortcutFor(key({ shiftKey: true, code: "Enter", key: "Enter" }))).toBeNull();
   });
 

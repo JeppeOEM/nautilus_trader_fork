@@ -358,14 +358,27 @@ table {
   color: var(--color-link);
 }
 
-/* Spec §A8.1 top toolbar: three clusters (symbol+timeframe | chart type | indicators+fit+
-   jump) separated by a visible divider. */
+/* Chart UX rework (2026-10-08): the header -- the top bar and the replay controls -- sticks to the
+   top of the window while the page scrolls through the panes, so every control stays in reach. It
+   sits over the chart (z-index above the chart's canvases and legends, below the dialogs), on the
+   page's own background. */
+.chart-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  margin: 0 0 12px;
+  padding: 6px 0;
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+}
+
+/* The top bar: three clusters (market, timeframe and chart type | what the chart draws | actions and
+   menus) separated by a rule, one line on a desktop width; a narrower window wraps whole clusters. */
 .chart-topbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0;
-  margin: 0 0 12px;
+  gap: 6px 0;
 }
 
 .chart-cluster {
@@ -374,6 +387,123 @@ table {
   gap: 6px;
   padding: 0 12px;
   border-left: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+
+.chart-replay-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+/* A dropdown of the top bar (`MenuButton`): the panel opens under its button, over the chart. */
+.menu-button {
+  position: relative;
+  display: inline-block;
+}
+
+.menu-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 190px;
+  padding: 6px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border-strong);
+}
+
+.menu-panel-right {
+  left: auto;
+  right: 0;
+}
+
+.menu-panel > button {
+  text-align: left;
+}
+
+.menu-panel > button[aria-checked="true"] {
+  color: var(--color-link);
+}
+
+.menu-panel > button[aria-checked="true"]::before {
+  content: "\2713  ";
+}
+
+.menu-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 2px;
+  cursor: pointer;
+}
+
+.menu-row input[type="checkbox"] {
+  order: 1;
+}
+
+.menu-sep {
+  width: 100%;
+  margin: 4px 0;
+  border: 0;
+  border-top: 1px solid var(--color-border);
+}
+
+/* The price scale's quick switches and the view's jumps, on the chart's bottom-right corner
+   (`ChartCornerControls`, inside the positioned `.term-box`); the inline right/bottom insets clear the
+   price scale and the time axis. */
+.chart-corner {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  gap: 4px;
+}
+
+.chart-chip {
+  padding: 2px 6px;
+  font-size: 11px;
+  color: var(--chart-text);
+  background: var(--chart-bg);
+  border: 1px solid var(--chart-border);
+  cursor: pointer;
+  opacity: 0.85;
+}
+
+.chart-chip:hover {
+  opacity: 1;
+}
+
+.chart-chip.active {
+  color: var(--chart-bg);
+  background: var(--chart-text);
+}
+
+.chart-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+/* The site's navigation bar (App.tsx's TopNav). In the stylesheet, not inline, so the focus view's
+   rule below can hide it. */
+.site-nav {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.3em 1em;
+  padding: 0.6em 1em;
+  border-bottom: 1px solid var(--color-border);
+}
+
+/* The focus view (`useFocusView`, body class `chart-focus`): the site's navigation goes, the chart
+   takes the window's width and fits its height (LightweightChart's `fitToWindow`), and the page still
+   scrolls. The error bar stays (DATA-07: never hidden). */
+body.chart-focus .site-nav {
+  display: none;
 }
 
 .chart-cluster:first-child {
@@ -397,6 +527,18 @@ table {
 .chart-cluster .tabbtn {
   flex: none;
   padding: 7px 8px;
+}
+
+/* In the top bar a toggle that is off reads as an ordinary button (the dim `.tabbtn` look reads as
+   disabled there); on, it keeps `.tabbtn.active`'s highlight. */
+.chart-topbar .tabbtn:not(.active):not(:disabled) {
+  color: var(--color-text);
+  border-color: var(--color-border-strong);
+}
+
+.chart-topbar .menu-open {
+  color: var(--color-active);
+  border-color: var(--color-link);
 }
 
 /* Spec §A8.1 left toolbar: cursor/crosshair, divider, then the drawing tools. */
@@ -653,45 +795,6 @@ table {
   background: var(--vga-light-red);
 }
 
-/* Story 18.10 (spec §A8.1): the top bar's clusters, separated by a rule (ANSI-style divider). */
-.chart-topbar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-
-.chart-topbar-group {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.chart-topbar-group + .chart-topbar-group {
-  border-left: 1px solid var(--color-border);
-  padding-left: 12px;
-}
-
-/* A group that wraps onto its own row would keep a dangling divider otherwise -- the rule is
-   only drawn while the bar fits on one line (wide viewports). */
-@media (max-width: 720px) {
-  .chart-topbar-group + .chart-topbar-group {
-    border-left: 0;
-    padding-left: 0;
-  }
-}
-
-.chart-topbar h1 {
-  margin: 0;
-}
-
-.chart-toolbar-divider {
-  width: 100%;
-  margin: 0;
-  border: 0;
-  border-top: 1px solid var(--color-border);
-}
-
 /* Story 33.12: the chart page is the per-coin stage beside the optional watchlist rail. Neither
    clips nor fixes a height (chart-layout.test.mjs): the page scrolls, as with the panes. */
 .chart-page {
@@ -703,23 +806,6 @@ table {
 .chart-stage {
   flex: 1;
   min-width: 0;
-}
-
-/* The fullscreen element: the top bar, the replay controls, the tool rail, the chart with every pane
-   and the Liquidation tape. LightweightChart scales the panes so the chart fits this element's height
-   (refitting on a viewport resize). Known limit: a message under the chart (a load error, an overlay
-   notice) is not in that budget, so it sits below the screen edge and the stage scrolls to it.
-   Upgrade path: subtract the content under the chart from the budget and refit when it changes. */
-.chart-stage:fullscreen {
-  width: 100vw;
-  height: 100vh;
-  padding: 8px;
-  overflow: auto;
-  background: var(--color-bg);
-}
-
-.chart-stage::backdrop {
-  background: var(--color-bg);
 }
 
 /* The symbol in the top bar is the symbol search's button: it reads as the heading it replaced. */
@@ -751,6 +837,14 @@ table {
 
 .symbol-search-results {
   max-height: 50vh;
+}
+
+.symbol-search-scope {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+  color: var(--color-text-dim);
 }
 
 .symbol-search-active {

@@ -63,7 +63,7 @@ describe("usePickerIndicatorValues", () => {
     expect(fetchIndicatorValuesMock).toHaveBeenCalledWith(
       "BTC-USD-PERP.DYDX",
       expect.any(Number),
-      120,
+      500,
       60,
       [{ name: "RelativeStrengthIndex", params: { period: 14 } }],
     );
@@ -87,7 +87,7 @@ describe("usePickerIndicatorValues", () => {
     expect(fetchIndicatorValuesMock).toHaveBeenLastCalledWith(
       "BTC-USD-PERP.DYDX",
       120_000 * 1_000_000,
-      120,
+      500,
       60,
       [{ name: "RelativeStrengthIndex", params: { period: 14 } }],
     );
@@ -152,7 +152,7 @@ describe("usePickerIndicatorValues", () => {
     expect(fetchIndicatorValuesMock).toHaveBeenLastCalledWith(
       "BTC-USD-PERP.DYDX",
       expect.any(Number),
-      120,
+      500,
       60,
       [{ name: "SimpleMovingAverage", params: {} }],
     );
@@ -208,5 +208,25 @@ describe("usePickerIndicatorValues", () => {
 
       expect(fetchIndicatorValuesMock).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe("usePickerIndicatorValues copies (chart UX rework, 2026-10-08)", () => {
+  it("requests two copies of one indicator once and draws its series under each copy's own keys", async () => {
+    fetchIndicatorValuesMock.mockReset().mockResolvedValue({
+      items: [{ t: 60_000, values: { "RelativeStrengthIndex_period=14.value": 55 } }],
+      has_more: false,
+      errors: {},
+      venue: "DYDX",
+      market: "perp",
+    });
+    const rsi = { name: "RelativeStrengthIndex", params: { period: 14 }, category: "native" };
+    const entries = [rsi, { ...rsi, instance: 2 }];
+    const { result } = renderHook(() => usePickerIndicatorValues("BTC-USD-PERP.DYDX", null, entries));
+
+    await waitFor(() => expect(Object.keys(result.current)).toHaveLength(2));
+    expect(fetchIndicatorValuesMock).toHaveBeenCalledTimes(1);
+    expect(fetchIndicatorValuesMock.mock.calls[0][4]).toEqual([{ name: "RelativeStrengthIndex", params: { period: 14 } }]);
+    expect(result.current["RelativeStrengthIndex_period=14#2.value"]).toEqual(result.current["RelativeStrengthIndex_period=14.value"]);
   });
 });

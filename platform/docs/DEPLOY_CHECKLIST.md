@@ -2209,3 +2209,31 @@ the pull and simply become ignored.
       `cp -a ~/alerts.post-dw219/. data/alerts/`), drop the two `.gitkeep` files the copy brought
       back (`rm -f data/preferences/.gitkeep data/alerts/.gitkeep`: the reverted tree neither
       tracks nor ignores them, so `git status` would show them), then `make up`.
+
+### chart-ux (commit: this branch's, merged into troll by hand)
+
+The chart page's UX rework: the Invert scale removed (chart layouts become `v = 2`, upgraded on read,
+every saved zoom reset to the 300-bar default), a sticky one-line top bar with chart-type, Layout
+and Settings menus, scale chips and Fit / Latest on the chart, a focus view instead of the browser
+fullscreen, indicators addable more than once (`instance` in `chart_indicators.toml`), the symbol
+search and Compare listing collected markets only (each collector now keeps its collected set in
+the Redis key `collector:collected:<VENUE>`, `docs/DATA_DICTIONARY.md` §2.17), and two chart bugs
+fixed at their cause (the price pane deleted by the library on a Lines -> Candles switch, and a new
+pane inheriting the price scale's Percent/Log mode, which broke the Spread pane). Nothing to
+migrate by hand: the layout upgrade happens on read and is written back on the next save.
+
+- [ ] Back up `data/preferences/chart_layouts.toml` before the deploy
+      (`cp -a data/preferences/chart_layouts.toml ~/chart_layouts.pre-chart-ux.toml`): the new
+      `data_api` writes `v = 2` tables, which a rolled-back `data_api` refuses (a 500 on every
+      layout GET); a rollback restores this copy (changes made after the deploy are lost).
+- [ ] Redeploy every collector (`make redeploy-all`) and `data_api`: only a collector running this
+      code writes its `collector:collected:<VENUE>` key, and until each venue's key exists its
+      markets read `collected: null`, so the symbol search lists every market and says why.
+- [ ] After the redeploy: `docker compose exec redis redis-cli --scan --pattern 'collector:collected:*'`
+      lists one key per running collector (BYBIT, HYPERLIQUID), each `GET` showing the plan's
+      instruments under `collected`; the chart's symbol search then lists only those, with
+      **All markets** listing the rest.
+- [ ] Open a coin with a saved layout: it opens at about 300 bars with the newest at the right;
+      the price scale has no Invert anywhere; with one compare, Spread draws a pane whose axis is
+      in bps (never %).
+

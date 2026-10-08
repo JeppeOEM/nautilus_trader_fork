@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { entryId, indicatorId, splitSeriesKey } from "./indicatorId";
+import { copyId, entryId, indicatorId, splitSeriesKey, valuesId } from "./indicatorId";
 import { outputStyle } from "./indicatorStyle";
 
 // The ids below are what `views/indicator_picker.py`'s `indicator_id` produces for the same
@@ -63,5 +63,21 @@ describe("outputStyle", () => {
     expect(outputStyle(entry({ value: { color: 5, line_width: "9", line_style: "wavy" } }), "value")).toEqual({});
     expect(outputStyle(entry({ value: { line_width: 9 } }), "value")).toEqual({ line_width: 4 });
     expect(outputStyle(entry({ value: { line_width: 0.2 } }), "value")).toEqual({ line_width: 1 });
+  });
+});
+
+describe("indicator copies (chart UX rework, 2026-10-08)", () => {
+  const rsi = { name: "RelativeStrengthIndex", params: { period: 14 }, category: "native" };
+
+  it("keeps the first copy's plain id and gives a later copy its own, sharing one values id", () => {
+    expect(entryId(rsi)).toBe("RelativeStrengthIndex_period=14");
+    expect(entryId({ ...rsi, instance: 1 })).toBe("RelativeStrengthIndex_period=14");
+    expect(entryId({ ...rsi, instance: 2 })).toBe("RelativeStrengthIndex_period=14#2");
+    expect(valuesId({ ...rsi, instance: 2 })).toBe("RelativeStrengthIndex_period=14");
+    expect(copyId("SMA:hl2", 3)).toBe("SMA:hl2#3");
+  });
+
+  it("splits a copy's series key on its last dot, keeping the copy in the id", () => {
+    expect(splitSeriesKey("RelativeStrengthIndex_period=14#2.value")).toEqual({ id: "RelativeStrengthIndex_period=14#2", output: "value" });
   });
 });

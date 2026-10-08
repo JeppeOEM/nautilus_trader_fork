@@ -8,7 +8,7 @@ export type ShortcutAction =
   | { kind: "tool"; tool: ShortcutTool }
   | { kind: "replay" }
   | { kind: "log_scale" }
-  | { kind: "fullscreen" }
+  | { kind: "focus" }
   | { kind: "compare" }
   | { kind: "search" }
   | { kind: "sheet" }
@@ -31,10 +31,10 @@ export const SHORTCUTS: readonly ShortcutRow[] = [
   { keys: "Alt+R", does: "Bar Replay: pick a start bar, or exit a running replay (candle charts only; nothing in Lines mode)" },
   { keys: "Alt+C", does: "Compare: open the symbol search to add a compare symbol (Candles mode only)" },
   { keys: "Shift+L", does: "Log scale on / off (not while a compare forces the percent scale)" },
-  { keys: "Shift+F", does: "Fullscreen on / off (the chart with every pane, the tools and the top bar)" },
+  { keys: "Shift+F", does: "Focus view on / off: only the chart, its tools and the top bar, fitted to the browser window" },
   { keys: "/ or Ctrl+K (Cmd+K)", does: "Symbol search: open another market" },
   { keys: "?", does: "This list" },
-  { keys: "Esc", does: "Disarm the tool, cancel a replay pick, clear a typed timeframe" },
+  { keys: "Esc", does: "Close a menu, disarm the tool, cancel a replay pick, clear a typed timeframe; with none of those, leave the focus view" },
   { keys: "Ctrl+Z (Cmd+Z)", does: "Undo a drawing edit" },
   { keys: "Ctrl+Shift+Z or Ctrl+Y", does: "Redo a drawing edit" },
   { keys: "Shift while drawing", does: "Snap a line to 0 / 45 / 90 degrees" },
@@ -113,7 +113,7 @@ export function shortcutFor(event: KeyboardEvent): ShortcutAction | null {
   if (char !== null) return { kind: "timeframe_char", char };
   if (event.shiftKey) {
     if (event.code === "KeyL") return { kind: "log_scale" };
-    if (event.code === "KeyF") return { kind: "fullscreen" };
+    if (event.code === "KeyF") return { kind: "focus" };
     return null;
   }
   return event.key === "Enter" ? { kind: "timeframe_enter" } : null;

@@ -19,16 +19,7 @@ const queryClient = new QueryClient();
 
 function TopNav() {
   return (
-    <nav
-      style={{
-        borderBottom: "1px solid var(--color-border)",
-        padding: "0.6em 1em",
-        display: "flex",
-        flexWrap: "wrap",
-        justifyContent: "space-between",
-        gap: "0.3em 1em",
-      }}
-    >
+    <nav className="site-nav">
       <span>
         <Link to="/">Rankings</Link> · <Link to="/alerts">Alerts</Link> · <Link to="/docs">Docs</Link>
       </span>

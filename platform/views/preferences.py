@@ -25,9 +25,12 @@ added `chart_drawings.toml`, Story 32.6 `chart_layouts.toml`, Story 33.7
   added three optional keys to an entry: `source` (the price a close-fed indicator reads, default
   `"close"`), `hidden` (the legend's eye, default `false`) and `style` (a table per output label of
   `color`/`line_width`/`line_style`, default empty = the pane palette). They are written only when
-  not default, so a file saved before them loads unchanged and saves back byte-identical. `id` is
-  never persisted: it is a client-side sequence counter for the multi-instance picker UI,
-  regenerated fresh on every load.
+  not default, so a file saved before them loads unchanged and saves back byte-identical. The chart
+  UX rework (2026-10-08) added `instance` (an integer >= 1, default 1, written only above 1): the
+  copy number of an indicator added more than once, so two copies with the same name, params and
+  source stay two entries (`check_indicator_entries` refuses a repeated name/params/source/instance).
+  It names a copy only; the copies' values are the same series (`indicator_picker.indicator_id`
+  never carries it).
 - `chart_drawings.toml`: per-instrument chart drawings (Story 32.5), a table per instrument id
   holding `v = 1` and an `items` array of tables, each tagged with a `kind` (`hline`,
   `trendline`, `fib`, `position`, `anchored_vp`, `anchored_vwap`; Story 33.10 added `ray`,
@@ -38,7 +41,7 @@ added `chart_drawings.toml`, Story 32.6 `chart_layouts.toml`, Story 33.7
   checked by `validate_drawing`, which names the offending field (`DrawingError`): a malformed
   item is refused, never dropped, so a saved drawing is never silently lost on a round trip.
 - `chart_layouts.toml`: per-instrument chart layout (Story 32.6), a table per instrument id holding
-  `v = 1` and the fields below, plus one reserved `[default]` table (the template a coin opened for
+  `v = 2` (a `v = 1` table is migrated on read, `_migrate_v1_table`) and the fields below, plus one reserved `[default]` table (the template a coin opened for
   the first time is seeded from) with the same fields and a `default_indicators` array of indicator
   entry tables (the `chart_indicators.toml` shape) -- `load_chart_layouts`/`save_chart_layouts`.
   `default` can never be an instrument id (every id is `SYMBOL.VENUE`). Fields (`validate_layout`,
@@ -167,6 +170,8 @@ class IndicatorEntry:
     hidden: bool = field(default=False, kw_only=True)
     # Output label -> {color, line_width, line_style, ...}; empty = the pane palette default.
     style: dict[str, dict[str, Any]] = field(default_factory=dict, kw_only=True)
+    # The copy number of an indicator added more than once (>= 1); never part of its values' id.
+    instance: int = field(default=1, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -247,7 +252,27 @@ def _load_indicator_entry(instrument_id: str, e: dict[str, Any]) -> IndicatorEnt
         source=_typed_or_default(instrument_id, e, "source", "close"),
         hidden=_typed_or_default(instrument_id, e, "hidden", False),
         style=_typed_or_default(instrument_id, e, "style", {}),
+        instance=_instance_or_default(instrument_id, e),
     )
+
+
+def is_valid_instance(instance: Any) -> bool:
+    """Return True for an indicator copy number the file and the API accept: an integer >= 1."""
+    return isinstance(instance, int) and not isinstance(instance, bool) and instance >= 1
+
+
+def _instance_or_default(instrument_id: str, e: dict[str, Any]) -> int:
+    """`e["instance"]` when valid, else 1 with one warning (the `_typed_or_default` rule)."""
+    instance = e.get("instance", 1)
+    if is_valid_instance(instance):
+        return int(instance)
+    _log.warning(
+        "chart_indicators.toml: %s entry %r has an invalid instance %r; using 1",
+        instrument_id,
+        e.get("name"),
+        instance,
+    )
+    return 1
 
 
 def _indicator_table(entry: IndicatorEntry) -> dict[str, Any]:
@@ -266,6 +291,8 @@ def _indicator_table(entry: IndicatorEntry) -> dict[str, Any]:
         table["hidden"] = True
     if entry.style:
         table["style"] = entry.style
+    if entry.instance != 1:
+        table["instance"] = entry.instance
     return table
 
 
@@ -702,7 +729,12 @@ def save_chart_drawings(config: dict[str, list[dict[str, Any]]], path: Path) -> 
 # `chart_layouts.toml` (Story 32.6). `LAYOUT_BAR_SECONDS` mirrors the frontend's `timeframes.ts`
 # TIMEFRAMES (1m 5m 15m 1H 4H 1D 1W; `test_bar_seconds_mirror_the_frontend` pins the pair); the
 # candles route accepts any size, so this is the layout's own closed set.
-LAYOUT_VERSION = 1
+LAYOUT_VERSION = 2
+# The only older version still read: `_migrate_v1_table` upgrades it, and the next save writes v2.
+_LAYOUT_V1 = 1
+# The zoom a coin opens at (bars on screen) until its own is saved: wide enough to read the trend.
+# Mirrors the frontend's `BUILT_IN_LAYOUT.visible_bars` (`test_visible_bars_default_mirrors_the_frontend`).
+DEFAULT_VISIBLE_BARS = 300
 LAYOUT_DEFAULT_KEY = "default"
 LAYOUT_BAR_SECONDS = (60, 300, 900, 3600, 14400, 86400, 604800)
 LAYOUT_MODES = ("candles", "lines")
@@ -832,7 +864,7 @@ MAX_COMPARE_SYMBOLS = 3
 # bound exists, so this cap only bounds a hostile value. Mirrors the frontend's
 # `MAX_INSTRUMENT_ID_LENGTH` (`lib/compare.ts`; `test_instrument_id_length_mirrors_the_frontend`).
 MAX_INSTRUMENT_ID_LENGTH = 512
-PRICE_SCALE_DEFAULTS: dict[str, Any] = {"mode": "normal", "auto_scale": True, "invert": False}
+PRICE_SCALE_DEFAULTS: dict[str, Any] = {"mode": "normal", "auto_scale": True}
 COMPARE_DEFAULTS: dict[str, Any] = {"symbols": [], "spread": False}
 # Story 33.10: the optional `drawings_hidden` key, the tool rail's "Hide all drawings" (every drawing
 # of the coin neither drawn nor hit-tested, and the drawing tools off). A layout saved before it
@@ -869,7 +901,7 @@ BUILTIN_DEFAULT_LAYOUT: dict[str, Any] = {
     "volume": True,
     "crosshair": True,
     "pane_heights": {},
-    "visible_bars": 120,
+    "visible_bars": DEFAULT_VISIBLE_BARS,
     "volume_profile": {
         "kind": "off",
         "rows": 24,
@@ -1211,7 +1243,7 @@ def _validate_price_scale(scale: Any) -> dict[str, Any]:
     """
     Return the right price scale's settings (the caller passes `PRICE_SCALE_DEFAULTS` when the
     table is absent), else raise `LayoutError` naming `price_scale.<key>`: a present table carries
-    all three keys, and an explicit null is a wrong value, refused (strict by design).
+    both keys, and an explicit null is a wrong value, refused (strict by design).
     """
     if not isinstance(scale, dict):
         raise LayoutError("price_scale", "must be an object")
@@ -1219,9 +1251,8 @@ def _validate_price_scale(scale: Any) -> dict[str, Any]:
     _check_keys(scale, keys, keys, "price_scale.")
     if scale["mode"] not in PRICE_SCALE_MODES:
         raise LayoutError("price_scale.mode", f"must be one of {list(PRICE_SCALE_MODES)}")
-    for key in ("auto_scale", "invert"):
-        if not isinstance(scale[key], bool):
-            raise LayoutError(f"price_scale.{key}", "must be a boolean")
+    if not isinstance(scale["auto_scale"], bool):
+        raise LayoutError("price_scale.auto_scale", "must be a boolean")
     return {key: scale[key] for key in PRICE_SCALE_DEFAULTS}
 
 
@@ -1265,7 +1296,25 @@ def _layout_table(layout: dict[str, Any]) -> dict[str, Any]:
     return table
 
 
+def _migrate_v1_table(name: str, table: dict[str, Any]) -> dict[str, Any]:
+    """
+    Return a `v = 1` layout table as v2 (chart UX rework, 2026-10-08): the Invert scale was removed,
+    so `price_scale.invert` goes (a boolean, else the table is refused naming it -- a v1 file held
+    nothing else there), and `visible_bars` takes `DEFAULT_VISIBLE_BARS`, the operator's one-time
+    reset of every saved zoom to the wider default. Every other key is validated as before.
+    """
+    migrated = dict(table, v=LAYOUT_VERSION, visible_bars=DEFAULT_VISIBLE_BARS)
+    scale = table.get("price_scale")
+    if isinstance(scale, dict) and "invert" in scale:
+        if not isinstance(scale["invert"], bool):
+            raise LayoutError(f"{name}.price_scale.invert", "must be a boolean")
+        migrated["price_scale"] = {k: v for k, v in scale.items() if k != "invert"}
+    return migrated
+
+
 def _read_layout_table(name: str, table: Any, *, tolerant: bool, extra: frozenset[str]) -> Any:
+    if isinstance(table, dict) and table.get("v") == _LAYOUT_V1:
+        table = _migrate_v1_table(name, table)
     if not isinstance(table, dict) or table.get("v") != LAYOUT_VERSION:
         raise LayoutError(name, f"is not a v = {LAYOUT_VERSION} layout table")
     body = {k: v for k, v in table.items() if k != "v" and k not in extra}

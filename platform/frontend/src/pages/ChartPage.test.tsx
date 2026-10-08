@@ -299,7 +299,7 @@ interface ChartStubProps {
   sessionBreaks?: boolean;
   countdown?: { barSeconds: number; enabled: boolean } | null;
   lastPrice?: { line: boolean; label: boolean };
-  fullscreen?: boolean;
+  fitToWindow?: boolean;
   liveBar?: unknown;
   liveVolumeColor?: string;
   markerTime?: number | null;
@@ -358,6 +358,31 @@ const { fetchCoinIndicatorConfig, fetchIndicatorCatalog } = await import("../api
 const { SAVE_DEBOUNCE_MS, SAVE_RETRY_MS } = await import("../hooks/useChartDrawings");
 const { BUILT_IN_LAYOUT } = await import("../lib/chartLayout");
 type ChartLayout = import("../lib/chartLayout").ChartLayout;
+
+// Chart UX rework (2026-10-08): the chart type menu holds the candle chart types and the 1 s book
+// lines (what the Candles / Lines buttons were); the Settings menu the display toggles.
+const LINES_ITEM = "Lines (1 s book)";
+function pickChartType(item: string): void {
+  fireEvent.click(screen.getByRole("button", { name: /^Chart type:/ }));
+  fireEvent.click(screen.getByRole("menuitemradio", { name: item }));
+}
+const switchToLines = (): void => pickChartType(LINES_ITEM);
+const switchToCandles = (): void => pickChartType("Candles");
+function openSettings(): void {
+  if (screen.queryByRole("group", { name: "Chart settings" }) === null) {
+    fireEvent.click(screen.getByRole("button", { name: "Chart settings" }));
+  }
+}
+/** The Settings menu's checkbox `name`, opening the menu first when it is closed. */
+function setting(name: string): HTMLElement {
+  openSettings();
+  return screen.getByRole("checkbox", { name });
+}
+/** The Settings menu's time zone select, opening the menu first when it is closed. */
+function timeZoneSelect(): HTMLElement {
+  openSettings();
+  return screen.getByRole("combobox", { name: "Time zone" });
+}
 
 const IID = "BTC-USD-PERP.DYDX";
 const layoutOf = (patch: Partial<ChartLayout> = {}): ChartLayout => ({ ...BUILT_IN_LAYOUT, ...patch });
@@ -441,7 +466,7 @@ beforeEach(() => {
   mocks.failedIids = [];
   marketsApi.get.mockReset().mockResolvedValue({
     items: [
-      { instrument_id: "BTC-USD-PERP.HYPERLIQUID", symbol: "BTC", venue: "HYPERLIQUID", same_asset: true, market: "perp", volume24h: 2_500_000 },
+      { instrument_id: "BTC-USD-PERP.HYPERLIQUID", symbol: "BTC", venue: "HYPERLIQUID", same_asset: true, market: "perp", volume24h: 2_500_000, collected: true },
     ],
     stale_venues: [],
   });
@@ -538,10 +563,10 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
   it("disables the hline button in Lines mode and re-enables it back in Candles", async () => {
     await renderReady(page());
 
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
     expect(toolControl("Horizontal line tool")).toBeDisabled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Candles" }));
+    switchToCandles();
     expect(toolControl("Horizontal line tool")).toBeEnabled();
   });
 
@@ -549,7 +574,7 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
     await renderReady(page());
     armTool("Horizontal line tool");
 
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
 
     expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "Horizontal line tool" })).toHaveAttribute("aria-pressed", "false");
@@ -886,36 +911,29 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
 
   // Story 32.4 (2026-09-30): still no toggle. The chart area alone is light, by operator decision,
   // through the `.chart-workspace` tokens in theme.css; the rest of the app keeps the VGA identity.
-  it("orders the top toolbar [symbol+timeframe] [chart type] [indicators+fit+latest], with no theme toggle", () => {
+  it("orders the top bar [market, timeframe, chart type] [what is drawn] [actions, menus, view], with no theme toggle", () => {
     render(page());
 
     const names = within(screen.getByRole("toolbar", { name: "Chart controls" }))
       .getAllByRole("button")
       .map((b) => b.getAttribute("aria-label") ?? b.textContent);
+    // Chart UX rework (2026-10-08): one line; Invert is gone, the display toggles and the
+    // Liquidation tape are in the Settings menu, the scale switches and Fit / Latest on the chart.
     expect(names).toEqual([
       "BTC-USD-PERP.DYDX", // Story 33.12: the symbol opens the symbol search
       ...["1m", "5m", "15m", "1H", "4H", "1D", "1W"].map((l) => `Timeframe ${l}`),
-      "Candles",
-      "Lines",
-      "Auto",
-      "Invert",
+      "Chart type: Candles",
+      "Indicators",
       "Compare",
       "Spread",
-      "Indicators",
       "Volume overlays",
-      "Liquidation tape",
-      "Layout",
       "Alert",
-      "Fit",
-      "Latest",
       "Replay",
-      "Fullscreen",
+      "Layout ▾",
+      "Chart settings",
+      "Focus",
       "Watchlist",
       "Keyboard shortcuts",
-      "Session breaks",
-      "Countdown",
-      "Last price line",
-      "Last price label",
     ]);
     expect(screen.getByRole("link", { name: /Rankings/ })).toHaveAttribute("href", "/");
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("BTC-USD-PERP.DYDX");
@@ -1070,7 +1088,7 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
   it("disables a candles-only tool in its flyout in Lines mode, with its title, while the group stays usable", async () => {
     await renderReady(page());
     armTool("Horizontal line tool");
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
 
     // The group shows the HLine (disabled), but its flyout still offers the Trend line, which Lines mode allows.
     expect(screen.getByRole("button", { name: "Horizontal line tool" })).toBeDisabled();
@@ -1122,8 +1140,23 @@ describe("ChartPage indicators dialog (spec A4.1)", () => {
     expect(saveConfigMock).toHaveBeenCalledWith("BTC-USD-PERP.DYDX", [
       { name: "SimpleMovingAverage", params: {}, category: "native" },
     ]);
-    expect(within(dialog).getByRole("button", { name: /^SimpleMovingAverage/ })).toBeDisabled();
-    expect(within(dialog).getByText("added")).toBeInTheDocument();
+    // Chart UX rework (2026-10-08): an added indicator can be added again, as another copy.
+    expect(within(dialog).getByRole("button", { name: /^SimpleMovingAverage/ })).toBeEnabled();
+    expect(within(dialog).getByText("added · click to add another")).toBeInTheDocument();
+  });
+
+  it("adds a second copy with the same defaults as instance 2, its own legend row and series keys", async () => {
+    const dialog = await openDialog();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /^SimpleMovingAverage/ }));
+    await act(async () => {});
+    fireEvent.click(within(dialog).getByRole("button", { name: /^SimpleMovingAverage/ }));
+    await act(async () => {});
+
+    expect(saveConfigMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", [
+      { name: "SimpleMovingAverage", params: {}, category: "native" },
+      { name: "SimpleMovingAverage", params: {}, category: "native", instance: 2 },
+    ]);
   });
 });
 
@@ -1303,7 +1336,7 @@ describe("ChartPage trendline tool (Story 18.2)", () => {
 
   it("works in Lines mode too", async () => {
     await renderReady(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
 
     expect(toolControl("Trendline tool")).toBeEnabled();
   });
@@ -1334,7 +1367,7 @@ describe("ChartPage measurement tool (Story 18.3)", () => {
 
   it("is disabled in Lines mode", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
 
     expect(toolControl("Measurement tool")).toBeDisabled();
   });
@@ -1503,7 +1536,7 @@ describe("ChartPage bar replay (Story 18.4)", () => {
   it("is disabled in Lines mode, saying why (Story 33.12: Replay is a candle-chart feature)", () => {
     render(<ChartPage />);
     expect(screen.getByRole("button", { name: "Replay" })).toHaveAttribute("title", "Bar Replay (Alt+R)");
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
 
     expect(screen.getByRole("button", { name: "Replay" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Replay" })).toHaveAttribute("title", "Replay is available on candle charts");
@@ -1674,7 +1707,7 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
 
   it("is disabled in Lines mode", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
 
     expect(toolControl("Fixed range volume profile tool")).toBeDisabled();
   });
@@ -1698,7 +1731,14 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
           unsubscribeVisibleLogicalRangeChange: vi.fn(),
           subscribeVisibleTimeRangeChange: vi.fn(),
           unsubscribeVisibleTimeRangeChange: vi.fn(),
+          // The chart's corner controls (scale chips, Latest) read these.
+          scrollPosition: () => 0,
+          height: () => 28,
+          subscribeSizeChange: vi.fn(),
+          unsubscribeSizeChange: vi.fn(),
         }),
+        priceScale: () => ({ width: () => 60 }),
+        chartElement: () => document.createElement("div"),
       });
     });
   const vrvp = () => lastChartProps.current!.volumeProfiles!.filter((p) => p.id === "vrvp");
@@ -1787,10 +1827,11 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
   it("subscribes to the visible range only while active, and shows revealed bars only during a replay", () => {
     render(<ChartPage />);
     attachChart();
-    expect(handlers).toHaveLength(0);
+    // The chart's corner controls (Latest) hold their own subscription throughout.
+    const base = handlers.length;
 
     overlayClick("Add visible range volume profile");
-    expect(handlers).toHaveLength(1);
+    expect(handlers).toHaveLength(base + 1);
     expect(vrvp()[0].profile.totalVolume).toBeCloseTo(30); // bars 2..4
 
     fireEvent.click(screen.getByRole("button", { name: "Replay" }));
@@ -1808,7 +1849,7 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
     expect(add()).toBeDisabled();
     expect(add()).toHaveTextContent("on the chart");
 
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
     expect(screen.getByText("Shown in Candles mode only")).toBeInTheDocument();
     const svp = within(openOverlays()).getByRole("button", { name: "Add Session Volume Profile" });
     expect(svp).toBeDisabled();
@@ -1836,7 +1877,7 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
     act(() => lastChartProps.current!.onRangeSelect!({ time: 1, price: 1 }, { time: 3, price: 2 }));
     expect(lastChartProps.current!.volumeProfiles!.map((p) => p.id)).toEqual(["frvp-1", "vrvp"]);
 
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
 
     expect(vrvp()).toHaveLength(0);
   });
@@ -1854,11 +1895,12 @@ describe("ChartPage Volume overlays dialog", () => {
     mocks.session = { candles, volume: mocks.volume, completeFrom: null };
   });
 
-  it("opens from the top bar's Volume overlays button, next to Indicators, with the overlays to add and nothing on", () => {
+  it("opens from the top bar's Volume overlays button, in the Indicators cluster, with the overlays to add and nothing on", () => {
     render(page());
     const topbar = screen.getByRole("toolbar", { name: "Chart controls" });
     const labels = within(topbar).getAllByRole("button").map((b) => b.textContent);
-    expect(labels.indexOf("Volume overlays")).toBe(labels.indexOf("Indicators") + 1);
+    // Chart UX rework (2026-10-08): Indicators, Compare, Spread, Volume overlays -- what the chart draws.
+    expect(labels.indexOf("Volume overlays")).toBe(labels.indexOf("Indicators") + 3);
     expect(screen.queryByRole("dialog", { name: "Volume overlays" })).toBeNull();
 
     fireEvent.click(within(topbar).getByRole("button", { name: "Volume overlays" }));
@@ -1933,7 +1975,7 @@ describe("ChartPage Volume overlays dialog", () => {
 
   it("disables every Add and the FRVP draw in Lines mode, saying why", () => {
     render(page());
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
     const dialog = openOverlays();
 
     expect(within(dialog).getByText(/Volume overlays draw in Candles mode only/)).toBeInTheDocument();
@@ -1966,7 +2008,7 @@ describe("ChartPage Volume overlays dialog", () => {
     expect(within(notices).getByText("Session Volume Profile: loading session history")).toBeInTheDocument();
     expect(within(notices).getByText("Session Volume Profile: 2 of 5 sessions drawn")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
     expect(screen.queryByRole("list", { name: "Volume overlay notices" })).toBeNull();
   });
 
@@ -2068,11 +2110,11 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
   it("can be removed, and is hidden in Lines mode", () => {
     render(<ChartPage />);
     overlayClick("Add Session Volume Profile");
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
     expect(sessions()).toHaveLength(0);
     expect(screen.getByText("Shown in Candles mode only")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Candles" }));
+    switchToCandles();
     expect(sessions()).toHaveLength(3);
     overlayClick("Remove session volume profile");
     expect(sessions()).toHaveLength(0);
@@ -3059,7 +3101,7 @@ describe("ChartPage layout that comes back as it was left (Story 32.6)", () => {
     expect(hooks.candlesBar.length).toBeGreaterThan(0);
     expect(hooks.candlesBar.every((bar) => bar === 3600)).toBe(true);
     expect(screen.getByRole("button", { name: "Timeframe 1H" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: "Lines" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^Chart type:/ })).toHaveAccessibleName(`Chart type: ${LINES_ITEM}`);
     expect(screen.getByRole("button", { name: "Crosshair toggle" })).toHaveAttribute("aria-pressed", "false");
     expect(lastChartProps.current!.panes!.map((p) => p.id)).toEqual([]); // volume off
     expect(lastChartProps.current!.initialPaneHeights).toEqual({ "RelativeStrengthIndex_period=14": 220 });
@@ -3121,7 +3163,7 @@ describe("ChartPage layout that comes back as it was left (Story 32.6)", () => {
     vi.useFakeTimers();
     render(page());
     fireEvent.click(screen.getByRole("button", { name: "Timeframe 15m" }));
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
     fireEvent.click(screen.getByRole("button", { name: "Crosshair toggle" }));
     act(() => lastChartProps.current!.onPaneHeights!({ price: 480, volume: 150 }));
     await flushSave();
@@ -3597,7 +3639,7 @@ describe("ChartPage Anchored VP and Anchored VWAP drawings (Story 32.7)", () => 
     place("Anchored volume profile tool", 200);
     place("Anchored VWAP tool", 100);
 
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
 
     expect(lastChartProps.current!.drawings).toEqual([]);
     expect(avpProfiles()).toHaveLength(0);
@@ -3986,7 +4028,7 @@ describe("ChartPage volume footprint (Story 32.8)", () => {
     layoutApi.server[IID] = layoutOf({ footprint: { ...BUILT_IN_LAYOUT.footprint, on: true } });
     const dialog = await openIndicators();
 
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
 
     expect(lastFootprintCall().enabled).toBe(false);
     expect(lastChartProps.current!.footprint).toBeNull();
@@ -4200,7 +4242,7 @@ describe("ChartPage derivatives panes (Story 33.5)", () => {
     expect(liveDerivs.liquidationsSubscribed.every((iid) => iid === "")).toBe(true);
     expect(derivativePanes()).toEqual([]);
     expect(lastChartProps.current!.liquidationMarkers).toEqual([]);
-    expect(screen.getByRole("button", { name: "Liquidation tape" })).toBeDisabled();
+    expect(setting("Liquidation tape")).toBeDisabled();
     fireEvent.click(within(screen.getByRole("toolbar", { name: "Chart controls" })).getByRole("button", { name: "Indicators" }));
     const group = within(screen.getByRole("dialog", { name: "Indicators" })).getByRole("group", { name: "Derivatives" });
     expect(within(group).getByText("spot: no derivatives")).toBeInTheDocument();
@@ -4232,7 +4274,7 @@ describe("ChartPage derivatives panes (Story 33.5)", () => {
     }));
     await renderPerp();
     act(() => lastChartProps.current!.onBarSpacing!(12));
-    fireEvent.click(screen.getByRole("button", { name: "Liquidation tape" }));
+    fireEvent.click(setting("Liquidation tape"));
     await flush();
 
     fireEvent.click(screen.getByRole("button", { name: "Replay" }));
@@ -4288,9 +4330,9 @@ describe("ChartPage derivatives panes (Story 33.5)", () => {
 
   it("in Lines mode: the group is disabled with Candles mode only, nothing drawn, the tape button disabled", async () => {
     await renderPerp();
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
     expect(derivativePanes()).toEqual([]);
-    expect(screen.getByRole("button", { name: "Liquidation tape" })).toBeDisabled();
+    expect(setting("Liquidation tape")).toBeDisabled();
     fireEvent.click(within(screen.getByRole("toolbar", { name: "Chart controls" })).getByRole("button", { name: "Indicators" }));
     const group = within(screen.getByRole("dialog", { name: "Indicators" })).getByRole("group", { name: "Derivatives" });
     expect(within(group).getByText("Candles mode only")).toBeInTheDocument();
@@ -4300,7 +4342,7 @@ describe("ChartPage derivatives panes (Story 33.5)", () => {
   it("disables the tape until the instrument's market is known", async () => {
     mocks.venueMarket = null;
     await renderPerp();
-    expect(screen.getByRole("button", { name: "Liquidation tape" })).toBeDisabled();
+    expect(setting("Liquidation tape")).toBeDisabled();
   });
 
   it("persists the on/off state, the style and the pane height in the coin's layout", async () => {
@@ -4350,14 +4392,14 @@ describe("ChartPage derivatives panes (Story 33.5)", () => {
 
   it("toggles the Liquidation tape, which says when the instrument has no feed", async () => {
     await renderPerp();
-    const toggle = screen.getByRole("button", { name: "Liquidation tape" });
-    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    const toggle = setting("Liquidation tape");
+    expect(toggle).not.toBeChecked();
     expect(screen.queryByRole("complementary", { name: "Liquidation tape" })).toBeNull();
 
     fireEvent.click(toggle);
     await flush();
 
-    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    expect(toggle).toBeChecked();
     expect(screen.getByRole("complementary", { name: "Liquidation tape" })).toHaveTextContent(
       "no liquidation feed for this instrument",
     );
@@ -4365,7 +4407,7 @@ describe("ChartPage derivatives panes (Story 33.5)", () => {
 
   it("shows a live liquidation on the tape", async () => {
     await renderPerp();
-    fireEvent.click(screen.getByRole("button", { name: "Liquidation tape" }));
+    fireEvent.click(setting("Liquidation tape"));
     await flush();
     act(() =>
       liveDerivs.onLiquidation!({
@@ -4604,41 +4646,44 @@ describe("chart type, price scale and compare (Story 33.9)", () => {
     vi.useFakeTimers();
     render(page());
     expect(lastChartProps.current!.chartType).toBe("candles");
-    expect(lastChartProps.current!.priceScale).toEqual({ mode: "normal", autoScale: true, invert: false });
+    expect(lastChartProps.current!.priceScale).toEqual({ mode: "normal", autoScale: true });
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Chart type" }), { target: { value: "heikin_ashi" } });
-    fireEvent.change(screen.getByRole("combobox", { name: "Price scale" }), { target: { value: "log" } });
-    fireEvent.click(screen.getByRole("button", { name: "Auto" }));
-    fireEvent.click(screen.getByRole("button", { name: "Invert" }));
+    // Chart UX rework (2026-10-08): the type from the chart type menu, the scale from the chart's
+    // corner chips; Invert is gone.
+    pickChartType("Heikin Ashi");
+    fireEvent.click(screen.getByRole("button", { name: "Log scale" }));
+    fireEvent.click(screen.getByRole("button", { name: "Auto scale" }));
     await flushSave();
 
     expect(lastChartProps.current!.chartType).toBe("heikin_ashi");
-    expect(lastChartProps.current!.priceScale).toEqual({ mode: "log", autoScale: false, invert: true });
-    expect(screen.getByRole("button", { name: "Auto" })).toHaveAttribute("aria-pressed", "false");
+    expect(lastChartProps.current!.priceScale).toEqual({ mode: "log", autoScale: false });
+    expect(screen.getByRole("button", { name: "Auto scale" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Log scale" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByRole("button", { name: /Invert/ })).toBeNull();
     expect(lastSaved()).toMatchObject({
       chart_type: "heikin_ashi",
-      price_scale: { mode: "log", auto_scale: false, invert: true },
+      price_scale: { mode: "log", auto_scale: false },
     });
   });
 
   it("persists a change the chart reports (the scale menu, a double-click restoring auto)", async () => {
     vi.useFakeTimers();
-    layoutApi.server[IID] = layoutOf({ price_scale: { mode: "normal", auto_scale: false, invert: false } });
+    layoutApi.server[IID] = layoutOf({ price_scale: { mode: "normal", auto_scale: false } });
     render(page());
 
     act(() => lastChartProps.current!.onPriceScale!({ auto_scale: true }));
     act(() => lastChartProps.current!.onPriceScale!({ mode: "indexed" }));
     await flushSave();
 
-    expect(lastSaved().price_scale).toEqual({ mode: "indexed", auto_scale: true, invert: false });
+    expect(lastSaved().price_scale).toEqual({ mode: "indexed", auto_scale: true });
   });
 
   it("restores the saved type and scale", () => {
-    layoutApi.server[IID] = layoutOf({ chart_type: "area", price_scale: { mode: "percent", auto_scale: true, invert: true } });
+    layoutApi.server[IID] = layoutOf({ chart_type: "area", price_scale: { mode: "percent", auto_scale: true } });
     render(page());
 
-    expect(screen.getByRole("combobox", { name: "Chart type" })).toHaveValue("area");
-    expect(lastChartProps.current!.priceScale).toEqual({ mode: "percent", autoScale: true, invert: true });
+    expect(screen.getByRole("button", { name: /^Chart type:/ })).toHaveAccessibleName("Chart type: Area");
+    expect(lastChartProps.current!.priceScale).toEqual({ mode: "percent", autoScale: true });
   });
 
   it("adds a compare as a coloured overlay aligned on the main bars, with gaps, and saves it", async () => {
@@ -4666,13 +4711,13 @@ describe("chart type, price scale and compare (Story 33.9)", () => {
 
   it("forces the percent scale while a compare is drawn, keeping the stored mode for when it goes", async () => {
     vi.useFakeTimers();
-    layoutApi.server[IID] = layoutOf({ price_scale: { mode: "log", auto_scale: true, invert: false } });
+    layoutApi.server[IID] = layoutOf({ price_scale: { mode: "log", auto_scale: true } });
     render(page());
 
     await addCompare(OTHER);
     expect(lastChartProps.current!.priceScale!.mode).toBe("percent");
     expect(lastChartProps.current!.scaleModesLocked).toMatch(/percent scale/);
-    expect(screen.getByRole("option", { name: "Log" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Log scale" })).toBeDisabled();
     await flushSave();
     expect(lastSaved().price_scale.mode).toBe("log");
 
@@ -4685,7 +4730,7 @@ describe("chart type, price scale and compare (Story 33.9)", () => {
   });
 
   it("keeps Indexed to 100 as the compare scale when it is the stored mode", async () => {
-    layoutApi.server[IID] = layoutOf({ price_scale: { mode: "indexed", auto_scale: true, invert: false }, compare: { symbols: [OTHER], spread: false } });
+    layoutApi.server[IID] = layoutOf({ price_scale: { mode: "indexed", auto_scale: true }, compare: { symbols: [OTHER], spread: false } });
     render(page());
 
     expect(lastChartProps.current!.priceScale!.mode).toBe("indexed");
@@ -4736,11 +4781,17 @@ describe("chart type, price scale and compare (Story 33.9)", () => {
     mocks.candles = [bar(60, 101), bar(120, 102), { time: 180 }];
     mocks.candlesByIid[OTHER] = [bar(60, 100), { time: 120 }, bar(180, 100)];
     render(page());
-    expect(screen.getByRole("button", { name: "Spread" })).toBeDisabled();
+    // With no compare yet, Spread opens the compare search and draws once a symbol is picked.
+    const spread = () => screen.getByRole("button", { name: "Spread" });
+    expect(spread()).toBeEnabled();
+    expect(spread()).toHaveAttribute("title", expect.stringMatching(/opens the search/));
+    fireEvent.click(spread());
+    await act(async () => {});
+    expect(compareField()).not.toBeNull();
 
     await addCompare(OTHER);
-    fireEvent.click(screen.getByRole("button", { name: "Spread" }));
     await flushSave();
+    expect(spread()).toHaveAttribute("aria-pressed", "true");
 
     const pane = spreadPane()!;
     expect(pane).toMatchObject({ placement: "pane", zeroLine: true });
@@ -4749,7 +4800,8 @@ describe("chart type, price scale and compare (Story 33.9)", () => {
     expect(lastSaved().compare.spread).toBe(true);
 
     await addCompare("ETHUSDT-LINEAR.BYBIT");
-    expect(screen.getByRole("button", { name: "Spread" })).toBeDisabled();
+    expect(spread()).toBeDisabled();
+    expect(spread()).toHaveAttribute("title", expect.stringMatching(/exactly one compare/));
     expect(spreadPane()).toBeUndefined();
     await flushSave();
     expect(lastSaved().compare.spread).toBe(true); // kept as stored
@@ -4800,19 +4852,21 @@ describe("chart type, price scale and compare (Story 33.9)", () => {
     expect(comparePane()!.hidden).toBe(true);
   });
 
-  it("disables the chart type and Compare in Lines mode and draws no compare, keeping them stored", async () => {
+  it("disables Compare and Spread in Lines mode and draws no compare, keeping the type and compares stored", async () => {
     vi.useFakeTimers();
     layoutApi.server[IID] = layoutOf({ chart_type: "bars", compare: { symbols: [OTHER], spread: false } });
     render(page());
 
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
     await flushSave();
 
-    expect(screen.getByRole("combobox", { name: "Chart type" })).toBeDisabled();
+    // The chart type menu stays usable in Lines mode: it is the way back to a candle chart type.
+    expect(screen.getByRole("button", { name: /^Chart type:/ })).toHaveAccessibleName(`Chart type: ${LINES_ITEM}`);
     expect(screen.getByRole("button", { name: "Compare" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Spread" })).toBeDisabled();
     expect(comparePane()).toBeUndefined();
     expect(lastChartProps.current!.priceScale!.mode).toBe("normal");
-    expect(screen.getByRole("combobox", { name: "Price scale" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Log scale" })).toBeEnabled();
     expect(lastSaved()).toMatchObject({ chart_type: "bars", compare: { symbols: [OTHER] } });
   });
 });
@@ -4900,7 +4954,7 @@ describe("ChartPage drawing tools II (Story 33.10)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Undo" }));
     expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
 
-    const field = screen.getAllByRole("combobox")[0];
+    const field = timeZoneSelect();
     fireEvent.keyDown(field, { key: "z", ctrlKey: true });
     expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
   });
@@ -5187,10 +5241,10 @@ describe("symbol search, watchlist, shortcuts and chart settings (Story 33.12)",
   const HL = "BTC-USD-PERP.HYPERLIQUID";
   const SPOT = "BTCUSDT-SPOT.BYBIT";
   const markets = [
-    { instrument_id: IID, symbol: "BTC", venue: "DYDX", same_asset: false, market: "perp", volume24h: 1_000_000 },
-    { instrument_id: HL, symbol: "BTC", venue: "HYPERLIQUID", same_asset: true, market: "perp", volume24h: 2_500_000 },
-    { instrument_id: ETH, symbol: "ETH", venue: "BYBIT", same_asset: false, market: "perp", volume24h: null },
-    { instrument_id: SPOT, symbol: "BTC", venue: "BYBIT", same_asset: false, market: "spot", volume24h: null },
+    { instrument_id: IID, symbol: "BTC", venue: "DYDX", same_asset: false, market: "perp", volume24h: 1_000_000, collected: true },
+    { instrument_id: HL, symbol: "BTC", venue: "HYPERLIQUID", same_asset: true, market: "perp", volume24h: 2_500_000, collected: true },
+    { instrument_id: ETH, symbol: "ETH", venue: "BYBIT", same_asset: false, market: "perp", volume24h: null, collected: true },
+    { instrument_id: SPOT, symbol: "BTC", venue: "BYBIT", same_asset: false, market: "spot", volume24h: null, collected: true },
   ];
   const press = (init: KeyboardEventInit) => fireEvent.keyDown(window, init);
   const searchField = () => screen.getByRole("searchbox", { name: "Search markets" });
@@ -5286,7 +5340,7 @@ describe("symbol search, watchlist, shortcuts and chart settings (Story 33.12)",
     expect(screen.getByRole("dialog", { name: "Compare symbol" })).toBeInTheDocument();
     fireEvent.click(within(screen.getByRole("dialog", { name: "Compare symbol" })).getByRole("button", { name: "Close" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
     press({ key: "ç", code: "KeyC", altKey: true });
     expect(screen.queryByRole("dialog", { name: "Compare symbol" })).toBeNull();
   });
@@ -5300,10 +5354,10 @@ describe("symbol search, watchlist, shortcuts and chart settings (Story 33.12)",
     press({ key: "√", code: "KeyV", altKey: true });
     expect(screen.getByRole("button", { name: "Vertical line tool" })).toHaveAttribute("aria-pressed", "true");
 
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
     press({ key: "˙", code: "KeyH", altKey: true });
     expect(screen.queryByRole("button", { name: "Horizontal line tool", pressed: true })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Candles" }));
+    switchToCandles();
     press({ key: "˙", code: "KeyH", altKey: true });
     expect(screen.getByRole("button", { name: "Horizontal line tool" })).toHaveAttribute("aria-pressed", "true");
   });
@@ -5320,7 +5374,7 @@ describe("symbol search, watchlist, shortcuts and chart settings (Story 33.12)",
   it("ignores Alt+R in Lines mode, where Replay is disabled", () => {
     mocks.candles = [1, 2].map((t) => ({ time: t, open: 1, high: 1, low: 1, close: 1 }));
     render(page());
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
     press({ key: "®", code: "KeyR", altKey: true });
     expect(screen.queryByRole("group", { name: "Replay controls" })).toBeNull();
     expect(lastChartProps.current!.markerTime ?? null).toBeNull();
@@ -5342,7 +5396,7 @@ describe("symbol search, watchlist, shortcuts and chart settings (Story 33.12)",
     render(page());
     press({ key: "L", code: "KeyL", shiftKey: true });
     expect(lastChartProps.current!.priceScale!.mode).toBe("percent");
-    expect(screen.getByRole("combobox", { name: "Price scale" })).toHaveValue("percent");
+    expect(screen.getByRole("button", { name: "Percent scale" })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("switches timeframe from typed keys and Enter, showing the buffer; an unknown one changes nothing", () => {
@@ -5371,7 +5425,7 @@ describe("symbol search, watchlist, shortcuts and chart settings (Story 33.12)",
     press({ key: "Escape", code: "Escape" });
     expect(screen.queryByRole("status", { name: "Typed timeframe" })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
     press({ key: "5", code: "Digit5" });
     expect(screen.queryByRole("status", { name: "Typed timeframe" })).toBeNull();
   });
@@ -5381,17 +5435,17 @@ describe("symbol search, watchlist, shortcuts and chart settings (Story 33.12)",
     const before = hooks.candlesBar.at(-1);
     press({ key: "4", code: "Digit4" });
     press({ key: "h", code: "KeyH" });
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
     expect(screen.queryByRole("status", { name: "Typed timeframe" })).toBeNull();
     press({ key: "Enter", code: "Enter" });
-    fireEvent.click(screen.getByRole("button", { name: "Candles" }));
+    switchToCandles();
     press({ key: "Enter", code: "Enter" });
     expect(hooks.candlesBar.at(-1)).toBe(before);
   });
 
   it("does nothing while the operator types in a field or a dialog is open", () => {
     render(page());
-    const zone = screen.getByRole("combobox", { name: "Time zone" });
+    const zone = timeZoneSelect();
     fireEvent.keyDown(zone, { key: "/", code: "Slash" });
     fireEvent.keyDown(zone, { key: "L", code: "KeyL", shiftKey: true });
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -5425,15 +5479,16 @@ describe("symbol search, watchlist, shortcuts and chart settings (Story 33.12)",
       sessionBreaks: false,
       countdown: { barSeconds: 60, enabled: true },
       lastPrice: { line: true, label: true },
-      fullscreen: false,
+      fitToWindow: false,
     });
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Time zone" }), { target: { value: "local" } });
-    for (const name of ["Session breaks", "Countdown", "Last price line"]) fireEvent.click(screen.getByRole("button", { name }));
+    // Chart UX rework (2026-10-08): all five in the Settings menu.
+    fireEvent.change(timeZoneSelect(), { target: { value: "local" } });
+    for (const name of ["Session breaks", "Countdown", "Last price line"]) fireEvent.click(setting(name));
     await flushSave();
     const saved = lastSaved();
     expect(saved).toMatchObject({ time_zone: "local", session_breaks: true, bar_countdown: false, last_price: { line: false, label: true } });
-    expect(saved).not.toHaveProperty("fullscreen");
+    expect(JSON.stringify(saved)).not.toMatch(/focus|fullscreen|fit_to_window/i);
 
     cleanup();
     layoutApi.server[IID] = saved;
@@ -5444,7 +5499,9 @@ describe("symbol search, watchlist, shortcuts and chart settings (Story 33.12)",
       countdown: { enabled: false },
       lastPrice: { line: false, label: true },
     });
-    expect(screen.getByRole("combobox", { name: "Time zone" })).toHaveValue("local");
+    expect(timeZoneSelect()).toHaveValue("local");
+    expect(setting("Session breaks")).toBeChecked();
+    expect(setting("Countdown")).not.toBeChecked();
   });
 
   it("hands the chart identical bar times in every time zone (formatting only)", () => {
@@ -5452,7 +5509,7 @@ describe("symbol search, watchlist, shortcuts and chart settings (Story 33.12)",
     render(page());
     const utc = lastChartProps.current!.data;
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Time zone" }), { target: { value: "local" } });
+    fireEvent.change(timeZoneSelect(), { target: { value: "local" } });
 
     expect(lastChartProps.current!.timeZone).toBe("local");
     expect(lastChartProps.current!.data).toBe(utc);
@@ -5467,7 +5524,7 @@ describe("symbol search, watchlist, shortcuts and chart settings (Story 33.12)",
     expect(lastChartProps.current!.countdown!.enabled).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Exit" }));
     expect(lastChartProps.current!.countdown!.enabled).toBe(true);
-    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    switchToLines();
     expect(lastChartProps.current!.countdown!.enabled).toBe(false);
   });
 

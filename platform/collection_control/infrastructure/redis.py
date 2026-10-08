@@ -20,6 +20,7 @@ from collections.abc import AsyncIterator
 import redis.asyncio as aioredis
 from redis.exceptions import ConnectionError as RedisConnectionError
 
+from collection_control.application.ports import COLLECTED_KEY_PREFIX
 from collection_control.application.ports import CONTROL_CHANNEL
 from collection_control.application.ports import STATUS_CHANNEL
 
@@ -55,15 +56,27 @@ class RedisStatusBus:
         self._url = url
         self._client: aioredis.Redis | None = None
 
-    async def publish(self, message: str) -> None:
+    def _connected(self) -> aioredis.Redis:
         if self._client is None:
             self._client = aioredis.Redis.from_url(
                 self._url, socket_connect_timeout=1.0, socket_timeout=1.0, decode_responses=True
             )
+        return self._client
+
+    async def publish(self, message: str) -> None:
+        client = self._connected()
         try:
-            await self._client.publish(STATUS_CHANNEL, message)
+            await client.publish(STATUS_CHANNEL, message)
         except RedisConnectionError:
-            await self._client.publish(STATUS_CHANNEL, message)
+            await client.publish(STATUS_CHANNEL, message)
+
+    async def store_collected(self, venue: str, snapshot: str) -> None:
+        """SET the key (no expiry: the reader judges age by its `ts`), retried once on a lost connection."""
+        client = self._connected()
+        try:
+            await client.set(f"{COLLECTED_KEY_PREFIX}{venue}", snapshot)
+        except RedisConnectionError:
+            await client.set(f"{COLLECTED_KEY_PREFIX}{venue}", snapshot)
 
     async def aclose(self) -> None:
         if self._client is not None:

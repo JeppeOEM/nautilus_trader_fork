@@ -67,7 +67,6 @@ export interface PriceScaleLayout {
   mode: PriceScaleModeName;
   /** Off = the vertical range the operator dragged to is kept through scrolls. */
   auto_scale: boolean;
-  invert: boolean;
 }
 
 export interface CompareLayout {
@@ -88,7 +87,7 @@ export interface LastPriceLayout {
 
 export const DEFAULT_LAST_PRICE: LastPriceLayout = { line: true, label: true };
 
-export const DEFAULT_PRICE_SCALE: PriceScaleLayout = { mode: "normal", auto_scale: true, invert: false };
+export const DEFAULT_PRICE_SCALE: PriceScaleLayout = { mode: "normal", auto_scale: true };
 export const DEFAULT_COMPARE: CompareLayout = { symbols: [], spread: false };
 
 export interface FootprintSettings {
@@ -192,7 +191,9 @@ export const BUILT_IN_LAYOUT: ChartLayout = {
   volume: true,
   crosshair: true,
   pane_heights: {},
-  visible_bars: 120,
+  // A wide first view (chart UX rework, 2026-10-08); mirrors `views/preferences.py`'s
+  // `DEFAULT_VISIBLE_BARS` (`test_visible_bars_default_mirrors_the_frontend`).
+  visible_bars: 300,
   volume_profile: {
     kind: "off",
     rows: 24,
@@ -513,12 +514,9 @@ function priceScaleOf(raw: unknown, present: boolean, fallbacks: string[]): Pric
   }
   const mode = PRICE_SCALE_MODES.find((m) => m === raw.mode);
   if (mode === undefined) fallbacks.push("price_scale.mode");
-  const flag = (key: "auto_scale" | "invert"): boolean => {
-    if (typeof raw[key] === "boolean") return raw[key];
-    fallbacks.push(`price_scale.${key}`);
-    return DEFAULT_PRICE_SCALE[key];
-  };
-  return { mode: mode ?? DEFAULT_PRICE_SCALE.mode, auto_scale: flag("auto_scale"), invert: flag("invert") };
+  const autoScale = typeof raw.auto_scale === "boolean" ? raw.auto_scale : DEFAULT_PRICE_SCALE.auto_scale;
+  if (typeof raw.auto_scale !== "boolean") fallbacks.push("price_scale.auto_scale");
+  return { mode: mode ?? DEFAULT_PRICE_SCALE.mode, auto_scale: autoScale };
 }
 
 /** A stored compare id this client can draw: a non-empty string with a `.VENUE` suffix. */

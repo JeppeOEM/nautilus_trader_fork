@@ -34,6 +34,7 @@ from observability import error_ledger
 
 import collection_control.application.control as control_module
 from collection_control.application.control import ControlService
+from collection_control.application.ports import COLLECTED_KEY_PREFIX
 from collection_control.application.ports import STATUS_CHANNEL
 from collection_control.application.ports import PlanFileChanged
 from collection_control.application.status import StatusPublisher
@@ -124,10 +125,14 @@ class _Store:
 class _Bus:
     def __init__(self) -> None:
         self.published: list[str] = []
+        self.collected: dict[str, str] = {}
         self.closed = False
 
     async def publish(self, message: str) -> None:
         self.published.append(message)
+
+    async def store_collected(self, venue: str, snapshot: str) -> None:
+        self.collected[venue] = snapshot
 
     async def aclose(self) -> None:
         self.closed = True
@@ -486,6 +491,23 @@ def test_an_added_instrument_capture_has_not_reached_yet_is_published_pending() 
         "trade_backfill": 0,
         "pending": True,
     }
+
+
+def test_every_publish_keeps_the_venues_collected_set_without_the_pending_ids() -> None:
+    rig = _Rig(_plan("A.DYDX", "B.DYDX"))
+    rig.capture.pending = frozenset({"B.DYDX"})
+    asyncio.run(rig.status.publish(rig.control.plan))
+    snapshot = json.loads(rig.bus.collected["DYDX"])
+    assert (snapshot["venue"], snapshot["collected"], snapshot["pending"]) == (
+        "DYDX",
+        ["A.DYDX"],
+        ["B.DYDX"],
+    )
+    assert isinstance(snapshot["ts"], int)
+
+
+def test_the_collected_key_prefix_is_the_published_name() -> None:
+    assert COLLECTED_KEY_PREFIX == "collector:collected:"
 
 
 def test_hand_edited_exclude_entries_are_published_as_unpinned() -> None:

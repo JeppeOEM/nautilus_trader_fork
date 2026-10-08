@@ -16,10 +16,10 @@ import { gapRun } from "../lib/gaps";
 import type { VolumeBarFlow } from "../lib/volumeColor";
 import type { LiveBar } from "./useLiveCandle";
 
-// Mirrors dashboard.py:206's old defaults (_CANDLE_VISIBLE_BARS=120,
-// _CANDLE_REFILL_MARGIN_BARS=20) -- same initial window size and scroll-back trigger
-// margin, now served through the cursor-paginated /api/candles contract (AD-F3).
-const INITIAL_LIMIT = 120;
+// The first page and every scroll-back page: the server's cap (`_MAX_CANDLES_LIMIT` in
+// `data_api/routes/candles.py`), so the wide default view (`BUILT_IN_LAYOUT.visible_bars`, 300)
+// opens filled with history to scroll into. The refill margin is dashboard.py's old one.
+const INITIAL_LIMIT = 500;
 // Exported so useLiveCandle.ts (Story 15.5) can subscribe to the same bar size instead
 // of duplicating the literal -- the two paths must never silently drift apart.
 export const BAR_SECONDS = 60;

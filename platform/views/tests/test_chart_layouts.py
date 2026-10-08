@@ -27,6 +27,7 @@ import pytest
 from views.preferences import BUILTIN_DEFAULT_LAYOUT
 from views.preferences import CHART_TYPES
 from views.preferences import COMPARE_DEFAULTS
+from views.preferences import DEFAULT_VISIBLE_BARS
 from views.preferences import DERIVATIVE_KEYS
 from views.preferences import DERIVATIVE_LINE_STYLES
 from views.preferences import DERIVATIVE_OUTPUTS
@@ -36,6 +37,7 @@ from views.preferences import FOOTPRINT_DEFAULTS
 from views.preferences import FOOTPRINT_MODES
 from views.preferences import LAST_PRICE_DEFAULTS
 from views.preferences import LAYOUT_BAR_SECONDS
+from views.preferences import LAYOUT_VERSION
 from views.preferences import LIQUIDATION_MEASURES
 from views.preferences import MAX_COMPARE_SYMBOLS
 from views.preferences import MAX_DERIVATIVE_LINE_WIDTH
@@ -138,8 +140,8 @@ def test_round_trip_with_pane_heights_anchors_and_default_indicators(tmp_path: P
     assert loaded.default == default
     assert loaded.default_indicators == [sma]
     raw = tomllib.loads(path.read_text())
-    assert raw[_IID]["v"] == 1
-    assert raw["default"]["v"] == 1
+    assert raw[_IID]["v"] == LAYOUT_VERSION
+    assert raw["default"]["v"] == LAYOUT_VERSION
     assert "start" not in raw[_ETH]["volume_profile"]  # an unset anchor is omitted, no null
 
 
@@ -278,7 +280,7 @@ def test_a_stray_key_or_wrong_version_in_the_file_is_refused(tmp_path: Path) -> 
     path = tmp_path / "l.toml"
     save_chart_layouts(ChartLayouts({_IID: _layout()}), path)
     good = path.read_text()
-    path.write_text(good.replace("v = 1", "v = 2"))
+    path.write_text(good.replace("v = 2", "v = 3"))
     with pytest.raises(LayoutError, match=_IID):
         load_chart_layouts(path)
     path.write_text(good + "bogus = 1\n")
@@ -754,7 +756,7 @@ def test_a_layout_saved_before_story_33_9_loads_with_the_defaults(tmp_path: Path
     path.write_text(_PRE_32_8_FILE)  # no chart_type, price_scale or compare
     layout = load_chart_layouts(path).layouts[_IID]
     assert layout["chart_type"] == "candles"
-    assert layout["price_scale"] == {"mode": "normal", "auto_scale": True, "invert": False}
+    assert layout["price_scale"] == {"mode": "normal", "auto_scale": True}
     assert layout["compare"] == {"symbols": [], "spread": False}
 
 
@@ -768,7 +770,7 @@ def test_chart_type_price_scale_and_compare_round_trip_through_the_file(tmp_path
     path = tmp_path / "chart_layouts.toml"
     layout = _layout(
         chart_type="heikin_ashi",
-        price_scale={"mode": "indexed", "auto_scale": False, "invert": True},
+        price_scale={"mode": "indexed", "auto_scale": False},
         compare={"symbols": [_BYBIT_BTC, _SOL], "spread": True},
     )
     save_chart_layouts(ChartLayouts({_IID: layout}, default=layout), path)
@@ -799,12 +801,13 @@ def test_a_bad_chart_type_is_refused_naming_it(chart_type: Any) -> None:
     ("scale", "key"),
     [
         ("log", "price_scale"),
-        ({"mode": "x", "auto_scale": True, "invert": False}, "price_scale.mode"),
-        ({"mode": None, "auto_scale": True, "invert": False}, "price_scale.mode"),
-        ({"mode": "log", "auto_scale": 1, "invert": False}, "price_scale.auto_scale"),
-        ({"mode": "log", "auto_scale": True, "invert": "no"}, "price_scale.invert"),
-        ({"mode": "log", "auto_scale": True}, "price_scale.invert"),
-        ({"mode": "log", "auto_scale": True, "invert": False, "lock": 1}, "price_scale.lock"),
+        ({"mode": "x", "auto_scale": True}, "price_scale.mode"),
+        ({"mode": None, "auto_scale": True}, "price_scale.mode"),
+        ({"mode": "log", "auto_scale": 1}, "price_scale.auto_scale"),
+        ({"mode": "log"}, "price_scale.auto_scale"),
+        # The Invert scale was removed (v2): a v2 table carrying it is refused, never dropped.
+        ({"mode": "log", "auto_scale": True, "invert": False}, "price_scale.invert"),
+        ({"mode": "log", "auto_scale": True, "lock": 1}, "price_scale.lock"),
         (None, "price_scale"),
     ],
 )
@@ -881,7 +884,7 @@ def test_chart_type_and_scale_settings_mirror_the_frontend() -> None:
     scale = _ts_block("lib/chartLayout.ts", "export const DEFAULT_PRICE_SCALE")
     assert _ts_value(scale, "mode") == PRICE_SCALE_DEFAULTS["mode"]
     assert _ts_value(scale, "auto_scale") == str(PRICE_SCALE_DEFAULTS["auto_scale"]).lower()
-    assert _ts_value(scale, "invert") == str(PRICE_SCALE_DEFAULTS["invert"]).lower()
+    assert "invert" not in scale
     compare = _ts_block("lib/chartLayout.ts", "export const DEFAULT_COMPARE")
     assert _ts_value(compare, "symbols") == "[]"
     assert _ts_value(compare, "spread") == str(COMPARE_DEFAULTS["spread"]).lower()
@@ -1050,3 +1053,47 @@ def test_time_zone_and_last_price_settings_mirror_the_frontend() -> None:
     assert _ts_value(block, "session_breaks") == "false"
     assert _ts_value(block, "bar_countdown") == "true"
     assert _ts_bool_table(block, "last_price") == LAST_PRICE_DEFAULTS
+
+
+# -- v2 (chart UX rework, 2026-10-08): Invert removed, the saved zoom reset to the wider default ----
+
+_V1_INVERTED_FILE = (
+    _PRE_32_8_FILE
+    + f"""
+["{_IID}".price_scale]
+mode = "log"
+auto_scale = false
+invert = true
+"""
+)
+
+
+def test_a_v1_table_is_migrated_dropping_invert_and_resetting_the_zoom(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    path.write_text(_V1_INVERTED_FILE)
+    layout = load_chart_layouts(path).layouts[_IID]
+    assert layout["price_scale"] == {"mode": "log", "auto_scale": False}
+    assert layout["visible_bars"] == DEFAULT_VISIBLE_BARS
+
+
+def test_a_migrated_v1_file_is_written_back_as_v2(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    path.write_text(_V1_INVERTED_FILE)
+    save_chart_layouts(load_chart_layouts(path), path)
+    table = tomllib.loads(path.read_text())[_IID]
+    assert table["v"] == LAYOUT_VERSION == 2
+    assert "invert" not in table["price_scale"]
+
+
+def test_a_v1_table_with_a_non_boolean_invert_is_refused_naming_it(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    path.write_text(_V1_INVERTED_FILE.replace("invert = true", 'invert = "yes"'))
+    with pytest.raises(LayoutError, match=r"price_scale\.invert"):
+        load_chart_layouts(path)
+
+
+def test_visible_bars_default_mirrors_the_frontend() -> None:
+    source = (_FRONTEND / "lib/chartLayout.ts").read_text()
+    layout = source[source.index("export const BUILT_IN_LAYOUT") :]
+    assert int(_ts_value(layout, "visible_bars")) == DEFAULT_VISIBLE_BARS
+    assert BUILTIN_DEFAULT_LAYOUT["visible_bars"] == DEFAULT_VISIBLE_BARS

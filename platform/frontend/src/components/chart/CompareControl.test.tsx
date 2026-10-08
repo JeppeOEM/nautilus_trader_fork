@@ -28,6 +28,7 @@ const market = (iid: string, volume24h: number | null = 12_345_678) => ({
   same_asset: false,
   market: "perp",
   volume24h,
+  collected: true,
 });
 
 /** The page's side of the control: it holds `open`, as `Alt+C` opens the same search. */

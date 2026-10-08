@@ -43,6 +43,12 @@ function volumeText(volume: number | null): string {
   return volume === null || !Number.isFinite(volume) ? "—" : `${formatFixed(volume, { decimals: 2, scale: 1e6 })}M`;
 }
 
+/** Whether any market says if it is collected: false when no collector's set could be read (every
+ * `collected` null), and the dialog then lists every market rather than none. */
+function collectedKnown(markets: readonly MarketItem[]): boolean {
+  return markets.some((m) => m.collected !== null);
+}
+
 /**
  * Story 33.12: the symbol search, one dialog for opening another market (`navigate`: `/`, Ctrl/Cmd+K
  * or the symbol button) and for adding a compare symbol (`compare`: the Compare button or Alt+C,
@@ -50,6 +56,12 @@ function volumeText(volume: number | null): string {
  * market and 24 h volume, filtered by every typed token; ↑/↓ move the highlight, Enter picks it. In
  * compare mode a typed id is still accepted when nothing matches (the market list may be down), and
  * an id the chart cannot compare is refused inline with the reason (`validateCompareInput`).
+ *
+ * Chart UX rework (2026-10-08): only the markets a collector collects are listed (`collected`, from
+ * the collectors' own record), since only they have bars to chart; the navigate dialog's "All
+ * markets" switch lists every venue market, an uncollected one tagged. Compare lists collected
+ * markets only: an uncollected compare has no bars to draw. When no collector's record can be read,
+ * every market is listed and the dialog says why.
  */
 // One empty list for every render: a fresh `[]` default would re-run the row filter on each render.
 const NONE_COMPARED: readonly string[] = [];
@@ -62,6 +74,7 @@ export default function SymbolSearch({ mode, instrumentId, compared = NONE_COMPA
   const [staleVenues, setStaleVenues] = useState<string[]>([]);
   const [highlight, setHighlight] = useState(0);
   const [refusal, setRefusal] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -84,13 +97,11 @@ export default function SymbolSearch({ mode, instrumentId, compared = NONE_COMPA
     };
   }, [compare, instrumentId]);
 
-  const offered = useMemo(
-    () =>
-      compare
-        ? (markets ?? []).filter((m) => !compared.includes(m.instrument_id) && m.instrument_id !== instrumentId)
-        : (markets ?? []),
-    [compare, markets, compared, instrumentId],
-  );
+  const known = markets !== null && collectedKnown(markets);
+  const offered = useMemo(() => {
+    const listed = (markets ?? []).filter((m) => !known || (showAll && !compare) || m.collected === true);
+    return compare ? listed.filter((m) => !compared.includes(m.instrument_id) && m.instrument_id !== instrumentId) : listed;
+  }, [compare, markets, known, showAll, compared, instrumentId]);
   const rows = useMemo(() => matching(offered, query), [offered, query]);
   const active = Math.min(highlight, Math.max(0, rows.length - 1));
   // Option ids for `aria-activedescendant`: focus stays in the input, so a screen reader learns the
@@ -154,6 +165,22 @@ export default function SymbolSearch({ mode, instrumentId, compared = NONE_COMPA
           Close
         </button>
       </div>
+      {!compare && known && (
+        <label className="symbol-search-scope">
+          <input
+            type="checkbox"
+            checked={showAll}
+            onChange={() => {
+              setShowAll((all) => !all);
+              setHighlight(0);
+            }}
+          />
+          All markets ({markets?.length ?? 0}), not only the collected ones
+        </label>
+      )}
+      {markets !== null && markets.length > 0 && !known && (
+        <p role="status">No collector has reported what it collects: every market is listed.</p>
+      )}
       {refusal !== null && <p role="alert">{refusal}</p>}
       {loadError !== null && <p role="status">{loadError}</p>}
       {loadError === null && staleVenues.length > 0 && (
@@ -175,6 +202,7 @@ export default function SymbolSearch({ mode, instrumentId, compared = NONE_COMPA
                 <strong>{m.symbol}</strong> <span className="indicator-dialog-tag">{m.instrument_id}</span>
               </span>
               <span className="indicator-dialog-tag">
+                {m.collected === false && "not collected · "}
                 {m.venue} · {m.market} · 24h {volumeText(m.volume24h)}
               </span>
             </button>
