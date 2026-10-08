@@ -239,6 +239,17 @@ class EmptyTopOfBook(Exception):
     """
 
 
+class DuplicateSecond(Exception):
+    """
+    Two archived snapshots stamped the same millisecond: two collectors wrote one catalog (their
+    files overlap; Nautilus's `write_data` then refuses every later write to that directory too).
+    A malfunction upstream (DATA-07): ledgered and raised, never de-duplicated by the reader, which
+    could not tell which copy is right. The chart cannot draw it either (lightweight-charts refuses
+    a time that does not increase). The fix is in the catalog: one of the overlapping files moves
+    out, and `make`'s STACK_SINGLE_WRITER guard keeps a second stack from writing it again.
+    """
+
+
 def _gap_row(t: int) -> dict:
     return {
         "t": t,
@@ -286,7 +297,8 @@ def price_series_rows(snapshots: Sequence[DydxSecondSnapshot]) -> list[dict]:
     `collector.crossed_book`); one the archive holds
     anyway predates that gate or is a capture bug, whose fix is at the gate or through
     `repair_catalog`, never a reader-side filter (DATA-07). A second with an empty side cannot be
-    drawn at all and raises `EmptyTopOfBook` (see `_require_top`).
+    drawn at all and raises `EmptyTopOfBook` (see `_require_top`); a second archived twice raises
+    `DuplicateSecond`.
     """
     rows: list[dict] = []
     prev_ts_ms: int | None = None
@@ -294,6 +306,13 @@ def price_series_rows(snapshots: Sequence[DydxSecondSnapshot]) -> list[dict]:
         _require_top(s)
         bp, ap = s.bid_prices[0], s.ask_prices[0]
         curr_ts_ms = s.ts_event // 1_000_000
+        if prev_ts_ms is not None and curr_ts_ms <= prev_ts_ms:
+            detail = (
+                f"snapshot archived twice for {s.instrument_id.value} at t={curr_ts_ms} ms: two "
+                "collectors wrote overlapping catalog files"
+            )
+            error_ledger.record("views.snapshot_duplicate_second", detail)
+            raise DuplicateSecond(detail)
         if prev_ts_ms is not None and (curr_ts_ms - prev_ts_ms) > SNAPSHOT_GAP_THRESHOLD_MS:
             rows.extend(_gap_row(g) for g in _gap_times(prev_ts_ms, curr_ts_ms, 1000))
         prev_ts_ms = curr_ts_ms

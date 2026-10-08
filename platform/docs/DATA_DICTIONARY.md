@@ -2920,7 +2920,9 @@ archived second is priced as written -- a crossed second (`bid >= ask`) included
 never writes one (`SecondSampler` rejects it as `Crossed`, Story 26.1), so one in the archive predates that
 gate or is a capture bug to fix at the gate or with `repair_catalog`, never a reader filter (AD-3).
 A second with an empty side cannot be drawn at all and is never written by the gate, so reading one
-fails the request (500) and counts `views.snapshot_without_top`. Gap rows are the only rendering rule:
+fails the request (500) and counts `views.snapshot_without_top`. A second archived twice (two
+collectors on one catalog wrote overlapping files) fails it the same way and counts
+`views.snapshot_duplicate_second`, never de-duplicated by the reader `[added 2026-10-08]`. Gap rows are the only rendering rule:
 `SNAPSHOT_GAP_THRESHOLD_MS` (2500 ms) in Lines mode, one bar in the bar-spaced panes
 (`with_gap_markers`).
 

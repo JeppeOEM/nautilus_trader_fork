@@ -30,6 +30,7 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from views import chart_series
 from views.chart_series import MAX_GAP_ROWS_PER_GAP
 from views.chart_series import SNAPSHOT_GAP_THRESHOLD_MS
+from views.chart_series import DuplicateSecond
 from views.chart_series import EmptyTopOfBook
 from views.chart_series import price_series_rows
 from views.chart_series import snapshot_series_page
@@ -137,6 +138,20 @@ def test_an_empty_top_of_book_is_ledgered_and_raised_never_skipped(
         price_series_rows([healthy, empty])
 
     assert error_ledger.counts() == {"views.snapshot_without_top": 1}
+
+
+def test_a_second_archived_twice_is_ledgered_and_raised_never_deduplicated() -> None:
+    # Two collectors on one catalog (2026-10-08): the same second from each one's file.
+    error_ledger.reset()
+    first = _snapshot(_BASE_NS, [100.0], [101.0])
+    twice = _snapshot(_BASE_NS + 1_000_000_000, [100.0], [101.0])
+
+    with pytest.raises(
+        DuplicateSecond, match=rf"{_IID} at t={(_BASE_NS + 1_000_000_000) // 1_000_000} ms"
+    ):
+        price_series_rows([first, twice, twice])
+
+    assert error_ledger.counts() == {"views.snapshot_duplicate_second": 1}
 
 
 def _null_price_fields(row: dict) -> list[object]:

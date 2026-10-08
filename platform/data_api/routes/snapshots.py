@@ -76,7 +76,7 @@ def get_snapshots(instrument_id: str, before_ns: int, limit: int = 900) -> Snaps
         kept, has_more = chart_series.snapshot_series_page(
             CATALOG_PATH, instrument_id, before_ns, limit
         )
-    except chart_series.EmptyTopOfBook as exc:
+    except (chart_series.EmptyTopOfBook, chart_series.DuplicateSecond) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return SnapshotSeriesResponse(
         items=[SnapshotSeriesPoint(**row) for row in kept],
