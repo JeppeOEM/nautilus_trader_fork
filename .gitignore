@@ -188,8 +188,14 @@ bench_data/
 /platform/data/errors/
 !/platform/data/errors/.gitkeep
 /platform/data/bots_churn_check/
-# AlertStore's atomic-save temp, left behind only by a process killed mid-save (DW-197).
-/platform/data/alerts/.alerts.toml.tmp
+# The UI's preferences and the alert store are live state data_api rewrites in place: tracked,
+# every upstream change to a copy made the VPS `git pull` refuse it (DW-219/DW-291). The defaults
+# ship as seeds under data_api/seeds/. `dir/*`, not `dir/`, so the `.gitkeep` negation can apply;
+# this also covers AlertStore's atomic-save temp `.alerts.toml.tmp` (DW-197).
+/platform/data/preferences/*
+!/platform/data/preferences/.gitkeep
+/platform/data/alerts/*
+!/platform/data/alerts/.gitkeep
 # The archive scheduler's cursor state and the reference recorders' raw files (Story 31.1).
 /platform/data/archive/
 /platform/data/verification/

@@ -64,6 +64,8 @@ for _var, _name in _REMOVED_PATH_VARS.items():
             "(docker-compose.yml mounts ./data/preferences/ at /app/preferences)"
         )
 
+# The bind-mounted directory of untracked live files; never created here (a missing directory is a
+# missing mount), only seeded with missing defaults at startup (data_api/preference_seeds.py).
 CHART_PREFERENCES_DIR: str = os.environ.get("CHART_PREFERENCES_DIR", "/app/preferences")
 CHART_INDICATOR_CONFIG_PATH: str = str(Path(CHART_PREFERENCES_DIR) / "chart_indicators.toml")
 SCREENER_COLUMNS_CONFIG_PATH: str = str(Path(CHART_PREFERENCES_DIR) / "screener_columns.toml")

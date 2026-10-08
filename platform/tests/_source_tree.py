@@ -230,9 +230,11 @@ def _bound_module(
 HISTORY_DIRS = ("docs", ".planning")
 
 # What the walk skips: git-ignored or generated trees and the history directories. `data/` is
-# runtime state except its committed top-level `.toml` configs, which the walk reads. Every tracked
-# text file must be walked: `test_legacy_names.test_walk_reads_every_tracked_text_file` fails the
-# day a new suffix or directory is committed.
+# runtime state except its committed top-level `.toml` configs, which the walk reads; the
+# preference and alert files under it are untracked live state, and their seeds are walked under
+# `data_api/` (DW-219/DW-291). Every tracked text file must be walked:
+# `test_legacy_names.test_walk_reads_every_tracked_text_file` fails the day a new suffix or
+# directory is committed.
 # Git-ignored trees, skipped by every no-git fallback as `git ls-files --exclude-standard` does.
 IGNORED_DIRS = frozenset(
     {"data", "node_modules", "dist", "__pycache__", ".git", ".venv"}
@@ -259,9 +261,10 @@ def _walk(top: Path, directory: Path) -> Iterator[Path]:
             if path.name not in _WALK_SKIP_DIRS or nested_docs:
                 yield from _walk(top, path)
             elif path == top / "data":
-                # The committed configs, and the committed preference files (Story 32.5).
-                yield from sorted(path.glob("*.toml"))
-                yield from sorted((path / "preferences").glob("*.toml"))
+                # The committed configs only: everything below `data/` is untracked live state.
+                # Files only: a retired single-file bind mount leaves a root-owned `<name>.toml`
+                # directory behind on a host that ran the old compose.
+                yield from sorted(p for p in path.glob("*.toml") if p.is_file())
         elif path.suffix in _WALK_SUFFIXES or path.name in _WALK_NAMES:
             yield path
 

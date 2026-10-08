@@ -318,14 +318,17 @@ services:
       - ./data/errors:/app/errors_dir
       # rw: saved alerts (Story 20.1). A directory, not the single file: the store saves by
       # renaming a temp file over alerts.toml, and a rename cannot replace a single-file bind
-      # mount (EBUSY) (DW-197). The directory (and the committed alerts.toml in it) must exist on
-      # the host, or Docker would create it root-owned and uid 1000 could not write.
+      # mount (EBUSY) (DW-197). The directory is kept in git by a `.gitkeep` (alerts.toml is
+      # untracked live state, DW-291): it must exist on the host, or Docker would create it
+      # root-owned and uid 1000 could not write.
       - ./data/alerts/:/app/alerts_dir/:rw
-      # rw: the UI's preference files (chart_indicators.toml, screener_columns.toml,
-      # chart_drawings.toml), one mounted directory instead of one bind mount per file, so a new
+      # rw: the UI's preference files (every path in data_api/settings.py derives from
+      # CHART_PREFERENCES_DIR), one mounted directory instead of one bind mount per file, so a new
       # preference file needs no new mount (Story 32.5). data_api's PUT routes are the only
-      # writers. The directory (and the committed files in it) must exist on the host, or Docker
-      # would create it root-owned and uid 1000 could not write.
+      # writers. The files are untracked live state; data_api seeds a missing one that has a
+      # shipped default (data_api/seeds/) at startup (DW-219). The directory is kept in git by a
+      # `.gitkeep`: it must exist on the host, or Docker would create it root-owned and uid 1000
+      # could not write.
       - ./data/preferences/:/app/preferences/:rw
     network_mode: host
     restart: always

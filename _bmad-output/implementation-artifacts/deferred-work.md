@@ -1770,7 +1770,9 @@ resolution-undo: 501612be81209b39f912be5f86707e9a8fae0a2082d36ca5e084f5430ccfda9
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: platform/data/{chart_indicators,screener_columns}.toml
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-25-2-ranking-context-rankingboard-replaces-module-globals.md` summary: The two UI preference TOMLs (`platform/data/{chart_indicators,screener_columns}.toml`) are tracked in git yet rewritten in place by data_api at runtime, so every VPS `git pull` that touches them is refused until the live copy is set aside and restored. evidence: docker-compose.yml mounts both `:rw` for data_api's PUT routes; the Story 25.2 DEPLOY_CHECKLIST step works around it. The conflict existed at their old `ml_signals/` path at baseline a046e0839a; 25.2 only moved them.
-status: open
+status: done 2026-10-08
+resolution: resolved by sweep bundle dw-untrack-runtime-data-files
+resolution-undo: 9c3c3ed117779a15e1b47516286bef3b3c844668f4fd3bc6f9f9429ee504f428 2026-10-08 7374617475733a206f70656e
 decision: 2026-10-05 Untrack, gitignore, seed defaults at startup — Stop tracking live files; ship *.default.toml and copy if missing
 
 ### DW-220: The ranking price-series mark-price fallback (`CatalogPriceHistory._mark_prices`) loads every mark price since `start_ns` with no rate bound, so a venue …
@@ -2361,7 +2363,9 @@ origin: migrated from legacy ledger (flat append from spec-dw-197-199-alert-stor
 location: platform/data/alerts/alerts.toml
 source_spec: `_bmad-output/implementation-artifacts/spec-dw-197-199-alert-store-durability.md`
 reason: Runtime-rewritten data files are git-tracked (`platform/data/alerts/alerts.toml`, as `platform/data/preferences/*.toml` already are), so any upstream change to a tracked copy makes the VPS `git pull` refuse the locally rewritten file. Evidence: The 32-5 and DW-197 DEPLOY_CHECKLIST entries both need `git checkout --` surgery for exactly this; upgrade path is gitignoring the files (keeping a `.gitkeep`), since `AlertStore._load` and the preference readers already start empty on a missing file.
-status: open
+status: done 2026-10-08
+resolution: resolved by sweep bundle dw-untrack-runtime-data-files
+resolution-undo: 9c3c3ed117779a15e1b47516286bef3b3c844668f4fd3bc6f9f9429ee504f428 2026-10-08 7374617475733a206f70656e
 
 ### DW-292: `mypy platform/kernel/catalog_files.py` fails at line 382: `SecondOHLC(...)` gets a `*Generator[float | None, ...]` star-arg where it expects `float`, so a None open/high/low/close is not excluded by the types
 

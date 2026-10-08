@@ -1,4 +1,5 @@
-# Default Technicals columns; rewritten by the UI on any change (see screener_columns_config.py).
+# Default Technicals columns. data_api copies this file to screener_columns.toml at startup
+# only when that file is missing (data_api/preference_seeds.py); the UI rewrites the live copy.
 
 [[columns]]
 name = "RelativeStrengthIndex"

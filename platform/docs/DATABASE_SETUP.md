@@ -209,10 +209,14 @@ runtime command leaves the VPS checkout modified (`docs/DEPLOY_CHECKLIST.md`'s 2
   `collector:status` (a planned id not yet applied carries `"pending": true`).
 - **Docker mount:** the three plan files are the only collector config mounts that are `rw` in
   `docker-compose.yml` (each read-write only in its own collector's container). Outside them,
-  only the preference files the UI saves are `rw` (the `data/preferences/` directory: `chart_indicators.toml`,
-  `screener_columns.toml`, `chart_drawings.toml`; and the `data/alerts/` directory,
+  only the preference files the UI saves are `rw` (every file in the `data/preferences/` directory: `chart_indicators.toml`,
+  `screener_columns.toml`, `chart_drawings.toml`, `chart_layouts.toml`,
+  `screener_filter_presets.toml`, `chart_watchlist.toml`; and the `data/alerts/` directory,
   `alerts.toml` plus its save temp); every other config file (`bots/config.toml` included) is
-  mounted `:ro` and never written back by the running process.
+  mounted `:ro` and never written back by the running process. Those preference and alert files are
+  untracked live state (each directory is kept in git by its `.gitkeep`); `data_api` seeds a
+  missing one that has a shipped default (`data_api/seeds/<name>.default.toml`, today only
+  `screener_columns.toml`) at startup and never overwrites an existing one (DW-219/DW-291).
 - `bot_tui` never edits these files directly — it only publishes `collector:control`
   messages, keeping each file's filesystem access to its one collector container.
 

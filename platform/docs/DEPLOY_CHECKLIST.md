@@ -2157,3 +2157,47 @@ row into the table once. This is live only once `live-paper` is rebuilt.
       reads the new fill rows as carrying no PnL. If a rollback is unavoidable, the round trips
       closed while it runs are missing from every PnL figure after the re-upgrade. Recover them by
       hand from `fills` rows with a non-NULL `position_realized_pnl` newer than the rollback.
+
+### DW-219/DW-291 runtime preference and alert files are untracked (commit: this change's)
+
+The five files `data_api` rewrites in place are no longer tracked: `data/alerts/alerts.toml` and
+`data/preferences/{chart_drawings,chart_indicators,chart_layouts,screener_columns}.toml`. Both
+directories are gitignored and kept in git by a `.gitkeep`. The default Technicals columns ship as
+`data_api/seeds/screener_columns.default.toml`, which `data_api` copies to
+`data/preferences/screener_columns.toml` at startup only when that file is missing; an existing
+file is never touched. The pull that brings this change deletes the tracked copies from the
+working tree, so the live files must be carried across it by hand, once. The never-tracked
+`chart_watchlist.toml` and `screener_filter_presets.toml` in the same directory are untouched by
+the pull and simply become ignored.
+
+- [ ] On the VPS, stop the writer first so no preference or alert save lands between the backup
+      and the pull: `cd ~/nautilus_trader_fork/platform && docker compose stop data_api`.
+- [ ] Back up both live directories outside the checkout (not `/tmp`, which a reboot
+      mid-procedure clears), refusing a leftover backup from an earlier attempt (`cp -a` would
+      nest into it and the restore would copy the stale files):
+      `test ! -e ~/preferences.pre-dw219 && test ! -e ~/alerts.pre-dw219 &&
+      cp -a data/preferences ~/preferences.pre-dw219 && cp -a data/alerts ~/alerts.pre-dw219`.
+- [ ] `git status --short data/` shows which tracked copies the UI rewrote; `git checkout --` each
+      of them (the pull would refuse a modified tracked file), then `git pull`. The pull deletes
+      all five files from the working tree, modified or not.
+- [ ] Restore the live files: `cp -a ~/preferences.pre-dw219/. data/preferences/` and
+      `cp -a ~/alerts.pre-dw219/. data/alerts/`. Check both directories and their files are owned
+      by uid 1000 (`ls -ln data/preferences/ data/alerts/`; if not,
+      `sudo chown -R 1000:1000 data/preferences/ data/alerts/`): the writers place their temp
+      files in the directory, so the directory itself must be writable.
+- [ ] `make up` (it rebuilds the `data_api` image, which carries the seed), then check in the web UI that the screener's Technicals columns, every coin's
+      drawings, layouts and chart indicators, and the saved alerts all survived. Check
+      `data/preferences/screener_columns.toml` especially: if it were lost, `data_api` would
+      re-seed it with the four default columns and every customisation would be gone silently.
+- [ ] Save any preference and any alert change in the UI, then `git status --short` must stay
+      clean (the files are ignored). Keep the two `~/*.pre-dw219` backups until then.
+- [ ] Rollback (only if this deploy is reverted): the revert re-adds the five tracked files, so its
+      checkout or pull refuses with "untracked working tree files would be overwritten".
+      `docker compose stop data_api`, move the live files aside, refusing a leftover from an
+      earlier attempt (`test ! -e ~/preferences.post-dw219 && test ! -e ~/alerts.post-dw219 &&
+      mv data/preferences ~/preferences.post-dw219 && mv data/alerts ~/alerts.post-dw219`),
+      check out or pull the revert, copy them back over the tracked copies
+      (`cp -a ~/preferences.post-dw219/. data/preferences/` and
+      `cp -a ~/alerts.post-dw219/. data/alerts/`), drop the two `.gitkeep` files the copy brought
+      back (`rm -f data/preferences/.gitkeep data/alerts/.gitkeep`: the reverted tree neither
+      tracks nor ignores them, so `git status` would show them), then `make up`.

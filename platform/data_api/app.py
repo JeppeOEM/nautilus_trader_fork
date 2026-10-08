@@ -38,10 +38,12 @@ service (`network_mode: host` + `uvicorn --host 127.0.0.1`), no `ports:` entry.
 
 import asyncio
 import contextlib
+import logging
 import os
 from collections.abc import AsyncIterator
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI
@@ -60,6 +62,7 @@ from views import coin_detail
 
 from data_api import alert_wiring
 from data_api import buses
+from data_api import preference_seeds
 from data_api.routes import alerts as alerts_routes
 from data_api.routes import archive as archive_routes
 from data_api.routes import candles as candles_routes
@@ -75,6 +78,7 @@ from data_api.routes import snapshots as snapshots_routes
 from data_api.routes import watchlist as watchlist_routes
 from data_api.routes.snapshots import MAX_SNAPSHOTS_LIMIT
 from data_api.settings import CATALOG_PATH
+from data_api.settings import CHART_PREFERENCES_DIR
 from data_api.settings import ERROR_LEDGER_DIR
 from data_api.settings import METRICS_DB_PATH
 from data_api.settings import REDIS_URL
@@ -94,6 +98,8 @@ _MAX_CATALOG_SPAN_NS = MAX_SNAPSHOTS_LIMIT * NS_PER_S
 # (the start is widened downwards, clamped at 0, so it cannot overflow).
 _MAX_TS_NS = 2**63 - 1 - READ_SPAN_MARGIN_NS
 _Timestamp = Annotated[int, Query(ge=0, le=_MAX_TS_NS)]
+
+logger = logging.getLogger(__name__)
 
 # Where platform/data_api.dockerfile's Node build stage COPYs platform/frontend/dist -- keep this
 # default in sync with that Dockerfile's COPY destination (Story 15.1 AC #5).
@@ -122,8 +128,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     (Story 33.4): the candle bus stays the one `liquidations:raw` subscriber. The engine is also
     the derivs bus's `DerivsObserver` (Story 33.8), attached and detached with the rest, so a
     funding, open-interest or liquidation alert fires with no `/ws/live` listener open.
+
+    Before any of that, a missing preference file with a shipped default is seeded (DW-219), so
+    the first request already reads it.
     """
     error_ledger.start()
+    _seed_preferences()
     # Bound once so shutdown detaches exactly what startup attached, even if a test swaps them.
     live_candle_bus, alert_engine = buses.live_candle_bus, alert_wiring.engine
     live_derivs_bus = buses.live_derivs_bus
@@ -148,6 +158,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
+
+def _seed_preferences() -> None:
+    """
+    Seed the preference defaults. A failure (an unwritable mount) is ledgered, not fatal: every
+    other route stays up, and an unseeded file reads as its loader's missing-file state.
+    """
+    try:
+        seeded = preference_seeds.seed_missing(Path(CHART_PREFERENCES_DIR))
+    except OSError as exc:
+        error_ledger.record("data_api.preference_seed", str(exc), exc)
+        return
+    for name in seeded:
+        logger.info("Seeded %s in %s from its shipped default", name, CHART_PREFERENCES_DIR)
 
 
 app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
