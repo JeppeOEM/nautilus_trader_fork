@@ -467,7 +467,7 @@ def test_verify_wipe_refuses_a_running_stack_and_keeps_the_plan_and_preferences(
     recipe = " ".join(_expand(line, variables) for line in recipes["verify-wipe"])
     assert "com.docker.compose.project=verify" in recipe
     assert "exit 1" in recipe
-    for kept in ("dydx_config.toml", "preferences"):
+    for kept in ("dydx_config.toml", "preferences", "alerts"):
         assert f"! -name {kept}" in recipe
     assert "-print" in recipe, "it lists what it deletes"
 

@@ -389,12 +389,17 @@ def test_a_scenario_spaced_long_enough_runs() -> None:
 _PS = '{{.Names}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.service"}}'
 
 
+def _ps_rows(*rows: tuple[str, str, str]) -> str:
+    """`docker ps --format _PS` output: one container, compose project and service per line."""
+    return "".join("\t".join(row) + "\n" for row in rows)
+
+
 def test_network_cut_is_refused_while_a_collector_of_another_project_runs() -> None:
     fake = _Host()
-    fake.ps_output = (
-        "verify-bybit-collector\tverify\tbybit_collector\n"
-        "platform-redis-1\tplatform\tredis\n"
-        "bybit-collector\tplatform\tbybit_collector\n"
+    fake.ps_output = _ps_rows(
+        ("verify-bybit-collector", "verify", "bybit_collector"),
+        ("platform-redis-1", "platform", "redis"),
+        ("bybit-collector", "platform", "bybit_collector"),
     )
     with pytest.raises(
         ChaosRefused, match=r"would be cut too \(stop them first\): bybit-collector$"
@@ -406,8 +411,9 @@ def test_network_cut_is_refused_while_a_collector_of_another_project_runs() -> N
 
 def test_network_cut_is_refused_while_a_paper_bot_runs_even_in_the_verify_stack() -> None:
     fake = _Host()
-    fake.ps_output = (
-        "verify-bybit-collector\tverify\tbybit_collector\nverify-live-paper\tverify\tlive-paper\n"
+    fake.ps_output = _ps_rows(
+        ("verify-bybit-collector", "verify", "bybit_collector"),
+        ("verify-live-paper", "verify", "live-paper"),
     )
     with pytest.raises(ChaosRefused, match=r"would be cut too .*: verify-live-paper$"):
         run_scenario(_request(NETWORK_CUT), fake.host())

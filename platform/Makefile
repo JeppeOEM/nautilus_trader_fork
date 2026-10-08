@@ -208,7 +208,8 @@ test:
 ## checkout's data/, or while a `verify` project started from another checkout runs (one project
 ## name per host: `up`/`down` here would recreate or remove that checkout's stack). It marks this
 ## data/ as a verify stack's (`data/.verify-stack`), which `verify-wipe` requires, and refuses a
-## data/ holding anything but the three toml files that is not marked yet (a live checkout's).
+## data/ holding anything but the committed plan, preferences and alerts that is not marked yet
+## (a live checkout's).
 VERIFY_REDIS_PORT ?= 26379
 VERIFY_DATA_API_PORT ?= 29100
 VERIFY_DOZZLE_PORT ?= 28080
@@ -216,12 +217,13 @@ VERIFY_COMPOSE := REDIS_PORT=$(VERIFY_REDIS_PORT) DATA_API_PORT=$(VERIFY_DATA_AP
 VERIFY_SERVICES := redis bybit_collector hyperliquid_collector archive ranking_engine data_api dozzle reference_recorder_bybit reference_recorder_hyperliquid live-paper
 # verification/raw and verification/scratch: the verify `archive` mounts them (its nightly
 # `verify_day` step, Story 31.11); created here so dockerd never creates them root-owned.
-VERIFY_DATA_DIRS := preferences catalog candles errors metrics archive verification verification/raw verification/scratch verification/bot_signals/live coverage live_paper
+VERIFY_DATA_DIRS := preferences catalog candles errors metrics archive verification verification/raw verification/scratch verification/bot_signals/live coverage live_paper alerts
 # `verify-up` marks the data/ it starts on; `verify-wipe` deletes only a marked data/, so a
 # `make verify-wipe` typed in the live checkout (its stack stopped) never deletes live data.
 VERIFY_MARKER := .verify-stack
-# What `verify-wipe` never deletes: the operator's hand-kept preference and plan files, and the mark.
-VERIFY_KEEP := ! -name dydx_config.toml ! -name preferences ! -name $(VERIFY_MARKER)
+# What `verify-wipe` never deletes: the operator's hand-kept preference and plan files, the saved
+# alerts' directory (committed with its alerts.toml, DW-197) and the mark.
+VERIFY_KEEP := ! -name dydx_config.toml ! -name preferences ! -name alerts ! -name $(VERIFY_MARKER)
 # Every guard below reads `docker ps`, whose failure (daemon down, socket permission) prints
 # nothing -- the same as "no container": each verify target checks the daemon answers first.
 VERIFY_DOCKER_UP = docker ps -q >/dev/null || { echo "$@: the docker daemon does not answer; refusing to guess what runs" >&2; exit 1; }
@@ -261,10 +263,10 @@ verify-down:
 	@others="$$($(VERIFY_OTHER_CHECKOUTS))"; if [ -n "$$others" ]; then echo "verify-down: the running verify stack is another checkout's: $$others" >&2; exit 1; fi
 	$(VERIFY_COMPOSE) down
 
-## Delete this checkout's data/ for a clean-slate soak, keeping only its three toml files. Refuses on
-## a data/ `verify-up` never marked (a live checkout's), while any container of the `verify` project
-## runs (`make verify-down` first) or any running container of any project bind-mounts this data/,
-## and lists every entry it deletes before deleting it.
+## Delete this checkout's data/ for a clean-slate soak, keeping only its committed plan, preferences
+## and alerts. Refuses on a data/ `verify-up` never marked (a live checkout's), while any container
+## of the `verify` project runs (`make verify-down` first) or any running container of any project
+## bind-mounts this data/, and lists every entry it deletes before deleting it.
 verify-wipe:
 	@$(VERIFY_DOCKER_UP)
 	@if [ ! -e $(PLATFORM_DIR)data/$(VERIFY_MARKER) ]; then echo "verify-wipe: this data/ was never started by make verify-up (no data/$(VERIFY_MARKER)); refusing to delete what may be live data" >&2; exit 1; fi

@@ -63,9 +63,10 @@ _RANKING_SITES = (
 
 # A service name is never a module or a path: `import x`, `from x`, `-m x`, `import_module("x`,
 # `<dir>/x` or `<dir>\x` in front of one is a stale package reference, whatever the allowances
-# below would accept.
+# below would accept. The one directory that holds service names is the error ledger's
+# (`data/errors/<service>.jsonl`), so `errors/` in front of one is not a package path.
 _STALE_CONTEXT = re.compile(
-    r"(?:\bimport\s+|\bfrom\s+|-m\s+|(?:import_module|__import__)\(\s*[\"']|[/\\])"
+    r"(?:\bimport\s+|\bfrom\s+|-m\s+|(?:import_module|__import__)\(\s*[\"']|(?<!\berrors)[/\\])"
     r"(?:bybit_collector|hyperliquid_collector|ranking_engine)\b"
 )
 # What may follow an allowed identifier: never a path or module continuation (`/x`, `\x`, `.x`),
@@ -89,6 +90,11 @@ ALLOWANCES = (
         "the bots' fills.db store directory under platform/data/ (and its mirrored container path)",
     ),
     Allowance(
+        # The list is directory names under platform/data/, `live_paper` among them.
+        re.compile(r"^VERIFY_DATA_DIRS :=(?: [\w/]+)*$"),
+        "make verify-up's list of the data/ directories it creates, the bots' store among them",
+    ),
+    Allowance(
         # A bare name only: never followed by a package path (`/`) or a module path (`.<word>`).
         re.compile(
             rf"\b(?:bybit_collector|hyperliquid_collector|ranking_engine)\b{_NO_CONTINUATION}"
@@ -100,6 +106,15 @@ ALLOWANCES = (
             rf"\b(?:bybit_collector|hyperliquid_collector|ranking_engine)\.jsonl\b{_NO_CONTINUATION}"
         ),
         "a service's durable error-ledger file, named after its ERROR_LEDGER_SERVICE",
+    ),
+    Allowance(
+        # `error_ledger.job_service()`: `<ERROR_LEDGER_SERVICE>.<job>[_<venue>]`, and its `.jsonl`
+        # file; `{tool}` is an f-string's placeholder for the job's name.
+        re.compile(
+            r"\b(?:bybit_collector|hyperliquid_collector|ranking_engine)\.verify_[\w{}]+"
+            rf"(?:\.jsonl)?\b{_NO_CONTINUATION}"
+        ),
+        "a verification job's ledger service name (and file) under its spawning service's name",
     ),
     Allowance(
         re.compile(rf"\branking_engine\.(?:{_RANKING_SITES})\b{_NO_CONTINUATION}"),
