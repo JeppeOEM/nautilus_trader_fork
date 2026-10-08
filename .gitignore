@@ -201,6 +201,8 @@ bench_data/
 /platform/data/verification/
 # The collectors' coverage record (Story 31.2): `<catalog>/../coverage/<venue>.jsonl`.
 /platform/data/coverage/
+# Backtest reports (`research.application.backtest_report`): one folder per run, local output.
+/platform/data/backtest_reports/
 # `make verify-up`'s per-checkout mark (`verify-wipe` deletes only a marked data/): never committed,
 # or every checkout would carry it.
 /platform/data/.verify-stack

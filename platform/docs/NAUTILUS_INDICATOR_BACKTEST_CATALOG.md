@@ -406,7 +406,15 @@ are a cross-check beside it, never a replacement.
 
 Tearsheet: `nautilus_trader.analysis.tearsheet.create_tearsheet` (`:283`) and
 `create_tearsheet_from_stats` (`:584`), used at `crypto_ema_cross_ethusdt_trade_ticks.py:118`.
-Not wired: it needs plotly 6.3.1+ and duplicates notebook 04's charts.
+Wired as every backtest report's `tearsheet.html` (`research.application.backtest_report`,
+2026-10-08: `NodeRunner(report_root=...)` calls `create_tearsheet` on the live engine before
+`node.dispose()`; a report saved later uses `create_tearsheet_from_stats`). plotly is pinned at
+6.8.0 in `uv.lock` (the `visualization` extra and the dev group), above the 6.3.1 the tearsheet
+needs. Two upstream traps it
+works around: `register_chart` + `TearsheetCustomChart` alone draws nothing (the tearsheet renders
+only names in the internal `_TEARSHEET_CHART_SPECS`, filled by `_register_tearsheet_chart`, and
+skips any other name silently), and the automatic layout has eight slots, dropping later panels,
+so the report passes an explicit `GridLayout`.
 
 ### 4.5 Data loaders and examples with no data here
 

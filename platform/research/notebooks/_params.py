@@ -68,6 +68,7 @@ class Params:
     candles_dir: str
     metrics_db_path: str
     errors_dir: str
+    backtest_reports_dir: str
     instruments: tuple[str, ...]
     start: str
     end: str
@@ -75,7 +76,9 @@ class Params:
     @classmethod
     def from_env(cls) -> "Params":
         """
-        Read `CATALOG_PATH`, `CANDLES_DIR`, `METRICS_DB_PATH`, `ERRORS_DIR`, `INSTRUMENTS`
+        Read `CATALOG_PATH`, `CANDLES_DIR`, `METRICS_DB_PATH`, `ERRORS_DIR`,
+        `BACKTEST_REPORTS_DIR` (where a backtest's report folder is saved,
+        `research.application.backtest_report`: beside the archive, never in it), `INSTRUMENTS`
         (comma-separated) and `START`/`END` (ISO dates or timestamps, naive = UTC), each defaulting
         to the `platform/data/` layout, the two dYdX majors and yesterday 00:00 -> today 00:00 UTC.
         `NOTEBOOK_HEADLESS=1` switches plotly to a renderer that builds figures but shows none.
@@ -98,6 +101,9 @@ class Params:
                 "METRICS_DB_PATH", str(DATA_DIR / "metrics" / "metrics.db")
             ),
             errors_dir=os.environ.get("ERRORS_DIR", str(DATA_DIR / "errors")),
+            backtest_reports_dir=os.environ.get(
+                "BACKTEST_REPORTS_DIR", str(DATA_DIR / "backtest_reports")
+            ),
             instruments=instruments or DEFAULT_INSTRUMENTS,
             # An empty value counts as unset (`START= jupyter lab ...`).
             start=os.environ.get("START") or (today - timedelta(days=1)).isoformat(),

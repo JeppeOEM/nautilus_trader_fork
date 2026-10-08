@@ -35,9 +35,9 @@
 # ## 1. Parameters
 #
 # Read from the environment (`research/notebooks/_params.py`): `CATALOG_PATH`, `INSTRUMENTS`,
-# `START`, `END`. The rest are set here; the ones marked *setting* can also be given as JSON in
-# `NOTEBOOK_<NAME>` (`_params.setting`), which is how the test harness shrinks them to its
-# ten-minute fixture:
+# `START`, `END` and `BACKTEST_REPORTS_DIR` (where the single run's report is saved). The rest
+# are set here; the ones marked *setting* can also be given as JSON in `NOTEBOOK_<NAME>`
+# (`_params.setting`), which is how the test harness shrinks them to its ten-minute fixture:
 #
 # - `STRATEGY`, `STRATEGY_CONFIG` -- the strategy and its config class by string path
 #   (`research.strategies.<module>:<Class>`). The first worked example is `OFIStrategy` on 1 s
@@ -102,6 +102,8 @@ SELECT_BY = setting("SELECT_BY", "expectancy")
 TOP_N = 5
 evaluation.check_heatmap_sweep(GRID, SELECT_BY)
 runner = NodeRunner()
+# The single run is saved as a report; the sweep and walk-forward runs are not.
+report_runner = NodeRunner(report_root=params.backtest_reports_dir)
 spec = RunSpec(
     catalog_path=params.catalog_path,
     instrument_ids=(INSTRUMENT,),
@@ -125,9 +127,14 @@ print(f"grid {GRID}; {N_FOLDS} folds, in-sample fraction {IN_SAMPLE_FRACTION}, b
 # equity after every account event (`EquityCurve`) and the `MetricReport`, all attributed to the
 # run's config id. The equity is the account balance: realized PnL and every fee, not marked to
 # market (the `RunResult` Known limit), so an adverse move held open does not show until it closes.
+#
+# The run is saved as a report folder under `BACKTEST_REPORTS_DIR`
+# (`research.application.backtest_report`): Nautilus's tearsheet, the strategy's source file and
+# `record.json`; the sweep and walk-forward runs below are compared here and not saved.
 
 # %%
-result = runner.run(spec)
+result = report_runner.run(spec)
+print(f"saved to {result.report_dir}")
 print(
     f"config {result.config_id}: {len(result.trades)} closed trades, {len(result.equity)} equity "
     f"points, {result.iterations} data events, engine {result.wall_seconds:.2f} s"

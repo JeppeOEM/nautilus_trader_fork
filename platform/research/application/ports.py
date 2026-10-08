@@ -25,6 +25,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
+from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
 
@@ -335,6 +336,13 @@ class RunResult:
     land in `returns`, e.g. `CAGR (252 days)`, `Calmar Ratio (252 days)`, `Max Drawdown`); `orders` / `fills` are the engine's own `generate_orders_report()` /
     `generate_order_fills_report()` frames (possibly empty); `wall_seconds` is the engine's run
     time (data loading excluded).
+    The engine identity and Nautilus's own returns, read before the engine is disposed (the
+    backtest report, `research.application.backtest_report`): `run_id` (`BacktestEngine.run_id`),
+    `instance_id` (the kernel's), `returns` (`PortfolioAnalyzer.returns()`: the daily account
+    returns when the account has two days of balances, else the per-position returns -- the
+    series Nautilus's return statistics and tearsheet read) -- None / empty on a result built by
+    hand; `report_dir` is the folder
+    `NodeRunner(report_root=...)` saved the run into, None when it saved none.
     """
 
     config_id: str
@@ -348,6 +356,10 @@ class RunResult:
     wall_seconds: float
     orders: pd.DataFrame = field(default_factory=pd.DataFrame)
     fills: pd.DataFrame = field(default_factory=pd.DataFrame)
+    run_id: str | None = None
+    instance_id: str | None = None
+    returns: pd.Series = field(default_factory=lambda: pd.Series(dtype="float64"))
+    report_dir: Path | None = None
 
     def pnl_by_hour_of_day(self) -> dict[int, float]:
         """

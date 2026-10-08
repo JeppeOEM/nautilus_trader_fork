@@ -282,6 +282,53 @@ statistic.
 
 ---
 
+### Backtest reports
+
+Every backtest run can leave one folder behind, `research.application.backtest_report`
+(quick-dev 2026-10-08). `NodeRunner(report_root=...)` saves each run it returns, from the engine
+before it is disposed, into `<report_root>/<StrategyClass>_<YYYY-MM-DDTHH-MM-SSZ>/` (UTC save time;
+`-2`, `-3`, ... when the name is taken) and sets `RunResult.report_dir`:
+
+- `tearsheet.html` -- Nautilus's own tearsheet (`create_tearsheet`): run information, account
+  summary, the statistics table, equity, drawdown, monthly and yearly returns, the returns
+  distribution and rolling Sharpe, plus a Run Configuration table (the `RunSpec`, its fill, fee and
+  latency models, exec algorithms, params, the strategy file's sha256, the git revision with
+  `-dirty`, Nautilus and Python versions), realized PnL by UTC exit hour and weekday, and for a
+  `bars:<spec>` run the bars with their fills and, on one instrument, a buy-and-hold benchmark;
+- `strategy.py` -- the strategy's module file, verbatim (`strategy_config.py` too when the config
+  class lives elsewhere);
+- `record.json` -- every number of the run: the spec, `MetricReport`, Nautilus's `stats_pnls` /
+  `stats_returns` / `stats_general` (an undefined statistic, Nautilus's NaN, is `null`), the
+  closed trades, the equity curve, the PnL by day, hour and weekday, the ids, counts and engine
+  time, the benchmark and the environment;
+
+and one line in `<report_root>/index.jsonl`.
+
+```python
+from research.application.backtest_report import list_backtest_reports
+from research.application.backtest_report import load_backtest_record
+from research.application.backtest_report import save_backtest_report
+from research.application.backtest_runner import NodeRunner
+
+result = NodeRunner(report_root=params.backtest_reports_dir).run(spec)   # saved; result.report_dir
+save_backtest_report(other_result, other_spec, params.backtest_reports_dir)  # a RunResult after the fact
+reports = list_backtest_reports(params.backtest_reports_dir)   # one row per run, metrics.* columns
+record = load_backtest_record(reports["folder"].iloc[-1])      # one run's record.json
+```
+
+A report saved after the fact (no engine) has Nautilus's panels from the stored statistics and
+returns, without the bars panel or benchmark. The root is `BACKTEST_REPORTS_DIR` (default
+`platform/data/backtest_reports/`, git-ignored): reports sit beside the archive, a root inside the
+catalog is refused, and the notebooks still never write the archive. Notebook 04 saves its single
+run, notebook 08 every gallery row (not the execution-axis repeats); the runner scripts
+(`backtest_ofi`'s NodeRunner path, `backtest_liquidation_cascade`, `backtest_candle_pattern`) take
+`report_root=` and save from the command line. A save that fails raises and leaves no folder. The
+module's `Known limit:`s (the internal tearsheet registration, ~4.7 MB of embedded plotly.js per
+report, imports pinned only by the git revision, the engine cache's bar capacity, orders and fills
+counted not stored) are in its docstring.
+
+---
+
 ### Run an existing backtest
 
 ```bash

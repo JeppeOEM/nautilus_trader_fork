@@ -20,12 +20,18 @@ book (the market the simulated exchange fills against) plus the archived `custom
 rows. Bybit LINEAR ids only (`kernel.liquidation.has_liquidation_feed`).
 
     python -m research.strategies.backtest_liquidation_cascade   # from platform/
+
+`report_root` saves the run as a backtest report folder there (`NodeRunner(report_root=...)`,
+`research.application.backtest_report`); the command line saves into `default_reports_root()`.
 """
+
+from pathlib import Path
 
 from research.application.backtest_runner import NodeRunner
 from research.application.ports import RunResult
 from research.application.ports import RunSpec
 from research.strategies.catalog_location import default_catalog_path
+from research.strategies.catalog_location import default_reports_root
 from research.strategies.liquidation_cascade_strategy import DEFAULT_STOP_PCT
 
 
@@ -37,6 +43,8 @@ def run(
     start: str | int = "2026-10-05",
     end: str | int = "2026-10-06",
     catalog_path: str | None = None,
+    *,
+    report_root: str | Path | None = None,
     **params: object,
 ) -> RunResult:
     """
@@ -61,11 +69,12 @@ def run(
         params=params,
         data="liquidations",
     )
-    return NodeRunner().run(spec)
+    return NodeRunner(report_root=report_root).run(spec)
 
 
 if __name__ == "__main__":
-    result = run()
+    result = run(report_root=default_reports_root())
+    print(f"Report: {result.report_dir}")
     print(f"Events processed: {result.iterations:,}; closed trades: {len(result.trades)}")
     for name, value in result.metrics.as_table():
         print(f"{name:>24}: {value}")

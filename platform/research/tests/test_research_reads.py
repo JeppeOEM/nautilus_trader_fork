@@ -29,6 +29,8 @@ path the kernel keeps consistent with what capture writes. Instrument definition
 The scan is static (AST): every non-test `.py` under `research/` and the code cells of every
 notebook, with IPython magics and shell escapes stripped. The only exemption names the story that
 replaces the file and fails once that story is `done`, or once the file no longer needs it.
+A finished engine's in-memory cache (`engine.cache.bars(...)`) is not the catalog and is not
+flagged.
 """
 
 import ast
@@ -94,9 +96,27 @@ def _bounded(call: ast.Call) -> bool:
     return {"start", "end"} <= keywords
 
 
+def _engine_cache_read(call: ast.Call) -> bool:
+    """
+    `engine.cache.bars(...)` reads a finished backtest engine's in-memory `Cache` -- what the run
+    already streamed, held to its `CacheConfig` capacity -- not the catalog (the backtest report's
+    bars panel and benchmark, `research.application.backtest_report`). Matched on exactly that
+    spelling, so no other object's `cache` attribute escapes the rule.
+    """
+    receiver = call.func.value if isinstance(call.func, ast.Attribute) else None
+    return (
+        isinstance(receiver, ast.Attribute)
+        and receiver.attr == "cache"
+        and isinstance(receiver.value, ast.Name)
+        and receiver.value.id == "engine"
+    )
+
+
 def _forbidden(call: ast.Call) -> str | None:
     name = _called_name(call)
-    if name in FORBIDDEN_READS or (name in BOUNDABLE_READS and not _bounded(call)):
+    if name in FORBIDDEN_READS or (
+        name in BOUNDABLE_READS and not _bounded(call) and not _engine_cache_read(call)
+    ):
         return name
     return None
 
@@ -232,3 +252,16 @@ def test_a_catalog_query_needs_both_bounds() -> None:
 def test_market_frames_objects_needs_both_bounds() -> None:
     source = "frames.objects(TradeTick, i, start=a, end=b)\nframes.objects(TradeTick, i)\n"
     assert forbidden_reads(source) == [(2, "objects")]
+
+
+def test_an_engine_cache_read_is_not_a_catalog_read() -> None:
+    source = (
+        "engine.cache.bars(bar_type)\ncatalog.bars()\ncache.bars(bar_type)\n"
+        "engine.cache.read_parquet(p)\nstore.cache.bars(bar_type)\n"
+    )
+    assert forbidden_reads(source) == [
+        (2, "bars"),
+        (3, "bars"),
+        (4, "read_parquet"),
+        (5, "bars"),
+    ]
