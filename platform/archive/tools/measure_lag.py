@@ -27,6 +27,15 @@ history (DATA-06) and is counted as replay, not lag; nothing is recorded during 
 would otherwise read as lag (D-44). dYdX book deltas carry no venue stamp
 (`ts_event = ts_init`, D-49), so their lag reads 0 by construction.
 
+The configured instruments are the plan the venue's collector reads: the file its env var names
+(`PLAN_ENV`: `BYBIT_COLLECTOR_CONFIG` and `HYPERLIQUID_COLLECTOR_CONFIG` as compose sets them on
+the collectors, `DYDX_PLAN_PATH` as it sets it on `archive`), else Bybit's and Hyperliquid's
+committed `config.toml` and dYdX's frozen container path. In the collector image, mount the live
+plan and set its env var (`docker run --network host -e BYBIT_COLLECTOR_CONFIG=... -v ...`,
+`docs/DEPLOY_CHECKLIST.md` §5.3); without them the image reads the plan baked in at build time.
+Not `docker compose run <collector>`: it inherits the collector's `mem_limit`, sized for the
+collector, not for a recorder holding every lag of a multi-hour run, and its capture CPU weight.
+
 The lag includes any clock offset between the venue and this host: run it on the host that
 runs the collector.
 """
@@ -40,6 +49,7 @@ import tomllib
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from observability import error_ledger
@@ -50,6 +60,18 @@ from nautilus_trader.model.data import TradeTick
 VENUES = ("bybit", "hyperliquid", "dydx")
 _S_NS = 1_000_000_000
 _HOLD_BACK_STEP_S = 0.5
+# The env var each venue's collector reads its plan from (docker-compose.yml). Known limit: an
+# empty value reads as unset here (the committed/default plan), while the Bybit and Hyperliquid
+# collectors' `os.environ.get(VAR, default)` turns it into `Path("")` and fail to start; aligning
+# them is a collector change, out of this tool's scope.
+PLAN_ENV = MappingProxyType(
+    {
+        "bybit": "BYBIT_COLLECTOR_CONFIG",
+        "hyperliquid": "HYPERLIQUID_COLLECTOR_CONFIG",
+        "dydx": "DYDX_PLAN_PATH",
+    }
+)
+_DYDX_DEFAULT_PLAN = "/app/dydx_collector/config.toml"  # the `archive` service's mount
 
 
 class LagRecorder:
@@ -128,18 +150,29 @@ def _build_client(venue: str, environment: str, on_data: Callable[[object], None
     )
 
 
+def _plan_path(venue: str) -> Path:
+    """
+    Return the plan the venue's collector reads: the file its `PLAN_ENV` var names when set and
+    non-empty, else Bybit's and Hyperliquid's committed `config.toml` and dYdX's frozen container
+    path. Resolved here, at call time: archive imports no capture module statically, and the
+    collectors' `CONFIG_PATH` is frozen at their import.
+    """
+    configured = os.environ.get(PLAN_ENV[venue])
+    if configured:
+        return Path(configured)
+    if venue == "dydx":
+        return Path(_DYDX_DEFAULT_PLAN)
+    platform_dir = Path(__file__).resolve().parents[2]  # archive/tools/measure_lag.py
+    return platform_dir / "capture" / "venues" / venue / "config.toml"
+
+
 def _default_instruments(venue: str) -> list[str]:
     """
-    Return the venue's configured instruments: dYdX's from its mounted plan (`DYDX_PLAN_PATH`,
-    default the frozen container path, as the `archive` service reads it), the others from their
-    committed `config.toml`. The dYdX plan lists `{ id = "..." }` tables (per-instrument options
-    such as `store_order_book_deltas`); Bybit's and Hyperliquid's list bare ids.
+    Return the venue's configured instruments, read from `_plan_path` (its env var's plan, else
+    the venue's default). The dYdX plan lists `{ id = "..." }` tables (per-instrument options such
+    as `store_order_book_deltas`); Bybit's and Hyperliquid's list bare ids.
     """
-    platform_dir = Path(__file__).resolve().parents[2]  # archive/tools/measure_lag.py
-    path = platform_dir / "capture" / "venues" / venue / "config.toml"
-    if venue == "dydx":
-        path = Path(os.environ.get("DYDX_PLAN_PATH") or "/app/dydx_collector/config.toml")
-    with path.open("rb") as f:
+    with _plan_path(venue).open("rb") as f:
         raw = tomllib.load(f).get("instruments", [])
     return [entry["id"] if isinstance(entry, dict) else entry for entry in raw]
 
@@ -173,7 +206,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--venue", required=True, choices=VENUES)
     parser.add_argument("--seconds", type=float, required=True)
-    parser.add_argument("--instrument", action="append", help="default: the venue's config.toml")
+    parser.add_argument(
+        "--instrument",
+        action="append",
+        help="default: the venue's plan, the file its env var names "
+        f"({', '.join(f'{v}: {e}' for v, e in PLAN_ENV.items())}), else its default plan",
+    )
     parser.add_argument("--environment", default="mainnet", choices=("mainnet", "testnet"))
     parser.add_argument("--stale-trade-seconds", type=float, default=10.0)
     parser.add_argument("--warmup-seconds", type=float, default=30.0)
@@ -183,10 +221,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         instruments = args.instrument or _default_instruments(args.venue)
     except FileNotFoundError as e:
-        hint = "set DYDX_PLAN_PATH or " if args.venue == "dydx" else ""
-        parser.error(f"{e.filename} not found: {hint}pass --instrument")
+        env_var = PLAN_ENV[args.venue]
+        parser.error(f"{e.filename} not found: point {env_var} at the plan or pass --instrument")
     except (OSError, tomllib.TOMLDecodeError, KeyError) as e:
-        parser.error(f"cannot read the {args.venue} instruments: {e!r}; pass --instrument")
+        parser.error(
+            f"cannot read the {args.venue} instruments ({PLAN_ENV[args.venue]} or its default): "
+            f"{e!r}; pass --instrument"
+        )
     if not instruments:
         parser.error(f"no instruments configured for {args.venue}: pass --instrument")
     recorder = LagRecorder(int(args.stale_trade_seconds * _S_NS))

@@ -359,9 +359,17 @@ Record numbers where each line says, never in a story file.
 - `collector.late_trade`, `collector.pending_deltas`, `collector.book_sequence` for Bybit and
   Hyperliquid in `/api/errors`: a steady late-trade rate means `hold_back_seconds` is too
   short; any `pending_deltas` or `book_sequence` entry is a DATA-02 finding for D-63 (22.12).
-- Lag measurement, once per venue, in the collector image with `--network host`:
-  `python3 -m archive.tools.measure_lag --venue bybit --seconds 10800` and
-  `--venue hyperliquid --seconds 10800`; record the per-kind distributions in D-63, then set
+- Lag measurement, once per venue, in the collector image with `--network host`, the live plan
+  mounted read-only and its env var set, so the tool reads the plan the collector collects
+  (without them it reads the plan baked in at build time):
+  `docker run --rm --network host -e BYBIT_COLLECTOR_CONFIG=/app/bybit_config.toml
+  -v "$PWD/capture/venues/bybit/config.toml:/app/bybit_config.toml:ro" platform-bybit_collector
+  python3 -m archive.tools.measure_lag --venue bybit --seconds 10800` and the same with
+  `HYPERLIQUID_COLLECTOR_CONFIG=/app/hyperliquid_config.toml`,
+  `capture/venues/hyperliquid/config.toml` and `--venue hyperliquid`, from `platform/`. Not
+  `docker compose run <collector>`: it inherits the collector's `mem_limit` (362m/248m, sized for
+  the collector, not for 3 h of held lags) and its capture CPU weight beside the live collector.
+  Record the per-kind distributions in D-63, then set
   each venue's `hold_back_seconds` to its TradeTick p99.9 rounded up to 0.5 s (or 0.0 with the
   reason in the comment), replace the provisional dev-box comment, and redeploy (22.12).
 - After the first full UTC day: `du -sh platform/data/catalog/data/trade_tick/*.<VENUE>` summed

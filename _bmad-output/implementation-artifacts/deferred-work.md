@@ -1955,7 +1955,9 @@ resolution-undo: 9077e58b03eea8f8c9d2570018bc9c06100b365969d0b85199174491807bf96
 origin: migrated from legacy ledger ("Deferred from: code review of story 22.1 (2026-09-20)"), 2026-10-05
 location: archive/tools/measure_lag.py
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-26-2-capture-package-and-venue-packages-with-entrypoints.md` summary: `archive/tools/measure_lag.py` `_default_instruments` reads fixed in-tree paths: for dYdX inside a container that is the bind-mounted live plan whose `[[instruments]]` are tables (so bare `--venue dydx` yields dicts as ids), and for Bybit/Hyperliquid it ignores `BYBIT_COLLECTOR_CONFIG`/`HYPERLIQUID_COLLECTOR_CONFIG`. evidence: platform/archive/tools/measure_lag.py `_default_instruments` (`tomllib.load(f).get("instruments", [])` returned as-is); same logic at baseline 7fbdb4fe76.
-status: open
+status: done 2026-10-08
+resolution: resolved by sweep bundle dw-measure-lag-venue-config-env
+resolution-undo: 0239a31cfe5d8d37a50619a5cbb53c6a13a11c3352994d485e4d6d76fe2d584a 2026-10-08 7374617475733a206f70656e
 
 ### DW-241: `run_forever` calls `build()` outside its try/backoff block, so a build failure on a restart attempt (config load, candle store, Redis, control plane) escapes …
 

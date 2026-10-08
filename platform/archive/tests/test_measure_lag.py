@@ -19,8 +19,10 @@ from pathlib import Path
 
 import pytest
 
+from archive.tools.measure_lag import PLAN_ENV
 from archive.tools.measure_lag import LagRecorder
 from archive.tools.measure_lag import _default_instruments
+from archive.tools.measure_lag import _plan_path
 from archive.tools.measure_lag import main
 from archive.tools.measure_lag import percentile
 from archive.tools.measure_lag import report
@@ -34,6 +36,13 @@ from nautilus_trader.model.objects import Quantity
 
 
 _MS = 1_000_000
+
+
+@pytest.fixture(autouse=True)
+def _no_plan_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear the plan env vars a compose shell (`make test` in the image) sets."""
+    for env_var in PLAN_ENV.values():
+        monkeypatch.delenv(env_var, raising=False)
 
 
 def _trade(n: int, lag_ms: int) -> TradeTick:
@@ -126,12 +135,80 @@ def test_the_committed_dydx_plan_yields_instrument_ids(monkeypatch: pytest.Monke
 
 
 def test_a_missing_dydx_plan_is_a_usage_error_not_an_empty_plan(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("DYDX_PLAN_PATH", str(tmp_path / "absent.toml"))
     with pytest.raises(SystemExit) as exited:
         main(["--venue", "dydx", "--seconds", "1"])
     assert exited.value.code == 2
+    assert "DYDX_PLAN_PATH" in capsys.readouterr().err
+
+
+# Bybit and Hyperliquid read their plan from the env var compose sets (DW-240), like dYdX.
+_ENV_VENUES = pytest.mark.parametrize(
+    ("venue", "env_var", "instrument_id"),
+    [
+        ("bybit", "BYBIT_COLLECTOR_CONFIG", "X-LINEAR.BYBIT"),
+        ("hyperliquid", "HYPERLIQUID_COLLECTOR_CONFIG", "X-USD-PERP.HYPERLIQUID"),
+    ],
+)
+
+
+@_ENV_VENUES
+def test_the_env_named_plan_is_the_one_measured(
+    venue: str,
+    env_var: str,
+    instrument_id: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = tmp_path / "config.toml"
+    plan.write_text(f'instruments = ["{instrument_id}"]\n')
+    monkeypatch.setenv(env_var, str(plan))
+    assert _default_instruments(venue) == [instrument_id]
+
+
+_ENV_VARS = pytest.mark.parametrize(
+    ("venue", "env_var"),
+    [("bybit", "BYBIT_COLLECTOR_CONFIG"), ("hyperliquid", "HYPERLIQUID_COLLECTOR_CONFIG")],
+)
+
+
+@_ENV_VARS
+def test_an_empty_env_var_falls_back_to_the_committed_config(
+    venue: str,
+    env_var: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    committed = _default_instruments(venue)
+    monkeypatch.setenv(env_var, "")
+    assert committed
+    assert _default_instruments(venue) == committed
+
+
+def test_an_empty_dydx_plan_path_falls_back_to_the_frozen_container_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DYDX_PLAN_PATH", "")
+    assert _plan_path("dydx") == Path("/app/dydx_collector/config.toml")
+
+
+@_ENV_VARS
+def test_an_env_var_naming_a_missing_plan_is_a_usage_error_naming_it(
+    venue: str,
+    env_var: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    absent = tmp_path / "absent.toml"
+    monkeypatch.setenv(env_var, str(absent))
+    with pytest.raises(SystemExit) as exited:
+        main(["--venue", venue, "--seconds", "1"])
+    assert exited.value.code == 2
+    err = capsys.readouterr().err
+    assert env_var in err
+    assert str(absent) in err
 
 
 def test_an_unreadable_dydx_plan_is_a_usage_error(
