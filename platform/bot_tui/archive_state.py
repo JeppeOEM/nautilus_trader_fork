@@ -30,6 +30,7 @@ import logging
 import time
 
 import redis.asyncio as aioredis
+from observability.pubsub_liveness import receive_until_silent
 
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,8 @@ _LATEST_RECEIVED_AT: float | None = None
 # The scheduler republishes at least every 30 s (its heartbeat), so four missed heartbeats means
 # the service or the Redis path is down and the shown line is no longer current.
 _STATUS_STALE_SECONDS: float = 120.0
+# How long one `get_message` poll waits, so the silence check runs at least this often.
+_POLL_SECONDS: float = 5.0
 
 
 def _handle_status_message(message: object) -> None:
@@ -83,16 +86,9 @@ async def _receive(pubsub: aioredis.client.PubSub) -> None:
     resubscribes: `listen()` would block forever on a half-open connection, leaving the line
     stale until the TUI restarts.
     """
-    heard = time.monotonic()
-    while True:
-        message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=5.0)
-        if message is not None and message["type"] == "message":
-            heard = time.monotonic()
-            _ingest(message["data"])
-        elif time.monotonic() - heard > _STATUS_STALE_SECONDS:
-            raise ConnectionError(
-                f"no {ARCHIVE_STATUS_CHANNEL} message for {_STATUS_STALE_SECONDS:.0f}s"
-            )
+    await receive_until_silent(
+        pubsub, ARCHIVE_STATUS_CHANNEL, _STATUS_STALE_SECONDS, _ingest, poll_seconds=_POLL_SECONDS
+    )
 
 
 async def _redis_listener(redis_url: str) -> None:

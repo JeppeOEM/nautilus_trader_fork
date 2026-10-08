@@ -34,6 +34,7 @@ import logging
 import time
 
 import redis.asyncio as aioredis
+from observability.pubsub_liveness import receive_until_silent
 
 
 logger = logging.getLogger(__name__)
@@ -183,19 +184,14 @@ class RankingsBus:
         resubscribes: a heartbeat-driven liveness check, since `listen()` blocks forever on a
         half-open connection and the cache would freeze until the process restarts.
         """
-        heard = time.monotonic()
-        while True:
-            message = await pubsub.get_message(
-                ignore_subscribe_messages=True, timeout=_POLL_SECONDS
-            )
-            if message is not None and message["type"] == "message":
-                heard = time.monotonic()
-                self._ingest(message["data"])
-            self._flush_suppressed_malformed()
-            if time.monotonic() - heard > SILENCE_RESUBSCRIBE_SECONDS:
-                raise ConnectionError(
-                    f"no {RANKINGS_CHANNEL} message for {SILENCE_RESUBSCRIBE_SECONDS:.0f}s"
-                )
+        await receive_until_silent(
+            pubsub,
+            RANKINGS_CHANNEL,
+            SILENCE_RESUBSCRIBE_SECONDS,
+            self._ingest,
+            poll_seconds=_POLL_SECONDS,
+            after_poll=self._flush_suppressed_malformed,
+        )
 
     def _ingest(self, data: str) -> None:
         try:

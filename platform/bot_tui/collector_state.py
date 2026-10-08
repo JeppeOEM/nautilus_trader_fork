@@ -50,6 +50,7 @@ import redis.asyncio as aioredis
 from kernel.venues import VENUE_KINDS
 from kernel.venues import MalformedInstrumentId
 from kernel.venues import venue_of
+from observability.pubsub_liveness import receive_until_silent
 
 
 logger = logging.getLogger(__name__)
@@ -353,16 +354,13 @@ async def _receive(pubsub: aioredis.client.PubSub) -> None:
     Ingest messages until `_SILENCE_RESUBSCRIBE_SECONDS` pass without one, then raise so the
     listener resubscribes (`listen()` would block forever on a half-open connection).
     """
-    heard = time.monotonic()
-    while True:
-        message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=_POLL_SECONDS)
-        if message is not None and message["type"] == "message":
-            heard = time.monotonic()
-            _ingest(message["data"])
-        elif time.monotonic() - heard > _SILENCE_RESUBSCRIBE_SECONDS:
-            raise ConnectionError(
-                f"no collector:status message for {_SILENCE_RESUBSCRIBE_SECONDS:.0f}s"
-            )
+    await receive_until_silent(
+        pubsub,
+        "collector:status",
+        _SILENCE_RESUBSCRIBE_SECONDS,
+        _ingest,
+        poll_seconds=_POLL_SECONDS,
+    )
 
 
 async def _redis_listener(redis_url: str) -> None:

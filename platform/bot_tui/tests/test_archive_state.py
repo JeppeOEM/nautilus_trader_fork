@@ -14,6 +14,8 @@
 # -------------------------------------------------------------------------------------------------
 """Tests for bot_tui.archive_state -- Story 25.1b. Pure logic, no Redis."""
 
+import asyncio
+
 import pytest
 
 from bot_tui import archive_state
@@ -67,3 +69,14 @@ def test_a_wall_clock_step_does_not_change_the_archive_lines_staleness(
     wall = archive_state.time.time()
     monkeypatch.setattr(archive_state.time, "time", lambda: wall + step)
     assert archive_state.is_stale() is False
+
+
+class _SilentPubSub:
+    async def get_message(self, ignore_subscribe_messages: bool, timeout: float) -> None:
+        await asyncio.sleep(0)
+
+
+def test_receive_raises_after_silence_naming_the_channel(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(archive_state, "_STATUS_STALE_SECONDS", -1.0)
+    with pytest.raises(ConnectionError, match="no archive:status message for -1s"):
+        asyncio.run(archive_state._receive(_SilentPubSub()))  # type: ignore[arg-type]

@@ -47,6 +47,7 @@ from kernel.venues import market_kind
 from kernel.venues import same_asset
 from kernel.venues import venue_of
 from observability import error_ledger
+from observability.pubsub_liveness import receive_until_silent
 
 
 logger = logging.getLogger(__name__)
@@ -253,18 +254,9 @@ class MarketsBus:
         resubscribes: `listen()` blocks forever on a half-open connection. Every venue publishes
         each 60 s cycle, so 180 s of silence on the whole channel is never a healthy quiet.
         """
-        heard = time.monotonic()
-        while True:
-            message = await pubsub.get_message(
-                ignore_subscribe_messages=True, timeout=_POLL_SECONDS
-            )
-            if message is not None and message["type"] == "message":
-                heard = time.monotonic()
-                self._ingest(message["data"])
-            elif time.monotonic() - heard > STALE_AFTER_SECONDS:
-                raise ConnectionError(
-                    f"no {MARKETS_CHANNEL} message for {STALE_AFTER_SECONDS:.0f}s"
-                )
+        await receive_until_silent(
+            pubsub, MARKETS_CHANNEL, STALE_AFTER_SECONDS, self._ingest, poll_seconds=_POLL_SECONDS
+        )
 
     def _ingest(self, data: str) -> None:
         try:

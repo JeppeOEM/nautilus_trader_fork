@@ -2305,7 +2305,9 @@ origin: migrated from legacy ledger (flat append from sweep bundle dw-live-chann
 location: platform/views/archive_status_bus.py, platform/views/rankings_bus.py, platform/bot_tui/archive_state.py, platform/bot_tui/collector_state.py
 source_spec: `_bmad-output/implementation-artifacts/bmad-dev-auto-result-live-channel-hardening.md`
 reason: The heartbeat-silence `_receive` loop is now copied in four modules (`views/archive_status_bus.py`, `views/rankings_bus.py`, `bot_tui/archive_state.py`, `bot_tui/collector_state.py`) and two more subscribers (`bot_tui/bots_state.py`, `bot_tui/bot_history_state.py`) still need it, so it should become one shared helper taking an ingest callback. evidence: The four `_receive` bodies are line-for-line the same poll/`heard`/`ConnectionError` loop with differently named constants (`STALE_AFTER_SECONDS`, `SILENCE_RESUBSCRIBE_SECONDS`, `_SILENCE_RESUBSCRIBE_SECONDS`); a shared home has to respect `tests/test_boundaries.py`'s context edges (views and bot_tui may not import each other).
-status: open
+status: done 2026-10-08
+resolution: resolved by sweep bundle dw-pubsub-silence-receive-helper
+resolution-undo: c09ababc4da7e725960b0cd269186b3e4444e4e671192f01c2fccbdbb96e00ef 2026-10-08 7374617475733a206f70656e
 
 ### DW-284: `GET /api/coin/{iid}/indicator-values` builds request params with no magnitude cap, so `HullMovingAverage {period: 10**9}` stalls `data_api` ~16 s per entry
 
@@ -2459,3 +2461,10 @@ location: platform/frontend/src/lib/drawings.ts
 source_spec: `_bmad-output/implementation-artifacts/spec-33-10-drawing-tools-two-ray-vline-rectangle-channel-text-arrow-magnet-undo-lock.md`
 reason: `nextDrawingId` reuses a deleted trendline's id (max+1 over the current list), so a `trendline_cross` alert naming a deleted `trendline-N` silently re-attaches to the next trendline placed; Story 33.10's Delete all makes this likely. Evidence: `frontend/src/lib/drawings.ts` `nextDrawingId` (pre-existing since 32.5) and `data_api/alert_inputs.py` `DrawingFileReader.trendline`, which resolves by id only; nothing invalidates or removes an alert when its drawing is deleted.
 status: open
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-dw-283-pubsub-silence-receive-helper.md`
+  summary: The two `markets:live` subscribers disagree on whether the channel can be legitimately silent: `views/markets_bus.py` raises and resubscribes after 180 s of silence ("Every venue publishes each 60 s cycle"), while `bot_tui/markets_state.py` PING-probes instead because "no venue has a fresh volume source, so the ranking engine publishes nothing" is a healthy quiet.
+  evidence: `platform/views/markets_bus.py` `_receive` docstring + `STALE_AFTER_SECONDS` vs `platform/bot_tui/markets_state.py` `_receive` docstring; both subscribe the same `"markets:live"`. Pre-existing (the views copy raised on silence before DW-283, which kept behaviour byte-identical); one docstring is wrong, or `data_api` reconnects a healthy connection every 180 s during that quiet.
+- source_spec: `_bmad-output/implementation-artifacts/spec-dw-283-pubsub-silence-receive-helper.md`
+  summary: The PING-after-silence liveness loop (the deliberate exception to `observability.pubsub_liveness.receive_until_silent`) is still copied in four subscribers with no shared helper, so a fix to one misses the others.
+  evidence: `platform/archive/infrastructure/redis_bus.py` `_messages` (~line 100), `platform/collection_control/infrastructure/redis.py` (~line 94), `platform/bots/infrastructure/liquidation_data_client.py` (~line 332) and `platform/bot_tui/markets_state.py` `_receive` each poll `get_message`, send a PING after a silence window and raise on an unanswered one. Pre-existing; outside DW-283's listed callers.

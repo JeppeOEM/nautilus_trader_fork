@@ -140,6 +140,9 @@ async def _receive(pubsub: aioredis.client.PubSub) -> None:
     on a half-open connection, leaving every venue to age out although the publisher still runs,
     while a legitimate silence (no venue has a fresh volume source, so the ranking engine publishes
     nothing) keeps a healthy connection instead of reconnecting every few minutes.
+
+    That legitimate silence is why this is not `observability.pubsub_liveness.receive_until_silent`:
+    the shared helper raises on silence alone, which suits only a heartbeat-driven channel.
     """
     heard = time.monotonic()
     pinged_at: float | None = None

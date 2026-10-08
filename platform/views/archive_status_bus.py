@@ -44,6 +44,7 @@ import time
 
 import redis.asyncio as aioredis
 from observability import error_ledger
+from observability.pubsub_liveness import receive_until_silent
 
 
 logger = logging.getLogger(__name__)
@@ -176,18 +177,13 @@ class ArchiveStatusBus:
         resubscribes: a heartbeat-driven liveness check, since `listen()` blocks forever on a
         half-open connection.
         """
-        heard = time.monotonic()
-        while True:
-            message = await pubsub.get_message(
-                ignore_subscribe_messages=True, timeout=_POLL_SECONDS
-            )
-            if message is not None and message["type"] == "message":
-                heard = time.monotonic()
-                self._ingest(message["data"])
-            elif time.monotonic() - heard > STALE_AFTER_SECONDS:
-                raise ConnectionError(
-                    f"no {ARCHIVE_STATUS_CHANNEL} message for {STALE_AFTER_SECONDS:.0f}s"
-                )
+        await receive_until_silent(
+            pubsub,
+            ARCHIVE_STATUS_CHANNEL,
+            STALE_AFTER_SECONDS,
+            self._ingest,
+            poll_seconds=_POLL_SECONDS,
+        )
 
     def _ingest(self, data: str) -> None:
         try:

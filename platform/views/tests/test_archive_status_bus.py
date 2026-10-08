@@ -14,6 +14,7 @@
 # -------------------------------------------------------------------------------------------------
 """Story 25.1b: `ArchiveStatusBus`'s shape check and cache discipline (pure, no Redis)."""
 
+import asyncio
 import copy
 import json
 
@@ -149,3 +150,14 @@ def test_unparseable_payload_is_ledgered_and_keeps_cache() -> None:
 
     assert bus.latest == good
     assert _ledger_count() == before + 1
+
+
+class _SilentPubSub:
+    async def get_message(self, ignore_subscribe_messages: bool, timeout: float) -> None:
+        await asyncio.sleep(0)
+
+
+def test_receive_raises_after_silence_naming_the_channel(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(archive_status_bus, "STALE_AFTER_SECONDS", -1.0)
+    with pytest.raises(ConnectionError, match="no archive:status message for -1s"):
+        asyncio.run(ArchiveStatusBus()._receive(_SilentPubSub()))  # type: ignore[arg-type]

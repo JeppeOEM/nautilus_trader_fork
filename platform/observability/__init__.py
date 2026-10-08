@@ -14,7 +14,8 @@
 # -------------------------------------------------------------------------------------------------
 """
 The generic observability subdomain (DDD spine AD-D16): the error ledger, the one outbound
-notifier, the generic watchdog transition and the incident-report handler.
+notifier, the generic watchdog transition, the incident-report handler and the heartbeat-silence
+pub/sub receive loop (`pubsub_liveness`).
 
 It imports only the standard library and holds no venue token, so every context except
 `kernel` (which imports no context, spine AD-D2) may depend on it, and it depends on none
