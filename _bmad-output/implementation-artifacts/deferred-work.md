@@ -2164,7 +2164,9 @@ resolution-undo: 0048a9d04f44fc28ce1ff055a57d3d109c101be1016932f3bf35d6b4fc4e643
 origin: migrated from legacy ledger ("Deferred from: story 26.3 spine version lens (2026-09-28)"), 2026-10-05
 location: _bmad-output/implementation-artifacts/spec-31-8-candles-and-klines-on-every-timeframe-with-pass-rates.md
 reason: source_spec: `_bmad-output/implementation-artifacts/spec-31-8-candles-and-klines-on-every-timeframe-with-pass-rates.md` summary: Every `verification.*` day tool reports PASS (exit 0) over nothing when the venue's plan is an explicit `instruments = []`: nothing refuses an empty plan, which is the "exit 0 over nothing" shape DATA-07/D-123 refuses elsewhere. evidence: `verification/domain/plan_file.py` accepts `instruments = []` as "a plan that records nothing", and `plan_of` (`verification/conservation.py:120`) returns it unchanged. `conservation`, `trades`, `book`, `derivs`, `catalog` and the new `candles` then iterate zero instruments and print a passing verdict. This is a cross-tool pattern from 31.2 onwards, not new in 31.8, so it needs one shared refusal in `plan_of`.
-status: open
+status: done 2026-10-08
+resolution: resolved by sweep bundle dw-verification-refuse-empty-plan
+resolution-undo: dd670b686fc312ca8202a12fe70f67cfbd2a01d8db3bbaa7f23931020ef9b99c 2026-10-08 7374617475733a206f70656e
 
 ### DW-266: A collector's plan can grow at runtime (`collector:control`) past the size its compose `mem_limit` was measured for, with nothing warning before the cgroup …
 

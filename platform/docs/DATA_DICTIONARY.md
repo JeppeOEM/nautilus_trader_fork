@@ -1104,8 +1104,10 @@ coverage or marker line is refused (file:line), never skipped.
   `examples_unexplained`}. Up to 5 examples are listed per instrument.
 - **Exit codes**: 0 = every instrument passes, 1 = any fails, 2 = usage error (argparse). A
   refusal exits with status 1 and its message, ledgered at `verification.conservation.refused`.
-  Refusals are: no raw root or catalog, an unreadable plan, a malformed coverage/marker/trade
-  line, or a truncated raw file of an hour that has ended.
+  Refusals are: no raw root or catalog, an unreadable plan, an empty plan (`instruments = []`,
+  or every one excluded: a verdict over nothing, refused in the shared `plan_of` that every day
+  tool and `chaos` read the plan through, DW-265), a malformed coverage/marker/trade line, or a
+  truncated raw file of an hour that has ended.
 - **Repro** (host, from `platform/`, on the verify stack's data):
   `VERIFY_DATA_DIR=data/verification CATALOG_PATH=data/catalog python3 -m
   verification.conservation --venue BYBIT --day YYYY-MM-DD [--json]` (or `--raw-dir`/`--catalog`;
@@ -1218,18 +1220,18 @@ guarantee; a wrong `rebuilt` can only false-fail. Story 31.11's nightly `verify_
 `implausible_latency`) and every failing second class at 0; the day passes when every instrument
 does, the coverage record exists and no raw reference hour of the day is missing. Exit 0 pass, 1
 fail, 2 usage. Refusals exit 1 with their message, ledgered at `verification.trades.refused`: an
-unknown `--stage`, a day not closed, no raw root or catalog, an unreadable plan, a malformed line,
-a truncated raw file of an hour of the day, a trade file without precision metadata or `ts_event`
-column, a snapshot row without its precisions, a value the exact decode cannot hold (an
-`ArithmeticError` such as `decimal.Inexact` from an over-long wire decimal). Any other exception is
-a crash: ledgered at the same site (detail `crashed: ...`), then re-raised. Failing id and second
+unknown `--stage`, a day not closed, no raw root or catalog, an unreadable or empty plan, a
+malformed line, a truncated raw file of an hour of the day, a trade file without precision metadata
+or `ts_event` column, a snapshot row without its precisions, a value the exact decode cannot hold
+(an `ArithmeticError` such as `decimal.Inexact` from an over-long wire decimal). Any other exception
+is a crash: ledgered at the same site (detail `crashed: ...`), then re-raised. Failing id and second
 examples are deterministic, never set order: hour by hour, and within an hour by kind
 (`off_precision`, then field mismatches and conflicts, then missing, then extra ids), each kind in
-venue-time order. `--json` gives
-`passed`, `provisional`, `venue`, `day`, `stage`, `hours`, `coverage_file`, `coverage_present`,
-`missing_raw_files`, `truncated_neighbour_files` and per instrument `ids` (every count, the
-`no_aggressor_tokens`, up to 5 failing `examples`), `seconds` (`classes`, all ten, and up to 5
-failing `examples`) and `latency_ms` (`count`, `min_ms`, `p50_ms`, `p99_ms`, `max_ms`).
+venue-time order. `--json` gives `passed`, `provisional`, `venue`, `day`, `stage`, `hours`,
+`coverage_file`, `coverage_present`, `missing_raw_files`, `truncated_neighbour_files` and per
+instrument `ids` (every count, the `no_aggressor_tokens`, up to 5 failing `examples`), `seconds`
+(`classes`, all ten, and up to 5 failing `examples`) and `latency_ms` (`count`, `min_ms`, `p50_ms`,
+`p99_ms`, `max_ms`).
 
 **Repro** (host, from `platform/`, on the verify stack's data): `VERIFY_DATA_DIR=data/verification
 CATALOG_PATH=data/catalog python3 -m verification.trades --venue BYBIT --day YYYY-MM-DD --stage
@@ -1349,8 +1351,8 @@ polls were judged or rows exist; either fails the instrument whatever the rows s
 class, `content_differs` or `off_grid`; otherwise "nothing verified"). The day passes when every
 instrument does, the coverage record exists and no raw book hour (WS or REST) of the day is missing.
 Exit 0 pass, 1 fail, 2 usage. Refusals exit 1 with their message, ledgered at
-`verification.book.refused`: a day not closed, no raw root or catalog, an unreadable plan, a
-malformed line, a truncated raw file of an hour of the day, a float-layout snapshot file, a
+`verification.book.refused`: a day not closed, no raw root or catalog, an unreadable or empty plan,
+a malformed line, a truncated raw file of an hour of the day, a float-layout snapshot file, a
 non-positive stored gap, a row without its precisions or with unpaired sizes, a value the exact
 decode cannot hold. Any other exception is a crash, ledgered at the same site and re-raised.
 `--json` gives `passed`, `venue`, `day`, `layout`, `coverage_file`, `coverage_present`,
@@ -1527,15 +1529,15 @@ coverage record exists and no raw hour of `linear.tickers`, `linear.rest.tickers
 `<category>.rest.instruments-info` (Bybit) or `activeAssetCtx`, `rest.metaAndAssetCtxs`
 (Hyperliquid) is missing. Exit 0 pass, 1 fail, 2 usage. Refusals exit 1 with their message,
 ledgered at `verification.derivs.refused`: the book tool's (a day not closed, no raw root or
-catalog, an unreadable plan, a malformed line, a truncated raw file of an hour of the day), a
-mark/index file without its label, a stored value that is not decimal text, a null value or clock,
+catalog, an unreadable or empty plan, a malformed line, a truncated raw file of an hour of the day),
+a mark/index file without its label, a stored value that is not decimal text, a null value or clock,
 an unreadable `open_interest_poll_seconds`. Any other exception is a crash, ledgered at the same
 site and re-raised. `--json` gives `passed`, `venue`, `day`, `bounds_ns`,
 `open_interest_poll_seconds`, `coverage_file`, `coverage_present`, `missing_raw_files`,
 `truncated_neighbour_files`, per instrument `types` (each `kind`, `passed`, `reference`, `ratio`,
 `ts_rule`, `rest`, `rows`, `row_classes`, `updates`, `coverage`, `labels`, `label_vs_definition`,
-`examples`) and `definitions` (`passed`, `polls`, `differs`, `venue_changes`,
-`definitions_ts_init`, `not_declared`, `no_definition`), and `spot` (`rows`, `fabricated`).
+`examples`) and `definitions` (`passed`, `polls`, `differs`, `venue_changes`, `definitions_ts_init`,
+`not_declared`, `no_definition`), and `spot` (`rows`, `fabricated`).
 
 **Repro** (host, from `platform/`, on the verify stack's data): `VERIFY_DATA_DIR=data/verification
 CATALOG_PATH=data/catalog python3 -m verification.derivs --venue BYBIT --day YYYY-MM-DD [--json]`.
@@ -1660,7 +1662,7 @@ that reads `missing` at those widths.
 
 **Refusals** (ledgered at `verification.catalog.refused`, exit 1 with the message): a day not
 closed (`DAY_SETTLE_NS` after midnight), a missing catalog, candles directory or store file, an
-unreadable plan, a plan instrument without a stored definition, a day file that vanished,
+unreadable or empty plan, a plan instrument without a stored definition, a day file that vanished,
 appeared or changed during the run ("catalog changed during the check (maintenance ran?)" -- every
 day file -- selected as above, each with its (name, inode, size, mtime) -- is fingerprinted first,
 after the rehearsal (the scratch holds hard links) and at the end, so a same-name rewrite counts
@@ -1806,13 +1808,13 @@ each day's 1d reference verdict; upgrade path: a `--week` mode folding the week'
 
 **Refusals** (ledgered at `verification.candles.refused`, exit 1 with the message): a day not
 closed (`DAY_SETTLE_NS` = 2 h after midnight), a missing catalog, candles directory, store file,
-raw directory or coverage record, an unreadable plan, a malformed line, a truncated raw file of the
-day, the data_api unreachable or answering non-200 or with a malformed page, a file vanishing
-mid-run. Any other exception is a crash, ledgered at the same site and re-raised. A missing raw
-reference file of the day is counted failing (`missing_raw_files`), as in §1.16. With
-`--no-served` the served bars are not checked: the report says `served: not checked` and the
-verdict is `PROVISIONAL`, never `PASS` (exit 0 when nothing else failed, so it stays scriptable);
-Story 31.11 runs it with the served checks on.
+raw directory or coverage record, an unreadable or empty plan, a malformed line, a truncated raw
+file of the day, the data_api unreachable or answering non-200 or with a malformed page, a file
+vanishing mid-run. Any other exception is a crash, ledgered at the same site and re-raised. A
+missing raw reference file of the day is counted failing (`missing_raw_files`), as in §1.16. With
+`--no-served` the served bars are not checked: the report says `served: not checked` and the verdict
+is `PROVISIONAL`, never `PASS` (exit 0 when nothing else failed, so it stays scriptable); Story
+31.11 runs it with the served checks on.
 
 `--json` gives `verdict` (`PASS`/`FAIL`/`PROVISIONAL`), `passed`, `provisional`, `failing`, `venue`,
 `day`, `served`, `data_api`, `candle_store`, `coverage_file`, `missing_raw_files`,
@@ -2142,12 +2144,12 @@ more flush) has passed. The day output is unchanged; the JSON carries `start`/`e
 scenario on the verify stack and always undoes it (`finally`; a failed undo is ledgered and exits
 1); `--evaluate --venue V` judges every settled scenario. Refusals are ledgered at
 `verification.chaos.refused` (exit 1, no fault applied): no `data/.verify-stack` marker, a target
-container not `verify-*`, an open scenario (a `start` line without its `end`), fewer than 6 min
-since the last `end` (the judged windows' 270 s of margins never overlap), and `network_cut`
-without `sudo -n` or while another uid-1000 venue client runs (a collector of another compose
-project, or a `live-paper` bot of any: stop `verify-live-paper` first). An interrupt (Ctrl-C,
-SIGTERM, SIGHUP) ends the fault, undoes it and writes the `end` line, ledgered at
-`verification.chaos.fault_failed` with whether the undo held; later signals are ignored until the
+container not `verify-*`, an unreadable or empty plan (DW-265), an open scenario (a `start` line
+without its `end`), fewer than 6 min since the last `end` (the judged windows' 270 s of margins
+never overlap), and `network_cut` without `sudo -n` or while another uid-1000 venue client runs (a
+collector of another compose project, or a `live-paper` bot of any: stop `verify-live-paper` first).
+An interrupt (Ctrl-C, SIGTERM, SIGHUP) ends the fault, undoes it and writes the `end` line, ledgered
+at `verification.chaos.fault_failed` with whether the undo held; later signals are ignored until the
 tool exits, so a second one never cuts the undo short. Usage errors exit 2.
 
 | Scenario | Fault |
@@ -2261,8 +2263,9 @@ python -m archive.verify_day --catalog C --candles-dir X --venue V --day D --res
 - **What a reduction yields:**
   - `pass` only on exit 0 with `passed: true`, at least one instrument judged, none failing, and
     a top-level `failing` of 0 where the report has one (catalog, candles). Candles also need the
-    served bars `checked`. A report judging no instrument (an empty plan, a wrong mount) checked
-    nothing and is `fail`.
+    served bars `checked`. A report judging no instrument (a wrong mount) checked nothing and is
+    `fail`; an empty plan never reaches a report: every plan-reading tool refuses it
+    (DW-265), so it is `refused`.
   - Any other report is `fail`.
   - No parseable report, a malformed one, or a child killed at the timeout is `refused`.
   - Every count is read from the report, never re-derived (SSOT-01). Each tool's `report_json`

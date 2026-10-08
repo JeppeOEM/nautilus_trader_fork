@@ -51,6 +51,13 @@ def test_environment_defaults_to_mainnet_and_an_empty_plan_is_valid() -> None:
     )
 
 
+def test_an_empty_plan_file_still_reads_as_a_plan_that_records_nothing(tmp_path: Path) -> None:
+    """The recorder's contract: only the verification day tools refuse an empty plan."""
+    path = tmp_path / "config.toml"
+    path.write_text("instruments = []\n")
+    assert read_plan_file(path, "BYBIT").instruments == ()
+
+
 @pytest.mark.parametrize("text", ["", 'environment = "mainnet"\ncatalog_path = "/app/c"\n'])
 def test_a_file_read_mid_save_is_refused_not_an_empty_plan(text: str) -> None:
     """The plan store truncates then writes: a read in between must keep the last good plan."""

@@ -189,7 +189,8 @@ def _passes(tool: str, exit_code: int, body: Mapping[str, Any], verdict: TypeVer
     # A report contradicting itself (`passed` with a failing instrument) is never a pass.
     passed = exit_code == 0 and _flag(body.get("passed"), "passed")
     passed = passed and not verdict.failing_instruments and verdict.failing == 0
-    # A report judging no instrument (an empty plan, a wrong mount) checked nothing: never a pass.
+    # A report judging no instrument (a wrong mount) checked nothing: never a pass. An empty plan
+    # never gets here: `plan_of` refuses it in every plan-reading tool (DW-265).
     passed = passed and bool(verdict.instruments)
     if tool == "candles":
         return passed and body.get("served") == SERVED_CHECKED

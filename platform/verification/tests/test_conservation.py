@@ -418,6 +418,35 @@ def test_a_missing_raw_root_or_catalog_is_refused(
         _main(argv)
 
 
+def test_plan_of_returns_a_plan_that_lists_instruments(tmp_path: Path) -> None:
+    path = tmp_path / "bybit.toml"
+    path.write_text(f'instruments = ["{_BTC}"]\n')
+    plan = conservation.plan_of("BYBIT", {"BYBIT_COLLECTOR_CONFIG": str(path)})
+    assert plan.instruments == (_BTC,)
+
+
+@pytest.mark.parametrize(
+    "text", ["instruments = []\n", f'instruments = ["{_BTC}"]\nexclude = ["{_BTC}"]\n']
+)
+def test_plan_of_refuses_a_plan_that_lists_no_instruments(tmp_path: Path, text: str) -> None:
+    """An explicit empty plan, or one whose every instrument is excluded, would judge nothing."""
+    path = tmp_path / "bybit.toml"
+    path.write_text(text)
+    with pytest.raises(conservation.Refused, match="no instruments") as refused:
+        conservation.plan_of("BYBIT", {"BYBIT_COLLECTOR_CONFIG": str(path)})
+    assert str(path) in str(refused.value)
+
+
+def test_a_day_over_an_empty_plan_is_refused_never_a_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _bybit_day(tmp_path, monkeypatch)
+    (tmp_path / "bybit.toml").write_text("instruments = []\n")
+    with pytest.raises(SystemExit, match="no instruments"):
+        _main(["--venue", "BYBIT", "--day", _DAY.isoformat()])
+    assert capsys.readouterr().out == ""  # no verdict printed
+
+
 def test_a_bad_day_is_a_usage_error() -> None:
     with pytest.raises(SystemExit) as raised:
         _main(["--venue", "BYBIT", "--day", "29-09-2026"])

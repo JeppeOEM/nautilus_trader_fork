@@ -25,6 +25,7 @@ import json
 from collections.abc import Callable
 from collections.abc import Iterator
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from observability import error_ledger
@@ -90,3 +91,34 @@ def test_a_tool_run_by_hand_defaults_its_parent_to_verification(
         candles.main(_FUTURE_DAY)
 
     assert (errors_dir / "verification.verify_candles_bybit.jsonl").exists()
+
+
+@pytest.mark.parametrize("module", [book, candles, catalog, chaos, derivs, trades])
+def test_each_plan_reading_tool_reads_the_plan_through_the_one_shared_refusal(
+    module: ModuleType,
+) -> None:
+    """An empty plan is refused once, in `conservation.plan_of`; no tool may bypass it."""
+    assert module.plan_of is conservation.plan_of
+
+
+# The recorder (and the fixture tool that runs it) records an empty plan as nothing, so only they,
+# `plan_of` itself and the plan module defining the readers may name a plan reader; every verdict
+# tool goes through `plan_of`.
+_DIRECT_PLAN_READERS = {
+    "recorder.py",
+    "conservation.py",
+    "tools/record_fixtures.py",
+    "domain/plan_file.py",
+}
+_PLAN_READER_NAMES = ("read_plan_file", "parse_plan")
+
+
+def test_no_verdict_tool_reads_the_plan_file_around_the_shared_refusal() -> None:
+    root = Path(conservation.__file__).parent
+    readers = {
+        str(path.relative_to(root))
+        for path in root.rglob("*.py")
+        if "tests" not in path.relative_to(root).parts
+        and any(name in path.read_text() for name in _PLAN_READER_NAMES)
+    }
+    assert readers == _DIRECT_PLAN_READERS

@@ -139,12 +139,24 @@ def _inputs(args: argparse.Namespace, environ: Mapping[str, str]) -> Inputs:
 
 
 def plan_of(venue: str, environ: Mapping[str, str]) -> RecordingPlan:
-    """Read the venue's plan (its collector `config.toml`); `Refused` when it cannot be read."""
+    """
+    Read the venue's plan (its collector `config.toml`); `Refused` when it cannot be read, or when
+    it lists no instruments (`instruments = []`, or every one excluded): a day tool over an empty
+    plan would judge nothing and still exit 0 (DATA-07). The one refusal every plan-reading tool
+    shares; `read_plan_file` itself keeps accepting an empty plan, which the recorder records as
+    nothing.
+    """
     path = config_path(venue, environ)
     try:
-        return read_plan_file(path, venue)
+        plan = read_plan_file(path, venue)
     except (OSError, ValueError) as exc:
         raise Refused(f"plan {path}: {exc}") from exc
+    if not plan.instruments:
+        raise Refused(
+            f"plan {path} lists no instruments (`instruments = []`, or every one excluded): "
+            "a verdict over nothing is refused"
+        )
+    return plan
 
 
 def _refuse_unsettled(args: argparse.Namespace, now_ns: int) -> None:
