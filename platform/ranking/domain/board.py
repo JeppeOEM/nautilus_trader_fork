@@ -451,14 +451,21 @@ class RankingBoard:
 
         Returns every dropped catalog point and live/Parquet price disagreement as a detail for
         the engine to ledger (DATA-07); empty when the series was used whole.
+
+        The volume and the last close read each second once, its first copy in ts order -- the
+        price series' own validation rule (DW-218), which ledgers the duplicates it drops -- so a
+        second stored twice never doubles the hourly volume; the last close is the newest positive
+        one, as a non-positive price is no close.
         """
         inst = self._instruments.get(instrument_id)
         if inst is None or inst.backfilled:
             return []
         state = self._derivs_state(instrument_id, inst.last_seen_ns)
-        state.volume.backfill([(point.ts_event, point.volume) for point in series])
-        if state.last_close is None and series:
-            state.note_close(series[-1].ts_event, series[-1].close)
+        seconds = _first_copy_per_second(series)
+        state.volume.backfill([(point.ts_event, point.volume) for point in seconds])
+        closes = [point for point in seconds if point.close > 0]
+        if state.last_close is None and closes:
+            state.note_close(closes[-1].ts_event, closes[-1].close)
         pairs = [(point.ts_event, point.price) for point in series]
         return self._prices.backfill(instrument_id, pairs)
 
@@ -704,3 +711,12 @@ class RankingBoard:
             "ranks": self.current_ranks(now_ns),
             "stale_instrument_ids": self.stale_ids(now_ns),
         }
+
+
+def _first_copy_per_second(series: list[PricePoint]) -> list[PricePoint]:
+    """Return `series` sorted by ts, keeping the first copy of each ts (the sort is stable)."""
+    kept: list[PricePoint] = []
+    for point in sorted(series, key=lambda point: point.ts_event):
+        if not kept or kept[-1].ts_event != point.ts_event:
+            kept.append(point)
+    return kept

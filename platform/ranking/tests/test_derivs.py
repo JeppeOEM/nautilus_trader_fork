@@ -460,6 +460,22 @@ def test_the_backfill_seeds_volume_close_open_interest_and_liquidations() -> Non
     assert row["high_24h"] == 100.0
 
 
+def test_a_second_stored_twice_seeds_its_volume_once_and_no_close_is_non_positive() -> None:
+    """The backfill reads each second once (the price series' DW-218 rule) and skips a 0 close."""
+    b = board()
+    b.ingest(snap(LINEAR, 99.0, 101.0, NOW_NS - SEC_NS), NOW_NS)
+    twice = PricePoint(NOW_NS - 3 * HOUR_NS, 100.0, Decimal("100.0"), Decimal(6))
+    later = PricePoint(NOW_NS - 2 * HOUR_NS, 101.0, Decimal("101.0"), Decimal(1))
+    zero = PricePoint(NOW_NS - 90 * 60 * SEC_NS, 0.0, Decimal(0), Decimal(2))
+
+    details = b.backfill(LINEAR, [twice, later, twice, zero])
+
+    state = b._derivs[LINEAR]
+    assert state.volume.within(NOW_NS - HOUR_NS, 3 * HOUR_NS) == Decimal(9)  # 6 + 1 + 2, not 15
+    assert (state.last_close, state.last_close_ns) == (Decimal("101.0"), later.ts_event)
+    assert len(details) == 2  # the price series ledgers the duplicate and the 0 price
+
+
 def test_derivs_state_of_an_id_never_ranked_ages_out() -> None:
     b = board()
     b.ingest_derivs(_tick("mark", "1"), NOW_NS)
