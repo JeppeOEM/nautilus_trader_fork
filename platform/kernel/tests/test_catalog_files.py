@@ -1067,6 +1067,28 @@ def test_second_ohlc_arrays_refuses_a_vanished_file_never_reads_partially(catalo
     assert str(raised.value).startswith(f"{gone}: ")
 
 
+def test_second_ohlc_arrays_reads_a_day_file_beside_its_source_once(catalog: str) -> None:
+    """The rebuild's read keeps one copy per second, as every snapshot reader does."""
+    real = _real_files(catalog, _SNAP)
+    expected = catalog_files.second_ohlc_arrays(real)
+    day_file = str(_leaf(catalog, _SNAP) / _timestamps_to_filename(_DAY0, _DAY0 + NS_PER_DAY - 1))
+    shutil.copy(real[0], day_file)  # the merged copy of the first source's rows
+    cols = catalog_files.second_ohlc_arrays([day_file, *real])
+    assert set(cols) == set(expected)
+    for key, column in expected.items():
+        np.testing.assert_array_equal(cols[key], column, err_msg=key)
+
+
+def test_second_ohlc_arrays_refuses_a_second_stored_twice_with_different_values(
+    catalog: str,
+) -> None:
+    second = _DAY0 + 10 * NS_PER_S
+    ParquetDataCatalog(catalog).write_data([_snapshot(second, second + 2 * NS_PER_S, 99.0)])
+    with pytest.raises(catalog_files.CatalogReadError, match="stored twice") as raised:
+        catalog_files.second_ohlc_arrays(_real_files(catalog, _SNAP))
+    assert str(raised.value).startswith(f"second {second} ")
+
+
 @pytest.mark.parametrize("column", ["buy_volume", "sell_volume", "buy_count", "sell_count"])
 def test_second_ohlc_arrays_refuses_a_null_flow_column(
     catalog: str, tmp_path: Path, column: str

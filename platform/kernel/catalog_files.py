@@ -54,6 +54,8 @@ File faults (DATA-07), one policy per shape:
 - A file Parquet cannot read (truncated, corrupt) is refused with `CatalogReadError` naming it.
 `second_ohlc_arrays` reads a path list its caller built, so it cannot list again: a vanished file
 is refused (`CatalogReadError`) too -- its caller writes candles and never writes a partial read.
+It keeps one copy per second as the snapshot readers do (`_one_copy_per_second_arrays`), so a
+rebuild listing a day file beside a source not yet removed stores no doubled second.
 """
 
 import glob
@@ -713,6 +715,11 @@ def second_ohlc_arrays(paths: list[str]) -> dict[str, np.ndarray]:
     order-flow fold's input (`candles.domain.fold.FlowArrays`). Only the close may be null there (a
     second without a trade); a null volume, count or precision raises `ValueError` naming the file
     and column (`_flow_units`).
+
+    Each second is read once (`_one_copy_per_second_arrays`), as every self-listing snapshot reader
+    keeps it (`_one_copy_per_second`): a `ts_event` the given files hold twice -- a consolidated day
+    file listed beside a minute source not yet removed -- is one row, never a doubled volume in the
+    store, and two copies that disagree are refused (`CatalogReadError`), never one picked.
     """
     out = {k: np.empty(0, dtype=np.float64) for k in ("o", "h", "l", "c", "v")}
     out["ts_ms"] = np.empty(0, dtype=np.int64)
@@ -720,12 +727,45 @@ def second_ohlc_arrays(paths: list[str]) -> dict[str, np.ndarray]:
     parts = [_ohlc_part(path) for path in paths]
     if not parts:
         return out
-    joined = {k: np.concatenate([p[k] for p in parts]) for k in parts[0]}
+    joined = _one_copy_per_second_arrays(
+        paths, {k: np.concatenate([p[k] for p in parts]) for k in parts[0]}
+    )
     out["ts_ms"] = joined["ts_event"] // NS_PER_MS
     out["o"], out["h"], out["l"], out["c"] = (joined[k] for k in OHLC_UNIT_COLUMNS)
     out["v"] = joined["buy_volume"] + joined["sell_volume"]
     out.update({k: joined[k] for k in _FLOW_ARRAY_COLUMNS.values()})
     return out
+
+
+def _one_copy_per_second_arrays(
+    paths: list[str], joined: dict[str, np.ndarray]
+) -> dict[str, np.ndarray]:
+    """
+    Sort `joined`'s rows by `ts_event` and keep the first copy of each `ts_event` (the array form
+    of `_one_copy_per_second`, keyed on the exact `ts_event` too). A copy that differs from the kept
+    one in any column (NaN equal to NaN: an untraded second) raises `CatalogReadError` naming the
+    second and the files read (DATA-07).
+    """
+    order = np.argsort(joined["ts_event"], kind="stable")
+    rows = {k: column[order] for k, column in joined.items()}
+    ts = rows["ts_event"]
+    repeat = np.flatnonzero(ts[1:] == ts[:-1]) + 1
+    if not len(repeat):
+        return rows
+    # A run of copies compares each with its run's first row, which the mask keeps.
+    first = np.maximum.accumulate(np.where(np.r_[True, ts[1:] != ts[:-1]], np.arange(len(ts)), 0))
+    for name, column in rows.items():
+        a, b = column[repeat], column[first[repeat]]
+        same = (a == b) | (np.isnan(a) & np.isnan(b)) if column.dtype.kind == "f" else a == b
+        if not same.all():
+            second = int(ts[repeat[np.flatnonzero(~same)[0]]])
+            raise CatalogReadError(
+                f"second {second} is stored twice with different {name!r} values in "
+                f"{sorted(paths)}, refused"
+            )
+    keep = np.ones(len(ts), dtype=bool)
+    keep[repeat] = False
+    return {k: column[keep] for k, column in rows.items()}
 
 
 def _ohlc_part(path: str) -> dict[str, np.ndarray]:

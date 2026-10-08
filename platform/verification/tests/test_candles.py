@@ -684,14 +684,26 @@ def test_a_reference_trade_the_catalog_lacks_outside_every_gap_is_ref_different(
 def test_a_duplicated_traded_second_fails_the_reference_and_exits_1(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # Both copies of a traded second reach every fold alike (stored, served, catalog); only the
-    # reference, folded once from the venue's trades, sees the doubled volume.
+    """
+    Production reads a second the catalog holds twice once (`kernel.catalog_files`' one copy per
+    second: the store's rebuild and the served archive read alike), so its bars carry the venue's
+    single volume. The verifier reads the catalog independently and sees both copies: its
+    second check against the venue's trades (`reference`) flags the second on every width, its
+    own catalog fold disagrees with each stored bar (`catalog`), and every served bar holding the
+    second differs from that fold (`served`). Nothing else fails.
+    """
     status, report = _run(tmp_path, monkeypatch, capsys, _Scenario(duplicated=(0,)))
 
     assert status == 1
-    assert _width(report, 60)["reference"][REF_DIFFERENT] == 1
-    assert _width(report, 2700)["reference"][REF_DIFFERENT] == 1
-    assert report["failing"] == len(_instrument(report)["widths"])  # one per width, nothing else
+    widths = _instrument(report)["widths"]
+    for bar_seconds, width in widths.items():
+        assert width["reference"][REF_DIFFERENT] == 1, bar_seconds
+        assert width["served"][SERVED_DIFFERS] == 1, bar_seconds
+    stored = {s: w for s, w in widths.items() if w["catalog"] is not None}  # composed: no fold
+    assert {s: w["catalog"][DIFFERENT] for s, w in stored.items()} == dict.fromkeys(stored, 1)
+    assert "60" in stored
+    assert "600" not in stored
+    assert report["failing"] == 2 * len(widths) + len(stored)
 
 
 def test_the_same_trade_inside_a_recorder_gap_is_ref_recorder_gap_and_passes(
