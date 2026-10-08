@@ -17,8 +17,9 @@ Story 33.9: `GET /api/markets`, every live venue's market names for the chart's 
 (and, Story 33.12, its symbol search), served from `buses.markets_bus` (the process's one
 `markets:live` subscriber). The listing -- validation, staleness, expiry and the same-asset
 ordering -- is `views.markets_bus.MarketsBus`'s, each item's market type and 24 h volume
-`MarketsBus.with_market_details` over `buses.bus`'s cached `rankings:live`; this route only
-transports it.
+`MarketsBus.with_market_details` over `buses.bus`'s cached `rankings:live`, and (chart UX rework,
+2026-10-08) whether each is collected, `views.collected_markets.with_collected` over the venues'
+collected sets (`buses.collected_markets`); this route only transports it.
 """
 
 import time
@@ -26,6 +27,7 @@ import time
 from fastapi import APIRouter
 from fastapi import HTTPException
 from pydantic import BaseModel
+from views.collected_markets import with_collected
 
 from data_api import buses
 
@@ -45,6 +47,9 @@ class MarketItem(BaseModel):
     # message marks it stale, or the message is older than the listing's staleness horizon.
     market: str
     volume24h: float | None
+    # Whether the venue's collector collects it (subscribed, not pending); None when that venue's
+    # collected set is unknown (no fresh `collector:collected:<VENUE>` key) -- never False.
+    collected: bool | None
 
 
 class MarketsResponse(BaseModel):
@@ -64,7 +69,7 @@ class MarketsResponse(BaseModel):
         503: {"description": "No venue's `markets:live` list received in the last 900 s"},
     },
 )
-def get_markets(instrument_id: str | None = None) -> MarketsResponse:
+async def get_markets(instrument_id: str | None = None) -> MarketsResponse:
     """
     503 when no venue is live -- an empty list would pose as "no markets" while the ranking engine
     is down. A malformed `instrument_id` raises `MalformedInstrumentId`, the app's 400 handler.
@@ -73,6 +78,7 @@ def get_markets(instrument_id: str | None = None) -> MarketsResponse:
     listing = buses.markets_bus.listing(instrument_id, time.monotonic())
     if listing is None:
         raise HTTPException(status_code=503, detail="No venue's market list is live")
-    return MarketsResponse.model_validate(
-        buses.markets_bus.with_market_details(listing, buses.bus.latest, time.time_ns())
-    )
+    detailed = buses.markets_bus.with_market_details(listing, buses.bus.latest, time.time_ns())
+    venues = sorted({item["venue"] for item in detailed["items"]})
+    sets = await buses.collected_markets.by_venue(venues, time.time_ns())
+    return MarketsResponse.model_validate(with_collected(detailed, sets))

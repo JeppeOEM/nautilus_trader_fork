@@ -307,7 +307,7 @@ describe("the chart type, price scale and compare keys (Story 33.9)", () => {
     expect(fallbacks).toEqual([]);
     expect(errors).not.toHaveBeenCalled();
     expect(layout.chart_type).toBe("candles");
-    expect(layout.price_scale).toEqual({ mode: "normal", auto_scale: true, invert: false });
+    expect(layout.price_scale).toEqual({ mode: "normal", auto_scale: true });
     expect(layout.compare).toEqual({ symbols: [], spread: false });
     expect(DEFAULT_PRICE_SCALE).toEqual(layout.price_scale);
     expect(DEFAULT_COMPARE).toEqual(layout.compare);
@@ -317,7 +317,7 @@ describe("the chart type, price scale and compare keys (Story 33.9)", () => {
     const saved = {
       ...BUILT_IN_LAYOUT,
       chart_type: "heikin_ashi",
-      price_scale: { mode: "log", auto_scale: false, invert: true },
+      price_scale: { mode: "log", auto_scale: false },
       compare: { symbols: ["BTC-USD-PERP.HYPERLIQUID", "ETHUSDT-LINEAR.BYBIT"], spread: true },
     };
     const { layout, fallbacks } = normalizeLayout(saved, IID);
@@ -329,7 +329,7 @@ describe("the chart type, price scale and compare keys (Story 33.9)", () => {
       compare: saved.compare,
     });
     expect(sameLayout(layout, { ...layout, chart_type: "bars" })).toBe(false);
-    expect(sameLayout(layout, { ...layout, price_scale: { ...layout.price_scale, invert: false } })).toBe(false);
+    expect(sameLayout(layout, { ...layout, price_scale: { ...layout.price_scale, auto_scale: true } })).toBe(false);
     expect(sameLayout(layout, { ...layout, compare: { ...layout.compare, symbols: ["BTC-USD-PERP.HYPERLIQUID"] } })).toBe(false);
   });
 
@@ -337,7 +337,7 @@ describe("the chart type, price scale and compare keys (Story 33.9)", () => {
     const { layout, fallbacks } = normalizeLayout({
       ...BUILT_IN_LAYOUT,
       chart_type: "renko",
-      price_scale: { mode: "x", auto_scale: 1, invert: false, extra: true },
+      price_scale: { mode: "x", auto_scale: 1, extra: true },
       compare: 5,
     });
 

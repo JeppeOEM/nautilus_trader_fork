@@ -3314,6 +3314,11 @@
             "type": "object",
             "title": "Style",
             "default": {}
+          },
+          "instance": {
+            "type": "integer",
+            "title": "Instance",
+            "default": 1
           }
         },
         "type": "object",
@@ -3850,6 +3855,17 @@
               }
             ],
             "title": "Volume24H"
+          },
+          "collected": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collected"
           }
         },
         "type": "object",
@@ -3859,7 +3875,8 @@
           "venue",
           "same_asset",
           "market",
-          "volume24h"
+          "volume24h",
+          "collected"
         ],
         "title": "MarketItem",
         "description": "One market; `same_asset` is `kernel.venues.same_asset` against the request's id."

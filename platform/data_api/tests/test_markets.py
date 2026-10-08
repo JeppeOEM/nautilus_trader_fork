@@ -66,6 +66,21 @@ def _ranks_bus(*rows: dict[str, Any], updated_at: int | None = None) -> Rankings
     return bus
 
 
+class _Collected:
+    """Stands in for `buses.collected_markets`: fixed sets per venue (absent = unknown)."""
+
+    def __init__(self, sets: dict[str, frozenset[str]] | None = None) -> None:
+        self.sets = sets or {}
+
+    async def by_venue(self, venues: list[str], now_ns: int) -> dict[str, frozenset[str] | None]:
+        return {venue: self.sets.get(venue) for venue in venues}
+
+
+@pytest.fixture(autouse=True)
+def _no_collected_sets(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(buses, "collected_markets", _Collected())
+
+
 def _isolate(monkeypatch: pytest.MonkeyPatch, rankings: RankingsBus | None = None) -> None:
     monkeypatch.setattr(buses, "markets_bus", _live_bus())
     monkeypatch.setattr(buses, "bus", rankings or RankingsBus())
@@ -96,6 +111,7 @@ def test_markets_lists_the_same_asset_markets_of_other_venues_first(
                 "same_asset": True,
                 "market": "perp",
                 "volume24h": None,
+                "collected": None,
             },
             {
                 "instrument_id": _BYBIT_ETH,
@@ -104,6 +120,7 @@ def test_markets_lists_the_same_asset_markets_of_other_venues_first(
                 "same_asset": False,
                 "market": "perp",
                 "volume24h": None,
+                "collected": None,
             },
             {
                 "instrument_id": _HL_SOL,
@@ -112,6 +129,7 @@ def test_markets_lists_the_same_asset_markets_of_other_venues_first(
                 "same_asset": False,
                 "market": "perp",
                 "volume24h": None,
+                "collected": None,
             },
         ],
         "stale_venues": [],
@@ -142,6 +160,22 @@ def test_markets_names_a_stale_venue(monkeypatch: pytest.MonkeyPatch) -> None:
     body = TestClient(app_module.app).get("/api/markets").json()
 
     assert body["stale_venues"] == ["BYBIT"]
+
+
+def test_each_market_says_whether_its_venue_collects_it_or_null_when_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolate(monkeypatch)
+    monkeypatch.setattr(buses, "collected_markets", _Collected({"BYBIT": frozenset({_BYBIT_BTC})}))
+
+    items = TestClient(app_module.app).get("/api/markets").json()["items"]
+
+    assert {i["instrument_id"]: i["collected"] for i in items} == {
+        _BYBIT_BTC: True,
+        _BYBIT_ETH: False,
+        _HL_BTC: None,
+        _HL_SOL: None,
+    }
 
 
 def test_a_malformed_instrument_id_is_400(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -259,4 +293,5 @@ def test_a_markets_live_message_is_reflected_by_rest(monkeypatch: pytest.MonkeyP
         "same_asset": False,
         "market": "perp",
         "volume24h": None,
+        "collected": None,  # no collector keeps a collected set for this test venue
     } in response.json()["items"]

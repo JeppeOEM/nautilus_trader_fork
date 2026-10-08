@@ -87,13 +87,13 @@ describe("useCandles", () => {
     errSpy.mockRestore();
   });
 
-  it("fetches the initial 120-bar/60s page on mount", async () => {
+  it("fetches the initial 500-bar/60s page on mount (the server cap, for the wide default view)", async () => {
     fetchCandlesMock.mockResolvedValue(page([{ t: 60_000, o: 1, h: 2, l: 0.5, c: 1.5 }], true));
 
     const { result } = renderHook(() => useCandles("BTC-USD-PERP.DYDX", null));
 
     await waitFor(() => expect(result.current.candles).toHaveLength(1));
-    expect(fetchCandlesMock).toHaveBeenCalledWith("BTC-USD-PERP.DYDX", expect.any(Number), 120, 60);
+    expect(fetchCandlesMock).toHaveBeenCalledWith("BTC-USD-PERP.DYDX", expect.any(Number), 500, 60);
   });
 
   it("refills using the earliest loaded candle as before_ns when the visible range nears the start", async () => {
@@ -106,7 +106,7 @@ describe("useCandles", () => {
     chart.fire({ from: 5 as LogicalRange["from"], to: 50 as LogicalRange["to"] });
 
     await waitFor(() => expect(result.current.candles).toHaveLength(2));
-    expect(fetchCandlesMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", 120_000 * 1_000_000, 120, 60);
+    expect(fetchCandlesMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", 120_000 * 1_000_000, 500, 60);
     expect(result.current.candles[0].time).toBe(60); // prepended: 60_000ms -> 60s
   });
 
@@ -168,7 +168,7 @@ describe("useCandles", () => {
     chart.fire({ from: 10 as LogicalRange["from"], to: 60 as LogicalRange["to"] }); // slot 10: a gap slot
 
     await waitFor(() => expect(fetchCandlesMock).toHaveBeenCalledTimes(2));
-    expect(fetchCandlesMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", 0, 120, 60);
+    expect(fetchCandlesMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", 0, 500, 60);
   });
 
   it("does not crash and keeps previous state when a fetch rejects", async () => {

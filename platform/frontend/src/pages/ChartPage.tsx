@@ -7,7 +7,9 @@ import AlertDialog from "../components/chart/AlertDialog";
 import IndicatorPicker, { type IndicatorPickerHandle } from "../components/chart/IndicatorPicker";
 import IndicatorSettingsDialog, { type SettingsOutput, type SettingsPatch } from "../components/chart/IndicatorSettingsDialog";
 import LiquidationTape from "../components/chart/LiquidationTape";
+import ChartCornerControls from "../components/chart/ChartCornerControls";
 import CompareControl from "../components/chart/CompareControl";
+import MenuButton from "../components/chart/MenuButton";
 import ShortcutSheet from "../components/chart/ShortcutSheet";
 import SymbolSearch from "../components/chart/SymbolSearch";
 import WatchlistRail from "../components/chart/WatchlistRail";
@@ -36,7 +38,7 @@ import {
   timeframeFromBuffer,
 } from "../lib/shortcuts";
 import { TIME_ZONES, TIME_ZONE_LABELS, type TimeZoneSetting } from "../lib/time";
-import { type Fullscreen, useFullscreen } from "../hooks/useFullscreen";
+import { type FocusView, useFocusView } from "../hooks/useFocusView";
 import type { TrendlineAnchor } from "../components/chart/primitives/TrendlinePrimitive";
 import { type MagnetMode, nextDragGesture, nextMagnetMode, replaceDrawing } from "../lib/drawingKit";
 import ToolRail from "../components/chart/ToolRail";
@@ -124,7 +126,7 @@ import {
   type LastPriceLayout,
   type PriceScaleLayout,
 } from "../lib/chartLayout";
-import { CHART_TYPES, CHART_TYPE_LABELS, type ChartType, PRICE_SCALE_LABELS, PRICE_SCALE_MODES, type PriceScaleModeName } from "../lib/chartTypes";
+import { CHART_TYPES, CHART_TYPE_LABELS, type ChartType, type PriceScaleModeName } from "../lib/chartTypes";
 import { COMPARE_GROUP_PREFIX, SPREAD_GROUP, withCompareAdded } from "../lib/compare";
 import { useChartDerivatives } from "../hooks/useChartDerivatives";
 import { useFootprint } from "../hooks/useFootprint";
@@ -221,7 +223,9 @@ function panelForKey(key: string, catalog: Record<string, IndicatorCatalogEntry>
 function legendTitle(entry: IndicatorConfigEntry, note?: string | null): string {
   const parts: unknown[] = Object.values(entry.params ?? {});
   if (entry.source && entry.source !== DEFAULT_SOURCE) parts.push(entry.source);
-  const title = parts.length ? `${entry.name} (${parts.join(", ")})` : entry.name;
+  const base = parts.length ? `${entry.name} (${parts.join(", ")})` : entry.name;
+  // A second or later copy of one indicator is told apart while its settings still match the first's.
+  const title = (entry.instance ?? 1) > 1 ? `${base} #${entry.instance}` : base;
   return note ? `${title} · ${note}` : title;
 }
 
@@ -429,6 +433,8 @@ function withFlag(d: Drawing, flag: "locked" | "hidden", on: boolean): Drawing {
  * with "End of loaded data" shown, Step back at the start marker is disabled with a tooltip. */
 /** Story 33.12: why the Replay button is disabled in Lines mode (the operator's rule, 2026-10-07). */
 const REPLAY_LINES_REASON = "Replay is available on candle charts";
+// The chart-type menu's entry for Lines mode: the 1 s book snapshot lines, not a candle chart type.
+const LINES_LABEL = "Lines (1 s book)";
 
 function ReplayControls({ replay, onGoTo }: { replay: ReturnType<typeof useReplay>; onGoTo: () => void }) {
   if (replay.mode === "picking") {
@@ -489,8 +495,8 @@ interface ChartInnerProps {
   /** Story 33.10: the drawing magnet, held beside `toolMemory` (view state, never persisted). */
   magnet: MagnetMode;
   onMagnet: (mode: MagnetMode) => void;
-  /** Story 33.12: the stage's fullscreen, held above the timeframe remount (the stage element is). */
-  fullscreen: Fullscreen;
+  /** The focus view (chart UX rework, 2026-10-08), held above the coin and timeframe remounts. */
+  focus: FocusView;
   watchlistOpen: boolean;
   onWatchlistToggle: () => void;
 }
@@ -512,7 +518,7 @@ function ChartInner({
   onToolUsed,
   magnet,
   onMagnet,
-  fullscreen,
+  focus,
   watchlistOpen,
   onWatchlistToggle,
 }: ChartInnerProps) {
@@ -521,7 +527,6 @@ function ChartInner({
     (patch: Partial<ChartLayout>): void => onLayout((prev) => ({ ...prev, ...patch })),
     [onLayout],
   );
-  const [layoutMenuOpen, setLayoutMenuOpen] = useState(false);
   // The saved layout's values this component starts from (read once; later saves never re-seed it).
   const [initialLayout] = useState(layout);
   // Story 15.7: Candles/Lines toggle (AC #1) -- `dashboard.py`'s own #btn-candles/
@@ -810,7 +815,12 @@ function ChartInner({
     setSeenPickerValues(pickerValues);
     const current = new Set(Object.keys(pickerValues));
     const nextOrder = pickerSeriesKeys.filter((key) => current.has(key));
-    for (const key of Object.keys(pickerValues).sort()) {
+    // New keys join in the entries' order (the order indicators were added), outputs alphabetically
+    // within one: a copy (`<id>#2`) lands under its first copy, not above it (`#` sorts before `.`).
+    const entryOrder = new Map(pickerEntries.map((entry, index) => [entryId(entry), index] as const));
+    const rank = (key: string): number => entryOrder.get(splitSeriesKey(key).id) ?? pickerEntries.length;
+    const newKeys = Object.keys(pickerValues).sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0));
+    for (const key of newKeys) {
       if (current.has(key) && !nextOrder.includes(key)) nextOrder.push(key);
     }
     setPickerSeriesKeys(nextOrder);
@@ -1067,7 +1077,7 @@ function ChartInner({
   }, []);
 
   // Story 33.12: how times print, the session breaks, the bar countdown and the last-price line and
-  // label, each a field of the coin's layout (fullscreen is not: it is view state, never saved).
+  // label, each a field of the coin's layout (the focus view is not: it is view state, never saved).
   const [timeZone, setTimeZone] = useState<TimeZoneSetting>(initialLayout.time_zone);
   useEffect(() => patchLayout({ time_zone: timeZone }), [timeZone, patchLayout]);
   const [sessionBreaks, setSessionBreaks] = useState(initialLayout.session_breaks);
@@ -1177,6 +1187,12 @@ function ChartInner({
       .catch((err: unknown) => console.error("ChartPage: failed to load indicator catalog", err));
   }, []);
 
+  // Read by the Esc handler below (subscribed once): whether this Esc has something nearer to undo
+  // than the focus view, and the focus view of the latest render.
+  const escPendingRef = useRef(false);
+  escPendingRef.current = activeTool !== "cursor" || placement !== null || replayMode === "picking" || timeframeBuffer !== "";
+  const focusRef = useRef(focus);
+  focusRef.current = focus;
   useEffect(() => {
     // Story 18.1 (AC #5): Esc cancels the active tool from anywhere on the page, not
     // just from a focused chart -- an armed tool with no in-chart escape is exactly
@@ -1184,10 +1200,15 @@ function ChartInner({
     // cursor mode is a harmless no-op.
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (event.key === "Escape") {
+        // Esc undoes the nearest thing first: an armed tool, a placement, a replay pick or a typed
+        // timeframe; only with none of them (and no dialog, whose own Esc closes it) does it leave
+        // the focus view. An open menu's Esc never reaches here (`MenuButton` stops it).
+        const pending = escPendingRef.current;
         setActiveTool("cursor");
         setPlacement(null);
         cancelReplayPick();
         setTimeframeBuffer("");
+        if (!pending && !isTypingContext(event)) focusRef.current.exit();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -1216,7 +1237,7 @@ function ChartInner({
     if (action === null) return;
     if (action.kind === "timeframe_enter" && timeframeBuffer === "") return; // Enter on a button stays a click
     event.preventDefault();
-    // A held key's auto-repeat is one press: it must not flip fullscreen, log or replay back and forth.
+    // A held key's auto-repeat is one press: it must not flip the focus view, log or replay back and forth.
     if (event.repeat) return;
     runShortcut(action);
   };
@@ -1843,8 +1864,8 @@ function ChartInner({
         // A compare forces the percent scale: Normal and Log are locked (`scaleLockReason`).
         if (scaleLockReason === null) patchPriceScale({ mode: priceScale.mode === "log" ? "normal" : "log" });
         return;
-      case "fullscreen":
-        fullscreen.toggle();
+      case "focus":
+        focus.toggle();
         return;
       case "compare":
         if (mode === "candles") setCompareSearchOpen(true);
@@ -1870,282 +1891,268 @@ function ChartInner({
     }
   };
 
+  // The chart-type menu: a candle chart type, or the 1 s book lines (what Candles/Lines were).
+  const chartTypeLabel = mode === "lines" ? LINES_LABEL : CHART_TYPE_LABELS[chartType];
+  const pickChartType = (type: ChartType): void => {
+    setChartType(type);
+    if (mode === "candles") return;
+    setMode("candles");
+    selectTool("cursor");
+  };
+  const pickLines = (): void => {
+    if (mode === "lines") return;
+    setMode("lines");
+    selectTool("cursor");
+    replay.exit();
+    setCompareSearchOpen(false);
+    setTimeframeBuffer("");
+  };
+  // Spread is the main close over ONE compare's: with none yet, the button opens the compare search
+  // and the spread draws once a symbol is picked; with more than one it says which to remove.
+  const spreadTitle =
+    mode === "lines"
+      ? "Spread draws on candle bars: pick a candle chart type"
+      : compare.symbols.length > 1
+        ? "Spread needs exactly one compare symbol: remove the others"
+        : compare.symbols.length === 0
+          ? "The spread to a compare symbol, in bps: opens the search to pick one"
+          : "The main close over the compare close, in bps";
+  const toggleSpread = (): void => {
+    if (compare.symbols.length === 0) {
+      setCompare((prev) => ({ ...prev, spread: true }));
+      setCompareSearchOpen(true);
+      return;
+    }
+    setCompare((prev) => ({ ...prev, spread: !prev.spread }));
+  };
+
   return (
     <div>
-      {/* Spec §A8.1 top toolbar, clusters left to right: [symbol + timeframe] [chart type]
-          [indicators + fit + jump]. No theme toggle: the visual identity is fixed (15.9).
-          The symbol slot is a read-only label + back link -- coins are picked on Rankings. */}
-      <div className="chart-topbar" role="toolbar" aria-label="Chart controls">
-        <div className="chart-cluster">
-          <Link to="/">&larr; Rankings</Link>
-          {/* Story 33.12: the symbol opens the symbol search (also `/` and Ctrl/Cmd+K). */}
-          <h1>
-            <button type="button" className="chart-symbol" aria-haspopup="dialog" title="Search markets (/ or Ctrl+K)" onClick={() => setSearchOpen(true)}>
-              {instrumentId}
-            </button>
-          </h1>
-          {venueMarket && (
-            <span className="venue-badge" aria-label="Venue and market">
-              {venueMarket.venue} · {venueMarket.market}
-            </span>
-          )}
-          {TIMEFRAMES.map((tf) => (
-            <button
-              key={tf.label}
-              type="button"
-              className={barSeconds === tf.seconds ? "tabbtn active" : "tabbtn"}
-              aria-pressed={barSeconds === tf.seconds}
-              aria-label={`Timeframe ${tf.label}`}
-              disabled={mode === "lines"}
-              onClick={() => onTimeframeChange(tf.seconds)}
-            >
-              {tf.label}
-            </button>
-          ))}
-          {timeframeBuffer !== "" && (
-            <span className="chart-timeframe-buffer" role="status" aria-label="Typed timeframe">
-              {timeframeBuffer}
-            </span>
-          )}
-        </div>
-        <div className="chart-cluster">
-        <button
-          id="btn-candles"
-          type="button"
-          disabled={mode === "candles"}
-          onClick={() => {
-            setMode("candles");
-            selectTool("cursor");
-          }}
-        >
-          Candles
-        </button>
-        <button
-          id="btn-lines"
-          type="button"
-          disabled={mode === "lines"}
-          onClick={() => {
-            setMode("lines");
-            selectTool("cursor");
-            replay.exit();
-            setCompareSearchOpen(false);
-            setTimeframeBuffer("");
-          }}
-        >
-          Lines
-        </button>
-        {/* Story 33.9: how the price pane draws: the chart type, the right scale and compare symbols. */}
-        <select
-          aria-label="Chart type"
-          value={chartType}
-          disabled={mode === "lines"}
-          title={mode === "lines" ? "Chart types draw candle bars: switch to Candles" : undefined}
-          onChange={(e) => setChartType(e.target.value as ChartType)}
-        >
-          {CHART_TYPES.map((t) => (
-            <option key={t} value={t}>
-              {CHART_TYPE_LABELS[t]}
-            </option>
-          ))}
-        </select>
-        <select
-          aria-label="Price scale"
-          value={effectiveScaleMode}
-          title={scaleLockReason ?? undefined}
-          onChange={(e) => patchPriceScale({ mode: e.target.value as PriceScaleModeName })}
-        >
-          {PRICE_SCALE_MODES.map((m) => (
-            <option key={m} value={m} disabled={scaleLockReason !== null && (m === "normal" || m === "log")}>
-              {PRICE_SCALE_LABELS[m]}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          className={priceScale.auto_scale ? "tabbtn active" : "tabbtn"}
-          aria-pressed={priceScale.auto_scale}
-          title="Auto-scale the price axis to the visible bars"
-          onClick={() => patchPriceScale({ auto_scale: !priceScale.auto_scale })}
-        >
-          Auto
-        </button>
-        <button
-          type="button"
-          className={priceScale.invert ? "tabbtn active" : "tabbtn"}
-          aria-pressed={priceScale.invert}
-          onClick={() => patchPriceScale({ invert: !priceScale.invert })}
-        >
-          Invert
-        </button>
-        <CompareControl
-          instrumentId={instrumentId}
-          symbols={compare.symbols}
-          disabled={mode === "lines"}
-          open={compareSearchOpen}
-          onOpenChange={setCompareSearchOpen}
-          onAdd={addCompare}
-        />
-        <button
-          type="button"
-          className={compare.spread && spreadAvailable ? "tabbtn active" : "tabbtn"}
-          aria-pressed={compare.spread && spreadAvailable}
-          disabled={!spreadAvailable}
-          title={spreadAvailable ? "The main close over the compare close, in bps" : "Spread needs exactly one compare symbol"}
-          onClick={() => setCompare((prev) => ({ ...prev, spread: !prev.spread }))}
-        >
-          Spread
-        </button>
-        </div>
-        <div className="chart-cluster">
-          <button type="button" onClick={() => setIndicatorDialogOpen(true)}>
-            Indicators
-          </button>
-          <button type="button" aria-haspopup="dialog" onClick={() => setOverlaysDialogOpen(true)}>
-            Volume overlays
-          </button>
-          <button
-            type="button"
-            className={tapeOn ? "tabbtn active" : "tabbtn"}
-            aria-pressed={tapeOn}
-            disabled={!derivativesData.available}
-            title={tapeUnavailableReason(derivativesData.spot, mode === "candles", venueMarket !== null)}
-            onClick={() => setTapeOn((on) => !on)}
-          >
-            Liquidation tape
-          </button>
-          {/* Story 32.6: the coin's layout is saved as the default new coins start from, or reset to it. */}
-          <button
-            type="button"
-            aria-haspopup="menu"
-            aria-expanded={layoutMenuOpen}
-            onClick={() => setLayoutMenuOpen((open) => !open)}
-          >
-            Layout
-          </button>
-          {layoutMenuOpen && (
-            <span role="menu" aria-label="Layout">
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  setLayoutMenuOpen(false);
-                  onSaveAsDefault();
-                }}
-              >
-                Save as default
+      {/* Chart UX rework (2026-10-08): one sticky header -- the bar and the replay controls -- so every
+          control stays in reach while the page scrolls through the panes. The bar is one line on a
+          desktop width, clusters left to right: [market, timeframe, chart type] [what the chart
+          draws] [actions, menus, view]; the settings that change how the chart prints live in the
+          Settings menu, the price scale's switches on the chart itself (`ChartCornerControls`). No
+          theme toggle: the visual identity is fixed (15.9). */}
+      <div className="chart-header">
+        <div className="chart-topbar" role="toolbar" aria-label="Chart controls">
+          <div className="chart-cluster">
+            {!focus.active && <Link to="/">&larr; Rankings</Link>}
+            {/* Story 33.12: the symbol opens the symbol search (also `/` and Ctrl/Cmd+K). */}
+            <h1>
+              <button type="button" className="chart-symbol" aria-haspopup="dialog" title="Search markets (/ or Ctrl+K)" onClick={() => setSearchOpen(true)}>
+                {instrumentId}
               </button>
+            </h1>
+            {venueMarket && (
+              <span className="venue-badge" aria-label="Venue and market">
+                {venueMarket.venue} · {venueMarket.market}
+              </span>
+            )}
+            {TIMEFRAMES.map((tf) => (
               <button
+                key={tf.label}
                 type="button"
-                role="menuitem"
-                onClick={() => {
-                  setLayoutMenuOpen(false);
-                  onResetToDefault();
-                }}
+                className={barSeconds === tf.seconds ? "tabbtn active" : "tabbtn"}
+                aria-pressed={barSeconds === tf.seconds}
+                aria-label={`Timeframe ${tf.label}`}
+                disabled={mode === "lines"}
+                title={mode === "lines" ? "The 1 s book lines have no timeframe: pick a candle chart type" : undefined}
+                onClick={() => onTimeframeChange(tf.seconds)}
               >
-                Reset to default
+                {tf.label}
               </button>
-            </span>
-          )}
-          <button type="button" onClick={() => openAlertDialog(null)}>
-            Alert
-          </button>
-          <button type="button" onClick={() => chart?.timeScale().fitContent()}>
-            Fit
-          </button>
-          <button type="button" onClick={() => chart?.timeScale().scrollToRealTime()}>
-            Latest
-          </button>
-          {/* Story 18.4 (AC #1): candles-only, like the tools that need the candle array. Story 33.12
-              (operator, 2026-10-07): Replay steps whole bars, so it runs on every candle chart type
-              and never in Lines mode, where the disabled button says why. */}
-          <button
-            id="btn-replay"
-            type="button"
-            disabled={mode === "lines" || replay.mode !== "off"}
-            title={mode === "lines" ? REPLAY_LINES_REASON : "Bar Replay (Alt+R)"}
-            onClick={startReplayPick}
-          >
-            Replay
-          </button>
-          <button
-            type="button"
-            className={fullscreen.active ? "tabbtn active" : "tabbtn"}
-            aria-pressed={fullscreen.active}
-            title="The chart with every pane, the tools and this bar (Shift+F; Esc leaves)"
-            onClick={fullscreen.toggle}
-          >
-            Fullscreen
-          </button>
-          {fullscreen.error !== null && (
-            <span role="alert" className="chart-load-error">
-              {fullscreen.error}
-            </span>
-          )}
-          <button
-            type="button"
-            className={watchlistOpen ? "tabbtn active" : "tabbtn"}
-            aria-pressed={watchlistOpen}
-            onClick={onWatchlistToggle}
-          >
-            Watchlist
-          </button>
-          <button type="button" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)" onClick={() => setSheetOpen(true)}>
-            ?
-          </button>
-        </div>
-        {/* Story 33.12: how times print and what the price pane adds, saved in the coin's layout. */}
-        <div className="chart-cluster" role="group" aria-label="Chart settings">
-          <select aria-label="Time zone" value={timeZone} onChange={(e) => setTimeZone(e.target.value as TimeZoneSetting)}>
-            {TIME_ZONES.map((z) => (
-              <option key={z} value={z}>
-                {TIME_ZONE_LABELS[z]}
-              </option>
             ))}
-          </select>
-          <button
-            type="button"
-            className={sessionBreaks ? "tabbtn active" : "tabbtn"}
-            aria-pressed={sessionBreaks}
-            title="A dashed line at the first bar of each UTC day (intraday bars)"
-            onClick={() => setSessionBreaks((on) => !on)}
-          >
-            Session breaks
-          </button>
-          <button
-            type="button"
-            className={barCountdownOn ? "tabbtn active" : "tabbtn"}
-            aria-pressed={barCountdownOn}
-            title="Time to the bar's close under the last price (Candles mode, not during a replay)"
-            onClick={() => setBarCountdownOn((on) => !on)}
-          >
-            Countdown
-          </button>
-          <button
-            type="button"
-            className={lastPrice.line ? "tabbtn active" : "tabbtn"}
-            aria-pressed={lastPrice.line}
-            onClick={() => setLastPrice((prev) => ({ ...prev, line: !prev.line }))}
-          >
-            Last price line
-          </button>
-          <button
-            type="button"
-            className={lastPrice.label ? "tabbtn active" : "tabbtn"}
-            aria-pressed={lastPrice.label}
-            onClick={() => setLastPrice((prev) => ({ ...prev, label: !prev.label }))}
-          >
-            Last price label
-          </button>
+            {timeframeBuffer !== "" && (
+              <span className="chart-timeframe-buffer" role="status" aria-label="Typed timeframe">
+                {timeframeBuffer}
+              </span>
+            )}
+            {/* Every way to draw the price, the 1 s book lines included, in one menu beside the
+                timeframes: what was the Candles/Lines pair plus the chart-type select. */}
+            <MenuButton label={chartTypeLabel} ariaLabel={`Chart type: ${chartTypeLabel}`} title="Chart type" menuLabel="Chart type">
+              {(close) => (
+                <>
+                  {CHART_TYPES.map((type) => (
+                    <button
+                      key={type}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={mode === "candles" && chartType === type}
+                      onClick={() => {
+                        close();
+                        pickChartType(type);
+                      }}
+                    >
+                      {CHART_TYPE_LABELS[type]}
+                    </button>
+                  ))}
+                  <hr className="menu-sep" />
+                  <button
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={mode === "lines"}
+                    title="The 1 s bid, ask, mid and microprice lines from the book snapshots"
+                    onClick={() => {
+                      close();
+                      pickLines();
+                    }}
+                  >
+                    {LINES_LABEL}
+                  </button>
+                </>
+              )}
+            </MenuButton>
+          </div>
+          <div className="chart-cluster">
+            <button type="button" onClick={() => setIndicatorDialogOpen(true)}>
+              Indicators
+            </button>
+            <CompareControl
+              instrumentId={instrumentId}
+              symbols={compare.symbols}
+              disabled={mode === "lines"}
+              open={compareSearchOpen}
+              onOpenChange={setCompareSearchOpen}
+              onAdd={addCompare}
+            />
+            <button
+              type="button"
+              className={compare.spread && spreadAvailable ? "tabbtn active" : "tabbtn"}
+              aria-pressed={compare.spread && spreadAvailable}
+              disabled={mode === "lines" || compare.symbols.length > 1}
+              title={spreadTitle}
+              onClick={toggleSpread}
+            >
+              Spread
+            </button>
+            <button type="button" aria-haspopup="dialog" onClick={() => setOverlaysDialogOpen(true)}>
+              Volume overlays
+            </button>
+          </div>
+          <div className="chart-cluster">
+            <button type="button" onClick={() => openAlertDialog(null)}>
+              Alert
+            </button>
+            {/* Story 18.4 (AC #1): candles-only, like the tools that need the candle array. Story 33.12
+                (operator, 2026-10-07): Replay steps whole bars, so it runs on every candle chart type
+                and never in Lines mode, where the disabled button says why. */}
+            <button
+              id="btn-replay"
+              type="button"
+              disabled={mode === "lines" || replay.mode !== "off"}
+              title={mode === "lines" ? REPLAY_LINES_REASON : "Bar Replay (Alt+R)"}
+              onClick={startReplayPick}
+            >
+              Replay
+            </button>
+            {/* Story 32.6: the coin's layout is saved as the default new coins start from, or reset to it. */}
+            <MenuButton label="Layout" menuLabel="Layout" alignRight>
+              {(close) => (
+                <>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      close();
+                      onSaveAsDefault();
+                    }}
+                  >
+                    Save as default
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      close();
+                      onResetToDefault();
+                    }}
+                  >
+                    Reset to default
+                  </button>
+                </>
+              )}
+            </MenuButton>
+            {/* Story 33.12: how times print and what the price pane adds, each saved in the coin's
+                layout, and the Liquidation tape (view state). */}
+            <MenuButton label="Settings" ariaLabel="Chart settings" menuLabel="Chart settings" role="group" alignRight>
+              {() => (
+                <>
+                  <label className="menu-row">
+                    Time zone
+                    <select aria-label="Time zone" value={timeZone} onChange={(e) => setTimeZone(e.target.value as TimeZoneSetting)}>
+                      {TIME_ZONES.map((z) => (
+                        <option key={z} value={z}>
+                          {TIME_ZONE_LABELS[z]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <hr className="menu-sep" />
+                  <label className="menu-row" title="A dashed line at the first bar of each UTC day (intraday bars)">
+                    <input type="checkbox" checked={sessionBreaks} onChange={() => setSessionBreaks((on) => !on)} />
+                    Session breaks
+                  </label>
+                  <label className="menu-row" title="Time to the bar's close under the last price (candle charts, not during a replay)">
+                    <input type="checkbox" checked={barCountdownOn} onChange={() => setBarCountdownOn((on) => !on)} />
+                    Countdown
+                  </label>
+                  <label className="menu-row">
+                    <input type="checkbox" checked={lastPrice.line} onChange={() => setLastPrice((prev) => ({ ...prev, line: !prev.line }))} />
+                    Last price line
+                  </label>
+                  <label className="menu-row">
+                    <input type="checkbox" checked={lastPrice.label} onChange={() => setLastPrice((prev) => ({ ...prev, label: !prev.label }))} />
+                    Last price label
+                  </label>
+                  <hr className="menu-sep" />
+                  <label className="menu-row" title={tapeUnavailableReason(derivativesData.spot, mode === "candles", venueMarket !== null)}>
+                    <input
+                      type="checkbox"
+                      checked={tapeOn}
+                      disabled={!derivativesData.available}
+                      onChange={() => setTapeOn((on) => !on)}
+                    />
+                    Liquidation tape
+                  </label>
+                </>
+              )}
+            </MenuButton>
+            <button
+              type="button"
+              className={focus.active ? "tabbtn active" : "tabbtn"}
+              aria-pressed={focus.active}
+              title={
+                focus.active
+                  ? "Back to the normal page (Esc or Shift+F)"
+                  : "Only the chart, its tools and this bar, fitted to the browser window (Shift+F)"
+              }
+              onClick={focus.toggle}
+            >
+              {focus.active ? "Exit focus" : "Focus"}
+            </button>
+            <button
+              type="button"
+              className={watchlistOpen ? "tabbtn active" : "tabbtn"}
+              aria-pressed={watchlistOpen}
+              onClick={onWatchlistToggle}
+            >
+              Watchlist
+            </button>
+            <button type="button" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)" onClick={() => setSheetOpen(true)}>
+              ?
+            </button>
+          </div>
         </div>
+        {replay.mode !== "off" && (
+          <div role="group" aria-label="Replay controls" className="chart-replay-bar">
+            <ReplayControls replay={replay} onGoTo={startReplayPick} />
+            <button type="button" onClick={replay.exit}>
+              Exit
+            </button>
+          </div>
+        )}
       </div>
-      {replay.mode !== "off" && (
-        <div role="group" aria-label="Replay controls">
-          <ReplayControls replay={replay} onGoTo={startReplayPick} />
-          <button type="button" onClick={replay.exit}>
-            Exit
-          </button>
-        </div>
-      )}
       <div className="chart-workspace">
         {/* Story 18.1 (AC #1): the left tool rail, generated from `TOOL_GROUPS` (ToolRail.tsx) --
             .tabbtn's shared visual pattern (theme.css) with the narrow-rail overrides in index.css. */}
@@ -2231,7 +2238,7 @@ function ChartInner({
             patternMarkers={patternMarkers}
             onBarSpacing={setBarSpacing}
             chartType={chartType}
-            priceScale={{ mode: effectiveScaleMode, autoScale: priceScale.auto_scale, invert: priceScale.invert }}
+            priceScale={{ mode: effectiveScaleMode, autoScale: priceScale.auto_scale }}
             onPriceScale={patchPriceScale}
             scaleModesLocked={scaleLockReason}
             timeZone={timeZone}
@@ -2239,7 +2246,14 @@ function ChartInner({
             barSeconds={barSeconds}
             countdown={countdown}
             lastPrice={lastPrice}
-            fullscreen={fullscreen.active}
+            fitToWindow={focus.active}
+          />
+          <ChartCornerControls
+            chart={chart}
+            mode={effectiveScaleMode}
+            autoScale={priceScale.auto_scale}
+            lockReason={scaleLockReason}
+            onScale={patchPriceScale}
           />
           {mode === "candles" &&
             compare.symbols.map((iid) => (
@@ -2425,6 +2439,8 @@ export default function ChartPage() {
   // (and keeps its list and socket) when a row opens another coin. View state, not persisted.
   const [watchlistOpen, setWatchlistOpen] = useState(false);
   const toggleWatchlist = useCallback((): void => setWatchlistOpen((open) => !open), []);
+  // The focus view, held above the per-coin remount so opening another market keeps it.
+  const focus = useFocusView();
   if (!iid) return <p>No instrument specified.</p>;
   return (
     <div className="chart-page">
@@ -2437,6 +2453,7 @@ export default function ChartPage() {
         onMagnet={setMagnet}
         watchlistOpen={watchlistOpen}
         onWatchlistToggle={toggleWatchlist}
+        focus={focus}
       />
       {watchlistOpen && <WatchlistRail instrumentId={iid} />}
     </div>
@@ -2451,6 +2468,7 @@ function ChartForCoin({
   onMagnet,
   watchlistOpen,
   onWatchlistToggle,
+  focus,
 }: {
   instrumentId: string;
   toolMemory: Partial<Record<string, ChartTool>>;
@@ -2459,13 +2477,8 @@ function ChartForCoin({
   onMagnet: (mode: MagnetMode) => void;
   watchlistOpen: boolean;
   onWatchlistToggle: () => void;
+  focus: FocusView;
 }) {
-  // Story 33.12: the one fullscreen element, `.chart-stage`: the top bar (so the button that leaves
-  // stays on screen), the replay controls, the tool rail, the chart with every pane and its legends,
-  // and the Liquidation tape. Held here, above the per-timeframe remount of ChartInner, so a timeframe
-  // change (a click or a typed one) keeps fullscreen. The watchlist rail stays outside it.
-  const stageRef = useRef<HTMLDivElement | null>(null);
-  const fullscreen = useFullscreen(stageRef);
   // Story 32.6: the coin's saved layout (timeframe, volume, mode, crosshair, pane heights, zoom, volume
   // profile) is loaded BEFORE the chart mounts, so its first candle request already uses the saved
   // timeframe. Held here, not in ChartInner (remounted on every timeframe change).
@@ -2515,7 +2528,7 @@ function ChartForCoin({
 
   if (layout === null) {
     return (
-      <div className="chart-stage" ref={stageRef}>
+      <div className="chart-stage">
         {layoutStore.status === "failed" ? (
           <p role="alert" className="chart-load-error">
             The layout of {instrumentId} could not be loaded, so the chart is not drawn (see the error bar). A server or network failure is retried every few seconds.
@@ -2531,7 +2544,7 @@ function ChartForCoin({
   // (coin, timeframe), rather than trying to re-point one long-lived chart instance (see
   // LightweightChart's own docstring -- lightweight-charts has no supported API for that).
   return (
-    <div className="chart-stage" ref={stageRef}>
+    <div className="chart-stage">
       <ChartInner
         // `revision` is bumped by Reset to default in the same render as the reset layout: ChartInner
         // remounts once and re-reads every field (and its picker refetches the reset indicator list).
@@ -2552,7 +2565,7 @@ function ChartForCoin({
         onToolUsed={onToolUsed}
         magnet={magnet}
         onMagnet={onMagnet}
-        fullscreen={fullscreen}
+        focus={focus}
         watchlistOpen={watchlistOpen}
         onWatchlistToggle={onWatchlistToggle}
       />

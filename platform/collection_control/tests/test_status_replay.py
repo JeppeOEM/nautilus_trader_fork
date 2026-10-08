@@ -56,9 +56,13 @@ _APPENDED_KEYS = (
 class _Bus:
     def __init__(self) -> None:
         self.published: list[list[str]] = []
+        self.collected: dict[str, str] = {}
 
     async def publish(self, message: str) -> None:
         self.published.append([STATUS_CHANNEL, message])
+
+    async def store_collected(self, venue: str, snapshot: str) -> None:
+        self.collected[venue] = snapshot
 
     async def aclose(self) -> None:
         pass

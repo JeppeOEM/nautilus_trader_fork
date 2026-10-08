@@ -214,6 +214,7 @@ export interface IndicatorConfigEntry {
   source?: string;
   hidden?: boolean;
   style?: Record<string, Record<string, unknown>>;
+  instance?: number;
 }
 
 export interface IndicatorValuesItem {
@@ -307,6 +308,7 @@ export interface MarketItem {
   same_asset: boolean;
   market: string;
   volume24h: number | null;
+  collected: boolean | null;
 }
 
 export interface MarketsResponse {

@@ -113,6 +113,10 @@ function makePaneMock() {
     // Story 32.2: 0 = "not laid out yet"; a test sets the px the library would report.
     getHeight: vi.fn(() => 0),
     moveTo: vi.fn(),
+    rightScaleApply: vi.fn(),
+    priceScale(id: string) {
+      return { applyOptions: (opts: unknown) => (id === "right" ? this.rightScaleApply(opts) : undefined) };
+    },
   };
 }
 
@@ -122,6 +126,7 @@ const pricePaneMock = {
   getHTMLElement: () => document.createElement("div"),
   setStretchFactor: vi.fn(),
   getHeight: vi.fn(() => 0),
+  setPreserveEmptyPane: vi.fn(),
 };
 const TIME_AXIS_PX = 28;
 // The plot area the range tools hit-test presses against (rangeDrag's plotPoint): x in
@@ -272,6 +277,7 @@ type ChartTestProps = {
   onPaneHeights?: (heights: Record<string, number>) => void;
   initialVisibleBars?: number;
   onVisibleBars?: (bars: number) => void;
+  linesData?: import("../../hooks/useSnapshotSeries").SnapshotLinesData;
   // Story 33.10
   magnet?: "off" | "weak" | "strong";
   placement?: { tool: ChartTool; points: { time: number; price: number }[] } | null;
@@ -394,6 +400,12 @@ describe("LightweightChart", () => {
 
     expect(seriesUpdateMock).toHaveBeenCalledWith({ time: 60, open: 7, high: 8, low: 6, close: 7.5 });
     expect(seriesUpdateMock).toHaveBeenCalledWith({ time: 60, value: 42 });
+  });
+
+  it("keeps the price pane when its last series is removed (Lines -> Candles, a type switch)", () => {
+    pricePaneMock.setPreserveEmptyPane.mockClear();
+    render(<LightweightChart data={[]} onChartApi={() => {}} />);
+    expect(pricePaneMock.setPreserveEmptyPane).toHaveBeenCalledWith(true);
   });
 
   it("calls createChart exactly once per mount", () => {
@@ -567,6 +579,12 @@ describe("LightweightChart", () => {
       { color: "#2962ff", lineWidth: 3, lineStyle: 0 },
       1,
     );
+  });
+
+  it("gives every new pane its own Normal, auto-scaled right scale, never the price pane's mode", () => {
+    render(<LightweightChart data={[]} onChartApi={() => {}} panes={[makePaneSpec("Spread", { kind: "Line" })]} />);
+
+    expect(addedPane(0).rightScaleApply).toHaveBeenCalledWith({ mode: 0, autoScale: true });
   });
 
   it("draws an overlay inside the price pane (index 0) with no new pane, and removes just its series", () => {
@@ -2589,6 +2607,27 @@ describe("LightweightChart layout restore and reports (Story 32.6)", () => {
     expect(setVisibleLogicalRangeMock).toHaveBeenCalledTimes(1); // not again on later data
   });
 
+  it("shows the saved zoom at the newest bar after a Candles <-> Lines switch, never the old mode's range", () => {
+    const row = (i: number) => ({ time: (1000 + i) as never, value: 1 });
+    const lineRows = (n: number) => Array.from({ length: n }, (_, i) => row(i));
+    const lines = (n: number) => ({ bid: lineRows(n), ask: lineRows(n), mid: lineRows(n), micro: lineRows(n), price: lineRows(n) });
+    const { rerender } = render(chartElement({ data: bars(300), initialVisibleBars: 80, linesData: lines(0) }));
+    setVisibleLogicalRangeMock.mockClear();
+
+    rerender(chartElement({ mode: "lines", data: bars(300), initialVisibleBars: 80, linesData: lines(0) }));
+    expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled(); // no lines yet
+    rerender(chartElement({ mode: "lines", data: bars(300), initialVisibleBars: 80, linesData: lines(5000) }));
+    expect(setVisibleLogicalRangeMock).toHaveBeenLastCalledWith({ from: 4999 - 80 + 0.5, to: 4999.5 });
+
+    setVisibleLogicalRangeMock.mockClear();
+    rerender(chartElement({ mode: "candles", data: bars(300), initialVisibleBars: 80, linesData: lines(5000) }));
+    expect(setVisibleLogicalRangeMock).toHaveBeenLastCalledWith({ from: 299 - 80 + 0.5, to: 299.5 });
+
+    setVisibleLogicalRangeMock.mockClear();
+    rerender(chartElement({ mode: "candles", data: bars(301), initialVisibleBars: 80, linesData: lines(5000) }));
+    expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled(); // once per switch, not on later data
+  });
+
   it("reports a zoom once per burst, after the quiet period, and never the restore itself", () => {
     vi.useFakeTimers();
     const onVisibleBars = vi.fn();
@@ -3116,12 +3155,12 @@ describe("chart types, price scale and compare (Story 33.9)", () => {
     ["log", 1],
     ["percent", 2],
     ["indexed", 3],
-  ])("applies the %s mode, auto and invert to the right price scale", (mode, libraryMode) => {
-    const { rerender } = render(element({ priceScale: { mode, autoScale: true, invert: false } }));
-    expect(rightScaleApplyMock).toHaveBeenLastCalledWith({ mode: libraryMode, autoScale: true, invertScale: false });
+  ])("applies the %s mode and auto to the right price scale", (mode, libraryMode) => {
+    const { rerender } = render(element({ priceScale: { mode, autoScale: true } }));
+    expect(rightScaleApplyMock).toHaveBeenLastCalledWith({ mode: libraryMode, autoScale: true });
 
-    rerender(element({ priceScale: { mode, autoScale: false, invert: true } }));
-    expect(rightScaleApplyMock).toHaveBeenLastCalledWith({ mode: libraryMode, autoScale: false, invertScale: true });
+    rerender(element({ priceScale: { mode, autoScale: false } }));
+    expect(rightScaleApplyMock).toHaveBeenLastCalledWith({ mode: libraryMode, autoScale: false });
   });
 
   it("opens the scale menu on a right-click on the scale strip, and closes it on Esc and an outside press", () => {
@@ -3141,8 +3180,10 @@ describe("chart types, price scale and compare (Story 33.9)", () => {
     expect(screen.queryByRole("menu", { name: "Price scale" })).toBeNull();
 
     fireEvent.contextMenu(host, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 });
-    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Invert scale" }));
-    expect(onPriceScale).toHaveBeenLastCalledWith({ invert: true });
+    // The Invert scale was removed (chart UX rework, 2026-10-08).
+    expect(screen.queryByRole("menuitemcheckbox", { name: /Invert/ })).toBeNull();
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Auto (fits data to screen)" }));
+    expect(onPriceScale).toHaveBeenLastCalledWith({ auto_scale: false });
 
     fireEvent.contextMenu(host, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 });
     fireEvent.keyDown(window, { key: "Escape" });
@@ -3652,33 +3693,29 @@ describe("time zone, session breaks, countdown, last price and fullscreen (Story
     expect(attached(CountdownPrimitive)).toHaveLength(0);
   });
 
-  describe("fullscreen fit", () => {
+  describe("focus view fit (fitToWindow)", () => {
+    // The chart's px budget in the focus view: the window's height less what is above the chart (0 in
+    // jsdom, where every box sits at the origin) and the 8 px kept under the chart box.
+    const MARGIN_PX = 8;
     const STAGE_PX = 900;
-    let host: HTMLElement;
-    beforeEach(() => {
-      host = document.body;
-      Object.defineProperty(host, "clientHeight", { configurable: true, get: () => STAGE_PX });
-    });
-    afterEach(() => {
-      delete (host as { clientHeight?: number }).clientHeight;
-      delete (document as { fullscreenElement?: Element | null }).fullscreenElement;
-    });
-    const setFullscreenElement = (element: Element | null) =>
-      Object.defineProperty(document, "fullscreenElement", { configurable: true, get: () => element });
+    const setWindowBudget = (px: number) =>
+      Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: px + MARGIN_PX });
+    const originalInnerHeight = window.innerHeight;
+    beforeEach(() => setWindowBudget(STAGE_PX));
+    afterEach(() => Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: originalInnerHeight }));
     const volumeOnly = [makePaneSpec("volume", { kind: "Histogram" })];
-    const el = (fullscreen: boolean, onPaneHeights = vi.fn()) => (
-      <LightweightChart data={bars} onChartApi={() => {}} panes={volumeOnly} fullscreen={fullscreen} onPaneHeights={onPaneHeights} />
+    const el = (fit: boolean, onPaneHeights = vi.fn()) => (
+      <LightweightChart data={bars} onChartApi={() => {}} panes={volumeOnly} fitToWindow={fit} onPaneHeights={onPaneHeights} />
     );
 
-    it("scales every pane to fit the stage on entry, keeping their relative heights, and restores them on exit", () => {
+    it("scales every pane to fit the window on entry, keeping their relative heights, and restores them on exit", () => {
       const onPaneHeights = vi.fn();
       const { rerender } = render(el(false, onPaneHeights));
       pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX);
       addedPane(0).getHeight.mockReturnValue(VOLUME_PANE_PX);
 
-      setFullscreenElement(host);
       rerender(el(true, onPaneHeights));
-      // 900 px of stage less one separator and the time axis, split 500 : 120.
+      // 900 px of window budget less one separator and the time axis, split 500 : 120.
       const scale = (STAGE_PX - 1 - TIME_AXIS_PX) / (PRICE_PANE_PX + VOLUME_PANE_PX);
       const price = Math.floor(PRICE_PANE_PX * scale);
       const volume = Math.floor(VOLUME_PANE_PX * scale);
@@ -3688,7 +3725,6 @@ describe("time zone, session breaks, countdown, last price and fullscreen (Story
       expect(lastChartHeight()).toBeLessThanOrEqual(STAGE_PX);
       expect(price / volume).toBeCloseTo(PRICE_PANE_PX / VOLUME_PANE_PX, 1);
 
-      setFullscreenElement(null);
       rerender(el(false, onPaneHeights));
       expect(pricePaneMock.setStretchFactor).toHaveBeenLastCalledWith(PRICE_PANE_PX);
       expect(addedPane(0).setStretchFactor).toHaveBeenLastCalledWith(VOLUME_PANE_PX);
@@ -3697,12 +3733,11 @@ describe("time zone, session breaks, countdown, last price and fullscreen (Story
       expect(onPaneHeights).not.toHaveBeenCalled();
     });
 
-    it("saves a divider drag made in fullscreen at the stored scale, never the scaled heights", () => {
+    it("saves a divider drag made in the focus view at the stored scale, never the scaled heights", () => {
       const onPaneHeights = vi.fn();
       const { rerender, container } = render(el(false, onPaneHeights));
       pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX);
       addedPane(0).getHeight.mockReturnValue(VOLUME_PANE_PX);
-      setFullscreenElement(host);
       rerender(el(true, onPaneHeights));
       const scale = (STAGE_PX - 1 - TIME_AXIS_PX) / (PRICE_PANE_PX + VOLUME_PANE_PX);
       pricePaneMock.getHeight.mockReturnValue(Math.floor(PRICE_PANE_PX * scale));
@@ -3715,20 +3750,18 @@ describe("time zone, session breaks, countdown, last price and fullscreen (Story
 
       expect(onPaneHeights).toHaveBeenCalledTimes(1);
       expect(onPaneHeights).toHaveBeenCalledWith({ price: Math.round(600 / scale), volume: Math.round(270 / scale) });
-      setFullscreenElement(null);
       rerender(el(false, onPaneHeights));
       expect(pricePaneMock.setStretchFactor).toHaveBeenLastCalledWith(Math.round(600 / scale));
     });
 
-    it("keeps a pane the fullscreen drag did not resize at its stored height exactly, never re-rounded", () => {
+    it("keeps a pane the focus-view drag did not resize at its stored height exactly, never re-rounded", () => {
       const onPaneHeights = vi.fn();
       const { rerender, container } = render(el(false, onPaneHeights));
       pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX);
       addedPane(0).getHeight.mockReturnValue(VOLUME_PANE_PX);
-      // A stage where floor-then-round does move the volume pane (400 px: 71.8 shown as 71, back as 119).
+      // A window where floor-then-round does move the volume pane (400 px: 71.8 shown as 71, back as 119).
       const stagePx = 400;
-      Object.defineProperty(host, "clientHeight", { configurable: true, get: () => stagePx });
-      setFullscreenElement(host);
+      setWindowBudget(stagePx);
       rerender(el(true, onPaneHeights));
       const scale = (stagePx - 1 - TIME_AXIS_PX) / (PRICE_PANE_PX + VOLUME_PANE_PX);
       const volumeShown = Math.floor(VOLUME_PANE_PX * scale);
@@ -3743,55 +3776,48 @@ describe("time zone, session breaks, countdown, last price and fullscreen (Story
       expect(onPaneHeights).toHaveBeenCalledWith({ price: Math.round(600 / scale), volume: VOLUME_PANE_PX });
     });
 
-    it("never lays the panes out taller than a tiny stage's budget when the 1 px floor lifts several", () => {
+    it("never lays the panes out taller than a tiny window's budget when the 1 px floor lifts several", () => {
       const panes = [makePaneSpec("volume", { kind: "Histogram" }), makePaneSpec("a"), makePaneSpec("b")];
-      const { rerender } = render(<LightweightChart data={bars} onChartApi={() => {}} panes={panes} fullscreen={false} />);
+      const { rerender } = render(<LightweightChart data={bars} onChartApi={() => {}} panes={panes} fitToWindow={false} />);
       pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX);
       [VOLUME_PANE_PX, INDICATOR_PANE_PX, INDICATOR_PANE_PX].forEach((px, i) => addedPane(i).getHeight.mockReturnValue(px));
       const panesPx = 4;
-      Object.defineProperty(host, "clientHeight", { configurable: true, get: () => panesPx + 3 + TIME_AXIS_PX });
-      setFullscreenElement(host);
-      rerender(<LightweightChart data={bars} onChartApi={() => {}} panes={panes} fullscreen />);
+      setWindowBudget(panesPx + 3 + TIME_AXIS_PX);
+      rerender(<LightweightChart data={bars} onChartApi={() => {}} panes={panes} fitToWindow />);
 
       const shown = [pricePaneMock, addedPane(0), addedPane(1), addedPane(2)].map((pane) => pane.setStretchFactor.mock.lastCall?.[0] as number);
       expect(shown.every((px) => px >= 1)).toBe(true);
       expect(shown.reduce((sum, px) => sum + px, 0)).toBe(panesPx);
     });
 
-    it("watches the fullscreen element for viewport resizes while fullscreen only", () => {
-      const observed: Element[] = [];
-      const unobserved: Element[] = [];
-      const Original = globalThis.ResizeObserver;
-      globalThis.ResizeObserver = class {
-        observe(target: Element): void {
-          observed.push(target);
-        }
-        unobserve(target: Element): void {
-          unobserved.push(target);
-        }
-        disconnect(): void {}
-      };
-      try {
-        const { rerender } = render(el(false));
-        setFullscreenElement(host);
-        rerender(el(true));
-        expect(observed).toContain(host);
-        setFullscreenElement(null);
-        rerender(el(false));
-        expect(unobserved).toEqual([host]);
-      } finally {
-        globalThis.ResizeObserver = Original;
-      }
+    it("refits on a window resize while the focus view is on only", () => {
+      const { rerender } = render(el(false));
+      pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX);
+      addedPane(0).getHeight.mockReturnValue(VOLUME_PANE_PX);
+      rerender(el(true));
+      setWindowBudget(500);
+      act(() => {
+        window.dispatchEvent(new Event("resize"));
+      });
+      const scale = (500 - 1 - TIME_AXIS_PX) / (PRICE_PANE_PX + VOLUME_PANE_PX);
+      expect(pricePaneMock.setStretchFactor).toHaveBeenLastCalledWith(Math.floor(PRICE_PANE_PX * scale));
+
+      rerender(el(false));
+      pricePaneMock.setStretchFactor.mockClear();
+      act(() => {
+        window.dispatchEvent(new Event("resize"));
+      });
+      expect(pricePaneMock.setStretchFactor).not.toHaveBeenCalled();
     });
   });
 
-  it("re-applies the container's width on entering and on leaving fullscreen", () => {
+  it("re-applies the container's width on entering and on leaving the focus view", () => {
     const widthCalls = () => applyOptionsMock.mock.calls.filter((c) => Object.keys(c[0] as object).join() === "width").length;
     const { rerender } = render(chartElement({ data: bars }));
     const before = widthCalls();
-    rerender(<LightweightChart data={bars} onChartApi={() => {}} fullscreen />);
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} fitToWindow />);
     expect(widthCalls()).toBe(before + 1);
-    rerender(<LightweightChart data={bars} onChartApi={() => {}} fullscreen={false} />);
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} fitToWindow={false} />);
     expect(widthCalls()).toBe(before + 2);
   });
 });

@@ -22,7 +22,9 @@ behind every `/ws/live` `derivs:{iid}` and `liquidations:{iid}` subscription (St
 subscribes no `liquidations:raw` of its own -- `live_candle_bus` hands it the rows it decoded,
 attached by `app.py`'s lifespan), and `archive_bus`, the one `archive:status` subscriber behind
 `GET /api/archive/status` (Story 25.1b), and `markets_bus`, the one `markets:live` subscriber behind
-`GET /api/markets` (Story 33.9).
+`GET /api/markets` (Story 33.9), whose items' `collected` flag `collected_markets` reads from the
+collectors' `collector:collected:<VENUE>` keys (a key read per request, no subscription; chart UX
+rework, 2026-10-08).
 
 Invariant: one subscriber per channel per process -- every reader shares these objects, so no
 request or WebSocket ever opens a Redis subscription of its own, and no two of them subscribe the
@@ -35,6 +37,7 @@ this module, so a test can swap any with `monkeypatch.setattr(buses, ...)`.
 """
 
 from views.archive_status_bus import ArchiveStatusBus
+from views.collected_markets import CollectedMarkets
 from views.live_candles import LiveCandleBus
 from views.live_derivs import LiveDerivsBus
 from views.markets_bus import MarketsBus
@@ -48,3 +51,4 @@ live_candle_bus = LiveCandleBus(settings.CATALOG_PATH)
 live_derivs_bus = LiveDerivsBus()
 archive_bus = ArchiveStatusBus()
 markets_bus = MarketsBus()
+collected_markets = CollectedMarkets(settings.REDIS_URL)

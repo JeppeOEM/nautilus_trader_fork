@@ -17,6 +17,7 @@ const item = (symbol: string) => ({
   venue: "BYBIT",
   market: "perp",
   volume24h: null,
+  collected: true as boolean | null,
 });
 
 afterEach(() => {
@@ -70,5 +71,43 @@ describe("SymbolSearch market list (Story 33.12)", () => {
     expect(screen.queryByText(/could not be loaded/)).not.toBeInTheDocument();
     expect(screen.getByText(/Market list stale for HYPERLIQUID/)).toBeInTheDocument();
     expect(screen.getAllByRole("option")).toHaveLength(1);
+  });
+});
+
+
+describe("SymbolSearch collected markets (chart UX rework, 2026-10-08)", () => {
+  const listed = () => screen.queryAllByRole("option").map((o) => o.textContent);
+
+  it("lists only the collected markets, and every market with All markets, an uncollected one tagged", async () => {
+    markets.get.mockResolvedValue({ items: [item("BTC"), { ...item("ETH"), collected: false }, { ...item("SOL"), collected: null }], stale_venues: [] });
+    render(<SymbolSearch mode="navigate" instrumentId="XRPUSDT-LINEAR.BYBIT" onPick={() => {}} onClose={() => {}} />);
+    await act(async () => {});
+
+    expect(listed()).toHaveLength(1);
+    expect(listed()[0]).toContain("BTCUSDT-LINEAR.BYBIT");
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /All markets \(3\)/ }));
+    expect(listed()).toHaveLength(3);
+    expect(listed()[1]).toContain("not collected");
+    expect(listed()[2]).not.toContain("not collected");
+  });
+
+  it("lists every market, saying why, when no collector has reported what it collects", async () => {
+    markets.get.mockResolvedValue({ items: [{ ...item("BTC"), collected: null }, { ...item("ETH"), collected: null }], stale_venues: [] });
+    render(<SymbolSearch mode="navigate" instrumentId="XRPUSDT-LINEAR.BYBIT" onPick={() => {}} onClose={() => {}} />);
+    await act(async () => {});
+
+    expect(listed()).toHaveLength(2);
+    expect(screen.getByRole("status")).toHaveTextContent("No collector has reported what it collects");
+    expect(screen.queryByRole("checkbox", { name: /All markets/ })).toBeNull();
+  });
+
+  it("offers only collected markets to compare, with no All markets switch", async () => {
+    markets.get.mockResolvedValue({ items: [item("BTC"), { ...item("ETH"), collected: false }], stale_venues: [] });
+    render(<SymbolSearch mode="compare" instrumentId="XRPUSDT-LINEAR.BYBIT" onPick={() => {}} onClose={() => {}} />);
+    await act(async () => {});
+
+    expect(listed()).toHaveLength(1);
+    expect(screen.queryByRole("checkbox", { name: /All markets/ })).toBeNull();
   });
 });

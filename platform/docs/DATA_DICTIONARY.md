@@ -4017,9 +4017,14 @@ and `lib/chartLayout.ts`, pinned by `views/tests/test_chart_layouts.py`):
   `heikin_ashi`. Default `candles`. Heikin Ashi, Hollow colours and the Line/Area/Baseline close
   values are display transforms handed only to the main series (AD-F6): indicators, drawings,
   alerts, profiles, measure, gaps and markers read the real OHLC (audit D-206).
-- `price_scale`: `{mode, auto_scale, invert}`, `mode` one of `PRICE_SCALE_MODES` -- `normal`, `log`,
-  `percent`, `indexed` (Indexed to 100). Default `{mode: "normal", auto_scale: true, invert:
-  false}`. A present table carries all three keys. With a compare symbol drawn the effective mode
+- `price_scale`: `{mode, auto_scale}`, `mode` one of `PRICE_SCALE_MODES` -- `normal`, `log`,
+  `percent`, `indexed` (Indexed to 100). Default `{mode: "normal", auto_scale: true}`. A present
+  table carries both keys. `[amended 2026-10-08: chart UX rework]` The `invert` key was removed
+  with the Invert scale: the layout table is `v = 2`, and a `v = 1` table is upgraded on read by
+  `views.preferences._migrate_v1_table` (its `invert`, a boolean, dropped; anything else there
+  refused naming `price_scale.invert`), which also resets `visible_bars` to `DEFAULT_VISIBLE_BARS`
+  (300, the wider default view, an operator decision); the next save writes `v = 2`. A `v = 2`
+  table carrying `invert` is a 422. With a compare symbol drawn the effective mode
   is `percent` (or `indexed` when stored); the stored mode is kept. Percent and Indexed normalise
   every price-pane series by its own first visible value (audit D-207).
 - `compare`: `{symbols, spread}`, at most `MAX_COMPARE_SYMBOLS` (3) distinct instrument ids with a
@@ -4058,6 +4063,21 @@ set is a 422 naming the key, never dropped; mirrored by `frontend/src/lib/time.t
   price-axis label.
 
 The `/api/markets` items gained `market` and `volume24h` in the same story (§2.20).
+
+`[amended 2026-10-08: chart UX rework]` **`collected`** on every `/api/markets` item: `true` when the
+venue's collector collects the id (subscribed, not pending), `false` when it does not, `null` when
+that venue's collected set is unknown -- never `false` for unknown. The source is one Redis key per
+venue, `collector:collected:<VENUE>`, which each collector's `StatusPublisher` overwrites on every
+`collector:status` publish with `collection_control.application.status.collected_snapshot`'s JSON
+`{venue, ts, collected, pending}` (`ts` wall-clock ns; `collected` = the plan's ids capture has
+applied, in plan order, AD-D17). A key, not the pub/sub channel, because that channel republishes
+only every `PLAN_STATUS_SECONDS` (1800 s): a `data_api` started between two publishes would know
+nothing for up to 30 min. `data_api` reads the keys per request (`views/collected_markets.py`'s
+`CollectedMarkets`, one `MGET`); a missing key, one older than 3600 s (two full republishes,
+`bot_tui`'s staleness), a malformed one (ledgered at `views.collected_markets`) or a failed read
+(ledgered) leaves the venue unknown. The symbol search lists the `true` markets (an **All
+markets** switch lists every one), the Compare search only those; with every item `null` both list
+every market and say why. The prefix is a local copy in `views` (`test_the_key_prefix_mirrors_collection_control`).
 
 ---
 

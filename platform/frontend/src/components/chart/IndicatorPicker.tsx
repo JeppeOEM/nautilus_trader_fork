@@ -3,7 +3,7 @@ import { type Ref, useEffect, useImperativeHandle, useRef, useState } from "reac
 import { fetchIndicatorCatalog } from "../../api/client";
 import type { IndicatorCatalogEntry, IndicatorConfigEntry } from "../../api/schema";
 import { DERIVATIVE_KEYS, DERIVATIVE_LABELS, type DerivativeKey } from "../../lib/chartLayout";
-import { DEFAULT_SOURCE, entryId, indicatorId } from "../../lib/indicatorId";
+import { DEFAULT_SOURCE, copyId, entryId, indicatorId, valuesId } from "../../lib/indicatorId";
 import IndicatorSettingsDialog, { type SettingsOutput, type SettingsPatch } from "./IndicatorSettingsDialog";
 import ParamInputs from "./ParamInputs";
 import { coerceParams, invalidParamKeys, rawFromParams } from "./paramCoercion";
@@ -70,16 +70,28 @@ interface IndicatorPickerProps {
   outputsFor?: (id: string) => SettingsOutput[];
 }
 
+/** Whether `entries` already hold an entry drawn under the id `name`/`params`/`source`/`instance`
+ * would take (single-instance: any entry of `name`). Two entries under one id would share one
+ * series key and legend row, so neither could be removed or restyled alone. */
 function hasInstance(
   entries: IndicatorConfigEntry[],
   name: string,
   params: Record<string, unknown>,
   multiInstance: boolean,
   source: string = DEFAULT_SOURCE,
+  instance?: number,
 ): boolean {
-  // Same instance = same id, the series key both would draw under (key order never matters).
-  const id = indicatorId(name, params, source);
+  const id = copyId(indicatorId(name, params, source), instance);
   return entries.some((e) => e.name === name && (!multiInstance || entryId(e) === id));
+}
+
+/** The copy number a new entry of `name`/`params`/`source` takes (chart UX rework, 2026-10-08): 1
+ * when none is configured, else one above the highest configured copy, so an indicator can be added
+ * again with its default settings and then set apart in its settings. */
+function nextInstance(entries: IndicatorConfigEntry[], name: string, params: Record<string, unknown>, source: string = DEFAULT_SOURCE): number {
+  const id = indicatorId(name, params, source);
+  const copies = entries.filter((e) => valuesId(e) === id).map((e) => e.instance ?? 1);
+  return copies.length === 0 ? 1 : Math.max(...copies) + 1;
 }
 
 function defaultParamsFor(catalogEntry: IndicatorCatalogEntry): Record<string, unknown> {
@@ -229,8 +241,9 @@ export default function IndicatorPicker({
     if (!catalogEntry) return;
     const params = defaultParamsFor(catalogEntry);
     const current = entriesRef.current;
-    if (hasInstance(current, name, params, multiInstance)) return; // already added
-    void persist([...current, { name, params, category: catalogEntry.category }]);
+    if (!multiInstance && hasInstance(current, name, params, false)) return; // already added
+    const instance = multiInstance ? nextInstance(current, name, params) : 1;
+    void persist([...current, { name, params, category: catalogEntry.category, ...(instance > 1 ? { instance } : {}) }]);
   }
 
   function handleAdd(): void {
@@ -254,6 +267,7 @@ export default function IndicatorPicker({
         patch.params ?? entry.params ?? {},
         multiInstance,
         patch.source ?? entry.source ?? DEFAULT_SOURCE,
+        entry.instance,
       )
     ) {
       // Two identical instances would share one series key and draw on top of each other.
@@ -310,9 +324,8 @@ export default function IndicatorPicker({
           open={dialogOpen}
           onClose={onDialogClose}
           catalog={catalog}
-          addedNames={Object.keys(catalog).filter((n) =>
-            hasInstance(entries, n, defaultParamsFor(catalog[n]), multiInstance),
-          )}
+          addedNames={Object.keys(catalog).filter((n) => entries.some((e) => e.name === n))}
+          multiInstance={multiInstance}
           disabled={disabled}
           onAdd={addByName}
           volumeOn={volumeOn}
@@ -437,6 +450,7 @@ function IndicatorDialog({
   onClose,
   catalog,
   addedNames,
+  multiInstance,
   disabled,
   onAdd,
   volumeOn,
@@ -453,6 +467,8 @@ function IndicatorDialog({
   onClose: () => void;
   catalog: Record<string, IndicatorCatalogEntry>;
   addedNames: string[];
+  /** An added indicator can be added again (another copy), so its row stays enabled. */
+  multiInstance: boolean;
   disabled: boolean;
   onAdd: (name: string) => void;
   volumeOn?: boolean;
@@ -565,9 +581,11 @@ function IndicatorDialog({
           const added = addedNames.includes(name);
           return (
             <li key={name}>
-              <button type="button" disabled={added || disabled} onClick={() => onAdd(name)}>
+              <button type="button" disabled={(added && !multiInstance) || disabled} onClick={() => onAdd(name)}>
                 <span>{name}</span>
-                <span className="indicator-dialog-tag">{added ? "added" : dialogCategoryOf(entry)}</span>
+                <span className="indicator-dialog-tag">
+                  {added ? (multiInstance ? "added · click to add another" : "added") : dialogCategoryOf(entry)}
+                </span>
               </button>
             </li>
           );

@@ -65,8 +65,8 @@ STATUS_CHANGE_POLL_SECONDS = 30.0
 # (Named `STATIC_PLAN_STATUS_SECONDS` until Story 29.4 made these plans commandable.)
 # Known limit: Redis pub/sub keeps no history, so a `bot_tui` started between two publishes shows
 # no section for this venue until the next one (up to this long, as for dYdX's
-# `liquidity_check_seconds`); upgrade path: also keep the last publish in a Redis key the TUI
-# reads on connect.
+# `liquidity_check_seconds`); upgrade path: read the collected set `collected_snapshot` keeps in
+# its Redis key on connect, as data_api's symbol search does (2026-10-08).
 PLAN_STATUS_SECONDS = 1800.0
 
 
@@ -143,6 +143,24 @@ def status_messages(
         messages.append(json.dumps(row))
     messages.append(plan_aggregate(plan, status, accepts_commands, last_refusal))
     return messages
+
+
+def collected_snapshot(plan: CollectionPlan, status: CaptureStatus, now_ns: int) -> str:
+    """
+    Return the venue's collected set as one JSON object, `{venue, ts, collected, pending}`: the
+    plan's ids capture has applied (`collected`, plan order) and those it has not (`pending`), at
+    wall-clock `ts` (ns). Kept in the venue's `COLLECTED_KEY_PREFIX` key on every publish; like the
+    rows, it never names as collected what the feed never subscribed (AD-D17).
+    """
+    pending = pending_ids(plan, status)
+    return json.dumps(
+        {
+            "venue": plan.venue,
+            "ts": now_ns,
+            "collected": [iid for iid in plan.collected if iid not in pending],
+            "pending": [iid for iid in plan.collected if iid in pending],
+        }
+    )
 
 
 def removed_message(iid: str) -> str:
@@ -250,6 +268,9 @@ class StatusPublisher:
             )
             for message in messages:
                 await self._bus.publish(message)
+            await self._bus.store_collected(
+                plan.venue, collected_snapshot(plan, status, time.time_ns())
+            )
             self._shown = _shown_state(plan, status)
             self._shown_refusal = refusal
 

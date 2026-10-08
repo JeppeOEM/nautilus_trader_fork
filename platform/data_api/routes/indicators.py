@@ -133,6 +133,8 @@ class IndicatorConfigEntry(PickerEntry):
     hidden: bool = False
     # Output label -> {color, line_width, line_style, ...}; `{}` = the pane palette default.
     style: dict[str, dict[str, Any]] = {}
+    # The copy number of an indicator added more than once; 1 for the first (and only) copy.
+    instance: int = 1
 
 
 @router.get("/api/coin/{instrument_id}/indicators")
@@ -158,6 +160,7 @@ def get_coin_indicator_config(instrument_id: str) -> list[IndicatorConfigEntry]:
             source=_servable_source(instrument_id, e),
             hidden=e.hidden,
             style=e.style,
+            instance=e.instance,
         )
         for e in entries
     ]
@@ -185,10 +188,10 @@ def _servable_source(instrument_id: str, entry: preferences.IndicatorEntry) -> s
 
 def _parse_config_entry(e: dict[str, Any]) -> preferences.IndicatorEntry:
     """
-    One PUT body entry. A wrong type for `params`/`source`/`hidden`/`style` is a `TypeError` (the
-    route's 400); TOML cannot hold `null` and JSON cannot hold `NaN`, so style leaves must be
-    strings, integers, booleans or finite floats (`preferences.is_valid_style`, the loader's rule
-    too).
+    One PUT body entry. A wrong type for `params`/`source`/`hidden`/`style`/`instance` is a
+    `TypeError` (the route's 400); TOML cannot hold `null` and JSON cannot hold `NaN`, so style
+    leaves must be strings, integers, booleans or finite floats (`preferences.is_valid_style`, the
+    loader's rule too), and `instance` an integer >= 1 (`preferences.is_valid_instance`).
     """
     source, hidden, style = e.get("source", "close"), e.get("hidden", False), e.get("style", {})
     params = e.get("params", {})
@@ -198,6 +201,9 @@ def _parse_config_entry(e: dict[str, Any]) -> preferences.IndicatorEntry:
         raise TypeError("params must be an object")
     if not preferences.is_valid_style(style):
         raise TypeError("style must be an object of per-output objects of finite scalar values")
+    instance = e.get("instance", 1)
+    if not preferences.is_valid_instance(instance):
+        raise TypeError("instance must be an integer >= 1")
     return preferences.IndicatorEntry(
         name=e["name"],
         params=params,
@@ -205,6 +211,7 @@ def _parse_config_entry(e: dict[str, Any]) -> preferences.IndicatorEntry:
         source=source,
         hidden=hidden,
         style=style,
+        instance=instance,
     )
 
 
@@ -240,6 +247,23 @@ def check_indicator_entries(entries: Sequence[preferences.IndicatorEntry]) -> No
     for entry in entries:
         check_entry_params(entry.name, entry.params)
     _check_sources(entries)
+    _check_distinct_copies(entries)
+
+
+def _check_distinct_copies(entries: Sequence[preferences.IndicatorEntry]) -> None:
+    """
+    Raise a 422 for two entries with the same name, params, source and `instance`: on the chart they
+    would be one legend row and one series key, so neither could be removed or restyled alone.
+    """
+    seen: set[tuple[str, int]] = set()
+    for entry in entries:
+        series_id = indicator_picker.indicator_id(entry.name, entry.params, entry.source)
+        if (series_id, entry.instance) in seen:
+            raise HTTPException(
+                status_code=422,
+                detail=f"duplicate indicator: {series_id} instance {entry.instance} is listed twice",
+            )
+        seen.add((series_id, entry.instance))
 
 
 def validate_indicator_payload(payload: Any) -> list[preferences.IndicatorEntry]:

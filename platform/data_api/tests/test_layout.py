@@ -144,7 +144,7 @@ def test_put_with_a_bad_mode_is_a_422_naming_it_and_writes_nothing(
     assert not (tmp_path / "chart_layouts.toml").exists()
 
 
-_SCALE = {"mode": "normal", "auto_scale": True, "invert": False}
+_SCALE = {"mode": "normal", "auto_scale": True}
 _ONE_COMPARE = {"symbols": ["BTC-USD-PERP.HYPERLIQUID"], "spread": False}
 
 

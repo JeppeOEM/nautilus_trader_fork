@@ -123,7 +123,6 @@ export type ChartMode = "candles" | "lines";
 export interface PriceScaleSettings {
   mode: PriceScaleModeName;
   autoScale: boolean;
-  invert: boolean;
 }
 
 /** A change to the price scale the operator made on the chart itself (the scale's menu, a double-click
@@ -131,7 +130,6 @@ export interface PriceScaleSettings {
 export interface PriceScalePatch {
   mode?: PriceScaleModeName;
   auto_scale?: boolean;
-  invert?: boolean;
 }
 
 /** The library's `PriceScaleMode` of each stored mode name. */
@@ -142,7 +140,7 @@ const SCALE_MODE_OF: Record<PriceScaleModeName, PriceScaleMode> = {
   indexed: PriceScaleMode.IndexedTo100,
 };
 
-const DEFAULT_PRICE_SCALE_SETTINGS: PriceScaleSettings = { mode: "normal", autoScale: true, invert: false };
+const DEFAULT_PRICE_SCALE_SETTINGS: PriceScaleSettings = { mode: "normal", autoScale: true };
 
 // Story 18.10: a one-shot view command from the page's Fit / Latest buttons. `seq` makes a
 // repeated identical click a NEW command (the effect keys on the object).
@@ -598,7 +596,7 @@ interface LightweightChartProps {
    * the HA series' first close rather than the real one (Normal and Log are exact: no base value).
    * Upgrade path: host the drawings on a hidden real-close series in those modes. */
   chartType?: ChartType;
-  /** Story 33.9: the price pane's right scale; default Normal, auto-scaled, not inverted. */
+  /** Story 33.9: the price pane's right scale; default Normal, auto-scaled. */
   priceScale?: PriceScaleSettings;
   /** Story 33.9: the operator changed the scale on the chart (its right-click menu, a double-click on
    * it that restores auto-scale, or a drag of it that turned auto-scale off). The page persists it. */
@@ -624,11 +622,12 @@ interface LightweightChartProps {
   /** Story 33.12: the main series' last-price line and its axis label (Lines mode: the `price` line's).
    * Default both shown. */
   lastPrice?: LastPriceSettings;
-  /** Story 33.12: the page's stage is the browser's fullscreen element. Entering scales every pane's
-   * height so the whole chart fits the stage (relative heights kept), leaving restores the stored
-   * heights; both re-apply the container's width at once. View state only: never reported through
-   * `onPaneHeights` as a layout change. */
-  fullscreen?: boolean;
+  /** The page's focus view (chart UX rework, 2026-10-08; was Story 33.12's browser fullscreen): every
+   * pane's height is scaled so the whole chart fits the browser window below what sits above it
+   * (relative heights kept), and refits on a window resize; leaving restores the stored heights. Both
+   * re-apply the container's width at once. View state only: never reported through `onPaneHeights`
+   * as a layout change. */
+  fitToWindow?: boolean;
 }
 
 export interface CountdownSettings {
@@ -911,9 +910,9 @@ function snapshotOf(registry: Map<string, PaneEntry>, heights: Record<string, nu
   return { price: heights.price ?? null, panes };
 }
 
-/** Story 33.12: the fullscreen fit -- the stored (unscaled) height of every pane group and the factor
- * the shown heights are scaled by. View state only, never a layout value. */
-interface FullscreenFit {
+/** The focus view's fit -- the stored (unscaled) height of every pane group and the factor the shown
+ * heights are scaled by. View state only, never a layout value. */
+interface WindowFit {
   stored: Record<string, number>;
   scale: number;
 }
@@ -938,30 +937,28 @@ function fitPaneHeights(stored: Record<string, number>, panesPx: number): { heig
   return { heights, scale };
 }
 
-/** The px the chart may take inside the fullscreen element: from the container's top to the element's
- * bottom, less its bottom padding and the chart box's own chrome under the chart (the top bar, the
- * replay controls and the legend rows above it are on screen already). Null when the container is
- * not inside the fullscreen element. */
-function fullscreenBudget(container: HTMLElement): number | null {
-  const host = document.fullscreenElement;
-  if (!(host instanceof HTMLElement) || !host.contains(container)) return null;
+/** The px kept free under the chart box in the focus view, so its bottom border shows. */
+const WINDOW_FIT_MARGIN_PX = 8;
+
+/** The px the chart may take in the focus view: the window's height less everything above the chart
+ * on the page scrolled to the top (the error bar, the top bar, the replay controls, the legend rows)
+ * and the chart box's own chrome under it, so at the top the whole chart is on screen. */
+function windowBudget(container: HTMLElement): number {
   const box = container.getBoundingClientRect();
-  const top = box.top - host.getBoundingClientRect().top + host.scrollTop;
+  const top = box.top + window.scrollY;
   const parentBottom = container.parentElement?.getBoundingClientRect().bottom ?? box.bottom;
-  const padding = parseFloat(getComputedStyle(host).paddingBottom) || 0;
-  return host.clientHeight - padding - top - Math.max(0, parentBottom - box.bottom);
+  return window.innerHeight - top - Math.max(0, parentBottom - box.bottom) - WINDOW_FIT_MARGIN_PX;
 }
 
 /**
- * Story 33.12: scales every laid-out pane so the whole chart (panes, separators, time axis) fits the
- * fullscreen element. A pane first seen in fullscreen (added there, or the chart mounted there by a
- * timeframe change) is stored at its layout or default height, so the fit stays proportional to
- * what the page shows outside fullscreen. Idempotent: the heights come from `fit.stored`, never from
- * the measured (already scaled) ones, so a resize-observer round trip settles.
+ * Scales every laid-out pane so the whole chart (panes, separators, time axis) fits the window in the
+ * focus view. A pane first seen there (added there, or the chart mounted there by a timeframe
+ * change) is stored at its layout or default height, so the fit stays proportional to what the
+ * normal page shows. Idempotent: the heights come from `fit.stored`, never from the measured
+ * (already scaled) ones, so a resize round trip settles.
  */
-function refitFullscreen(chart: IChartApi, container: HTMLElement, registry: Map<string, PaneEntry>, fit: FullscreenFit, known: Map<string, number>): void {
-  const budget = fullscreenBudget(container);
-  if (budget === null) return;
+function refitToWindow(chart: IChartApi, container: HTMLElement, registry: Map<string, PaneEntry>, fit: WindowFit, known: Map<string, number>): void {
+  const budget = windowBudget(container);
   const stored: Record<string, number> = {};
   for (const group of Object.keys(currentPaneHeights(chart, registry))) {
     fit.stored[group] ??= known.get(group) ?? defaultPanePx(group);
@@ -1184,7 +1181,7 @@ export default function LightweightChart({
   barSeconds = null,
   countdown = null,
   lastPrice = DEFAULT_LAST_PRICE_SETTINGS,
-  fullscreen = false,
+  fitToWindow = false,
 }: LightweightChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -1198,6 +1195,11 @@ export default function LightweightChart({
   const lineSeriesRef = useRef<Record<LineSeriesId, MainLineSeriesApi> | null>(null);
   const prevFirstTimeRef = useRef<Time | null>(null);
   const prevLinesLengthRef = useRef(0);
+  // A Candles <-> Lines switch shows the coin's saved zoom, the newest bar at the right edge, once
+  // the new mode's data arrives: the old mode's logical range counts 1 s rows against 1 m bars (or
+  // the reverse), so kept, it landed hours back in history (operator report 2026-10-08).
+  const modeViewPendingRef = useRef(false);
+  const shownModeRef = useRef(mode);
   const panesRef = useRef<Map<string, PaneEntry>>(new Map());
   const legendItemsRef = useRef<LegendSeries[]>([]);
   // Story 32.3: the px height of each pane the legend eye collapsed, by group, until it is shown.
@@ -1205,16 +1207,13 @@ export default function LightweightChart({
   // Story 32.6: last known pane heights by group id ("price" included): the saved layout's at mount,
   // then whatever the operator dragged to. A ref read at mount, so a later prop change re-pins nothing.
   const knownHeightsRef = useRef<Map<string, number>>(new Map(Object.entries(initialPaneHeights ?? {})));
-  // Story 33.12: the fullscreen fit while the page is fullscreen (null otherwise), the resize observer
-  // that also watches the fullscreen element then, and the element it watches.
-  const fullscreenFitRef = useRef<FullscreenFit | null>(null);
-  const resizeObserverRef = useRef<ResizeObserver | null>(null);
-  const observedHostRef = useRef<Element | null>(null);
+  // The focus view's fit while it is on (null otherwise).
+  const windowFitRef = useRef<WindowFit | null>(null);
   const refitNow = useCallback((): void => {
     const chart = chartRef.current;
     const container = containerRef.current;
-    const fit = fullscreenFitRef.current;
-    if (chart && container && fit) refitFullscreen(chart, container, panesRef.current, fit, knownHeightsRef.current);
+    const fit = windowFitRef.current;
+    if (chart && container && fit) refitToWindow(chart, container, panesRef.current, fit, knownHeightsRef.current);
   }, []);
   const paneHeightsCallbackRef = useRef(onPaneHeights);
   paneHeightsCallbackRef.current = onPaneHeights;
@@ -1224,6 +1223,12 @@ export default function LightweightChart({
   const visibleBarsReadyRef = useRef(false);
   const lastVisibleBarsRef = useRef<number | null>(null);
   const initialVisibleBarsRef = useRef(initialVisibleBars);
+  const showSavedZoomAfterModeSwitch = useCallback((chart: IChartApi, rows: number): void => {
+    if (!modeViewPendingRef.current) return;
+    modeViewPendingRef.current = false;
+    const bars = initialVisibleBarsRef.current ?? rows;
+    chart.timeScale().setVisibleLogicalRange({ from: rows - 1 - bars + 0.5, to: rows - 1 + 0.5 });
+  }, []);
   // Read by the candles data effect, never one of its deps: a prop flip must not re-run setData.
   const followNewestRef = useRef(followNewest);
   followNewestRef.current = followNewest;
@@ -1471,6 +1476,13 @@ export default function LightweightChart({
       // Intraday bars are unreadable without clock labels -- the library default shows dates only.
       timeScale: { borderColor: chartVar("--chart-border"), timeVisible: true },
     });
+    // The price pane is permanent. lightweight-charts deletes a pane once its last series is removed
+    // while other panes exist (`_cleanupIfPaneIsEmpty`), and the main series is removed and re-added
+    // on a Lines -> Candles return and on a chart-type switch: without this, with an indicator or
+    // volume pane open and nothing else on the price pane, pane 0 vanished, every pane shifted up
+    // one index, the new main series landed in the first indicator pane and the stacking below
+    // crashed on `moveTo` ("Assertion failed: Invalid pane index", operator report 2026-10-08).
+    chart.panes()[0].setPreserveEmptyPane(true);
     chartRef.current = chart;
     onChartApi(chart);
 
@@ -1507,16 +1519,14 @@ export default function LightweightChart({
             knownHeightsRef.current,
           );
         }
-        // Story 33.12: in fullscreen a new viewport size, or a pane added there, refits every pane.
+        // In the focus view a new width, or a pane added there, refits every pane.
         refitNow();
       });
     };
     // ResizeObserver, not window "resize": catches layout-only reflows and a container that
     // was hidden (clientWidth 0) at mount. Fires once on observe, so it also does the first sync.
-    // In fullscreen it watches the fullscreen element too, whose height is the viewport's.
     const resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(container);
-    resizeObserverRef.current = resizeObserver;
     const panes = panesRef.current;
     const collapsedHeights = collapsedHeightsRef.current;
     // Captured to a local for the cleanup below, same as `panes` -- reading
@@ -1528,8 +1538,6 @@ export default function LightweightChart({
     return () => {
       cancelled = true;
       resizeObserver.disconnect();
-      resizeObserverRef.current = null;
-      observedHostRef.current = null;
       cancelAnimationFrame(resizeFrame);
       chartRef.current = null;
       seriesRef.current = null;
@@ -1579,9 +1587,9 @@ export default function LightweightChart({
       if (!start || !chart) return;
       const now = currentPaneHeights(chart, panesRef.current);
       if (!Object.keys(now).some((id) => id in start && Math.abs(now[id] - start[id]) >= 1)) return;
-      // Story 33.12: a drag in fullscreen moved scaled panes; the layout keeps the stored scale, so
-      // the heights are unscaled first (and the fit keeps them, so leaving restores the drag).
-      const fit = fullscreenFitRef.current;
+      // A drag in the focus view moved scaled panes; the layout keeps the stored scale, so the
+      // heights are unscaled first (and the fit keeps them, so leaving restores the drag).
+      const fit = windowFitRef.current;
       // Only a pane the drag resized is unscaled: the others keep their stored height exactly, since
       // floor-then-round would move each of them by a pixel on every drag.
       const unscaled = (id: string, px: number): number => {
@@ -1681,6 +1689,10 @@ export default function LightweightChart({
       priceGapRef.current = null;
     }
 
+    if (shownModeRef.current !== mode) {
+      shownModeRef.current = mode;
+      modeViewPendingRef.current = true;
+    }
     if (mainKind !== null) {
       // Candles mode (`mainKind` is set exactly then).
       if (lineSeriesRef.current) {
@@ -1776,6 +1788,8 @@ export default function LightweightChart({
       });
     }
 
+    if (chart && mainRows.length > 0) showSavedZoomAfterModeSwitch(chart, mainRows.length);
+
     // Story 32.6: the saved zoom, once, with the first candles: that many bars, the latest at the
     // right edge. From here on, zoom changes are reported (see the subscription above).
     if (!visibleBarsReadyRef.current && data.length > 0 && chart) {
@@ -1790,7 +1804,7 @@ export default function LightweightChart({
 
     if (followNewestRef.current && chart) followNewestBar(chart, data, prevNewest);
     // `mainRows` changes with `data` and `chartType`; `mainKind` re-runs it on a fresh series.
-  }, [data, mainRows, mode, mainKind]);
+  }, [data, mainRows, mode, mainKind, showSavedZoomAfterModeSwitch]);
 
   useEffect(() => {
     // Story 33.12: the last-price line and label of the main series (Lines mode: the `price` line), the
@@ -1838,9 +1852,8 @@ export default function LightweightChart({
     chart.priceScale("right").applyOptions({
       mode: SCALE_MODE_OF[priceScale.mode],
       autoScale: priceScale.autoScale,
-      invertScale: priceScale.invert,
     });
-  }, [priceScale.mode, priceScale.autoScale, priceScale.invert]);
+  }, [priceScale.mode, priceScale.autoScale]);
 
   useEffect(() => {
     // Story 33.9: the scale strip's own gestures. A double-click on it is the library's auto-scale
@@ -1917,6 +1930,7 @@ export default function LightweightChart({
 
     for (const id of LINE_SERIES_IDS) series[id].setData(rows[id]);
     prevLinesLengthRef.current = rows.bid.length;
+    if (chart && rows.bid.length > 0) showSavedZoomAfterModeSwitch(chart, rows.bid.length);
 
     if (rangeBeforeUpdate && chart) {
       chart.timeScale().setVisibleLogicalRange({
@@ -1924,7 +1938,7 @@ export default function LightweightChart({
         to: rangeBeforeUpdate.to + addedAtFront,
       });
     }
-  }, [linesData, mode]);
+  }, [linesData, mode, showSavedZoomAfterModeSwitch]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -1978,6 +1992,13 @@ export default function LightweightChart({
         let pane = overlay ? null : ([...registry.values()].find((e) => e.group === group && e.pane)?.pane ?? null);
         if (!overlay && !pane) {
           pane = chart.addPane();
+          // A new pane's right scale starts from the chart-wide `rightPriceScale` options, and the
+          // price pane's scale settings are merged into those (lightweight-charts'
+          // `applyPriceScaleOptions`): a pane added while the price scale was Percent (a compare),
+          // Log, Indexed or Auto off took that mode -- the Spread pane drew its bps rebased as a
+          // percent of its first visible value (operator report 2026-10-08). Every indicator,
+          // volume and derivative pane has its own plain scale.
+          pane.priceScale("right").applyOptions({ mode: PriceScaleMode.Normal, autoScale: true });
           panesChanged = true;
         }
         const definition = spec.kind === "Line" ? LineSeries : HistogramSeries;
@@ -2289,36 +2310,38 @@ export default function LightweightChart({
     });
   }, [timeZone, labelBarSeconds]);
 
-  // False at mount, so a chart mounted in fullscreen (a timeframe change there remounts it) fits too.
-  const fullscreenSeenRef = useRef(false);
+  // False at mount, so a chart mounted in the focus view (a timeframe change there remounts it) fits.
+  const fitSeenRef = useRef(false);
   useEffect(() => {
-    // Story 33.12: entering fullscreen scales the panes to fit the stage (relative heights kept) and
-    // watches the fullscreen element for viewport resizes; leaving restores the stored heights. Both
-    // apply the container's new width at once (the resize observer would follow a frame later). View
-    // only: nothing here reports `onPaneHeights`, so the layout never saves a scaled height.
-    if (fullscreenSeenRef.current === fullscreen) return;
-    fullscreenSeenRef.current = fullscreen;
+    // The focus view: entering scales the panes to fit the window (relative heights kept), leaving
+    // restores the stored heights. Both apply the container's new width at once (the resize observer
+    // would follow a frame later). View only: nothing here reports `onPaneHeights`, so the layout
+    // never saves a scaled height.
+    if (fitSeenRef.current === fitToWindow) return;
+    fitSeenRef.current = fitToWindow;
     const chart = chartRef.current;
     const container = containerRef.current;
     if (!chart || !container) return;
     chart.applyOptions({ width: container.clientWidth });
-    const observer = resizeObserverRef.current;
-    if (fullscreen) {
-      fullscreenFitRef.current = { stored: currentPaneHeights(chart, panesRef.current), scale: 1 };
-      const host = document.fullscreenElement;
-      if (observer && host) observer.observe(host);
-      observedHostRef.current = host;
+    if (fitToWindow) {
+      windowFitRef.current = { stored: currentPaneHeights(chart, panesRef.current), scale: 1 };
       refitNow();
       return;
     }
-    if (observer && observedHostRef.current) observer.unobserve(observedHostRef.current);
-    observedHostRef.current = null;
-    const fit = fullscreenFitRef.current;
-    fullscreenFitRef.current = null;
+    const fit = windowFitRef.current;
+    windowFitRef.current = null;
     if (fit === null) return;
     const registry = panesRef.current;
     layoutPaneHeights(chart, registry, snapshotOf(registry, fit.stored), true, new Map(), knownHeightsRef.current);
-  }, [fullscreen, refitNow]);
+  }, [fitToWindow, refitNow]);
+
+  useEffect(() => {
+    // The window's height is the focus view's budget: a resize (an i3 tile changed) refits. The
+    // container's own resize observer covers a width change only.
+    if (!fitToWindow) return;
+    window.addEventListener("resize", refitNow);
+    return () => window.removeEventListener("resize", refitNow);
+  }, [fitToWindow, refitNow]);
 
   const sessionBreaksRef = useRef<{ host: MainSeriesApi | MainLineSeriesApi; primitive: SessionBreaksPrimitive } | null>(null);
   useEffect(() => {
@@ -3030,15 +3053,6 @@ export default function LightweightChart({
             onClick={() => pickScale({ auto_scale: !priceScale.autoScale })}
           >
             Auto (fits data to screen)
-          </button>
-          <button
-            type="button"
-            role="menuitemcheckbox"
-            aria-checked={priceScale.invert}
-            className="tabbtn"
-            onClick={() => pickScale({ invert: !priceScale.invert })}
-          >
-            Invert scale
           </button>
         </div>
       )}

@@ -212,7 +212,8 @@ def test_put_then_get_reflects_exactly_what_was_put(
     get_response = client.get(f"/api/coin/{_IID}/indicators")
     assert get_response.status_code == 200
     assert get_response.json() == [
-        {**entry, "source": "close", "hidden": False, "style": {}} for entry in payload
+        {**entry, "source": "close", "hidden": False, "style": {}, "instance": 1}
+        for entry in payload
     ]
 
     # Real load_config() against the same temp file the route just wrote, not a mock --
@@ -555,8 +556,36 @@ def test_put_then_get_round_trips_source_hidden_and_style(
     assert client.put(f"/api/coin/{_IID}/indicators", json=payload).status_code == 200
 
     got = client.get(f"/api/coin/{_IID}/indicators").json()
-    assert got[0] == payload[0]
-    assert got[1] == {**payload[1], "source": "close", "hidden": False, "style": {}}
+    assert got[0] == {**payload[0], "instance": 1}
+    assert got[1] == {**payload[1], "source": "close", "hidden": False, "style": {}, "instance": 1}
+
+
+def test_put_then_get_round_trips_two_copies_of_one_indicator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+    sma = {"name": "SimpleMovingAverage", "params": {"period": 20}, "category": "native"}
+    payload = [sma, {**sma, "instance": 2}]
+
+    assert client.put(f"/api/coin/{_IID}/indicators", json=payload).status_code == 200
+
+    got = client.get(f"/api/coin/{_IID}/indicators").json()
+    assert [e["instance"] for e in got] == [1, 2]
+
+
+def test_put_with_the_same_copy_listed_twice_is_422(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+    sma = {"name": "SimpleMovingAverage", "params": {"period": 20}, "category": "native"}
+    response = client.put(
+        f"/api/coin/{_IID}/indicators", json=[{**sma, "instance": 2}, {**sma, "instance": 2}]
+    )
+    assert response.status_code == 422
+    assert "duplicate indicator" in response.json()["detail"]
+    assert not Path(indicators_routes.CHART_INDICATOR_CONFIG_PATH).exists()
 
 
 def test_put_with_a_source_the_indicator_cannot_take_is_422_naming_source(
@@ -591,6 +620,9 @@ def test_put_with_wrongly_typed_source_hidden_or_style_is_400(
         {"style": {"value": "red"}},
         {"style": {"value": {"color": None}}},
         {"style": {"value": {"color": {"r": 1}}}},
+        {"instance": 0},
+        {"instance": True},
+        {"instance": "2"},
     )
     for bad in bad_fields:
         response = client.put(f"/api/coin/{_IID}/indicators", json=[{**base, **bad}])

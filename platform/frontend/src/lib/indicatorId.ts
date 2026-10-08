@@ -30,8 +30,23 @@ export function indicatorId(name: string, params: Record<string, unknown> | unde
   return !source || source === DEFAULT_SOURCE ? base : `${base}:${source}`;
 }
 
-export function entryId(entry: IndicatorConfigEntry): string {
+/** The id of the values one entry draws (`indicatorId`), shared by every copy of it: the values
+ * request and response know no copies. */
+export function valuesId(entry: IndicatorConfigEntry): string {
   return indicatorId(entry.name, entry.params, entry.source);
+}
+
+/** One copy's id (chart UX rework, 2026-10-08): the values id, plus `#<instance>` for the second and
+ * later copies of an indicator added more than once (`instance` > 1), so each copy has its own
+ * series keys, legend row and settings. The first copy keeps the plain id every saved pane height
+ * and legend action already uses. */
+export function copyId(valuesIdOf: string, instance: number | undefined): string {
+  return instance !== undefined && instance > 1 ? `${valuesIdOf}#${instance}` : valuesIdOf;
+}
+
+/** The id of one configured entry: its legend row, panes and series keys (`<id>.<output>`). */
+export function entryId(entry: IndicatorConfigEntry): string {
+  return copyId(valuesId(entry), entry.instance);
 }
 
 /** A series key `<id>.<output>`: its id and output label (the last dot, params may hold dots). */
