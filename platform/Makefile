@@ -87,6 +87,7 @@ build-base-vps:
 ## one, so without this build they would run a stale image once `up` stopped naming `collector`.
 ## Built first, so a failed build stops the target before any running service is replaced.
 up:
+	@$(STACK_SINGLE_WRITER)
 	mkdir -p $(PLATFORM_DIR)data/archive $(PLATFORM_DIR)data/coverage $(RCLONE_CONFIG_DIR)
 	$(COMPOSE) build collector
 	$(COMPOSE) up -d --build
@@ -103,6 +104,7 @@ up:
 ## Restarting `archive` mid-run kills the running maintenance step; every step is crash-safe and
 ## the scheduler repeats that venue-day on its next run (archive/application/scheduler.py).
 redeploy:
+	@$(STACK_SINGLE_WRITER)
 	mkdir -p $(PLATFORM_DIR)data/archive $(RCLONE_CONFIG_DIR)
 	$(COMPOSE) up -d --build archive ranking_engine data_api
 	$(COMPOSE) --profile live-paper up -d --build live-paper
@@ -119,6 +121,7 @@ redeploy:
 ## dYdX container keeps its old image (the image itself is rebuilt, for the maintenance targets
 ## that `run` it, as in `up`). Restart a running dYdX on the new image with `make up-dydx`.
 redeploy-all:
+	@$(STACK_SINGLE_WRITER)
 	mkdir -p $(PLATFORM_DIR)data/archive $(PLATFORM_DIR)data/coverage $(RCLONE_CONFIG_DIR)
 	$(COMPOSE) build collector
 	$(COMPOSE) up -d --build bybit_collector hyperliquid_collector archive ranking_engine data_api
@@ -132,6 +135,7 @@ redeploy-all:
 ## troll-redeploy in ~/.zshrc) without disturbing a running paper-trading bot's
 ## position/order state.
 redeploy-no-paper:
+	@$(STACK_SINGLE_WRITER)
 	mkdir -p $(PLATFORM_DIR)data/archive $(RCLONE_CONFIG_DIR)
 	$(COMPOSE) up -d --build archive ranking_engine data_api
 	$(COMPOSE) --profile tui build bot_tui
@@ -151,6 +155,7 @@ up-live-paper:
 ## cutover (Story 29.3) -- gated behind the `dydx` compose profile, the same pattern as
 ## `up-live-paper`. Runbook: docs/DEPLOY_CHECKLIST.md §8.
 up-dydx:
+	@$(STACK_SINGLE_WRITER)
 	mkdir -p $(PLATFORM_DIR)data/coverage
 	$(COMPOSE) --profile dydx up -d --build collector
 	@docker image prune -f
@@ -239,6 +244,15 @@ VERIFY_OTHER_CHECKOUTS = docker ps --filter label=com.docker.compose.project=ver
 # project>" per line: a stack of another project writing the same files would corrupt a
 # clean-slate soak, and a wipe under any running writer would delete live files.
 VERIFY_DATA_USERS = for id in $$(docker ps -q); do docker inspect -f '{{.Name}} {{with index .Config.Labels "com.docker.compose.project"}}{{.}}{{else}}-{{end}} {{range .Mounts}}{{.Source}} {{end}}' $$id; done | awk -v real="$$(realpath $(VERIFY_HERE)/data)" -v given="$(VERIFY_HERE)/data" 'function hit(m, d) { return m == d || index(m, d "/") == 1 || index(d, m "/") == 1 } { for (i = 3; i <= NF; i++) if (hit($$i, real) || hit($$i, given)) { print $$1, $$2; break } }'
+# The default stack's own guard, the mirror of `verify-up`'s: refuses while a running container of
+# another compose project (the `verify` stack, a second checkout's stack) bind-mounts this data/.
+# Two collectors on one catalog write overlapping files, after which Nautilus's `write_data` refuses
+# EVERY later write to that directory (its disjoint-interval check covers the existing files too):
+# the 2026-10-08 local outage, when `frontend-dev` started beside a running verify stack.
+# Known limit: a reboot restarts every `restart: always` container of both stacks with no make
+# target in the loop, so this only guards a stack being started by hand; the upgrade path is a
+# per-catalog writer lock the collectors take at start (capture/), refusing to run beside another.
+STACK_SINGLE_WRITER = $(VERIFY_DOCKER_UP); project="$$($(COMPOSE) config | sed -n 's/^name: //p')"; users="$$($(VERIFY_DATA_USERS) | awk -v p="$$project" '$$2 != p')"; if [ -n "$$users" ]; then echo "$@: containers of another compose project use this checkout's data/ (two catalog writers make overlapping files, and Nautilus then refuses every write): $$users -- stop them first (make verify-down for the verify stack)" >&2; exit 1; fi
 # What of data/ is not kept by a wipe: non-empty on a data/ `verify-up` never marked means a live
 # checkout's data, which `verify-up` must never mark (a later wipe would delete it).
 VERIFY_UNMARKED_DATA = [ ! -e $(PLATFORM_DIR)data/$(VERIFY_MARKER) ] && [ -d $(PLATFORM_DIR)data ] && cd $(PLATFORM_DIR)data && find . -mindepth 1 -maxdepth 1 $(VERIFY_KEEP) -print
@@ -492,6 +506,7 @@ prune-dry:
 ## self-contained (no VPS/tunnel dependency). Ctrl-C only stops the frontend -- the
 ## backend containers keep running (restart: always); `make down` stops those too.
 frontend-dev:
+	@$(STACK_SINGLE_WRITER)
 	$(COMPOSE) up -d --build redis data_api bybit_collector hyperliquid_collector ranking_engine
 	cd $(PLATFORM_DIR)frontend && npm run dev
 

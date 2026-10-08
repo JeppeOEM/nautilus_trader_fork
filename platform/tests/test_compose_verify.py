@@ -606,3 +606,19 @@ def test_verify_up_never_marks_a_data_dir_holding_unmarked_data() -> None:
         i for i, line in enumerate(up) if "$(VERIFY_MARKER)" in line and "touch" in line
     )
     assert guard < next(i for i, line in enumerate(up) if "$(VERIFY_COMPOSE)" in line)
+
+
+@pytest.mark.parametrize(
+    "target", ["up", "redeploy", "redeploy-all", "redeploy-no-paper", "up-dydx", "frontend-dev"]
+)
+def test_every_default_stack_writer_target_refuses_another_projects_writer_first(
+    target: str,
+) -> None:
+    # Two stacks on one data/ write overlapping catalog files, and Nautilus then refuses every
+    # later write to that directory (the 2026-10-08 outage): the guard runs before anything starts.
+    variables, recipes = _makefile()
+    assert recipes[target][0] == "@$(STACK_SINGLE_WRITER)"
+    guard = _expand(variables["STACK_SINGLE_WRITER"], variables)
+    assert "docker ps -q" in guard, "a daemon that does not answer is refused, not read as empty"
+    assert "'$$2 != p'" in guard, "only this stack's own compose project may use data/"
+    assert "sed -n 's/^name: //p'" in guard
