@@ -40,8 +40,11 @@ backend session.
 
 import logging
 import tempfile
+from collections.abc import Iterable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -58,12 +61,14 @@ import nautilus_trader.analysis as nautilus_analysis
 from nautilus_trader.backtest.config import ImportableFeeModelConfig
 from nautilus_trader.backtest.config import ImportableFillModelConfig
 from nautilus_trader.backtest.config import ImportableLatencyModelConfig
+from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.backtest.node import BacktestDataConfig
 from nautilus_trader.backtest.node import BacktestNode
 from nautilus_trader.backtest.node import BacktestRunConfig
 from nautilus_trader.backtest.node import BacktestVenueConfig
 from nautilus_trader.backtest.results import BacktestResult
+from nautilus_trader.cache.config import CacheConfig
 from nautilus_trader.config import ImportableStrategyConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.execution.config import ImportableExecAlgorithmConfig
@@ -78,6 +83,9 @@ from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.objects import Money
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from research.application.backtest_report import StrategySource
+from research.application.backtest_report import check_report
+from research.application.backtest_report import save_backtest_report
 from research.application.ports import FEE_MODELS
 from research.application.ports import FILL_MODELS
 from research.application.ports import LATENCY_KEYS
@@ -444,8 +452,17 @@ class NodeRunner:
 
     Invariant: every returned `RunResult` is the one its `config_id`'s engine produced (matched by
     `BacktestRunConfig.id`), and a config with no result raises `RuntimeError` naming it (DATA-07).
+    With a `report_root`, every returned result was saved as a backtest report under it
+    (`research.application.backtest_report.save_backtest_report`, from its still-live engine,
+    before `node.dispose()`, with the grid point's own params) and carries that folder as
+    `report_dir`; a report that could not be saved (a root inside the catalog or not writable, a
+    param that is not JSON, a strategy without a source file) refuses the run before it starts
+    (`check_report`), and a save that still fails raises -- never a result without its report.
     Holds no state between calls.
     """
+
+    def __init__(self, report_root: str | Path | None = None) -> None:
+        self._report_root = None if report_root is None else Path(report_root)
 
     def run(self, spec: RunSpec) -> RunResult:
         return self.sweep(spec, [{}])[0]
@@ -475,26 +492,48 @@ class NodeRunner:
                     )
                 planned[config.id] = (config, params)
                 positions[config.id] = position
+            sources = self._check_reports(spec, planned.values())
             node = BacktestNode(configs=[config for config, _ in planned.values()])
             try:
                 node.build()
                 register_statistics(node)
                 by_id = {result.run_config_id: result for result in node.run()}
                 return [
-                    self._result(node, spec, config_id, params, by_id.get(config_id))
-                    for config_id, (_, params) in planned.items()
+                    self._result(
+                        node, spec, config, params, by_id.get(config_id), sources.get(config_id)
+                    )
+                    for config_id, (config, params) in planned.items()
                 ]
             finally:
                 node.dispose()
 
-    @staticmethod
+    def _check_reports(
+        self,
+        spec: RunSpec,
+        planned: Iterable[tuple[BacktestRunConfig, dict[str, object]]],
+    ) -> dict[str, StrategySource]:
+        """
+        With a report root, check every grid point's report can be saved and read its strategy
+        files, before anything runs (`check_report`): a run is never discarded for a report that
+        could not have been written. Empty without a report root.
+        """
+        if self._report_root is None:
+            return {}
+        return {
+            config.id: check_report(replace(spec, params=params), self._report_root)
+            for config, params in planned
+        }
+
     def _result(
+        self,
         node: BacktestNode,
         spec: RunSpec,
-        config_id: str,
+        config: BacktestRunConfig,
         params: dict[str, object],
         result: BacktestResult | None,
+        source: StrategySource | None,
     ) -> RunResult:
+        config_id = config.id
         if result is None:
             raise RuntimeError(f"BacktestNode returned no result for config {config_id} ({params})")
         if result.iterations == 0:
@@ -506,28 +545,61 @@ class NodeRunner:
         engine = node.get_engine(config_id)
         if engine is None:
             raise RuntimeError(f"BacktestNode holds no engine for config {config_id}")
-        trades = ledger_from_positions(engine.trader.generate_positions_report())
-        account = engine.cache.account_for_venue(Venue(spec.venue))
-        if account is None:
-            raise RuntimeError(f"config {config_id}: no {spec.venue} account in the engine cache")
-        balance = float(spec.starting_balance)
-        return RunResult(
-            config_id=config_id,
-            params=params,
-            equity=equity_from_account(account.events, str(account.base_currency), balance),
-            trades=trades,
-            metrics=MetricReport.from_ledger(trades, balance),
-            pnl_by_day=trades.pnl_by_day(),
-            nautilus_stats={
-                "pnls": result.stats_pnls,
-                "returns": result.stats_returns,
-                "general": engine.portfolio.analyzer.get_performance_stats_general(),
-            },
-            iterations=result.iterations,
-            wall_seconds=_wall_seconds(result),
-            orders=engine.trader.generate_orders_report(),
-            fills=engine.trader.generate_order_fills_report(),
+        run = _run_result(engine, spec, config_id, params, result)
+        if self._report_root is None:
+            return run
+        # The point's own spec: a sweep point's report shows the params it ran with.
+        report_dir = save_backtest_report(
+            run,
+            replace(spec, params=params),
+            self._report_root,
+            engine=engine,
+            bar_capacity=_bar_capacity(config),
+            source=source,
         )
+        return replace(run, report_dir=report_dir)
+
+
+def _bar_capacity(config: BacktestRunConfig) -> int:
+    """Return the run engine's cache bar capacity (Nautilus's default when it sets no cache)."""
+    cache = config.engine.cache if config.engine is not None else None
+    return (cache or CacheConfig()).bar_capacity
+
+
+def _run_result(
+    engine: BacktestEngine,
+    spec: RunSpec,
+    config_id: str,
+    params: dict[str, object],
+    result: BacktestResult,
+) -> RunResult:
+    """Read one finished engine into a `RunResult` (it must not be disposed yet)."""
+    trades = ledger_from_positions(engine.trader.generate_positions_report())
+    account = engine.cache.account_for_venue(Venue(spec.venue))
+    if account is None:
+        raise RuntimeError(f"config {config_id}: no {spec.venue} account in the engine cache")
+    balance = float(spec.starting_balance)
+    analyzer = engine.portfolio.analyzer
+    return RunResult(
+        config_id=config_id,
+        params=params,
+        equity=equity_from_account(account.events, str(account.base_currency), balance),
+        trades=trades,
+        metrics=MetricReport.from_ledger(trades, balance),
+        pnl_by_day=trades.pnl_by_day(),
+        nautilus_stats={
+            "pnls": result.stats_pnls,
+            "returns": result.stats_returns,
+            "general": analyzer.get_performance_stats_general(),
+        },
+        iterations=result.iterations,
+        wall_seconds=_wall_seconds(result),
+        orders=engine.trader.generate_orders_report(),
+        fills=engine.trader.generate_order_fills_report(),
+        run_id=str(engine.run_id),
+        instance_id=str(engine.kernel.instance_id),
+        returns=analyzer.returns().copy(),
+    )
 
 
 def _wall_seconds(result: BacktestResult) -> float:

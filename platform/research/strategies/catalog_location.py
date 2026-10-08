@@ -13,7 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-The research runners' one default catalog root (DW-200).
+The research runners' one default catalog root (DW-200), and their default backtest reports root.
 
 `$CATALOG_PATH` when set and non-empty (as `research/notebooks/_params.py`, and the images'
 `/app/catalog` mount, where the file-anchored path would be the non-existent
@@ -38,3 +38,15 @@ def default_catalog_path() -> str:
     if from_env:
         return from_env
     return str(Path(__file__).resolve().parents[2] / "data" / "catalog")
+
+
+def default_reports_root() -> str:
+    """
+    Return where a runner script saves its backtest report (`NodeRunner(report_root=...)`):
+    `$BACKTEST_REPORTS_DIR` when set and non-empty (as `research/notebooks/_params.py`), else
+    `platform/data/backtest_reports`, beside the catalog root and never in it. Resolved per call.
+    """
+    from_env = os.environ.get("BACKTEST_REPORTS_DIR")
+    if from_env:
+        return from_env
+    return str(Path(__file__).resolve().parents[2] / "data" / "backtest_reports")

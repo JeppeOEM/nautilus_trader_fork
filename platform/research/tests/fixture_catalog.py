@@ -181,6 +181,7 @@ class FixturePaths:
     candles_dir: str
     errors_dir: str
     metrics_db_path: str
+    backtest_reports_dir: str
     instruments: tuple[str, ...]
     start: str
     end: str
@@ -196,6 +197,7 @@ class FixturePaths:
             "CANDLES_DIR": self.candles_dir,
             "METRICS_DB_PATH": self.metrics_db_path,
             "ERRORS_DIR": self.errors_dir,
+            "BACKTEST_REPORTS_DIR": self.backtest_reports_dir,
             "INSTRUMENTS": ",".join(self.instruments),
             "START": self.start,
             "END": self.end,
@@ -498,6 +500,8 @@ def build(root: Path) -> FixturePaths:
         candles_dir=str(root / "candles"),
         errors_dir=str(root / "errors"),
         metrics_db_path=str(root / "metrics" / "metrics.db"),
+        # Beside the fixture catalog, never in it; created by the first report a notebook saves.
+        backtest_reports_dir=str(root / "backtest_reports"),
         instruments=INSTRUMENTS,
         start=START,
         end=END,

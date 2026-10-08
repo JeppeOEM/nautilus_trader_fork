@@ -45,8 +45,9 @@
 # ## 1. Parameters
 #
 # Read from the environment (`research/notebooks/_params.py`): `CATALOG_PATH`, `INSTRUMENTS`,
-# `START`, `END`. The rest are set here; each can also be given as JSON in `NOTEBOOK_<NAME>`
-# (`_params.setting`), which is how the test harness shrinks them to its ten-minute fixture:
+# `START`, `END` and `BACKTEST_REPORTS_DIR` (where each gallery run's report folder is saved).
+# The rest are set here; each can also be given as JSON in `NOTEBOOK_<NAME>` (`_params.setting`),
+# which is how the test harness shrinks them to its ten-minute fixture:
 #
 # - `INSTRUMENT` -- the instrument backtested, by default the first of `INSTRUMENTS`;
 # - `DATA` -- the feed; the gallery needs bars, `"bars:1-MINUTE"` (Nautilus aggregates them from
@@ -85,7 +86,7 @@ SEED = setting("SEED", 42)
 CASCADE_INSTRUMENT = setting("CASCADE_INSTRUMENT", "BTCUSDT-LINEAR.BYBIT")
 CASCADE_PARAMS = setting("CASCADE_PARAMS", {})
 OFI_PARAMS = setting("OFI_PARAMS", {})
-runner = NodeRunner()
+runner = NodeRunner(report_root=params.backtest_reports_dir)
 bar_specs = gallery.default_specs(
     params.catalog_path,
     INSTRUMENT,
@@ -137,6 +138,13 @@ print(f"sizes {PERIODS or 'each strategy default'}; execution axes repeat {AXIS_
 # `RunResult` Known limit), so a position held open at the end of the window shows only its entry
 # fee.
 #
+# **Every run is saved** (`research.application.backtest_report`): one folder per row under
+# `BACKTEST_REPORTS_DIR`, `<Strategy>_<UTC time>/` with Nautilus's tearsheet (`tearsheet.html`),
+# the strategy's source file (`strategy.py`) and every number of the run (`record.json`); the
+# table under the leaderboard maps each label to its folder, and
+# `backtest_report.list_backtest_reports(params.backtest_reports_dir)` lists every saved run.
+# The execution-axis repeats of section 5 are sensitivity rows of one run and are not saved.
+#
 # A cascade row's label names its instrument and data kind (`Cascade follow short only
 # (BTCUSDT-LINEAR.BYBIT, liquidations)`): it runs on another instrument and feed than the bar rows
 # above it, and its sample is in section 3.
@@ -146,6 +154,7 @@ outcomes = gallery.run_specs(runner, specs)
 board = gallery.leaderboard(outcomes)
 print(board.to_string(index=False))
 gallery.check_outcomes(outcomes)  # the board shows a failed row first, then the run fails loudly
+print(gallery.report_frame(outcomes).to_string(index=False))
 equity = gallery.equity_frame(outcomes)
 equity_fig = go.Figure(
     [
@@ -227,7 +236,7 @@ print(ofi_sample)
 # %%
 baseline = gallery.find_outcome(outcomes, AXIS_SPEC)
 axes = gallery.execution_axes(baseline.gallery, SEED)
-axis_outcomes = gallery.run_specs(runner, axes)
+axis_outcomes = gallery.run_specs(NodeRunner(), axes)
 axis_board = gallery.axis_table(axis_outcomes, baseline)
 for axis in ("fill", "fee", "latency"):
     print(

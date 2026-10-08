@@ -27,10 +27,19 @@ forced-flow run and a default `run()` differ by more than the option. Compare th
 each other on one path -- `research.application.gallery.ofi_specs` runs the baseline and the three
 variants through `NodeRunner` alike (notebook 08) -- never against this module's default run.
 
+`report_root` saves a `seconds_liquidations` run as a backtest report folder there
+(`NodeRunner(report_root=...)`, `research.application.backtest_report`). The default path cannot:
+`snapshot_backtest` lets Nautilus dispose its engine inside `BacktestNode.run()` and returns only
+the `BacktestResult`, so `report_root` with it raises `ValueError` rather than saving nothing.
+Known limit: the default OFI run has no report; upgrade path: route it through `NodeRunner` with
+`latency_ms=0` once that path is shown to replay it identically, or save the `seconds` kind's
+gallery and notebook-04 runs, which do go through `NodeRunner`.
+
     python -m research.strategies.backtest_ofi   # from platform/
 """
 
 from decimal import Decimal
+from pathlib import Path
 
 from nautilus_trader.backtest.results import BacktestResult
 from research.application.backtest_runner import NodeRunner
@@ -49,6 +58,8 @@ def run(
     start: str = "2026-09-05",
     end: str = "2026-09-06",
     catalog_path: str | None = None,
+    *,
+    report_root: str | Path | None = None,
     **params: object,
 ) -> BacktestResult | RunResult:
     """
@@ -74,7 +85,13 @@ def run(
             params={**params, "trade_size": str(params["trade_size"])},
             data="seconds_liquidations",
         )
-        return NodeRunner().run(spec)
+        return NodeRunner(report_root=report_root).run(spec)
+    if report_root is not None:
+        raise ValueError(
+            "report_root needs the NodeRunner path (forced_flow_filter or a "
+            "liquidation_cascade_mode): the default snapshot_backtest run keeps no engine to "
+            "report from"
+        )
     return run_snapshot_backtest(
         catalog_path, symbol, start, end, _S + "OFIStrategy", _S + "OFIStrategyConfig", params
     )

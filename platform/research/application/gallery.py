@@ -562,6 +562,23 @@ def leaderboard(outcomes: Sequence[Outcome]) -> pd.DataFrame:
     )
 
 
+def report_frame(outcomes: Sequence[Outcome]) -> pd.DataFrame:
+    """
+    Return where each run was saved (`NodeRunner(report_root=...)`): one row per outcome, `label`
+    and `report_dir` -- None for a run that failed or ran without a report root, never dropped.
+    """
+    rows = [
+        {
+            "label": o.gallery.label,
+            "report_dir": None
+            if o.result is None or o.result.report_dir is None
+            else str(o.result.report_dir),
+        }
+        for o in outcomes
+    ]
+    return pd.DataFrame(rows, columns=["label", "report_dir"])
+
+
 def find_outcome(outcomes: Sequence[Outcome], label: str) -> Outcome:
     """Return the outcome labelled `label`; `ValueError` listing the labels when none matches."""
     for outcome in outcomes:

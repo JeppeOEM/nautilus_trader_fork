@@ -3471,6 +3471,23 @@ Story 33.13)
   exists. The sample line reports the UTC days touched and the window's hours. An id without a feed
   reports NaN/NA liquidation columns and counts of 0, never zeros as data.
 
+**Backtest reports (`research.application.backtest_report`, quick-dev 2026-10-08) -- written
+beside the archive, never in it.** `NodeRunner(report_root=...)` and `save_backtest_report` write
+one folder per run under `BACKTEST_REPORTS_DIR` (default `platform/data/backtest_reports/`,
+git-ignored; a root inside the catalog is refused): `<StrategyClass>_<YYYY-MM-DDTHH-MM-SSZ>/` with
+`tearsheet.html` (Nautilus's tearsheet), `strategy.py` (the strategy module, verbatim) and
+`record.json` (schema 1: `spec`, `run` ids/counts/engine time, `params`, `metrics` = `MetricReport`,
+`nautilus_stats` (`pnls` per currency, `returns`, `general`), `returns` (Nautilus's
+`PortfolioAnalyzer.returns()`), `trades`, `equity`, `pnl_by_day`/`pnl_by_hour_utc`/`pnl_by_weekday`,
+`benchmark`, `bars_panels`, `environment` = git revision (`-dirty`), Nautilus and Python versions),
+plus `index.jsonl`, one summary line per report. Every value is copied from the `RunResult` (its
+own PnL buckets, `pnl_by_hour_of_day`/`pnl_by_weekday`, included) or the engine (Nautilus's
+benchmark-relative statistics, on Nautilus 1.229+); nothing is recomputed. The one conversion is an undefined Nautilus statistic
+(NaN) stored as `null`; any other non-finite value refuses the save (`allow_nan=False`). The one
+value derived here, for the tearsheet and recorded beside it: the buy-and-hold benchmark of a one-instrument `bars:<spec>` run, the daily
+returns of each UTC day's last cached bar close (`ReturnSeries.from_prices`, a missing day never
+bridged; omitted, with the reason, when the cache was full or the run has several instruments).
+
 **Known limits pinned by Story 31.3** (each held by a test in
 `verification/tests/test_reference_series.py` or the named one, against the reference of §2.13):
 

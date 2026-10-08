@@ -19,12 +19,18 @@ window through the `BacktestRunner` port (`NodeRunner`: `BacktestNode` + `Backte
 (`1-MINUTE-LAST-INTERNAL` unless `bar_type` says otherwise).
 
     python -m research.strategies.backtest_candle_pattern   # from platform/
+
+`report_root` saves the run as a backtest report folder there (`NodeRunner(report_root=...)`,
+`research.application.backtest_report`); the command line saves into `default_reports_root()`.
 """
+
+from pathlib import Path
 
 from research.application.backtest_runner import NodeRunner
 from research.application.ports import RunResult
 from research.application.ports import RunSpec
 from research.strategies.catalog_location import default_catalog_path
+from research.strategies.catalog_location import default_reports_root
 
 
 _S = "research.strategies.candle_pattern_strategy:"
@@ -35,6 +41,8 @@ def run(
     start: str = "2026-09-05",
     end: str = "2026-09-06",
     catalog_path: str | None = None,
+    *,
+    report_root: str | Path | None = None,
     **params: object,
 ) -> RunResult:
     """
@@ -54,11 +62,16 @@ def run(
         params=params,
         data="trades",
     )
-    return NodeRunner().run(spec)
+    return NodeRunner(report_root=report_root).run(spec)
 
 
 if __name__ == "__main__":
-    result = run(long_patterns=["HAMMER", "ENGULFING"], trend_condition="above")
+    result = run(
+        long_patterns=["HAMMER", "ENGULFING"],
+        trend_condition="above",
+        report_root=default_reports_root(),
+    )
+    print(f"Report: {result.report_dir}")
     print(f"Events processed: {result.iterations:,}; closed trades: {len(result.trades)}")
     for name, value in result.metrics.as_table():
         print(f"{name:>24}: {value}")
