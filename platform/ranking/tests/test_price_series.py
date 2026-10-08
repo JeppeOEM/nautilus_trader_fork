@@ -187,7 +187,10 @@ def test_backfilled_in_memory_stats_match_the_formula_over_the_catalog_series() 
         _write_snapshot(catalog_dir, close_price=110.0, ts=t1)
         _write_snapshot(catalog_dir, close_price=130.0, ts=t2)
 
-        series = CatalogPriceHistory(catalog_dir).series(_IID, start_ns=0)
+        series = [
+            (point.ts_event, point.price)
+            for point in CatalogPriceHistory(catalog_dir).series(_IID, start_ns=0)
+        ]
         store = PriceSeriesStore()
         store.backfill(_IID, series)
         new_path = store.stats(_IID, now_ns=t2)

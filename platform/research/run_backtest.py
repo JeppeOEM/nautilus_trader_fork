@@ -22,6 +22,7 @@ OFIStrategy backtest on 1s snapshots. Run from platform/:
 import argparse
 
 from research.strategies.backtest_ofi import run
+from research.strategies.backtest_ofi import snapshot_result
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -33,7 +34,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--warmup", type=int, default=600, help="seconds of data before trading")
     a = p.parse_args(argv)
 
-    result = run(a.symbol, a.start, a.end, ofi_threshold=a.threshold, warmup_seconds=a.warmup)
+    result = snapshot_result(
+        run(a.symbol, a.start, a.end, ofi_threshold=a.threshold, warmup_seconds=a.warmup)
+    )
     print(f"Events: {result.iterations}")
     print(f"PnL: {result.stats_pnls}")
     print(f"Returns: {result.stats_returns}")

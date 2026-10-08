@@ -124,7 +124,7 @@ def test_shim_marker_scan_sees_each_marker_shape() -> None:
 
 
 # Kernel `Data` classes whose `__name__` is a persistence identifier (catalog directory name).
-_KERNEL_DATA_CLASSES = ("DydxSecondSnapshot", "OpenInterest")
+_KERNEL_DATA_CLASSES = ("DydxSecondSnapshot", "OpenInterest", "Liquidation")
 
 
 def test_each_kernel_data_class_is_registered_for_arrow_exactly_once() -> None:
@@ -135,7 +135,7 @@ def test_each_kernel_data_class_is_registered_for_arrow_exactly_once() -> None:
     """
     from nautilus_trader.serialization.arrow.serializer import _SCHEMAS
 
-    for module in ("kernel.second_snapshot", "kernel.open_interest"):
+    for module in ("kernel.second_snapshot", "kernel.open_interest", "kernel.liquidation"):
         importlib.import_module(module)
     names = [cls.__name__ for cls in _SCHEMAS]
     counts = {name: names.count(name) for name in _KERNEL_DATA_CLASSES}

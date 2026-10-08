@@ -18,16 +18,18 @@ one seconds -> bars fold over the archived 1 s rows.
 
 Four invariants, each owned by a module here. *Exactly once*: a second is folded into a bucket at
 most once, enforced by the per-instrument watermark `domain.candle_series.CandleSeries` applies and
-`infrastructure.sqlite_store` persists -- the `_UPSERT` accumulates `v` and `seconds_observed`, so a
-replayed batch would otherwise double-count. *Rebuildable from seconds*: the Parquet 1 s snapshots
-are the archive and the source of truth, this store is derived, and `application.rebuild` recomputes
-any whole UTC day from them idempotently (`python -m candles.rebuild`). *Never ahead of the
-archive*: `application.sink.CandleSink` is fed only rows whose `ParquetDataCatalog.write_data`
-already succeeded (capture's `capture.application.ports.SecondSink` port). *One fold*: `domain.fold`'s
-`fold_arrays` is the only seconds -> bars aggregation in `platform/` -- the stored closed bar
-(`application.queries.window`), the chart's forming bar (`application.forming.forming_bar`) and the
-archive-side read (`application.queries.candle_dicts_for_window`) all call it, so they cannot
-disagree. The only other fold in the platform is trades -> second, `kernel.fold.fold_trades`.
+`infrastructure.sqlite_store` persists -- the merge (`domain.fold.merge_buckets`, written back by
+`write_buckets`) accumulates `v`, `seconds_observed` and the order-flow sums, so a replayed batch
+would otherwise double-count; a liquidation's own guard is the store's `liquidations_applied`.
+*Rebuildable from seconds*: the Parquet 1 s snapshots are the archive and the source of truth, this
+store is derived, and `application.rebuild` recomputes any whole UTC day from them idempotently
+(`python -m candles.rebuild`). *Never ahead of the archive*: `application.sink.CandleSink` is fed
+only rows whose `ParquetDataCatalog.write_data` already succeeded (capture's
+`capture.application.ports.SecondSink` port). *One fold*: `domain.fold`'s `fold_arrays` is the only
+seconds -> bars aggregation in `platform/` -- the stored closed bar (`application.queries.window`),
+the chart's forming bar (`application.forming.forming_bar`) and the archive-side read
+(`application.queries.candle_dicts_for_window`) all call it, so they cannot disagree. The only other
+fold in the platform is trades -> second, `kernel.fold.fold_trades`.
 
 `domain/` (the fold, the `Candle` value type, the `CandleSeries` aggregate) is pure: stdlib, numpy
 and `kernel` only. `application/` holds the ports (`VerifiedDays`), the query and forming services,

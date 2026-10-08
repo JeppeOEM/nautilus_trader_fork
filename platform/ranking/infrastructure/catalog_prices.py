@@ -21,10 +21,18 @@ second-snapshot files, no 20-level book decode). Only trade closes: a window in 
 instrument never traded is an empty series (its pct/volatility stay None), never mark prices
 passed off as trades -- Story 31.3 deleted that fallback, which mixed a second quantity into the
 trade-close series (and so into `pct_1h`/`pct_24h`/`volatility`).
+
+Story 33.4: each point also carries the second's exact close and traded volume (buy + sell size),
+from the same rows' integer units at their own precisions, so the hourly-volume backfill is this
+one read, not a second one.
 """
 
 from kernel.catalog_files import query_second_ohlc
+from kernel.second_snapshot import SecondOHLC
 from observability import error_ledger
+
+from ranking.domain.derivs import units_decimal
+from ranking.domain.price_series import PricePoint
 
 
 # No upper bound: the series runs up to the newest archived second.
@@ -42,7 +50,7 @@ class CatalogPriceHistory:
     def __init__(self, catalog_path: str) -> None:
         self._catalog_path = catalog_path
 
-    def series(self, instrument_id: str, start_ns: int) -> list[tuple[int, float]]:
+    def series(self, instrument_id: str, start_ns: int) -> list[PricePoint]:
         rows = query_second_ohlc(
             self._catalog_path,
             instrument_id,
@@ -50,4 +58,17 @@ class CatalogPriceHistory:
             _OPEN_END_NS,
             on_foreign=error_ledger.record,
         )
-        return sorted((r.ts_event, r.close_price) for r in rows if r.close_price is not None)
+        points = [_point(r) for r in rows if r.close_price is not None]
+        return sorted(points, key=lambda point: point.ts_event)
+
+
+def _point(row: SecondOHLC) -> PricePoint:
+    if row.close_price is None or row.close_price_units is None:
+        raise ValueError(f"second {row.ts_event} has no close: not a traded second")
+    volume_units = row.buy_volume_units + row.sell_volume_units
+    return PricePoint(
+        ts_event=row.ts_event,
+        price=row.close_price,
+        close=units_decimal(row.close_price_units, row.price_precision),
+        volume=units_decimal(volume_units, row.size_precision),
+    )

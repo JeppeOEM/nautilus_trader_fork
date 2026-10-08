@@ -34,9 +34,12 @@ from kernel.indicators import MultiLevelOBI
 from kernel.indicators import microprice
 from kernel.indicators import mid_price
 from kernel.indicators import spread
+from kernel.liquidation import LiquidatedSide
+from kernel.liquidation import Liquidation
 from kernel.open_interest import OpenInterest
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.tests.snapshot_factory import make_snapshot
+from observability import error_ledger
 
 from nautilus_trader.model.currencies import BTC
 from nautilus_trader.model.currencies import USDT
@@ -52,10 +55,16 @@ from nautilus_trader.model.instruments import CurrencyPair
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from research.application import frames as frames_module
+from research.application.frames import INSTRUMENT_ATTR
+from research.application.frames import LIQUIDATION_DUPLICATE_SITE
+from research.application.frames import LIQUIDATION_READ_SITE
+from research.application.frames import LIQUIDATIONS_COLUMNS
 from research.application.frames import OBI_LEVELS
 from research.application.frames import SECONDS_COLUMNS
 from research.application.frames import CatalogFrames
 from research.tests.fixture_catalog import FixturePaths
+from research.tests.test_ofi_strategy_forced_flow import _instrument as _bybit_instrument
 
 
 _IID = "BTC-USD-PERP.DYDX"
@@ -394,3 +403,130 @@ def test_same_symbol_keeps_spot_apart_and_refuses_an_unreadable_id(tmp_path: Pat
     assert frames.same_symbol("BTCUSDT-SPOT.BYBIT") == ["BTCUSDC-SPOT.BYBIT", "BTCUSDT-SPOT.BYBIT"]
     assert frames.same_symbol("BTC-USD-PERP.DYDX") == ["BTC-USD-PERP.DYDX"]  # itself, no spot
     assert frames.same_symbol("ETHBTC-SPOT.BYBIT") == []
+
+
+def test_seconds_carry_the_exact_integer_volumes(frames: CatalogFrames) -> None:
+    # Second 0 traded 1.0 bought and 0.5 sold at the factory's size precision (Story 33.13).
+    row = frames.seconds(_IID, start=_at(0), end=_at(1)).iloc[0]
+    snapshot = _snapshot(0)
+    assert (row["buy_volume_units"], row["sell_volume_units"]) == (
+        snapshot.buy_volume_units,
+        snapshot.sell_volume_units,
+    )
+    assert row["buy_volume_units"] / 10 ** row["size_precision"] == row["buy_volume"]
+
+
+_LIQ_IID = "BTCUSDT-LINEAR.BYBIT"
+
+
+def _liquidation(ts_event: int, side: LiquidatedSide, size_units: int) -> Liquidation:
+    # Price 65 000.50 at precision 2, sizes at precision 3: a 10^-5 notional.
+    return Liquidation(
+        InstrumentId.from_str(_LIQ_IID),
+        side,
+        size_units,
+        6_500_050,
+        2,
+        3,
+        f"liq-{ts_event}",
+        ts_event,
+        ts_event + 50 * NS_PER_MS,
+    )
+
+
+@pytest.fixture
+def liquidation_frames(tmp_path: Path) -> CatalogFrames:
+    rows = [
+        _liquidation(_at(1), LiquidatedSide.LONG, 1_250),
+        _liquidation(_at(2), LiquidatedSide.SHORT, 3),
+        _liquidation(_at(3), LiquidatedSide.LONG, 40),
+        _liquidation(_DAY0 + NS_PER_DAY + NS_PER_S, LiquidatedSide.SHORT, 7),  # the next UTC day
+    ]
+    ParquetDataCatalog(str(tmp_path / "catalog")).write_data(rows)
+    return CatalogFrames(str(tmp_path / "catalog"), str(tmp_path / "candles"))
+
+
+def test_liquidations_are_decoded_once_from_their_units(
+    liquidation_frames: CatalogFrames,
+) -> None:
+    df = liquidation_frames.liquidations(_LIQ_IID, start=_at(1), end=_at(2))
+    assert tuple(df.columns) == LIQUIDATIONS_COLUMNS
+    row = df.iloc[0]
+    assert (row["side"], row["size_units"], row["price_units"]) == ("long", 1_250, 6_500_050)
+    assert (row["size_precision"], row["price_precision"]) == (3, 2)
+    assert (row["size"], row["price"]) == (1.25, 65_000.5)
+    assert row["notional"] == 81_250.625  # 1.25 x 65 000.50, at the bankruptcy price
+    assert row["venue_event_id"] == f"liq-{_at(1)}"
+    assert row["ts_init"] == _at(1) + 50 * NS_PER_MS
+    assert df.attrs[INSTRUMENT_ATTR] == _LIQ_IID
+
+
+def test_liquidations_window_is_half_open_and_crosses_utc_days(
+    liquidation_frames: CatalogFrames,
+) -> None:
+    df = liquidation_frames.liquidations(_LIQ_IID, start=_at(2), end=_at(3))
+    assert df["ts_event"].tolist() == [_at(2)]
+    both_days = liquidation_frames.liquidations(_LIQ_IID, start=_at(1), end=_DAY0 + 2 * NS_PER_DAY)
+    assert both_days["ts_event"].tolist() == [
+        _at(1),
+        _at(2),
+        _at(3),
+        _DAY0 + NS_PER_DAY + NS_PER_S,
+    ]
+    assert both_days.index[0] == pd.Timestamp(_at(1), unit="ns", tz="UTC")
+
+
+def test_every_liquidation_price_is_a_bankruptcy_price(liquidation_frames: CatalogFrames) -> None:
+    df = liquidation_frames.liquidations(_LIQ_IID, start=_at(0), end=_at(10))
+    assert set(df["price_kind"]) == {"bankruptcy"}
+
+
+def test_an_id_without_the_feed_is_the_empty_frame_with_every_column(
+    liquidation_frames: CatalogFrames,
+) -> None:
+    for iid in ("BTCUSDT-SPOT.BYBIT", "BTC-USD-PERP.HYPERLIQUID", _IID):
+        df = liquidation_frames.liquidations(iid, start=_at(0), end=_at(10))
+        assert df.empty, iid
+        assert tuple(df.columns) == LIQUIDATIONS_COLUMNS, iid
+
+
+def test_a_disagreeing_duplicate_is_ledgered_at_the_duplicate_site(tmp_path: Path) -> None:
+    first = _liquidation(_at(1), LiquidatedSide.LONG, 5)
+    forged = _liquidation(_at(1), LiquidatedSide.LONG, 6)  # the same venue event, another size
+    filler = _liquidation(_at(2), LiquidatedSide.LONG, 1)  # a wider span: a second file
+    catalog = ParquetDataCatalog(str(tmp_path))
+    catalog.write_data([first])
+    catalog.write_data([forged, filler], skip_disjoint_check=True)
+    error_ledger.reset()
+    try:
+        with pytest.raises(ValueError, match="stored twice"):
+            CatalogFrames(str(tmp_path), str(tmp_path)).liquidations(
+                _LIQ_IID, start=_at(0), end=_at(10)
+            )
+        assert error_ledger.counts() == {LIQUIDATION_DUPLICATE_SITE: 1}
+    finally:
+        error_ledger.reset()
+
+
+def test_any_other_refused_read_is_ledgered_at_the_read_site(
+    liquidation_frames: CatalogFrames, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The kernel's other refusal: a listing that kept losing files during a consolidation.
+    def refused(*_args: object) -> list[Liquidation]:
+        raise ValueError("liquidations: files kept disappearing during the read (3 listings)")
+
+    monkeypatch.setattr(frames_module, "query_liquidations", refused)
+    error_ledger.reset()
+    try:
+        with pytest.raises(ValueError, match="kept disappearing"):
+            liquidation_frames.liquidations(_LIQ_IID, start=_at(0), end=_at(10))
+        assert error_ledger.counts() == {LIQUIDATION_READ_SITE: 1}
+    finally:
+        error_ledger.reset()
+
+
+def test_definition_precisions_are_the_catalogs(tmp_path: Path) -> None:
+    ParquetDataCatalog(str(tmp_path)).write_data([_bybit_instrument()])
+    frames = CatalogFrames(str(tmp_path), str(tmp_path))
+    assert frames.definition_precisions(_LIQ_IID) == (2, 3)
+    assert frames.definition_precisions("ETHUSDT-LINEAR.BYBIT") is None

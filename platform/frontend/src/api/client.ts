@@ -6,31 +6,48 @@ import { type ChartLayout, layoutForSave } from "../lib/chartLayout";
 import type {
   AlertCreate,
   AlertResponse,
+  AlertUpdate,
   ArchiveRun,
   ArchiveRunResponse,
   ArchiveStatusResponse,
   ArchiveStep,
   CandlesResponse,
   DrawingsResponse,
+  FilterPresetItem,
+  FilterPresetsResponse,
   FootprintItem,
   FootprintResponse,
   FootprintRow,
+  FundingItem,
+  FundingResponse,
   HealthResponse,
   IndicatorCatalogEntry,
   IndicatorConfigEntry,
-  IndicatorSeriesResponse,
   IndicatorValuesResponse,
+  LiquidationBarItem,
+  LiquidationBarsResponse,
+  LiquidationItem,
+  LiquidationsResponse,
+  MarkIndexItem,
+  MarkIndexResponse,
+  MarketItem,
+  MarketsResponse,
   MetricsHistoryResponse,
+  OpenInterestItem,
+  OpenInterestResponse,
   RankingModeResponse,
   RankingsResponse,
   SnapshotSeriesResponse,
   TechnicalsColumn,
   TechnicalsValuesResponse,
+  WatchlistResponse,
 } from "./schema";
 
 export type {
+  FilterPresetItem,
   AlertCreate,
   AlertResponse,
+  AlertUpdate,
   ArchiveRun,
   ArchiveRunResponse,
   ArchiveStatusResponse,
@@ -39,15 +56,27 @@ export type {
   FootprintItem,
   FootprintResponse,
   FootprintRow,
+  FundingItem,
+  FundingResponse,
   HealthResponse,
   IndicatorCatalogEntry,
   IndicatorConfigEntry,
-  IndicatorSeriesResponse,
   IndicatorValuesResponse,
+  LiquidationBarItem,
+  LiquidationBarsResponse,
+  LiquidationItem,
+  LiquidationsResponse,
+  MarkIndexItem,
+  MarkIndexResponse,
+  MarketItem,
+  MarketsResponse,
   MetricsHistoryResponse,
+  OpenInterestItem,
+  OpenInterestResponse,
   RankingsResponse,
   SnapshotSeriesResponse,
   TechnicalsColumn,
+  WatchlistResponse,
 };
 
 /** A non-2xx response, with its status so callers can tell a proxy hiccup (502/503/504) from a
@@ -144,23 +173,64 @@ export async function fetchFootprint(
   return (await res.json()) as FootprintResponse;
 }
 
-// Story 15.4: cursor-paginated OFI/OBI/microprice/spread history (AD-F3) -- mirrors
-// fetchCandles()'s exact shape, so `useIndicatorSeries` can co-page with `useCandles`
-// using the identical before_ns/limit/bar_seconds tuple.
-export async function fetchIndicatorSeries(
+// Story 33.5: the derivatives read models (Story 33.4, `data_api/routes/derivatives.py`), on
+// fetchCandles()'s cursor contract. Bucketed pages (open interest, mark/index, liquidation bars) take
+// `bar_seconds`; event pages (funding, liquidations) do not. Each URL is written inline, so
+// `data_api/tests/test_frontend_contract.py` checks it against the served routes.
+function cursorParams(beforeNs: number, limit: number, barSeconds?: number): URLSearchParams {
+  const params = new URLSearchParams({ before_ns: String(beforeNs), limit: String(limit) });
+  if (barSeconds !== undefined) params.set("bar_seconds", String(barSeconds));
+  return params;
+}
+
+async function readPage<T>(res: Response, route: string, instrumentId: string): Promise<T> {
+  if (!res.ok) throw new HttpError(res.status, `GET /api/coin/${instrumentId}/${route} failed: ${res.status}`);
+  return (await res.json()) as T;
+}
+
+export async function fetchFunding(instrumentId: string, beforeNs: number, limit: number): Promise<FundingResponse> {
+  const params = cursorParams(beforeNs, limit);
+  const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/funding?${params}`);
+  return readPage<FundingResponse>(res, "funding", instrumentId);
+}
+
+export async function fetchOpenInterest(
   instrumentId: string,
   beforeNs: number,
   limit: number,
   barSeconds: number,
-): Promise<IndicatorSeriesResponse> {
-  const params = new URLSearchParams({
-    before_ns: String(beforeNs),
-    limit: String(limit),
-    bar_seconds: String(barSeconds),
-  });
-  const res = await fetch(`/api/indicator-series/${encodeURIComponent(instrumentId)}?${params}`);
-  if (!res.ok) throw new Error(`GET /api/indicator-series/${instrumentId} failed: ${res.status}`);
-  return (await res.json()) as IndicatorSeriesResponse;
+): Promise<OpenInterestResponse> {
+  const params = cursorParams(beforeNs, limit, barSeconds);
+  const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/open-interest?${params}`);
+  return readPage<OpenInterestResponse>(res, "open-interest", instrumentId);
+}
+
+export async function fetchMarkIndex(
+  instrumentId: string,
+  beforeNs: number,
+  limit: number,
+  barSeconds: number,
+): Promise<MarkIndexResponse> {
+  const params = cursorParams(beforeNs, limit, barSeconds);
+  const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/mark-index?${params}`);
+  return readPage<MarkIndexResponse>(res, "mark-index", instrumentId);
+}
+
+export async function fetchLiquidations(instrumentId: string, beforeNs: number, limit: number): Promise<LiquidationsResponse> {
+  const params = cursorParams(beforeNs, limit);
+  const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/liquidations?${params}`);
+  return readPage<LiquidationsResponse>(res, "liquidations", instrumentId);
+}
+
+export async function fetchLiquidationBars(
+  instrumentId: string,
+  beforeNs: number,
+  limit: number,
+  barSeconds: number,
+): Promise<LiquidationBarsResponse> {
+  const params = cursorParams(beforeNs, limit, barSeconds);
+  const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/liquidation-bars?${params}`);
+  return readPage<LiquidationBarsResponse>(res, "liquidation-bars", instrumentId);
 }
 
 // Story 15.7: cursor-paginated bid/ask/mid/micro/price history (AD-F3) for Lines mode --
@@ -224,7 +294,7 @@ export async function saveCoinIndicatorConfig(
 }
 
 // Story 15.6: cursor-paginated indicator-values history (AD-F3) -- mirrors
-// fetchCandles()/fetchIndicatorSeries()'s before_ns/limit/bar_seconds contract, plus the
+// fetchCandles()'s before_ns/limit/bar_seconds contract, plus the
 // caller-supplied `entries` (name+params) list of which picker-configured indicators to
 // replay over the same bounded window.
 export async function fetchIndicatorValues(
@@ -265,6 +335,50 @@ export async function saveTechnicalsColumns(entries: TechnicalsColumn[]): Promis
   }
 }
 
+// Story 33.7: the Rankings page's named filter presets -- one server-side list
+// (`screener_filter_presets.toml`), so a preset saved in one browser is listed in every other.
+export async function fetchFilterPresets(): Promise<FilterPresetItem[]> {
+  const res = await fetch("/api/rankings/filter-presets");
+  if (!res.ok) throw new Error(`GET /api/rankings/filter-presets failed: ${res.status}`);
+  return ((await res.json()) as FilterPresetsResponse).presets;
+}
+
+/** Replace the whole list; resolves to what the server stored (names stripped). */
+export async function saveFilterPresets(presets: FilterPresetItem[]): Promise<FilterPresetItem[]> {
+  const res = await fetch("/api/rankings/filter-presets", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ presets }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(`PUT /api/rankings/filter-presets failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return ((await res.json()) as FilterPresetsResponse).presets;
+}
+
+// Story 33.12: the chart page's pinned instruments (the watchlist rail) -- one server-side list
+// (`chart_watchlist.toml`), so a pin made in one browser shows in every other.
+export async function fetchWatchlist(): Promise<WatchlistResponse> {
+  const res = await fetch("/api/watchlist");
+  if (!res.ok) throw new HttpError(res.status, `GET /api/watchlist failed: ${res.status}`);
+  return (await res.json()) as WatchlistResponse;
+}
+
+/** Replace the whole list; resolves to what the server stored. A 422 names the refused entry. */
+export async function saveWatchlist(instruments: string[]): Promise<WatchlistResponse> {
+  const res = await fetch("/api/watchlist", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ instruments }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new HttpError(res.status, `PUT /api/watchlist failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return (await res.json()) as WatchlistResponse;
+}
+
 // Latest value of every requested indicator for every ranked instrument, keyed
 // instrument_id -> "{entry_index}.{output_attr}" -> value.
 export async function fetchTechnicalsValues(
@@ -285,13 +399,43 @@ export async function fetchAlerts(): Promise<AlertResponse[]> {
   return (await res.json()) as AlertResponse[];
 }
 
+/**
+ * A refused alert write's message for the form: the server's own `detail` (Story 33.8: a 422 names
+ * the field, `condition.upper must be greater than lower`), or each pydantic error's location and
+ * message, else the bare status.
+ */
+async function alertWriteError(res: Response, what: string): Promise<Error> {
+  const body = (await res.json().catch(() => null)) as { detail?: unknown } | null;
+  const detail = body?.detail;
+  if (typeof detail === "string") return new Error(detail);
+  if (Array.isArray(detail)) {
+    const parts = detail.map((d: { loc?: unknown[]; msg?: string }) =>
+      `${(d.loc ?? []).filter((l) => l !== "body").join(".")}: ${d.msg ?? "invalid"}`,
+    );
+    return new Error(parts.join("; "));
+  }
+  return new Error(`${what} failed: ${res.status}`);
+}
+
 export async function createAlert(body: AlertCreate): Promise<AlertResponse> {
   const res = await fetch("/api/alerts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`POST /api/alerts failed: ${res.status}`);
+  if (!res.ok) throw await alertWriteError(res, "POST /api/alerts");
+  return (await res.json()) as AlertResponse;
+}
+
+// Story 33.8: edit an alert's condition and delivery (its instrument and bar width stay); `rearm`
+// clears a triggered only-once alert. A 404 (deleted meanwhile) or 422 carries the server's detail.
+export async function updateAlert(id: string, body: AlertUpdate): Promise<AlertResponse> {
+  const res = await fetch(`/api/alerts/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await alertWriteError(res, `PUT /api/alerts/${id}`);
   return (await res.json()) as AlertResponse;
 }
 
@@ -307,6 +451,19 @@ export async function fetchArchiveStatus(): Promise<ArchiveStatusResponse> {
   const res = await fetch("/api/archive/status");
   if (!res.ok) throw new HttpError(res.status, `GET /api/archive/status failed: ${res.status}`);
   return (await res.json()) as ArchiveStatusResponse;
+}
+
+// Story 33.9: every live venue's market names (the chart's Compare picker), from the ranking
+// engine's `markets:live` lists. With `instrumentId`, that id is left out and its same-asset markets
+// on other venues come first (`same_asset`). 503 while no venue's list is live, never an empty list.
+export async function fetchMarkets(instrumentId?: string): Promise<MarketsResponse> {
+  // Two literal fetches (not one templated path) so `test_frontend_contract.py` checks the route.
+  const res =
+    instrumentId === undefined
+      ? await fetch("/api/markets")
+      : await fetch(`/api/markets?instrument_id=${encodeURIComponent(instrumentId)}`);
+  if (!res.ok) throw new HttpError(res.status, `GET /api/markets failed: ${res.status}`);
+  return (await res.json()) as MarketsResponse;
 }
 
 // Well above data_api's own 2 s Redis connect/publish bound (as SET_RANKING_MODE_TIMEOUT_MS).

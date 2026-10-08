@@ -16,12 +16,18 @@
 # %% [markdown]
 # # 08 Strategy gallery
 #
-# Thirteen ready-made strategies run side by side on one instrument and one window through the
-# same `BacktestRunner` as `04_backtest_evaluation`: five of Nautilus's own example strategies by
-# string path (`EMACross`, `EMACrossLongOnly`, `EMACrossBracket`, `BBMeanReversion` and
-# `EMACrossTWAP` with its `TWAPExecAlgorithm`), three `MACrossStrategy` runs (a different moving
-# average and exit each) and five `IndicatorSignalStrategy` runs (Bollinger, MACD, RSI, OBV and the
-# fuzzy candle). The page shows them as a leaderboard and one overlaid equity chart, then repeats
+# Twenty-one ready-made strategy runs side by side over one window through the same
+# `BacktestRunner` as `04_backtest_evaluation`. Thirteen on one instrument's bars: five of
+# Nautilus's own example strategies by string path (`EMACross`, `EMACrossLongOnly`,
+# `EMACrossBracket`, `BBMeanReversion` and `EMACrossTWAP` with its `TWAPExecAlgorithm`), three
+# `MACrossStrategy` runs (a different moving average and exit each) and five
+# `IndicatorSignalStrategy` runs (Bollinger, MACD, RSI, OBV and the fuzzy candle). Four on a Bybit
+# LINEAR instrument's liquidations: `LiquidationCascadeStrategy` following and fading liquidation
+# cascades, each short only and on both sides (Story 33.14; the derived quotes plus the archived
+# liquidations, `data="liquidations"`). Four `OFIStrategy` runs on the same instrument's 1 s
+# snapshots and liquidations (Story 33.13, `data="seconds_liquidations"`): the baseline, the
+# forced-flow filter (liquidations taken out of the cumulative delta) and the cascade `fade` and
+# `follow` gates. The page shows them as a leaderboard and one overlaid equity chart, then repeats
 # one of them across every simulated-exchange model Nautilus offers (11 fill models, 3 fee models,
 # three latency settings) to show how much of a result is the strategy and how much is a modelling
 # choice.
@@ -49,8 +55,16 @@
 #   defaults. A key is generic (`fast`, `slow`, `atr_period`, `atr_multiple`, `k`, ...) or for one
 #   strategy (`"EMACross.fast"`, `"Signal.rsi.low"`, `"MACross.HULL.atr_multiple"`); the spec of
 #   each row shows what it resolved to;
+# - `CASCADE_INSTRUMENT` -- the instrument of the four cascade runs, by default
+#   `BTCUSDT-LINEAR.BYBIT`; one without a liquidation feed (only Bybit LINEAR has one) is stated,
+#   and its four runs are left out;
+# - `CASCADE_PARAMS` -- overrides of any `LiquidationCascadeStrategyConfig` field for the four runs
+#   (`{}` for the strategy's defaults, a 1 % stop); the mode and sides are each run's own;
+# - `OFI_PARAMS` -- overrides of any `OFIStrategyConfig` field for the four OFI runs on
+#   `CASCADE_INSTRUMENT` (`{}` for the strategy's defaults); the forced-flow fields are each run's
+#   own;
 # - `STARTING_BALANCE` -- in the instrument's settlement currency;
-# - `AXIS_SPEC` -- the label of the gallery row §3 repeats across the execution models;
+# - `AXIS_SPEC` -- the label of the gallery row §5 repeats across the execution models;
 # - `SEED` -- the random seed of every fill model, so a rerun is identical.
 
 # %%
@@ -68,8 +82,11 @@ PERIODS = setting("PERIODS", {})
 STARTING_BALANCE = setting("STARTING_BALANCE", 10_000)
 AXIS_SPEC = setting("AXIS_SPEC", "EMACross")
 SEED = setting("SEED", 42)
+CASCADE_INSTRUMENT = setting("CASCADE_INSTRUMENT", "BTCUSDT-LINEAR.BYBIT")
+CASCADE_PARAMS = setting("CASCADE_PARAMS", {})
+OFI_PARAMS = setting("OFI_PARAMS", {})
 runner = NodeRunner()
-specs = gallery.default_specs(
+bar_specs = gallery.default_specs(
     params.catalog_path,
     INSTRUMENT,
     params.start,
@@ -78,7 +95,32 @@ specs = gallery.default_specs(
     PERIODS,
     STARTING_BALANCE,
 )
-print(f"{INSTRUMENT}, {DATA}, {params.start} -> {params.end}: {len(specs)} strategies")
+cascade_specs = gallery.cascade_specs(
+    params.catalog_path,
+    CASCADE_INSTRUMENT,
+    params.start,
+    params.end,
+    CASCADE_PARAMS,
+    STARTING_BALANCE,
+)
+sample = gallery.cascade_sample(
+    params.catalog_path, CASCADE_INSTRUMENT, params.start, params.end, CASCADE_PARAMS
+)
+ofi_specs = gallery.ofi_specs(
+    params.catalog_path,
+    CASCADE_INSTRUMENT,
+    params.start,
+    params.end,
+    OFI_PARAMS,
+    STARTING_BALANCE,
+)
+ofi_sample = gallery.ofi_sample(
+    params.catalog_path, CASCADE_INSTRUMENT, params.start, params.end, OFI_PARAMS
+)
+specs = [*bar_specs, *cascade_specs, *ofi_specs]
+print(f"{INSTRUMENT}, {DATA}, {params.start} -> {params.end}: {len(bar_specs)} strategies")
+print(f"{CASCADE_INSTRUMENT}, liquidations: {len(cascade_specs)} cascade runs; {sample}")
+print(f"{CASCADE_INSTRUMENT}, seconds_liquidations: {len(ofi_specs)} OFI runs; {ofi_sample}")
 print(f"sizes {PERIODS or 'each strategy default'}; execution axes repeat {AXIS_SPEC!r}")
 
 # %% [markdown]
@@ -94,6 +136,10 @@ print(f"sizes {PERIODS or 'each strategy default'}; execution axes repeat {AXIS_
 # **The equity is the account balance:** realized PnL and every fee, not marked to market (the
 # `RunResult` Known limit), so a position held open at the end of the window shows only its entry
 # fee.
+#
+# A cascade row's label names its instrument and data kind (`Cascade follow short only
+# (BTCUSDT-LINEAR.BYBIT, liquidations)`): it runs on another instrument and feed than the bar rows
+# above it, and its sample is in section 3.
 
 # %%
 outcomes = gallery.run_specs(runner, specs)
@@ -107,11 +153,61 @@ equity_fig = go.Figure(
         for label, rows in equity.groupby("label")
     ]
 )
-equity_fig.update_layout(title=f"{INSTRUMENT}: account equity per strategy", height=560)
+equity_fig.update_layout(title="Account equity per strategy", height=560)
 equity_fig.show()
 
 # %% [markdown]
-# ## 3. Execution axes
+# ## 3. Liquidation cascades
+#
+# The four `LiquidationCascadeStrategy` runs alone (`gallery.cascade_outcomes`): their leaderboard
+# rows and equity. **Read the sample first** (printed beside the chart): the window's UTC days, its
+# archived liquidations and the episodes the strategy's own detector finds in them
+# (`research.application.liquidations.replay_cascade` of the one
+# `kernel.indicators.LiquidationCascade`).
+# A handful of episodes is a handful of trades: no statistic of these rows means anything until
+# the window holds many. Follow sells into a cascade of long liquidations while it rises (and buys
+# into short liquidations) and closes when it is spent; fade waits for the spent state and takes
+# the other side. The notional is priced at the bankruptcy price (audit D-148), and exits are
+# judged once a second with market orders, never resting stops (the strategy's Known limits).
+
+# %%
+cascades = gallery.cascade_outcomes(outcomes)
+print(gallery.leaderboard(cascades).to_string(index=False))
+cascade_equity = gallery.equity_frame(cascades)
+cascade_fig = go.Figure(
+    [
+        go.Scatter(x=rows["ts"], y=rows["equity"], name=label, line_shape="hv")
+        for label, rows in cascade_equity.groupby("label")
+    ]
+)
+cascade_fig.update_layout(title=f"{CASCADE_INSTRUMENT}: liquidation cascade equity", height=420)
+cascade_fig.show()
+print(sample)
+
+# %% [markdown]
+# ## 4. OFI and the forced flow
+#
+# The four `OFIStrategy` runs alone (`gallery.ofi_outcomes`), the baseline first: each other row
+# changes exactly one input against it. The forced-flow filter takes each second's liquidated size
+# out of the cumulative delta (`kernel.indicators.organic_delta_units`, the 33.6 formula); every
+# OFI row runs with the cumulative-delta gate on (`gallery.OFI_BASE_PARAMS`: `cum_delta_threshold`
+# 0, net flow must agree with the entry's side; `OFI_PARAMS` can change it), the one decision the
+# filter can change; `fade` and `follow`
+# gate OFI's own entries on the phase of the one `LiquidationCascade` detector (`follow` lets only
+# the forced side through while the cascade builds, `fade` only the other side in the window after
+# the rate fell back under its baseline, both suppress every other entry while a cascade runs).
+# **Read the sample first** (printed under the table): the window's days and the episodes of the
+# same detector with the same parameters -- replayed on whole seconds, while the strategy advances
+# it at each snapshot, so an episode's edges can differ by about a second (audit D-223). Nothing
+# here is claimed beyond that recorded window.
+
+# %%
+ofi_runs = gallery.ofi_outcomes(outcomes)
+print(gallery.leaderboard(ofi_runs).to_string(index=False))
+print(ofi_sample)
+
+# %% [markdown]
+# ## 5. Execution axes
 #
 # The `AXIS_SPEC` row repeated with exactly one thing changed (`gallery.execution_axes`): each of
 # the 11 fill models (probabilities 0.5 / 0.5, seeded with `SEED`), each of the 3 fee models (a flat
@@ -153,7 +249,7 @@ difference_fig.show()
 print(f"{len(differences)} matched fills across {len(axes)} settings")
 
 # %% [markdown]
-# ## 4. Reading guide
+# ## 6. Reading guide
 #
 # - **Copy a row into `04_backtest_evaluation`.** A row is a `RunSpec`: in notebook 04 set
 #   `STRATEGY` and `STRATEGY_CONFIG` to the string paths of the row's strategy (an upstream example
@@ -174,5 +270,14 @@ print(f"{len(differences)} matched fills across {len(axes)} settings")
 #   are the same modelling choice at this order size, not independent hypotheses: at `trade_size`
 #   0.01 on an L1 venue the tiered and size-aware models never reach a second tier (the catalog's
 #   section 5, pitfall 6).
+# - **A cascade row is only as good as its sample.** The cascade runs trade episodes, not bars: the
+#   sample line says how many the window holds. They run on the derived 1 s quotes, so a fill is
+#   the next second's top of book; copy one into notebook 04 with `DATA` `"liquidations"` and
+#   `INSTRUMENT` a Bybit LINEAR id.
+# - **An OFI row differs from the baseline by one input.** A gap between the baseline and a
+#   variant is what the filter or the gate changed on this window's episodes, no more: with one or
+#   two episodes it is an anecdote. Copy one into notebook 04 with `DATA`
+#   `"seconds_liquidations"`, `INSTRUMENT` a Bybit LINEAR id and the row's `forced_flow_filter` /
+#   `liquidation_cascade_mode` in `PARAMS`.
 # - **One strategy per row, one position at a time.** Sizes are fixed (`trade_size` 0.01), there
 #   is no portfolio sizing, and the family strategies hold at most one position.

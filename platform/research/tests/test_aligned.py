@@ -16,7 +16,8 @@
 `research.application.aligned` (Story 27.4): bar returns read span by span over the candle store's
 coverage (a hole is a NaN return, never an error), the complete return grid, funding per hour,
 bucketed levels and changes, volume share, and the cross-venue view over the session fixture --
-the planted Bybit lead of 2 s, the dYdX outage as NaN, a missing venue as a line.
+the planted Bybit lead of 2 s, the dYdX outage as NaN, a missing venue as a line; and the
+liquidations against the open-interest change and the cross-venue episode pairing (Story 33.13).
 """
 
 import math
@@ -30,9 +31,13 @@ from candles.infrastructure.sqlite_store import CandleStore
 from candles.infrastructure.sqlite_store import db_path_for_venue
 from kernel.clocks import NS_PER_DAY
 from kernel.clocks import NS_PER_S
+from kernel.liquidation import LiquidatedSide
+from kernel.liquidation import Liquidation
 
+from nautilus_trader.model.identifiers import InstrumentId
 from research.application import aligned
 from research.application.frames import CatalogFrames
+from research.application.frames import liquidations_frame
 from research.application.ports import window_ns
 from research.domain.correlation import CorrelationMatrix
 from research.domain.correlation import correlation_matrix
@@ -401,3 +406,135 @@ def test_anchor_cluster_is_the_cluster_holding_the_anchor() -> None:
     assert aligned.anchor_cluster(clusters, "b") == ("a", "b")
     with pytest.raises(ValueError, match="no cluster"):
         aligned.anchor_cluster(clusters, "z")
+
+
+# --- Story 33.13: liquidations against open interest, and episodes across venues ---------------
+
+
+def test_finest_sum_rescales_every_part_to_the_finest_precision_exactly() -> None:
+    assert aligned.finest_sum([(25, 2), (3, 0), (1, 4)]) == (32_501, 4)  # 0.25 + 3 + 0.0001
+    assert aligned.finest_sum([]) == (0, 0)
+
+
+def _oi(rows: list[tuple[int, float]]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [{"ts_event": ts, "open_interest": oi, "ts_init": ts} for ts, oi in rows],
+        columns=["ts_event", "open_interest", "ts_init"],
+    )
+
+
+def _liquidation(ts_event: int, size_units: int, size_precision: int) -> Liquidation:
+    iid = InstrumentId.from_str(_BTC_BYBIT)
+    return Liquidation(
+        iid,
+        LiquidatedSide.LONG,
+        size_units,
+        1_000,
+        0,
+        size_precision,
+        str(ts_event),
+        ts_event,
+        ts_event,
+    )
+
+
+def test_liquidations_vs_oi_per_bucket() -> None:
+    # Four 60 s buckets: OI 100 -> 90 -> (no reading) -> 85; liquidations of 2.5 and 1 in bucket 1.
+    start = _DAY0
+    oi = _oi(
+        [
+            (start + 10 * NS_PER_S, 100.0),
+            (start + 70 * NS_PER_S, 90.0),
+            (start + 190 * NS_PER_S, 85.0),
+        ]
+    )
+    liqs = liquidations_frame(
+        _BTC_BYBIT,
+        [_liquidation(start + 61 * NS_PER_S, 25, 1), _liquidation(start + 62 * NS_PER_S, 1, 0)],
+    )
+    table = aligned.liquidations_vs_oi(liqs, oi, 60, start, start + 240 * NS_PER_S)
+    assert tuple(table.columns) == aligned.LIQUIDATIONS_VS_OI_COLUMNS
+    assert table["liquidation_size"].tolist() == [0.0, 3.5, 0.0, 0.0]
+    assert table["liquidation_notional"].tolist() == [0.0, 3_500.0, 0.0, 0.0]
+    assert np.array_equal(table["oi_change"], [math.nan, -10.0, math.nan, math.nan], equal_nan=True)
+    assert table["deleveraging"].tolist() == [False, True, False, False]
+    assert table["share_of_oi_drop"].iloc[1] == 0.35
+    assert table["share_of_oi_drop"].isna().tolist() == [True, False, True, True]
+    assert table.index[1] == pd.Timestamp(start + 60 * NS_PER_S, unit="ns", tz="UTC")
+
+
+def test_liquidations_vs_oi_without_a_feed_is_unknown_not_zero() -> None:
+    oi = _oi([(_DAY0, 100.0), (_DAY0 + 60 * NS_PER_S, 90.0)])
+    table = aligned.liquidations_vs_oi(None, oi, 60, _DAY0, _DAY0 + 120 * NS_PER_S)
+    assert table["liquidation_size"].isna().all()
+    assert table["oi_change"].tolist()[1] == -10.0
+    assert not table["deleveraging"].any()
+
+
+def _episodes(rows: list[tuple[int, int]]) -> pd.DataFrame:
+    return pd.DataFrame(rows, columns=["start_ns", "direction"])
+
+
+def test_cross_venue_pairs_the_nearest_same_direction_episode_within_the_lag() -> None:
+    a = _episodes([(100 * NS_PER_S, -1), (500 * NS_PER_S, 1), (900 * NS_PER_S, -1)])
+    b = _episodes([(103 * NS_PER_S, -1), (110 * NS_PER_S, -1), (498 * NS_PER_S, -1)])
+    result = aligned.cross_venue_liquidations(a, b, 30, "BYBIT", "OTHER")
+    # 500 s (+1) has only a -1 near it; 900 s has nothing within 30 s.
+    assert result.pairs.to_dict("records") == [
+        {"a_start_ns": 100 * NS_PER_S, "b_start_ns": 103 * NS_PER_S, "direction": -1, "lag_s": 3.0}
+    ]
+    assert (result.a_episodes, result.b_episodes, result.reason) == (3, 3, None)
+
+
+def test_cross_venue_takes_the_nearest_pair_first_so_no_later_episode_loses_its_match() -> None:
+    # a1 at 0 s and a2 at 100 s, one b at 99 s: a2 (lag -1 s) is nearer than a1 (+99 s).
+    a = _episodes([(0, -1), (100 * NS_PER_S, -1)])
+    b = _episodes([(99 * NS_PER_S, -1)])
+    result = aligned.cross_venue_liquidations(a, b, 300, "BYBIT", "OTHER")
+    assert result.pairs.to_dict("records") == [
+        {"a_start_ns": 100 * NS_PER_S, "b_start_ns": 99 * NS_PER_S, "direction": -1, "lag_s": -1.0}
+    ]
+
+
+def test_cross_venue_lines_say_when_no_pair_started_within_the_lag() -> None:
+    a = _episodes([(0, -1)])
+    result = aligned.cross_venue_liquidations(a, _episodes([(900 * NS_PER_S, -1)]), 30, "A", "B")
+    assert result.lines() == [
+        "A vs B: 1 vs 1 episode(s)",
+        "no same-direction episode pair started within the lag",
+    ]
+    empty = aligned.cross_venue_liquidations(a, _episodes([]), 30, "A", "B")
+    assert empty.lines()[1] == "no cascade episode on B"
+
+
+def test_an_empty_side_gives_no_pair_and_names_itself() -> None:
+    a = _episodes([(100 * NS_PER_S, -1)])
+    result = aligned.cross_venue_liquidations(a, _episodes([]), 30, "BYBIT", "HYPERLIQUID")
+    assert result.pairs.empty
+    assert result.reason == "no cascade episode on HYPERLIQUID"
+    with pytest.raises(ValueError, match="max_lag_s"):
+        aligned.cross_venue_liquidations(a, a, -1)
+
+
+def test_the_first_oi_change_is_taken_against_the_bucket_before_the_window() -> None:
+    start = _DAY0 + 600 * NS_PER_S
+    assert aligned.oi_window_start(start + 30 * NS_PER_S, 60) == start - 60 * NS_PER_S
+    oi = _oi([(start - 30 * NS_PER_S, 100.0), (start + 10 * NS_PER_S, 96.0)])
+    table = aligned.liquidations_vs_oi(None, oi, 60, start, start + 60 * NS_PER_S)
+    assert table["oi_change"].tolist() == [-4.0]  # the pre-window bucket is not an output row
+    assert table.index[0] == pd.Timestamp(start, unit="ns", tz="UTC")
+
+
+def test_cross_venue_pairing_is_one_to_one_and_a_tie_goes_to_the_later_b() -> None:
+    # Both a episodes are nearest to b at 100 s; the first (by start) takes it, the second the
+    # next unused one within the lag. A b equally far either side of an a: the later one.
+    a = _episodes([(102 * NS_PER_S, -1), (99 * NS_PER_S, -1), (500 * NS_PER_S, 1)])
+    b = _episodes(
+        [(100 * NS_PER_S, -1), (110 * NS_PER_S, -1), (495 * NS_PER_S, 1), (505 * NS_PER_S, 1)]
+    )
+    result = aligned.cross_venue_liquidations(a, b, 30)
+    pairs = result.pairs
+    assert pairs["a_start_ns"].tolist() == [99 * NS_PER_S, 102 * NS_PER_S, 500 * NS_PER_S]
+    assert pairs["b_start_ns"].tolist() == [100 * NS_PER_S, 110 * NS_PER_S, 505 * NS_PER_S]
+    assert pairs["b_start_ns"].is_unique
+    assert pairs["lag_s"].tolist() == [1.0, 8.0, 5.0]

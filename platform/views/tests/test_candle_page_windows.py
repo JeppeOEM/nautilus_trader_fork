@@ -39,7 +39,6 @@ _DAY = 86_400 * _S
 _WEEK = 7 * _DAY
 # A Monday 00:00 UTC (1970-01-05 plus whole weeks): a 1W, 1D, 45m and 30m bucket start at once.
 _MONDAY = 4 * _DAY + 2_900 * _WEEK
-_OHLC = ("t", "o", "h", "l", "c", "v")
 
 
 def _write(catalog_path: str, stamps: list[int]) -> None:
@@ -76,6 +75,7 @@ def _page(tmp_path: Path, before_ns: int, limit: int, bar_seconds: int) -> tuple
         catalog_path=str(tmp_path),
         candles_dir=str(tmp_path / "no-candle-store"),
         recent_rows=lambda *_: [],
+        recent_liquidations=lambda *_: [],
     )
 
 
@@ -88,7 +88,8 @@ def _assert_every_bar_is_whole(tmp_path: Path, served: list[dict], bar_seconds: 
     whole = _whole_bucket_bars(tmp_path, bar_seconds)
     assert served
     for bar in served:
-        assert {k: bar[k] for k in _OHLC} == whole[bar["t"]]
+        # Every key of the whole-bucket bar, the Story 33.3 order-flow columns included.
+        assert {k: bar[k] for k in whole[bar["t"]]} == whole[bar["t"]]
 
 
 def test_the_first_1w_page_mid_week_never_serves_a_truncated_previous_week(
@@ -171,5 +172,5 @@ def test_a_historical_mid_bucket_cursor_folds_only_the_seconds_before_it(tmp_pat
 
     seen = [r for r in query_second_ohlc(str(tmp_path), _IID, 0, 2**62) if r.ts_event < before_ns]
     (expected,) = bars_from_rows(seen, 60)
-    assert [{k: bar[k] for k in _OHLC} for bar in served] == [expected]
+    assert [{k: bar[k] for k in expected} for bar in served] == [expected]
     assert served[0]["partial"] is True  # 30 of 60 seconds observed

@@ -7,7 +7,28 @@ import { describe, expect, it } from "vitest";
 const files = {
   ...import.meta.glob(["./*.ts", "!./*.test.ts"], { query: "?raw", import: "default", eager: true }),
   ...import.meta.glob(["../pages/ChartPage.tsx"], { query: "?raw", import: "default", eager: true }),
+  // Story 33.12: the watchlist rail, the symbol search, the shortcut sheet, the compare picker and the
+  // time and shortcut modules -- the watchlist is server-side, fullscreen is never kept anywhere.
+  ...import.meta.glob(
+    [
+      "../components/chart/{WatchlistRail,SymbolSearch,ShortcutSheet,CompareControl}.tsx",
+      "../lib/{time,shortcuts}.ts",
+    ],
+    { query: "?raw", import: "default", eager: true },
+  ),
 } as Record<string, string>;
+
+/** Story 33.12's files: they touch no browser storage at all. */
+const STORY_33_12_FILES = [
+  "./useFullscreen.ts",
+  "./useWatchlist.ts",
+  "../components/chart/WatchlistRail.tsx",
+  "../components/chart/SymbolSearch.tsx",
+  "../components/chart/ShortcutSheet.tsx",
+  "../components/chart/CompareControl.tsx",
+  "../lib/time.ts",
+  "../lib/shortcuts.ts",
+];
 
 const stripComments = (code: string) => code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 
@@ -31,6 +52,13 @@ describe("no chart setting is kept in the browser", () => {
     expect([...new Set(keys)].sort()).toEqual([...(LEGACY_IMPORTS[name] ?? [])].sort());
     expect(code).not.toMatch(/localStorage\s*\.\s*setItem/);
     expect(code).not.toMatch(/sessionStorage/);
+  });
+
+  it("keeps the watchlist, fullscreen and the Story 33.12 settings out of browser storage", () => {
+    for (const name of STORY_33_12_FILES) {
+      expect(Object.keys(files)).toContain(name);
+      expect(stripComments(files[name])).not.toMatch(/localStorage|sessionStorage|indexedDB/);
+    }
   });
 
   it("the allow-listed files touch the keys only to read and remove them", () => {

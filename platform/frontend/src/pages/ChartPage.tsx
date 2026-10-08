@@ -1,32 +1,58 @@
 import { CrosshairMode, type IChartApi, type Time } from "lightweight-charts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useParams } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
 
 import { fetchCoinIndicatorConfig, fetchIndicatorCatalog, saveCoinIndicatorConfig } from "../api/client";
 import AlertDialog from "../components/chart/AlertDialog";
 import IndicatorPicker, { type IndicatorPickerHandle } from "../components/chart/IndicatorPicker";
-import type { SettingsOutput } from "../components/chart/IndicatorSettingsDialog";
+import IndicatorSettingsDialog, { type SettingsOutput, type SettingsPatch } from "../components/chart/IndicatorSettingsDialog";
+import LiquidationTape from "../components/chart/LiquidationTape";
+import CompareControl from "../components/chart/CompareControl";
+import ShortcutSheet from "../components/chart/ShortcutSheet";
+import SymbolSearch from "../components/chart/SymbolSearch";
+import WatchlistRail from "../components/chart/WatchlistRail";
+import CompareFeed, { type CompareFeedState } from "../components/chart/CompareFeed";
+import { comparePaneSpecs, mainSlots, spreadPaneSpec } from "../components/chart/comparePanes";
+import { DERIVATIVE_OUTPUT_TOKENS, DERIVATIVE_PANE_IDS, MARK_INDEX_GROUP } from "../components/chart/derivativePanes";
 import type { LegendAction } from "../components/chart/legend";
 import LightweightChart, {
   type ChartMode,
+  type ChartPoint,
   type DrawingSpec,
+  type Placement,
   type LegendExtra,
   type VolumeProfileSpec,
   type IndicatorPaneSpec,
+  type IndicatorPlot,
   type PriceLineSpec,
+  type PriceScalePatch,
 } from "../components/chart/LightweightChart";
+import {
+  type ShortcutAction,
+  TIMEFRAME_BUFFER_IDLE_MS,
+  TIMEFRAME_BUFFER_MAX,
+  isTypingContext,
+  shortcutFor,
+  timeframeFromBuffer,
+} from "../lib/shortcuts";
+import { TIME_ZONES, TIME_ZONE_LABELS, type TimeZoneSetting } from "../lib/time";
+import { type Fullscreen, useFullscreen } from "../hooks/useFullscreen";
 import type { TrendlineAnchor } from "../components/chart/primitives/TrendlinePrimitive";
-import SessionProfileControl from "../components/chart/SessionProfileControl";
-import VrvpControl from "../components/chart/VrvpControl";
-import VolumeProfileSettingsPanel from "../components/chart/VolumeProfileSettings";
+import { type MagnetMode, nextDragGesture, nextMagnetMode, replaceDrawing } from "../lib/drawingKit";
+import ToolRail from "../components/chart/ToolRail";
+import type { AlertCondition } from "../lib/alertConditions";
+import { type ChartTool, type ChartToolDef, groupOfTool, toolDef } from "../lib/chartTools";
+import VolumeOverlaysDialog, { type SessionSlot, VolumeOverlayNotices } from "../components/chart/VolumeOverlaysDialog";
 import {
   DEFAULT_VOLUME_PROFILE_SETTINGS,
   buildRangeProfile,
   type VolumeProfile,
   type VolumeProfileSettings,
 } from "../lib/volumeProfile";
-import { type AutoAnchorPreset, DEFAULT_AUTO_ANCHOR, anchorBars, anchorTime } from "../lib/autoAnchor";
-import { anchoredVwap, breakAtGaps } from "../lib/anchoredVwap";
+import { DEFAULT_AUTO_ANCHOR, anchorBars, anchorTime } from "../lib/autoAnchor";
+import { STORED_VWAP_SOURCE, type VwapPoint, anchoredVwap, breakAtGaps, storedVwapPoints } from "../lib/anchoredVwap";
+import { formatIndicatorValue, isIndicatorUnit } from "../lib/indicatorFormat";
+import { volumeBarColor } from "../lib/volumeColor";
 import {
   DEFAULT_IB_MINUTES,
   type InitialBalance,
@@ -52,21 +78,24 @@ import {
   type SessionProfileEntry,
   type SessionProfileSettings,
 } from "../lib/sessionProfile";
-import { chartVar, fibLevelColor } from "../components/chart/chartTheme";
+import { chartVar, fibLevelColor, newDrawingContext } from "../components/chart/chartTheme";
 import DrawingSettingsDialog from "../components/chart/DrawingSettingsDialog";
 import FootprintSettingsDialog from "../components/chart/FootprintSettingsDialog";
+import VolumeSettingsDialog from "../components/chart/VolumeSettingsDialog";
 import type { FootprintRenderSpec } from "../components/chart/primitives/FootprintPrimitive";
 import {
+  type Anchor,
   type Drawing,
   type DragPoint,
   type InstrumentPrecision,
-  type PositionSide,
   applyHandleDrag,
+  buildDrawing,
+  channelPlaceable,
   defaultFibLevels,
+  isLineDrawing,
+  kindOfTool,
   nextDrawingId,
-  newAnchoredVp,
-  newAnchoredVwap,
-  newPosition,
+  placementOf,
   safeDecimal,
   snapIndex,
   storedTime,
@@ -75,11 +104,29 @@ import { roundToPrecision } from "../lib/units";
 import { type ChartDrawings, useChartDrawings } from "../hooks/useChartDrawings";
 import { DEFAULT_SOURCE, entryId, splitSeriesKey } from "../lib/indicatorId";
 import { outputStyle } from "../lib/indicatorStyle";
+import { buildPatternMarkers, drawsPatternMarkers, PATTERN_INDICATOR, patternReadout } from "../lib/patternMarkers";
 import { assignPaneColor } from "../components/chart/paneColors";
 import type { IndicatorCatalogEntry, IndicatorConfigEntry } from "../api/schema";
 import { useCandles } from "../hooks/useCandles";
 import { TIMEFRAMES } from "../timeframes";
-import { type ChartLayout, type FootprintSettings, type VolumeProfileLayout } from "../lib/chartLayout";
+import {
+  type ChartLayout,
+  DERIVATIVE_KEYS,
+  DERIVATIVE_LABELS,
+  DERIVATIVE_OUTPUTS,
+  type DerivativeKey,
+  type DerivativesLayout,
+  type FootprintSettings,
+  type LiquidationMeasure,
+  type VolumeColorMode,
+  type VolumeProfileLayout,
+  type CompareLayout,
+  type LastPriceLayout,
+  type PriceScaleLayout,
+} from "../lib/chartLayout";
+import { CHART_TYPES, CHART_TYPE_LABELS, type ChartType, PRICE_SCALE_LABELS, PRICE_SCALE_MODES, type PriceScaleModeName } from "../lib/chartTypes";
+import { COMPARE_GROUP_PREFIX, SPREAD_GROUP, withCompareAdded } from "../lib/compare";
+import { useChartDerivatives } from "../hooks/useChartDerivatives";
 import { useFootprint } from "../hooks/useFootprint";
 import { useChartLayout } from "../hooks/useChartLayout";
 import { useReplay } from "../hooks/useReplay";
@@ -87,6 +134,7 @@ import { useSessionCandles } from "../hooks/useSessionCandles";
 import { useVisibleRange } from "../hooks/useVisibleRange";
 import { useLiveCandle } from "../hooks/useLiveCandle";
 import { usePickerIndicatorValues } from "../hooks/usePickerIndicatorValues";
+import { useStoredAnchoredVwap } from "../hooks/useStoredAnchoredVwap";
 import { useSnapshotSeries } from "../hooks/useSnapshotSeries";
 
 // The default chart is candles + a volume pane only; every other indicator is added
@@ -168,112 +216,34 @@ function panelForKey(key: string, catalog: Record<string, IndicatorCatalogEntry>
 
 // Legend title, TradingView-style: name plus its params and, when it is not the close, its
 // source, e.g. "RelativeStrengthIndex (14)" or "SimpleMovingAverage (20, hl2)". Per instance:
-// RSI(14) and RSI(21) are two titles.
-function legendTitle(entry: IndicatorConfigEntry): string {
+// RSI(14) and RSI(21) are two titles. Story 33.11: the catalog's `note` follows on the legend
+// ("ZigZag (5) · repaints last leg"); the settings dialog's title omits it.
+function legendTitle(entry: IndicatorConfigEntry, note?: string | null): string {
   const parts: unknown[] = Object.values(entry.params ?? {});
   if (entry.source && entry.source !== DEFAULT_SOURCE) parts.push(entry.source);
-  return parts.length ? `${entry.name} (${parts.join(", ")})` : entry.name;
+  const title = parts.length ? `${entry.name} (${parts.join(", ")})` : entry.name;
+  return note ? `${title} · ${note}` : title;
 }
 
-// Story 18.1 (AC #1): the chart's drawing-tool state -- "cursor" is the inert default.
-// Stories 18.2/18.3 extend this union with their tools, never a second state variable.
-export type ChartTool =
-  | "cursor"
-  | "hline"
-  | "trendline"
-  | "fib"
-  | "long"
-  | "short"
-  | "measure"
-  | "frvp"
-  | "avp"
-  | "avwap";
+const INDICATOR_PLOTS: readonly IndicatorPlot[] = ["line", "steps", "points", "swing"];
 
-interface ChartToolDef {
-  id: ChartTool;
-  label: string;
-  ariaLabel: string;
-  /** Hover tooltip, where the label alone does not say what the button does. */
-  title?: string;
-  /** No meaning in Lines mode (no single main series to attach to -- spec Task 2's
-   * MVP scope decision): disables the button there and disarms an armed tool (see the
-   * mode-guard effect in ChartInner). */
-  candlesOnly: boolean;
-  /** Places a drawing that is saved with the coin: off until the coin's drawings have loaded (a
-   * placement before then would be overwritten by the load, or overwrite the server's list). */
-  placesDrawing?: boolean;
-  /** Labels its prices at the instrument's precision: off until the first candles response has
-   * carried it, never at a guessed one. */
-  needsPrecision?: boolean;
+/** The catalog's plot hint for one output; absent or unknown draws a plain line. */
+function plotOf(catalogEntry: IndicatorCatalogEntry | undefined, output: string): IndicatorPlot | undefined {
+  const plot = catalogEntry?.plot?.[output];
+  return (INDICATOR_PLOTS as readonly string[]).includes(plot ?? "") ? (plot as IndicatorPlot) : undefined;
 }
 
-// The left tool rail's tools, as data -- Stories 18.2/18.3 append entries here and
-// the toolbar markup below never changes shape.
-// Story 18.10 (spec §A8.1): two clusters, top to bottom -- [cursor, crosshair toggle]
-// then the drawing tools [line, horizontal line, measurement, + the FRVP profile tool].
-// The crosshair toggle is not an exclusive tool (it is a view option), so it is rendered
-// between the clusters rather than living in this list.
-const SELECT_TOOLS: readonly ChartToolDef[] = [
-  {
-    id: "cursor",
-    label: "Cursor",
-    ariaLabel: "Cursor tool",
-    // The disarm, and the one mode in which drawings can be edited (Story 32.3).
-    title: "Select / edit drawings (Esc)",
-    candlesOnly: false,
-  },
-];
-const DRAWING_TOOLS: readonly ChartToolDef[] = [
-  { id: "trendline", label: "Trend", ariaLabel: "Trendline tool", candlesOnly: false, placesDrawing: true },
-  { id: "hline", label: "HLine", ariaLabel: "Horizontal line tool", candlesOnly: true, placesDrawing: true },
-  {
-    id: "fib",
-    label: "Fib",
-    ariaLabel: "Fibonacci retracement tool",
-    title: "Fibonacci retracement: drag from anchor A to anchor B",
-    candlesOnly: false,
-    placesDrawing: true,
-    needsPrecision: true,
-  },
-  {
-    id: "long",
-    label: "Long",
-    ariaLabel: "Long position tool",
-    title: "Long position: click the entry price",
-    candlesOnly: false,
-    placesDrawing: true,
-    needsPrecision: true,
-  },
-  {
-    id: "short",
-    label: "Short",
-    ariaLabel: "Short position tool",
-    title: "Short position: click the entry price",
-    candlesOnly: false,
-    placesDrawing: true,
-    needsPrecision: true,
-  },
-  { id: "measure", label: "Measure", ariaLabel: "Measurement tool", candlesOnly: true },
-  { id: "frvp", label: "FRVP", ariaLabel: "Fixed range volume profile tool", candlesOnly: true },
-  // Story 32.7: single-click drawings, saved with the coin's drawings; both read the candle bars.
-  {
-    id: "avp",
-    label: "AVP",
-    ariaLabel: "Anchored volume profile tool",
-    title: "Anchored volume profile: click the bar it starts at",
-    candlesOnly: true,
-    placesDrawing: true,
-  },
-  {
-    id: "avwap",
-    label: "AVWAP",
-    ariaLabel: "Anchored VWAP tool",
-    title: "Anchored VWAP: click the bar it starts at",
-    candlesOnly: true,
-    placesDrawing: true,
-    needsPrecision: true,
-  },
-];
+/** The pattern a `CandlePattern` entry detects (its `pattern` param, else the catalog default). */
+// A CandlePattern instance's pattern: its entry's param, else -- a stale series no entry owns any
+// more -- the `pattern=` its instance id carries (`indicatorId`), and only then the catalog default.
+function patternOf(
+  entry: IndicatorConfigEntry | undefined,
+  catalogEntry: IndicatorCatalogEntry | undefined,
+  instanceId?: string,
+): string {
+  const fromId = instanceId?.match(/(?:^|[_,])pattern=([^,:]+)/)?.[1];
+  return String(entry?.params?.pattern ?? fromId ?? catalogEntry?.params?.pattern ?? "");
+}
 
 type TpoDetail = { rows: TpoRow[]; balance: InitialBalance | null; ibMinutes: number };
 type TpoDetailCache = WeakMap<VolumeProfile, TpoDetail>;
@@ -300,16 +270,9 @@ function trimAfter<T extends { time: Time }>(rows: T[], cutoff: number | null): 
 }
 
 // The wanted start of its history is not part of it: that follows the clock (see `sessionNowMs`).
-interface SessionConfig {
-  preset: SessionPreset;
-  period: SessionPeriod;
-  settings: SessionProfileSettings;
-  /** Story 32.7: the Auto Anchored preset, the TPO's initial balance (minutes) and letters switch;
-   * kept whichever preset is on, so switching back restores them. */
-  anchor: AutoAnchorPreset;
-  ibMinutes: number;
-  letters: boolean;
-}
+// The anchor, initial balance and letters are kept whichever preset is on, so switching back
+// restores them.
+type SessionConfig = SessionSlot;
 
 // Story 18.8: each session's longest bar spans this fraction of the session's width.
 const SESSION_WIDTH_FRACTION = 0.7;
@@ -340,11 +303,133 @@ interface EdgeGhost {
 }
 
 const NO_BARS = (): number | null => null;
+
+// Story 33.5: the Derivatives group's legend groups -> the layout entry each belongs to.
+const DERIVATIVE_OF_GROUP: Record<string, DerivativeKey> = {
+  deriv_oi: "oi",
+  deriv_funding: "funding",
+  deriv_basis: "basis",
+  [MARK_INDEX_GROUP]: "mark_index",
+  deriv_liquidations: "liquidations",
+};
+
+/** A copy of `set` with `item` added, or removed when present. */
+function toggled(set: ReadonlySet<string>, item: string): ReadonlySet<string> {
+  const next = new Set(set);
+  if (!next.delete(item)) next.add(item);
+  return next;
+}
+
+function derivativeOfGroup(group: string): DerivativeKey | null {
+  return Object.hasOwn(DERIVATIVE_OF_GROUP, group) ? DERIVATIVE_OF_GROUP[group] : null;
+}
+
+/** Why the Liquidation tape button is disabled (its tooltip), or undefined while it is not. */
+function tapeUnavailableReason(spot: boolean, candles: boolean, marketKnown: boolean): string | undefined {
+  if (spot) return "spot: no derivatives";
+  if (!candles) return "Candles mode only";
+  if (!marketKnown) return "waiting for the instrument's market";
+  return undefined;
+}
+
+function derivativeOnStates(layout: DerivativesLayout): Record<DerivativeKey, boolean> {
+  return Object.fromEntries(DERIVATIVE_KEYS.map((key) => [key, layout[key].on])) as Record<DerivativeKey, boolean>;
+}
+
+// The Style rows of each entry's settings: a histogram output edits its up/down colours, a line its
+// colour, width and style. The seeds are the chart tokens the panes draw with while nothing is stored.
+const DERIVATIVE_OUTPUT_KINDS: Record<string, "Line" | "Histogram"> = { rate: "Histogram", liquidations: "Histogram" };
+
+function derivativeOutputs(key: DerivativeKey): SettingsOutput[] {
+  return DERIVATIVE_OUTPUTS[key].map((label) => {
+    const tokens = DERIVATIVE_OUTPUT_TOKENS[label];
+    return {
+      label,
+      kind: DERIVATIVE_OUTPUT_KINDS[label] ?? "Line",
+      defaultColor: chartVar(tokens.color),
+      defaultUpColor: chartVar(tokens.up),
+      defaultDownColor: chartVar(tokens.down),
+    };
+  });
+}
+
+/** An applied settings patch on one entry: its style, and Liquidations' `measure` and `markers`. */
+function applyDerivativePatch(prev: DerivativesLayout, key: DerivativeKey, patch: SettingsPatch): DerivativesLayout {
+  const style = Object.fromEntries(Object.entries(patch.style).filter(([, s]) => Object.keys(s).length > 0));
+  const entry = { ...prev[key], style };
+  if (key !== "liquidations") return { ...prev, [key]: entry };
+  const measure = patch.params.measure === "notional" ? "notional" : ("size" as LiquidationMeasure);
+  const markers = patch.params.markers !== false;
+  return { ...prev, liquidations: { ...prev.liquidations, ...entry, measure, markers } };
+}
+
+/** The legend gear's modal for one Derivatives entry: the one settings dialog (`IndicatorSettingsDialog`),
+ * with Liquidations' `measure` (size / notional) and `markers` (true / false) as its inputs. */
+function DerivativeSettingsDialog({
+  entryKey,
+  settings,
+  onApply,
+  onRemove,
+  onClose,
+}: {
+  entryKey: DerivativeKey;
+  settings: DerivativesLayout;
+  onApply: (patch: SettingsPatch) => void;
+  onRemove: () => void;
+  onClose: () => void;
+}) {
+  const liquidations = settings.liquidations;
+  const params: Record<string, unknown> =
+    entryKey === "liquidations" ? { measure: liquidations.measure, markers: liquidations.markers } : {};
+  const entry: IndicatorConfigEntry = {
+    name: DERIVATIVE_LABELS[entryKey],
+    category: "derivatives",
+    params,
+    style: settings[entryKey].style as IndicatorConfigEntry["style"],
+  };
+  const catalogEntry: IndicatorCatalogEntry = {
+    params,
+    panel: "",
+    category: "derivatives",
+    choices: entryKey === "liquidations" ? { measure: ["size", "notional"], markers: ["true", "false"] } : {},
+    outputs: [], // a derivatives pane, not a catalog indicator: no alert reads its outputs
+  };
+  return (
+    <IndicatorSettingsDialog
+      title={DERIVATIVE_LABELS[entryKey]}
+      entry={entry}
+      catalogEntry={catalogEntry}
+      outputs={derivativeOutputs(entryKey)}
+      disabled={false}
+      onApply={(patch) => {
+        onApply(patch);
+        // The layout saves itself (useChartLayout); a failed save is reported under the chart.
+        return Promise.resolve(null);
+      }}
+      onRemove={onRemove}
+      onClose={onClose}
+    />
+  );
+}
 const NONE: never[] = [];
+// Story 33.10: the drawings on screen while all are hidden (a stable empty list, so no memo churns).
+const NONE_DRAWN: Drawing[] = [];
+
+/** A drawing with its `locked` / `hidden` flag set; a cleared flag is removed (absent = false), so an
+ * unlocked drawing stores exactly what it did before it was ever locked. */
+function withFlag(d: Drawing, flag: "locked" | "hidden", on: boolean): Drawing {
+  if ((d[flag] === true) === on) return d;
+  if (on) return { ...d, [flag]: true };
+  const { [flag]: _cleared, ...rest } = d;
+  return rest as Drawing;
+}
 
 /** Story 18.4's replay control bar. DW-146: a click that would do nothing is never silently
  * ignored -- a pick on a data gap says so, Play/Step forward at the newest loaded bar are disabled
  * with "End of loaded data" shown, Step back at the start marker is disabled with a tooltip. */
+/** Story 33.12: why the Replay button is disabled in Lines mode (the operator's rule, 2026-10-07). */
+const REPLAY_LINES_REASON = "Replay is available on candle charts";
+
 function ReplayControls({ replay, onGoTo }: { replay: ReturnType<typeof useReplay>; onGoTo: () => void }) {
   if (replay.mode === "picking") {
     return (
@@ -398,6 +483,16 @@ interface ChartInnerProps {
   onLayout: (change: (prev: ChartLayout) => ChartLayout) => void;
   onSaveAsDefault: () => void;
   onResetToDefault: () => void;
+  /** The tool each rail group last armed, by group id: held above the timeframe and coin remounts. */
+  toolMemory: Partial<Record<string, ChartTool>>;
+  onToolUsed: (groupId: string, tool: ChartTool) => void;
+  /** Story 33.10: the drawing magnet, held beside `toolMemory` (view state, never persisted). */
+  magnet: MagnetMode;
+  onMagnet: (mode: MagnetMode) => void;
+  /** Story 33.12: the stage's fullscreen, held above the timeframe remount (the stage element is). */
+  fullscreen: Fullscreen;
+  watchlistOpen: boolean;
+  onWatchlistToggle: () => void;
 }
 
 function ChartInner({
@@ -413,6 +508,13 @@ function ChartInner({
   onLayout,
   onSaveAsDefault,
   onResetToDefault,
+  toolMemory,
+  onToolUsed,
+  magnet,
+  onMagnet,
+  fullscreen,
+  watchlistOpen,
+  onWatchlistToggle,
 }: ChartInnerProps) {
   const [chart, setChart] = useState<IChartApi | null>(null);
   const patchLayout = useCallback(
@@ -435,23 +537,64 @@ function ChartInner({
   const [activeTool, setActiveTool] = useState<ChartTool>("cursor");
   // Story 32.5: every drawing (horizontal lines, trendlines, Fibonacci, positions) is one list in
   // one server-side resource, restored on mount and saved on change by `useChartDrawings`.
-  const { drawings: allDrawings, setDrawings: setAllDrawings, status: drawingsStatus, saveError: drawingsSaveError } = drawingStore;
+  const {
+    drawings: allDrawings,
+    setDrawings: setAllDrawings,
+    undo: undoDrawings,
+    redo: redoDrawings,
+    canUndo,
+    canRedo,
+    status: drawingsStatus,
+    saveError: drawingsSaveError,
+    saveNow: saveDrawingsNow,
+  } = drawingStore;
   const [settingsId, setSettingsId] = useState<string | null>(null);
+  const allDrawingsRef = useRef(allDrawings);
+  useEffect(() => {
+    allDrawingsRef.current = allDrawings;
+  }, [allDrawings]);
+  // Story 33.10: Hide all drawings, persisted as the layout's `drawings_hidden`; while on, no drawing
+  // is drawn or hit-tested and the drawing tools are off.
+  const [drawingsHidden, setDrawingsHidden] = useState(initialLayout.drawings_hidden);
+  useEffect(() => patchLayout({ drawings_hidden: drawingsHidden }), [drawingsHidden, patchLayout]);
+  // The drawings on screen: none while all are hidden, and never one hidden from its menu.
+  const shownDrawings = useMemo(
+    () => (drawingsHidden ? NONE_DRAWN : allDrawings.filter((d) => d.hidden !== true)),
+    [allDrawings, drawingsHidden],
+  );
   const priceLines = useMemo<PriceLineSpec[]>(
     () =>
-      allDrawings.flatMap((d) =>
-        d.kind === "hline" ? [{ id: d.id, price: d.price, color: d.color ?? chartVar("--chart-drawing") }] : [],
+      shownDrawings.flatMap((d) =>
+        d.kind === "hline"
+          ? [
+              {
+                id: d.id,
+                price: d.price,
+                color: d.color ?? chartVar("--chart-drawing"),
+                ...(d.line_width === undefined ? {} : { lineWidth: d.line_width }),
+                ...(d.line_style === undefined ? {} : { lineStyle: d.line_style }),
+                ...(d.locked ? { locked: true } : {}),
+              },
+            ]
+          : [],
       ),
-    [allDrawings],
+    [shownDrawings],
   );
   const [crosshairOn, setCrosshairOn] = useState(initialLayout.crosshair);
   useEffect(() => patchLayout({ crosshair: crosshairOn }), [crosshairOn, patchLayout]);
   const [indicatorDialogOpen, setIndicatorDialogOpen] = useState(false);
+  const [overlaysDialogOpen, setOverlaysDialogOpen] = useState(false);
   const [alertDialogOpen, setAlertDialogOpen] = useState(false);
+  // Story 33.8: the condition the alert dialog opens with (a drawing's "Add alert…"); null = empty.
+  const [alertCondition, setAlertCondition] = useState<AlertCondition | null>(null);
+  const openAlertDialog = useCallback((condition: AlertCondition | null) => {
+    setAlertCondition(condition);
+    setAlertDialogOpen(true);
+  }, []);
   const [catalog, setCatalog] = useState<Record<string, IndicatorCatalogEntry>>({});
-  // Story 18.2: the trendline's first click, held until the second click completes it
-  // (or Esc / a tool change discards it); `drawings` is the placed set.
-  const [pendingAnchor, setPendingAnchor] = useState<TrendlineAnchor | null>(null);
+  // Story 18.2 / 33.10: a click-placed tool's points so far (`placementOf(tool)` in all), held until
+  // the last click places the drawing (or Esc / a tool change discards them).
+  const [placement, setPlacement] = useState<Placement | null>(null);
   const savedProfile = initialLayout.volume_profile;
   // A saved fixed range comes back with an empty profile that the first loaded candles fill (below).
   const [frvps, setFrvps] = useState<FrvpEntry[]>(() =>
@@ -515,7 +658,20 @@ function ChartInner({
   // scroll-back prepend, replay, a mode flip) can never wipe bars the chart already showed;
   // bars closed while the socket was down exist only on the server, so a reconnect refetches
   // the newest page and merges it in.
-  const liveBar = useLiveCandle(instrumentId, barSeconds, { onReconnect: refreshNewest, onBarClosed: appendBar });
+  // Story 33.5: a closed bar and a reconnect also re-read the derivatives routes' newest pages (the
+  // route wins for closed slots); the ref is set once `useChartDerivatives` below has run.
+  const derivativesRefreshRef = useRef<() => void>(() => {});
+  const derivativesAfterCloseRef = useRef<() => void>(() => {});
+  const liveBar = useLiveCandle(instrumentId, barSeconds, {
+    onReconnect: () => {
+      void refreshNewest();
+      derivativesRefreshRef.current();
+    },
+    onBarClosed: (bar) => {
+      appendBar(bar);
+      derivativesAfterCloseRef.current();
+    },
+  });
   // Story 32.1: a forming bar that starts more than one bar after history's newest point
   // (the collector came back after a hole) opens the gap run at once, not when it closes.
   // `historyLoaded` re-runs it once the first page lands: the socket may seed the forming bar
@@ -539,9 +695,14 @@ function ChartInner({
   // The forming bar is part of "the latest bar" here (not under a replay, which hides it): a drawing
   // placed on it draws at once, and the line and profile include it, like the candle beside them.
   const anchoredLive = replay.mode === "active" ? null : liveBar;
+  // Story 33.6: a stored-source Anchored VWAP's line is the server's (`AnchoredStoredVWAP`, the bars'
+  // exact stored `pv` / volume), fetched by its own values hook: never a picker pane.
+  // Story 33.10: only the drawings on screen: a hidden stored-source VWAP fetches nothing.
+  const storedVwap = useStoredAnchoredVwap(instrumentId, chart, shownDrawings, barSeconds, mode === "candles");
   const anchored = useMemo(() => {
-    // A coin with no anchored drawing (nearly every one) skips the per-tick copy of its bars.
-    if (mode !== "candles" || !allDrawings.some((d) => d.kind === "anchored_vp" || d.kind === "anchored_vwap")) {
+    // A coin with no anchored drawing (nearly every one) skips the per-tick copy of its bars. Story
+    // 33.10: a hidden one (or every one, while all are hidden) draws neither its profile nor its line.
+    if (mode !== "candles" || !shownDrawings.some((d) => d.kind === "anchored_vp" || d.kind === "anchored_vwap")) {
       return { specs: NONE, profiles: NONE, legend: NONE };
     }
     const specs: DrawingSpec[] = [];
@@ -554,7 +715,7 @@ function ChartInner({
     const times: number[] = [];
     for (const c of chartBars) if ("open" in c) times.push(c.time as number);
     const lastTime = times.at(-1);
-    for (const d of allDrawings) {
+    for (const d of shownDrawings) {
       if (d.kind !== "anchored_vp" && d.kind !== "anchored_vwap") continue;
       // An anchor after the newest displayed bar (a replay cut before it) is omitted, not snapped back.
       if (lastTime !== undefined && d.time > lastTime) continue;
@@ -584,30 +745,44 @@ function ChartInner({
         }
         continue;
       }
-      const points = anchorBar === null ? [] : breakAtGaps(anchoredVwap(bars, anchorBar, d.source), chartBars);
+      const source = d.source;
+      const stored = source === STORED_VWAP_SOURCE;
+      let points: VwapPoint[] = [];
+      // The stored line is the server's values, cut at the replay time like every pane; no bands. A
+      // stored line whose request failed on any page draws nothing: the pages that did load would be
+      // a partial line passed off as whole (audit D-187); the legend names the error.
+      if (anchorBar !== null && stored && storedVwap.errors[d.id] === undefined) {
+        points = storedVwapPoints(trimAfter(storedVwap.values[d.id] ?? NONE, cutoffTime), anchorBar);
+      } else if (anchorBar !== null && !stored) {
+        points = breakAtGaps(anchoredVwap(bars, anchorBar, source), chartBars);
+      }
       // The snapped bar, like the Anchored VP: the anchor handle sits on the bar the line starts from.
-      specs.push({ ...d, time: anchorBar ?? d.time, points });
+      specs.push({ ...d, ...(stored ? { bands: false } : {}), time: anchorBar ?? d.time, points });
       const latest = points.at(-1);
       const color = d.color ?? chartVar("--chart-drawing");
+      const error = stored ? storedVwap.errors[d.id] : undefined;
       legend.push({
         id: `avwap-${d.id}`,
         label: `AVWAP (${d.source})`,
         color,
         value: latest === undefined || precision === null ? null : latest.vwap,
         format: (value) => (precision === null ? String(value) : safeDecimal(value, precision.price)),
+        ...(error === undefined ? {} : { text: `failed: ${error}` }),
       });
     }
     // Shared empty arrays: a coin with none (nearly every one) must not hand the chart a fresh
     // array, hence a "changed" prop, on every bar.
     return { specs: specs.length > 0 ? specs : NONE, profiles: profiles.length > 0 ? profiles : NONE, legend: legend.length > 0 ? legend : NONE };
-  }, [allDrawings, mode, replay.displayed, volume, anchoredLive, precision]);
+  }, [shownDrawings, mode, replay.displayed, volume, anchoredLive, precision, storedVwap, cutoffTime]);
   const plainDrawings = useMemo<DrawingSpec[]>(
     () =>
-      allDrawings.flatMap((d): DrawingSpec[] => {
+      shownDrawings.flatMap((d): DrawingSpec[] => {
         if (d.kind === "hline" || d.kind === "anchored_vp" || d.kind === "anchored_vwap") return [];
-        return [d.kind === "trendline" ? { ...d, color: d.color ?? chartVar("--chart-drawing") } : d];
+        // The line kinds' spec carries its colour resolved (the trendline's since 18.2).
+        if (isLineDrawing(d)) return [{ ...d, color: d.color ?? chartVar("--chart-drawing") }];
+        return [d];
       }),
-    [allDrawings],
+    [shownDrawings],
   );
   const drawings = useMemo<DrawingSpec[]>(
     () => (anchored.specs.length === 0 ? plainDrawings : [...plainDrawings, ...anchored.specs]),
@@ -658,6 +833,35 @@ function ChartInner({
     },
     [onVolumeChange],
   );
+  // Story 33.6: how the Volume pane colours its bars (the layout's `volume_color_by`), set from the
+  // Volume legend row's gear. Each bar is painted here, the forming one by the chart with the same
+  // mapping (`liveVolumeColor`); the data in state keeps its flow for the next mode change.
+  const [volumeColorBy, setVolumeColorBy] = useState<VolumeColorMode>(initialLayout.volume_color_by);
+  useEffect(() => patchLayout({ volume_color_by: volumeColorBy }), [volumeColorBy, patchLayout]);
+  const [volumeDialogOpen, setVolumeDialogOpen] = useState(false);
+  const volumePalette = useMemo(
+    () => ({ up: chartVar("--chart-up"), down: chartVar("--chart-down"), neutral: assignPaneColor("volume", DEFAULT_PANE_IDS) }),
+    [],
+  );
+  const paintedVolume = useMemo(
+    () =>
+      volume.map((d) =>
+        "value" in d
+          ? { time: d.time, value: d.value, color: volumeBarColor(d, volumeColorBy, volumePalette.up, volumePalette.down, volumePalette.neutral) }
+          : d,
+      ),
+    [volume, volumeColorBy, volumePalette],
+  );
+  const liveVolumeColor =
+    liveBar === null || replay.mode === "active"
+      ? undefined
+      : volumeBarColor(
+          { o: liveBar.open, c: liveBar.close, buy_v: liveBar.buy_v, sell_v: liveBar.sell_v },
+          volumeColorBy,
+          volumePalette.up,
+          volumePalette.down,
+          volumePalette.neutral,
+        );
   const entriesById = useMemo(() => new Map(pickerEntries.map((e) => [entryId(e), e] as const)), [pickerEntries]);
   // The coin's indicator instance ids: the pane ids a saved height may still belong to.
   const paneIdsRef = useRef<ReadonlySet<string>>(new Set());
@@ -669,36 +873,53 @@ function ChartInner({
             {
               id: "volume",
               kind: "Histogram" as const,
-              data: volume,
-              color: assignPaneColor("volume", DEFAULT_PANE_IDS),
+              data: paintedVolume,
+              color: volumePalette.neutral,
               groupLabel: "Volume",
               hidden: volumeHidden,
-              configurable: false,
             },
           ]
         : []),
-      ...pickerSeriesKeys.map((key) => {
+      ...pickerSeriesKeys.map((key): IndicatorPaneSpec => {
         const panel = panelForKey(key, catalog);
         const { id: instanceId, output } = splitSeriesKey(key);
         const entry = entriesById.get(instanceId);
         const name = entry?.name ?? catalogNameForKey(key, catalog) ?? key;
+        const catalogEntry = catalog[catalogNameForKey(key, catalog) ?? ""];
         const style = outputStyle(entry, output);
+        // Story 33.6: an output the catalog gives a unit prints at the instrument's decimals (a
+        // native entry has none, and keeps the legend's default readout, as does every entry while
+        // the precision is unknown).
+        const unit = catalogEntry?.units?.[output];
+        const format =
+          precision !== null && isIndicatorUnit(unit)
+            ? (value: number): string => formatIndicatorValue(value, unit, precision)
+            : undefined;
+        // Story 33.11: a CandlePattern drawn as markers (its default) keeps only a legend row here,
+        // on an invisible overlay that never scales the price axis; the markers are `patternMarkers`.
+        // A stale series no entry owns follows the same default.
+        const markersOnly = name === PATTERN_INDICATOR && (entry === undefined || drawsPatternMarkers(entry));
+        const plot = plotOf(catalogEntry, output);
+        const shape = markersOnly
+          ? { kind: "Line" as const, placement: "overlay" as const, markersOnly: true, format: patternReadout(patternOf(entry, catalogEntry, instanceId)) }
+          : {
+              kind: panel === "histogram" ? ("Histogram" as const) : ("Line" as const),
+              placement: panel === "overlay" ? ("overlay" as const) : ("pane" as const),
+              ...(plot ? { plot } : {}),
+              ...(format ? { format } : {}),
+            };
         return {
           id: key,
           // One legend row, one pane per instance (RSI(14) and RSI(21) are two), even for stale
           // values no entry owns any more -- those get no buttons (the picker finds no entry).
           group: instanceId,
-          groupLabel: entry ? legendTitle(entry) : name,
+          groupLabel: entry ? legendTitle(entry, catalogEntry?.note) : name,
           outputLabel: output,
-          // Known limit: pattern hits are ±100 histogram spikes, not on-candle markers. Upgrade
-          // path: lightweight-charts `createSeriesMarkers`. (Story 27.7's `CandlePattern` is a
-          // "histogram" catalog entry like any other: no special case here.)
-          kind: panel === "histogram" ? ("Histogram" as const) : ("Line" as const),
           data: trimAfter(pickerValues[key], cutoffTime),
           // Combined with DEFAULT_PANE_IDS so a picker series never lands on volume's slot. A
           // colour the entry stores wins over the palette slot.
           color: style.color ?? assignPaneColor(key, [...DEFAULT_PANE_IDS, ...pickerSeriesKeys]),
-          placement: panel === "overlay" ? ("overlay" as const) : ("pane" as const),
+          ...shape,
           hidden: entry?.hidden === true,
           actionable: entry !== undefined,
           lineWidth: style.line_width,
@@ -708,7 +929,31 @@ function ChartInner({
         };
       }),
     ],
-    [volumeOn, volumeHidden, volume, pickerSeriesKeys, pickerValues, catalog, entriesById, cutoffTime],
+    [volumeOn, volumeHidden, paintedVolume, volumePalette, pickerSeriesKeys, pickerValues, catalog, entriesById, cutoffTime, precision],
+  );
+
+  // The time scale's bar spacing (px), reported by the chart: every candle-series marker (pattern
+  // and liquidation) hides at or below `MARKER_MIN_BAR_SPACING_PX` (`markersHiddenAt`).
+  const [barSpacing, setBarSpacing] = useState(Number.POSITIVE_INFINITY);
+
+  // Story 33.11: each shown CandlePattern entry's hits as markers on the candles, from the values the
+  // replay served up to its cursor (`trimAfter`): a hidden entry (the eye) or one drawn as a pane has
+  // none, and zoomed out past the marker spacing (`markersHiddenAt`) neither. Coloured by the entry's
+  // stored up/down colours, else the candles' own.
+  const patternMarkers = useMemo(
+    () =>
+      pickerSeriesKeys.flatMap((key) => {
+        const { id, output } = splitSeriesKey(key);
+        const entry = entriesById.get(id);
+        if (output !== "value" || !entry || entry.hidden || !drawsPatternMarkers(entry)) return [];
+        const style = outputStyle(entry, output);
+        return buildPatternMarkers(id, patternOf(entry, catalog[PATTERN_INDICATOR]), trimAfter(pickerValues[key] ?? [], cutoffTime), {
+          up: style.up_color ?? chartVar("--chart-up"),
+          down: style.down_color ?? chartVar("--chart-down"),
+          neutral: style.color ?? assignPaneColor(key, [...DEFAULT_PANE_IDS, ...pickerSeriesKeys]),
+        }, barSpacing);
+      }),
+    [pickerSeriesKeys, pickerValues, entriesById, catalog, cutoffTime, barSpacing],
   );
 
   // Story 32.8: the volume footprint, a field of the coin's layout (on/off and its settings). It is
@@ -733,12 +978,157 @@ function ChartInner({
     [footprintActive, footprintData.items, footprintData.precision, footprint, cutoffTime],
   );
 
+  // Story 33.5: the Derivatives group (Open Interest, Funding, Basis, Mark / Index, Liquidations), a
+  // field of the coin's layout; the Liquidation tape is view state. Spot (the candles' `market`)
+  // disables the group and fetches nothing, its saved on-states kept.
+  const [derivatives, setDerivatives] = useState<DerivativesLayout>(initialLayout.derivatives);
+  useEffect(() => patchLayout({ derivatives }), [derivatives, patchLayout]);
+  const [tapeOn, setTapeOn] = useState(false);
+  const [derivativeSettings, setDerivativeSettings] = useState<DerivativeKey | null>(null);
+  const changeDerivativeOn = useCallback(
+    (key: DerivativeKey, on: boolean): void => setDerivatives((prev) => ({ ...prev, [key]: { ...prev[key], on } })),
+    [],
+  );
+  const derivativesData = useChartDerivatives({
+    instrumentId,
+    barSeconds,
+    chart,
+    settings: derivatives,
+    market: venueMarket?.market ?? null,
+    candlesMode: mode === "candles",
+    bars: replay.displayed,
+    liveTime: replay.mode === "active" || !liveBar ? null : (liveBar.time as number),
+    cutoff: cutoffTime,
+    barSpacing,
+    tapeOn,
+  });
+  useEffect(() => {
+    derivativesRefreshRef.current = derivativesData.refreshNewest;
+    derivativesAfterCloseRef.current = derivativesData.refreshAfterClose;
+  }, [derivativesData.refreshNewest, derivativesData.refreshAfterClose]);
+
+  // Story 33.9: the price pane's chart type, right scale and compare symbols, each a field of the
+  // coin's layout. Lines mode keeps them stored but draws no compare and no chart type.
+  const [chartType, setChartType] = useState<ChartType>(initialLayout.chart_type);
+  useEffect(() => patchLayout({ chart_type: chartType }), [chartType, patchLayout]);
+  const [priceScale, setPriceScale] = useState<PriceScaleLayout>(initialLayout.price_scale);
+  useEffect(() => patchLayout({ price_scale: priceScale }), [priceScale, patchLayout]);
+  const [compare, setCompare] = useState<CompareLayout>(initialLayout.compare);
+  useEffect(() => patchLayout({ compare }), [compare, patchLayout]);
+  const patchPriceScale = useCallback(
+    (patch: PriceScalePatch): void => setPriceScale((prev) => ({ ...prev, ...patch })),
+    [],
+  );
+  const [compareFeeds, setCompareFeeds] = useState<Record<string, CompareFeedState>>({});
+  const onCompareFeed = useCallback((iid: string, state: CompareFeedState | null): void => {
+    setCompareFeeds((prev) => {
+      if (state !== null) return { ...prev, [iid]: state };
+      const { [iid]: _gone, ...rest } = prev;
+      return rest;
+    });
+  }, []);
+  // The legend eye hides a compare line in place; view state, never saved.
+  const [compareHidden, setCompareHidden] = useState<ReadonlySet<string>>(() => new Set());
+  const comparesDrawn = mode === "candles" && compare.symbols.length > 0;
+  // A compare draws on the Percent scale (each line from 0 % at the left edge); Indexed to 100 is the
+  // other scale that compares series. Only an explicit pick writes `price_scale.mode`, so removing the
+  // last compare brings back the operator's own mode.
+  const effectiveScaleMode: PriceScaleModeName = comparesDrawn
+    ? priceScale.mode === "indexed"
+      ? "indexed"
+      : "percent"
+    : priceScale.mode;
+  const scaleLockReason = comparesDrawn ? "A compare symbol draws on the percent scale: remove it to use Normal or Log" : null;
+  const spreadAvailable = mode === "candles" && compare.symbols.length === 1;
+  const mainLiveShown = replay.mode === "active" ? null : liveBar;
+  const comparePanes = useMemo<IndicatorPaneSpec[]>(() => {
+    if (!comparesDrawn) return NONE;
+    const slots = mainSlots(replay.displayed, mainLiveShown);
+    const liveShown = mainLiveShown !== null;
+    const specs = comparePaneSpecs(compare.symbols, compareFeeds, slots, liveShown, compareHidden);
+    if (!compare.spread || !spreadAvailable) return specs;
+    const [only] = compare.symbols;
+    return [...specs, spreadPaneSpec(instrumentId, only, replay.displayed, mainLiveShown, compareFeeds[only], slots, liveShown)];
+  }, [comparesDrawn, compare, compareFeeds, compareHidden, replay.displayed, mainLiveShown, spreadAvailable, instrumentId]);
+  // The add re-checks duplicate and maximum against the latest state, not the render the control saw.
+  const addCompare = useCallback(
+    (iid: string): void => setCompare((prev) => withCompareAdded(prev, iid, instrumentId)),
+    [instrumentId],
+  );
+  const removeCompare = useCallback((iid: string): void => {
+    setCompare((prev) => ({ ...prev, symbols: prev.symbols.filter((s) => s !== iid) }));
+    // A re-added symbol starts shown: its hidden flag goes with it.
+    setCompareHidden((prev) => {
+      if (!prev.has(iid)) return prev;
+      const next = new Set(prev);
+      next.delete(iid);
+      return next;
+    });
+  }, []);
+
+  // Story 33.12: how times print, the session breaks, the bar countdown and the last-price line and
+  // label, each a field of the coin's layout (fullscreen is not: it is view state, never saved).
+  const [timeZone, setTimeZone] = useState<TimeZoneSetting>(initialLayout.time_zone);
+  useEffect(() => patchLayout({ time_zone: timeZone }), [timeZone, patchLayout]);
+  const [sessionBreaks, setSessionBreaks] = useState(initialLayout.session_breaks);
+  useEffect(() => patchLayout({ session_breaks: sessionBreaks }), [sessionBreaks, patchLayout]);
+  const [barCountdownOn, setBarCountdownOn] = useState(initialLayout.bar_countdown);
+  useEffect(() => patchLayout({ bar_countdown: barCountdownOn }), [barCountdownOn, patchLayout]);
+  const [lastPrice, setLastPrice] = useState<LastPriceLayout>(initialLayout.last_price);
+  useEffect(() => patchLayout({ last_price: lastPrice }), [lastPrice, patchLayout]);
+  // The countdown counts the forming bar: there is none in Lines mode or under a replay.
+  const countdown = useMemo(
+    () => ({ barSeconds, enabled: barCountdownOn && mode === "candles" && replay.mode !== "active" }),
+    [barSeconds, barCountdownOn, mode, replay.mode],
+  );
+
+  // Story 33.12: the symbol search (navigate), the compare search (`CompareControl`, Alt+C) and the
+  // `?` sheet, and the timeframe typed on the keyboard so far (shown in a chip until Enter).
+  const navigate = useNavigate();
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [compareSearchOpen, setCompareSearchOpen] = useState(false);
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [timeframeBuffer, setTimeframeBuffer] = useState("");
+  useEffect(() => {
+    if (timeframeBuffer === "") return;
+    const id = setTimeout(() => setTimeframeBuffer(""), TIMEFRAME_BUFFER_IDLE_MS);
+    return () => clearTimeout(id);
+  }, [timeframeBuffer]);
+
+  const chartPanes = useMemo(
+    () =>
+      derivativesData.panes.length === 0 && comparePanes.length === 0
+        ? panes
+        : [...panes, ...comparePanes, ...derivativesData.panes],
+    [panes, comparePanes, derivativesData.panes],
+  );
+
   // The legend's eye / gear / x. Picker indicators go through the picker's own persist path (the
   // same one an add uses); Volume is page state (eye) and the Indicators dialog's toggle (x); the
   // Footprint row has the gear (its settings modal) and the x (off).
   const pickerRef = useRef<IndicatorPickerHandle>(null);
   const handleLegendAction = useCallback(
     (action: LegendAction, group: string): void => {
+      // Story 33.9: a compare's x removes it from the layout, its eye hides the line; the Spread pane's
+      // eye and x both turn the spread off (the Spread toggle brings it back).
+      if (group.startsWith(COMPARE_GROUP_PREFIX)) {
+        const iid = group.slice(COMPARE_GROUP_PREFIX.length);
+        if (action === "remove") removeCompare(iid);
+        else if (action === "hide") setCompareHidden((prev) => toggled(prev, iid));
+        return;
+      }
+      if (group === SPREAD_GROUP) {
+        if (action !== "settings") setCompare((prev) => ({ ...prev, spread: false }));
+        return;
+      }
+      const derivative = derivativeOfGroup(group);
+      if (derivative !== null) {
+        // The eye and the x both turn the entry off in the layout (its pane goes; the Indicators
+        // dialog brings it back); the gear opens its settings.
+        if (action === "settings") setDerivativeSettings(derivative);
+        else changeDerivativeOn(derivative, false);
+        return;
+      }
       if (group === "footprint") {
         if (action === "settings") setFootprintDialogOpen(true);
         else if (action === "remove") changeFootprintOn(false);
@@ -746,6 +1136,7 @@ function ChartInner({
       }
       if (group === "volume") {
         if (action === "hide") setVolumeHidden((h) => !h);
+        else if (action === "settings") setVolumeDialogOpen(true);
         else if (action === "remove") {
           changeVolumeOn(false);
         }
@@ -756,7 +1147,7 @@ function ChartInner({
       else if (action === "settings") picker?.openSettings(group);
       else picker?.remove(group);
     },
-    [changeVolumeOn, changeFootprintOn],
+    [changeVolumeOn, changeFootprintOn, changeDerivativeOn, removeCompare],
   );
   // Seeded with what the chart draws while the entry stores nothing: the palette colour, which a
   // histogram also paints both signs with (and the side whose colour is not set keeps).
@@ -765,12 +1156,14 @@ function ChartInner({
       .filter((key) => splitSeriesKey(key).id === id)
       .map((key) => {
         const palette = assignPaneColor(key, [...DEFAULT_PANE_IDS, ...pickerSeriesKeys]);
+        // A CandlePattern drawn as markers paints its hits in the candles' colours while none is stored.
+        const markers = drawsPatternMarkers(entriesById.get(id));
         return {
           label: splitSeriesKey(key).output,
           kind: panelForKey(key, catalog) === "histogram" ? "Histogram" : "Line",
           defaultColor: palette,
-          defaultUpColor: palette,
-          defaultDownColor: palette,
+          defaultUpColor: markers ? chartVar("--chart-up") : palette,
+          defaultDownColor: markers ? chartVar("--chart-down") : palette,
         };
       });
 
@@ -792,13 +1185,46 @@ function ChartInner({
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (event.key === "Escape") {
         setActiveTool("cursor");
-        setPendingAnchor(null);
+        setPlacement(null);
         cancelReplayPick();
+        setTimeframeBuffer("");
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [cancelReplayPick]);
+
+  // Story 33.10: undo and redo act only on drawings the operator can see and edit: loaded, not all
+  // hidden, and no placement half done (its points would refer to a list that just changed).
+  const historyActive = drawingsStatus === "ready" && !drawingsHidden && placement === null;
+  // Story 33.12: the page's one shortcut handler (`lib/shortcuts.ts`), drawing undo / redo included,
+  // subscribed once and reading the latest render through this ref. Nothing acts while the operator
+  // types in a field or a dialog is open (`isTypingContext`); Esc keeps its own handler above.
+  const shortcutRef = useRef<(event: KeyboardEvent) => void>(() => {});
+  shortcutRef.current = (event: KeyboardEvent): void => {
+    if (isTypingContext(event)) return;
+    const key = event.key.toLowerCase();
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && (key === "z" || key === "y")) {
+      // Ctrl/Cmd+Z undoes a drawing edit, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redoes it.
+      if (!historyActive) return;
+      event.preventDefault();
+      if (key === "y" || event.shiftKey) redoDrawings();
+      else undoDrawings();
+      return;
+    }
+    const action = shortcutFor(event);
+    if (action === null) return;
+    if (action.kind === "timeframe_enter" && timeframeBuffer === "") return; // Enter on a button stays a click
+    event.preventDefault();
+    // A held key's auto-repeat is one press: it must not flip fullscreen, log or replay back and forth.
+    if (event.repeat) return;
+    runShortcut(action);
+  };
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => shortcutRef.current(event);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   // useCallback (not inline arrows) so LightweightChart's interaction effects don't
   // tear down and re-attach their subscriptions on every render of this page -- the
@@ -828,65 +1254,55 @@ function ChartInner({
     [activeTool, roundPrice, setAllDrawings],
   );
 
+  // Story 33.10: places a finished click placement's drawing (`buildDrawing`) and reports whether it
+  // did: a degenerate one (the second point on the first) or a position before the precision is
+  // known places nothing. A text note opens its dialog at once, to be typed.
+  const placeDrawing = useCallback(
+    (tool: ChartTool, points: Anchor[]): boolean => {
+      const kind = kindOfTool(tool);
+      if (kind === null) return false;
+      const id = nextDrawingId(allDrawingsRef.current, kind);
+      const drawing = buildDrawing(tool, id, points, newDrawingContext(precisionRef.current));
+      if (drawing === null) return false;
+      setAllDrawings((all) => [...all, drawing]);
+      if (drawing.kind === "text") setSettingsId(id);
+      return true;
+    },
+    [setAllDrawings],
+  );
+
   const handlePointClick = useCallback(
-    (point: TrendlineAnchor): void => {
-      // Story 18.2 (AC #2/#5): first click stores the start anchor, the second completes
-      // the line and disarms the tool. A second click on the exact same point would make
-      // an invisible zero-length line, so it is ignored (the tool stays armed).
+    (clicked: ChartPoint): void => {
       // Story 18.4 (AC #2): while picking a replay start, a click selects that bar and
       // nothing else -- drawing tools are disarmed on entry, this guards the same click.
       // A click on a gap slot stays in picking; the hook's `pickMissed` drives the hint (DW-146).
       if (replayMode === "picking") {
-        pickReplayBar(point.time as number);
+        pickReplayBar(clicked.time as number);
         return;
       }
-      if (activeTool === "long" || activeTool === "short") {
-        // Story 32.5: one click places a position at the clicked price on the clicked bar. Its
-        // prices sit on the instrument's grid, so the tool is off until that precision is known.
-        const places = precisionRef.current?.price;
-        if (places === undefined) return;
-        const side: PositionSide = activeTool;
-        setAllDrawings((all) => [
-          ...all,
-          newPosition(nextDrawingId(all, "position"), side, point.time as number, point.price, places),
-        ]);
-        setActiveTool("cursor");
+      // Story 18.2 / 33.10: a click-placed tool collects `placementOf(tool)` points; the last one
+      // places the drawing and disarms the tool. A point on the previous one (time and price, on the
+      // grid) would make a zero-size drawing, so it is ignored and the tool stays armed.
+      const need = placementOf(activeTool);
+      if (need === 0) return;
+      const point: Anchor = { time: clicked.time as number, price: clicked.price };
+      const points = placement?.tool === activeTool ? placement.points : [];
+      const previous = points.at(-1);
+      if (previous && storedTime(previous.time) === storedTime(point.time) && roundPrice(previous.price) === roundPrice(point.price)) {
         return;
       }
-      if (activeTool === "avp" || activeTool === "avwap") {
-        // Story 32.7: one click at a bar places an anchored drawing; its colours are chart tokens.
-        const time = point.time as number;
-        setAllDrawings((all) => [
-          ...all,
-          activeTool === "avp"
-            ? newAnchoredVp(nextDrawingId(all, "anchored_vp"), time, chartVar("--chart-up"), chartVar("--chart-down"))
-            : newAnchoredVwap(nextDrawingId(all, "anchored_vwap"), time, chartVar("--chart-drawing"), chartVar("--chart-pane-4")),
-        ]);
-        setActiveTool("cursor");
+      const next = [...points, point];
+      // A channel's B on A's bar (vertical) or a C giving it no width is ignored the same way.
+      if (activeTool === "channel" && !channelPlaceable(next, precisionRef.current?.price ?? null)) return;
+      if (next.length < need) {
+        setPlacement({ tool: activeTool, points: next });
         return;
       }
-      if (activeTool !== "trendline") return;
-      if (!pendingAnchor) {
-        setPendingAnchor(point);
-        return;
-      }
-      if (pendingAnchor.time === point.time && pendingAnchor.price === point.price) return;
-      setAllDrawings((all) => [
-        ...all,
-        {
-          kind: "trendline",
-          id: nextDrawingId(all, "trendline"),
-          anchors: [
-            { time: storedTime(pendingAnchor.time as number), price: roundPrice(pendingAnchor.price) },
-            { time: storedTime(point.time as number), price: roundPrice(point.price) },
-          ],
-          color: chartVar("--chart-drawing"),
-        },
-      ]);
-      setPendingAnchor(null);
+      if (!placeDrawing(activeTool, next)) return;
+      setPlacement(null);
       setActiveTool("cursor");
     },
-    [activeTool, pendingAnchor, replayMode, pickReplayBar, roundPrice, setAllDrawings],
+    [activeTool, placement, replayMode, pickReplayBar, roundPrice, placeDrawing],
   );
 
   // Story 32.5: the Fibonacci drag's release. Anchor A is the press, B the release; a drag whose
@@ -1237,7 +1653,8 @@ function ChartInner({
     (heights: Record<string, number>): void =>
       onLayout((prev) => {
         const kept = Object.entries(prev.pane_heights).filter(
-          ([id]) => id === "price" || id === "volume" || paneIdsRef.current.has(id),
+          ([id]) =>
+            id === "price" || id === "volume" || paneIdsRef.current.has(id) || (DERIVATIVE_PANE_IDS as readonly string[]).includes(id),
         );
         return { ...prev, pane_heights: { ...Object.fromEntries(kept), ...heights } };
       }),
@@ -1277,29 +1694,32 @@ function ChartInner({
   const handleMeasureEnd = useCallback((): void => setActiveTool("cursor"), []);
 
   const selectTool = (tool: ChartTool): void => {
+    // The tool's rail group shows it from now on (TradingView's last-used rule); a one-tool group
+    // has nothing to remember.
+    const group = groupOfTool(tool);
+    if (group && group.tools.length > 1) onToolUsed(group.id, tool);
     setActiveTool(tool);
-    setPendingAnchor(null);
+    setPlacement(null);
     replay.cancelPick();
   };
 
   const startReplayPick = (): void => {
     setActiveTool("cursor");
-    setPendingAnchor(null);
+    setPlacement(null);
     replay.startPicking();
   };
 
   const handleDrawingColor = useCallback(
     (id: string, color: string): void => {
-      // A Fibonacci has a colour per level: the menu's one colour recolours them all.
+      // A Fibonacci has a colour per level: the menu's one colour recolours them all. The colour it
+      // already has is no edit (`replaceDrawing`).
       setAllDrawings((all) =>
-        all.map((d) =>
-          d.id !== id
-            ? d
-            : d.kind === "fib"
-              ? { ...d, color, levels: d.levels.map((l) => ({ ...l, color })) }
-              : d.kind === "anchored_vp"
-                ? { ...d, up_color: color } // a profile has no single colour: the menu's is its up colour
-                : { ...d, color },
+        replaceDrawing(all, id, (d) =>
+          d.kind === "fib" || d.kind === "fib_extension"
+            ? { ...d, color, levels: d.levels.map((l) => ({ ...l, color })) }
+            : d.kind === "anchored_vp"
+              ? { ...d, up_color: color } // a profile has no single colour: the menu's is its up colour
+              : { ...d, color },
         ),
       );
     },
@@ -1316,14 +1736,25 @@ function ChartInner({
     [setAllDrawings],
   );
 
+  // Story 33.10: every move of one handle drag is one gesture (`drag:<n>`, a fresh n per grab), so
+  // the whole drag is one undo step; `nextDragGesture` keeps n unique across this component's
+  // timeframe remounts.
+  const dragGestureRef = useRef<string | undefined>(undefined);
+  const handleDragStart = useCallback((): void => {
+    dragGestureRef.current = nextDragGesture();
+  }, []);
   const applyDrag = useCallback(
     (id: string, handle: string, point: DragPoint): void => {
       // Story 18.1 (AC #3) / 32.5: LightweightChart only reports the drag (it never mutates this
       // state); `applyHandleDrag` decides what the pointer means for each kind, and the updater
-      // form needs no closure state, so these callbacks stay identity-stable.
-      setAllDrawings((all) =>
-        all.map((d) => (d.id === id ? applyHandleDrag(d, handle, point, precisionRef.current?.price ?? null) : d)),
-      );
+      // form needs no closure state, so these callbacks stay identity-stable. A drag that changes
+      // nothing (a locked drawing, a refused move) returns the list itself: no edit, no undo step.
+      setAllDrawings((all) => {
+        const index = all.findIndex((d) => d.id === id);
+        if (index === -1) return all;
+        const moved = applyHandleDrag(all[index], handle, point, precisionRef.current?.price ?? null);
+        return moved === all[index] ? all : all.map((d, i) => (i === index ? moved : d));
+      }, dragGestureRef.current);
     },
     [setAllDrawings],
   );
@@ -1333,42 +1764,111 @@ function ChartInner({
   );
 
   const settingsDrawing = allDrawings.find((d) => d.id === settingsId);
-  const allDrawingsRef = useRef(allDrawings);
-  useEffect(() => {
-    allDrawingsRef.current = allDrawings;
-  }, [allDrawings]);
+  // Story 33.10: an undo or redo that took the dialog's drawing away closes the dialog (adjusting
+  // state during render): a later redo bringing it back must not pop the dialog open again.
+  if (settingsId !== null && settingsDrawing === undefined && drawingsStatus === "ready") setSettingsId(null);
   const requestSettings = useCallback((id: string): void => {
-    // No dialog without the instrument's precision (its fields are labelled and rounded by it):
-    // the request is dropped, not parked to pop open when the precision arrives. The Anchored VP's
-    // and VWAP's dialogs print no price, so they open without one.
+    // No position dialog without the instrument's precision (its fields are labelled and rounded by
+    // it): the request is dropped, not parked to pop open when the precision arrives. Every other
+    // kind's dialog prints no price, so it opens without one.
     const kind = allDrawingsRef.current.find((d) => d.id === id)?.kind;
-    if (precisionRef.current === null && kind !== "anchored_vp" && kind !== "anchored_vwap") return;
+    if (precisionRef.current === null && kind === "position") return;
     setSettingsId(id);
   }, []);
+
+  // Story 33.10: the menu's Lock / Unlock and Hide, and the rail's Show hidden and Delete all. Each
+  // is one edit (one undo step), saved like any other.
+  const handleDrawingLock = useCallback(
+    (id: string, locked: boolean): void =>
+      setAllDrawings((all) => replaceDrawing(all, id, (d) => withFlag(d, "locked", locked))),
+    [setAllDrawings],
+  );
+  const handleDrawingHide = useCallback(
+    (id: string): void => {
+      setSettingsId((open) => (open === id ? null : open));
+      setAllDrawings((all) => replaceDrawing(all, id, (d) => withFlag(d, "hidden", true)));
+    },
+    [setAllDrawings],
+  );
+  const hiddenCount = useMemo(() => allDrawings.filter((d) => d.hidden === true).length, [allDrawings]);
+  const showHidden = useCallback(
+    (): void => setAllDrawings((all) => (all.some((d) => d.hidden) ? all.map((d) => withFlag(d, "hidden", false)) : all)),
+    [setAllDrawings],
+  );
+  const deleteAllDrawings = (): void => {
+    const count = allDrawings.length;
+    if (count === 0) return;
+    const ok = window.confirm(
+      `Delete all ${safeDecimal(count, 0)} drawing${count === 1 ? "" : "s"} of ${instrumentId}? Ctrl+Z (Undo) brings them back while this page is open.`,
+    );
+    if (!ok) return;
+    setSettingsId(null);
+    setAllDrawings((all) => (all.length === 0 ? all : []));
+  };
+  const toggleDrawingsHidden = (): void => {
+    // Hiding every drawing turns the drawing tools off: an armed one is disarmed with its points.
+    if (!drawingsHidden) {
+      setActiveTool("cursor");
+      setPlacement(null);
+    }
+    setDrawingsHidden((hidden) => !hidden);
+  };
+  // A dialog's Apply with nothing changed records no undo step and sends no save (`replaceDrawing`).
   const applyDrawing = useCallback(
-    (next: Drawing): void => setAllDrawings((all) => all.map((d) => (d.id === next.id ? next : d))),
+    (next: Drawing): void => setAllDrawings((all) => replaceDrawing(all, next.id, () => next)),
     [setAllDrawings],
   );
 
-  const renderTool = (tool: ChartToolDef) => (
-    <button
-      key={tool.id}
-      type="button"
-      className={activeTool === tool.id ? "tabbtn active" : "tabbtn"}
-      aria-pressed={activeTool === tool.id}
-      aria-label={tool.ariaLabel}
-      data-tool={tool.id}
-      title={tool.title}
-      disabled={
-        (mode === "lines" && tool.candlesOnly) ||
-        (tool.placesDrawing === true && drawingsStatus !== "ready") ||
-        (tool.needsPrecision === true && precision === null)
+  const sessionRenderedCount = sessionCfg?.preset === "auto" ? autoView.specs.length : sessionSpecs.length;
+
+  const isToolDisabled = (tool: ChartToolDef): boolean =>
+    (mode === "lines" && tool.candlesOnly) ||
+    (tool.placesDrawing === true && (drawingsStatus !== "ready" || drawingsHidden)) ||
+    (tool.needsPrecision === true && precision === null);
+
+  // Story 33.12: what a shortcut (`lib/shortcuts.ts`) does, each exactly what its button does, and
+  // nothing where its button would be disabled.
+  const runShortcut = (action: ShortcutAction): void => {
+    switch (action.kind) {
+      case "tool":
+        if (!isToolDisabled(toolDef(action.tool))) selectTool(action.tool);
+        return;
+      case "replay":
+        // Replay is a candle-chart feature: Alt+R in Lines mode does nothing, like the disabled button.
+        if (mode === "lines") return;
+        if (replay.mode === "off") startReplayPick();
+        else replay.exit();
+        return;
+      case "log_scale":
+        // A compare forces the percent scale: Normal and Log are locked (`scaleLockReason`).
+        if (scaleLockReason === null) patchPriceScale({ mode: priceScale.mode === "log" ? "normal" : "log" });
+        return;
+      case "fullscreen":
+        fullscreen.toggle();
+        return;
+      case "compare":
+        if (mode === "candles") setCompareSearchOpen(true);
+        return;
+      case "search":
+        setSearchOpen(true);
+        return;
+      case "sheet":
+        setSheetOpen(true);
+        return;
+      case "timeframe_char":
+        // The timeframe buttons are disabled in Lines mode; so is typing one.
+        if (mode === "candles") setTimeframeBuffer((buffer) => (buffer + action.char).slice(-TIMEFRAME_BUFFER_MAX));
+        return;
+      case "timeframe_enter": {
+        const seconds = timeframeFromBuffer(timeframeBuffer);
+        setTimeframeBuffer("");
+        // Lines mode has no timeframe: a buffer typed before the switch is dropped, never applied.
+        if (mode !== "candles") return;
+        if (seconds !== null && seconds !== barSeconds) onTimeframeChange(seconds);
+        return;
       }
-      onClick={() => selectTool(tool.id)}
-    >
-      {tool.label}
-    </button>
-  );
+    }
+  };
 
   return (
     <div>
@@ -1378,7 +1878,12 @@ function ChartInner({
       <div className="chart-topbar" role="toolbar" aria-label="Chart controls">
         <div className="chart-cluster">
           <Link to="/">&larr; Rankings</Link>
-          <h1>{instrumentId}</h1>
+          {/* Story 33.12: the symbol opens the symbol search (also `/` and Ctrl/Cmd+K). */}
+          <h1>
+            <button type="button" className="chart-symbol" aria-haspopup="dialog" title="Search markets (/ or Ctrl+K)" onClick={() => setSearchOpen(true)}>
+              {instrumentId}
+            </button>
+          </h1>
           {venueMarket && (
             <span className="venue-badge" aria-label="Venue and market">
               {venueMarket.venue} · {venueMarket.market}
@@ -1397,6 +1902,11 @@ function ChartInner({
               {tf.label}
             </button>
           ))}
+          {timeframeBuffer !== "" && (
+            <span className="chart-timeframe-buffer" role="status" aria-label="Typed timeframe">
+              {timeframeBuffer}
+            </span>
+          )}
         </div>
         <div className="chart-cluster">
         <button
@@ -1418,14 +1928,90 @@ function ChartInner({
             setMode("lines");
             selectTool("cursor");
             replay.exit();
+            setCompareSearchOpen(false);
+            setTimeframeBuffer("");
           }}
         >
           Lines
+        </button>
+        {/* Story 33.9: how the price pane draws: the chart type, the right scale and compare symbols. */}
+        <select
+          aria-label="Chart type"
+          value={chartType}
+          disabled={mode === "lines"}
+          title={mode === "lines" ? "Chart types draw candle bars: switch to Candles" : undefined}
+          onChange={(e) => setChartType(e.target.value as ChartType)}
+        >
+          {CHART_TYPES.map((t) => (
+            <option key={t} value={t}>
+              {CHART_TYPE_LABELS[t]}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Price scale"
+          value={effectiveScaleMode}
+          title={scaleLockReason ?? undefined}
+          onChange={(e) => patchPriceScale({ mode: e.target.value as PriceScaleModeName })}
+        >
+          {PRICE_SCALE_MODES.map((m) => (
+            <option key={m} value={m} disabled={scaleLockReason !== null && (m === "normal" || m === "log")}>
+              {PRICE_SCALE_LABELS[m]}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          className={priceScale.auto_scale ? "tabbtn active" : "tabbtn"}
+          aria-pressed={priceScale.auto_scale}
+          title="Auto-scale the price axis to the visible bars"
+          onClick={() => patchPriceScale({ auto_scale: !priceScale.auto_scale })}
+        >
+          Auto
+        </button>
+        <button
+          type="button"
+          className={priceScale.invert ? "tabbtn active" : "tabbtn"}
+          aria-pressed={priceScale.invert}
+          onClick={() => patchPriceScale({ invert: !priceScale.invert })}
+        >
+          Invert
+        </button>
+        <CompareControl
+          instrumentId={instrumentId}
+          symbols={compare.symbols}
+          disabled={mode === "lines"}
+          open={compareSearchOpen}
+          onOpenChange={setCompareSearchOpen}
+          onAdd={addCompare}
+        />
+        <button
+          type="button"
+          className={compare.spread && spreadAvailable ? "tabbtn active" : "tabbtn"}
+          aria-pressed={compare.spread && spreadAvailable}
+          disabled={!spreadAvailable}
+          title={spreadAvailable ? "The main close over the compare close, in bps" : "Spread needs exactly one compare symbol"}
+          onClick={() => setCompare((prev) => ({ ...prev, spread: !prev.spread }))}
+        >
+          Spread
         </button>
         </div>
         <div className="chart-cluster">
           <button type="button" onClick={() => setIndicatorDialogOpen(true)}>
             Indicators
+          </button>
+          <button type="button" aria-haspopup="dialog" onClick={() => setOverlaysDialogOpen(true)}>
+            Volume overlays
+          </button>
+          <button
+            type="button"
+            className={tapeOn ? "tabbtn active" : "tabbtn"}
+            aria-pressed={tapeOn}
+            disabled={!derivativesData.available}
+            title={tapeUnavailableReason(derivativesData.spot, mode === "candles", venueMarket !== null)}
+            onClick={() => setTapeOn((on) => !on)}
+          >
+            Liquidation tape
           </button>
           {/* Story 32.6: the coin's layout is saved as the default new coins start from, or reset to it. */}
           <button
@@ -1460,7 +2046,7 @@ function ChartInner({
               </button>
             </span>
           )}
-          <button type="button" onClick={() => setAlertDialogOpen(true)}>
+          <button type="button" onClick={() => openAlertDialog(null)}>
             Alert
           </button>
           <button type="button" onClick={() => chart?.timeScale().fitContent()}>
@@ -1469,14 +2055,86 @@ function ChartInner({
           <button type="button" onClick={() => chart?.timeScale().scrollToRealTime()}>
             Latest
           </button>
-          {/* Story 18.4 (AC #1): candles-only, like the tools that need the candle array. */}
+          {/* Story 18.4 (AC #1): candles-only, like the tools that need the candle array. Story 33.12
+              (operator, 2026-10-07): Replay steps whole bars, so it runs on every candle chart type
+              and never in Lines mode, where the disabled button says why. */}
           <button
             id="btn-replay"
             type="button"
             disabled={mode === "lines" || replay.mode !== "off"}
+            title={mode === "lines" ? REPLAY_LINES_REASON : "Bar Replay (Alt+R)"}
             onClick={startReplayPick}
           >
             Replay
+          </button>
+          <button
+            type="button"
+            className={fullscreen.active ? "tabbtn active" : "tabbtn"}
+            aria-pressed={fullscreen.active}
+            title="The chart with every pane, the tools and this bar (Shift+F; Esc leaves)"
+            onClick={fullscreen.toggle}
+          >
+            Fullscreen
+          </button>
+          {fullscreen.error !== null && (
+            <span role="alert" className="chart-load-error">
+              {fullscreen.error}
+            </span>
+          )}
+          <button
+            type="button"
+            className={watchlistOpen ? "tabbtn active" : "tabbtn"}
+            aria-pressed={watchlistOpen}
+            onClick={onWatchlistToggle}
+          >
+            Watchlist
+          </button>
+          <button type="button" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)" onClick={() => setSheetOpen(true)}>
+            ?
+          </button>
+        </div>
+        {/* Story 33.12: how times print and what the price pane adds, saved in the coin's layout. */}
+        <div className="chart-cluster" role="group" aria-label="Chart settings">
+          <select aria-label="Time zone" value={timeZone} onChange={(e) => setTimeZone(e.target.value as TimeZoneSetting)}>
+            {TIME_ZONES.map((z) => (
+              <option key={z} value={z}>
+                {TIME_ZONE_LABELS[z]}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className={sessionBreaks ? "tabbtn active" : "tabbtn"}
+            aria-pressed={sessionBreaks}
+            title="A dashed line at the first bar of each UTC day (intraday bars)"
+            onClick={() => setSessionBreaks((on) => !on)}
+          >
+            Session breaks
+          </button>
+          <button
+            type="button"
+            className={barCountdownOn ? "tabbtn active" : "tabbtn"}
+            aria-pressed={barCountdownOn}
+            title="Time to the bar's close under the last price (Candles mode, not during a replay)"
+            onClick={() => setBarCountdownOn((on) => !on)}
+          >
+            Countdown
+          </button>
+          <button
+            type="button"
+            className={lastPrice.line ? "tabbtn active" : "tabbtn"}
+            aria-pressed={lastPrice.line}
+            onClick={() => setLastPrice((prev) => ({ ...prev, line: !prev.line }))}
+          >
+            Last price line
+          </button>
+          <button
+            type="button"
+            className={lastPrice.label ? "tabbtn active" : "tabbtn"}
+            aria-pressed={lastPrice.label}
+            onClick={() => setLastPrice((prev) => ({ ...prev, label: !prev.label }))}
+          >
+            Last price label
           </button>
         </div>
       </div>
@@ -1489,23 +2147,31 @@ function ChartInner({
         </div>
       )}
       <div className="chart-workspace">
-        {/* Story 18.1 (AC #1): the left tool rail, generated from CHART_TOOLS --
-            .tabbtn's shared visual pattern (theme.css) with the narrow-rail overrides
-            in index.css, same scoped-override precedent as .filter-panel .tabbtn. */}
-        <div className="chart-toolbar" role="toolbar" aria-label="Chart tools">
-          {SELECT_TOOLS.map(renderTool)}
-          <button
-            type="button"
-            className={crosshairOn ? "tabbtn active" : "tabbtn"}
-            aria-pressed={crosshairOn}
-            aria-label="Crosshair toggle"
-            onClick={() => setCrosshairOn((on) => !on)}
-          >
-            Cross
-          </button>
-          <hr className="chart-toolbar-divider" />
-          {DRAWING_TOOLS.map(renderTool)}
-        </div>
+        {/* Story 18.1 (AC #1): the left tool rail, generated from `TOOL_GROUPS` (ToolRail.tsx) --
+            .tabbtn's shared visual pattern (theme.css) with the narrow-rail overrides in index.css. */}
+        <ToolRail
+          activeTool={activeTool}
+          lastUsed={toolMemory}
+          isDisabled={isToolDisabled}
+          onPick={selectTool}
+          crosshairOn={crosshairOn}
+          onCrosshairToggle={() => setCrosshairOn((on) => !on)}
+          actions={{
+            magnet,
+            onMagnet: () => onMagnet(nextMagnetMode(magnet)),
+            canUndo: canUndo && historyActive,
+            canRedo: canRedo && historyActive,
+            onUndo: undoDrawings,
+            onRedo: redoDrawings,
+            allHidden: drawingsHidden,
+            onHideAll: toggleDrawingsHidden,
+            hiddenCount,
+            onShowHidden: showHidden,
+            deleteAllDisabled: drawingsStatus !== "ready" || allDrawings.length === 0,
+            hiddenAllReason: drawingsHidden ? "Drawings are hidden (Hide all): show them first" : null,
+            onDeleteAll: deleteAllDrawings,
+          }}
+        />
         <div className="term-box" data-label={instrumentId}>
           {loadFailed && (
             <div role="alert" className="chart-load-error">
@@ -1517,15 +2183,20 @@ function ChartInner({
             data={replay.displayed}
             linesData={snapshotLines}
             onChartApi={setChart}
-            panes={panes}
+            panes={chartPanes}
             priceLines={priceLines}
             onPriceClick={handlePriceClick}
             drawings={drawings}
-            pendingAnchor={pendingAnchor}
+            placement={placement}
+            magnet={magnet}
+            onDrawingDragStart={handleDragStart}
+            onDrawingLock={handleDrawingLock}
+            onDrawingHide={handleDrawingHide}
             drawEditable={activeTool === "cursor" && replayMode !== "picking"}
             onDrawingColor={handleDrawingColor}
             onDrawingDelete={handleDrawingDelete}
             onDrawingSettings={requestSettings}
+            onDrawingAlert={openAlertDialog}
             precision={precision}
             onDrawingDrag={applyDrag}
             fibActive={activeTool === "fib"}
@@ -1549,15 +2220,43 @@ function ChartInner({
             onVisibleBars={handleVisibleBars}
             // Story 18.4: the real-time forming bar would reveal "future" price action.
             liveBar={replay.mode === "active" ? null : liveBar}
+            liveVolumeColor={liveVolumeColor}
             markerTime={replay.markerTime}
             // DW-145: keep the replay head in view as it advances.
             followNewest={replay.mode === "active"}
             anchorMarkerTime={autoView.markerTime}
             legendExtras={anchored.legend}
             footprint={footprintSpec}
+            liquidationMarkers={derivativesData.markers}
+            patternMarkers={patternMarkers}
+            onBarSpacing={setBarSpacing}
+            chartType={chartType}
+            priceScale={{ mode: effectiveScaleMode, autoScale: priceScale.auto_scale, invert: priceScale.invert }}
+            onPriceScale={patchPriceScale}
+            scaleModesLocked={scaleLockReason}
+            timeZone={timeZone}
+            sessionBreaks={sessionBreaks}
+            barSeconds={barSeconds}
+            countdown={countdown}
+            lastPrice={lastPrice}
+            fullscreen={fullscreen.active}
           />
+          {mode === "candles" &&
+            compare.symbols.map((iid) => (
+              <CompareFeed key={iid} instrumentId={iid} chart={chart} barSeconds={barSeconds} onState={onCompareFeed} />
+            ))}
         </div>
+        {tapeOn && derivativesData.available && <LiquidationTape {...derivativesData.tape} timeZone={timeZone} />}
       </div>
+      <VolumeOverlayNotices
+        candlesMode={mode === "candles"}
+        vrvp={{ active: vrvpActive, pastOldest: visibleRange?.pastOldest ?? false }}
+        session={{
+          active: sessionCfg,
+          renderedCount: sessionRenderedCount,
+          loading: sessionData.loading,
+        }}
+      />
       {drawingsStatus === "failed" && (
         <p role="alert" className="chart-load-error">
           Drawings could not be loaded, so the drawing tools are off (see the error bar). The load is retried every few seconds; the tools come back once it succeeds.
@@ -1568,7 +2267,7 @@ function ChartInner({
           {drawingsSaveError}
         </p>
       )}
-      {settingsDrawing && settingsDrawing.kind !== "hline" && settingsDrawing.kind !== "trendline" && (precision || settingsDrawing.kind === "anchored_vp" || settingsDrawing.kind === "anchored_vwap") && (
+      {settingsDrawing && (precision || settingsDrawing.kind !== "position") && (
         <DrawingSettingsDialog
           key={settingsDrawing.id}
           drawing={settingsDrawing}
@@ -1582,6 +2281,23 @@ function ChartInner({
         <p role="alert" className="chart-load-error">
           Footprint: {footprintData.error}
         </p>
+      )}
+      {derivativeSettings !== null && (
+        <DerivativeSettingsDialog
+          entryKey={derivativeSettings}
+          settings={derivatives}
+          onApply={(patch) => setDerivatives((prev) => applyDerivativePatch(prev, derivativeSettings, patch))}
+          onRemove={() => changeDerivativeOn(derivativeSettings, false)}
+          onClose={() => setDerivativeSettings(null)}
+        />
+      )}
+      {volumeDialogOpen && (
+        <VolumeSettingsDialog
+          colorBy={volumeColorBy}
+          onApply={setVolumeColorBy}
+          onRemove={() => changeVolumeOn(false)}
+          onClose={() => setVolumeDialogOpen(false)}
+        />
       )}
       {footprintDialogOpen && (
         <FootprintSettingsDialog
@@ -1609,67 +2325,59 @@ function ChartInner({
           )}
         </p>
       ))}
-      {/* DW-150: the settings are reachable as soon as the FRVP tool is armed, so the first
-          profile is placed with them already set. */}
-      {(frvps.length > 0 || activeTool === "frvp") && (
-        <div role="group" aria-label="Volume profiles">
-          {frvps.map((f) => (
-            <button
-              key={f.id}
-              type="button"
-              aria-label={`Remove volume profile ${f.id}`}
-              onClick={() => setFrvps((all) => all.filter((x) => x.id !== f.id))}
-            >
-              {f.id} x
-            </button>
-          ))}
-          <VolumeProfileSettingsPanel
-            title="Fixed range volume profile settings"
-            value={frvpSettings}
-            onChange={handleFrvpSettings}
-          />
-        </div>
+      {overlaysDialogOpen && (
+        <VolumeOverlaysDialog
+          candlesMode={mode === "candles"}
+          timeZone={timeZone}
+          onClose={() => setOverlaysDialogOpen(false)}
+          vrvp={{
+            active: vrvpActive,
+            settings: vrvpSettings,
+            pastOldest: visibleRange?.pastOldest ?? false,
+            onAdd: () => setVrvpActive(true),
+            onRemove: () => setVrvpActive(false),
+            onSettingsChange: setVrvpSettings,
+          }}
+          session={{
+            active: sessionCfg,
+            renderedCount: sessionRenderedCount,
+            loading: sessionData.loading,
+            onAdd: addSessionProfile,
+            onRemove: () => setSessionCfg(null),
+            onPeriodChange: changeSessionPeriod,
+            onOptionsChange: changeSessionOptions,
+            onSettingsChange: changeSessionSettings,
+          }}
+          // DW-150: the FRVP settings show as soon as the tool is armed, so the first range is placed
+          // with them already set.
+          frvp={{
+            ranges: frvps,
+            settings: frvpSettings,
+            armed: activeTool === "frvp",
+            drawDisabled: isToolDisabled(toolDef("frvp")),
+            onDraw: () => selectTool("frvp"),
+            onRemove: (id) => setFrvps((all) => all.filter((x) => x.id !== id)),
+            onSettingsChange: handleFrvpSettings,
+          }}
+        />
       )}
-      {/* Anchor target of the top bar's "Indicators" entry point: the picker plus the chart-only
-          overlay controls. */}
-      <div id="indicators" tabIndex={-1}>
-      <VrvpControl
-        active={vrvpActive}
-        candlesMode={mode === "candles"}
-        settings={vrvpSettings}
-        pastOldest={visibleRange?.pastOldest ?? false}
-        onAdd={() => setVrvpActive(true)}
-        onRemove={() => setVrvpActive(false)}
-        onSettingsChange={setVrvpSettings}
-      />
-      <SessionProfileControl
-        active={
-          sessionCfg
-            ? {
-                preset: sessionCfg.preset,
-                period: sessionCfg.period,
-                settings: sessionCfg.settings,
-                anchor: sessionCfg.anchor,
-                ibMinutes: sessionCfg.ibMinutes,
-                letters: sessionCfg.letters,
-              }
-            : null
-        }
-        candlesMode={mode === "candles"}
-        renderedCount={sessionCfg?.preset === "auto" ? autoView.specs.length : sessionSpecs.length}
-        loading={sessionData.loading}
-        onAdd={addSessionProfile}
-        onRemove={() => setSessionCfg(null)}
-        onPeriodChange={changeSessionPeriod}
-        onOptionsChange={changeSessionOptions}
-        onSettingsChange={changeSessionSettings}
-      />
+      {searchOpen && (
+        <SymbolSearch
+          mode="navigate"
+          instrumentId={instrumentId}
+          onPick={(iid) => navigate(`/chart/${encodeURIComponent(iid)}`)}
+          onClose={() => setSearchOpen(false)}
+        />
+      )}
+      {sheetOpen && <ShortcutSheet onClose={() => setSheetOpen(false)} />}
       <AlertDialog
         open={alertDialogOpen}
         onClose={() => setAlertDialogOpen(false)}
         instrumentId={instrumentId}
         barSeconds={barSeconds}
         priceLines={priceLines}
+        initialCondition={alertCondition}
+        saveDrawings={saveDrawingsNow}
       />
       <IndicatorPicker
         ref={pickerRef}
@@ -1688,19 +2396,76 @@ function ChartInner({
         footprintOn={footprint.on}
         onFootprintChange={changeFootprintOn}
         footprintCandlesOnly={mode !== "candles"}
+        derivatives={derivativeOnStates(derivatives)}
+        onDerivativeChange={changeDerivativeOn}
+        derivativesDisabled={derivativesData.spot}
+        derivativesCandlesOnly={mode !== "candles"}
       />
-      </div>
     </div>
   );
 }
 
 export default function ChartPage() {
   const { iid } = useParams<{ iid: string }>();
+  // The tool each rail group last armed (TradingView's rule: a group's button shows the tool used
+  // last). Held here, above the per-coin and per-timeframe remounts, so it follows the operator from
+  // coin to coin. Known limit: not persisted, so a page reload shows each group's first tool again.
+  // Upgrade path: a per-viewer UI preference beside the coin layout (not the layout table itself,
+  // whose shape is the server's).
+  const [toolMemory, setToolMemory] = useState<Partial<Record<string, ChartTool>>>({});
+  const rememberTool = useCallback(
+    (groupId: string, tool: ChartTool): void =>
+      setToolMemory((prev) => (prev[groupId] === tool ? prev : { ...prev, [groupId]: tool })),
+    [],
+  );
+  // Story 33.10: the drawing magnet follows the operator from coin to coin like the tool memory. Not
+  // persisted (the spec's choice): a reload starts with it off.
+  const [magnet, setMagnet] = useState<MagnetMode>("off");
+  // Story 33.12: the watchlist rail, beside the per-coin chart rather than inside it, so it stays open
+  // (and keeps its list and socket) when a row opens another coin. View state, not persisted.
+  const [watchlistOpen, setWatchlistOpen] = useState(false);
+  const toggleWatchlist = useCallback((): void => setWatchlistOpen((open) => !open), []);
   if (!iid) return <p>No instrument specified.</p>;
-  return <ChartForCoin key={iid} instrumentId={iid} />;
+  return (
+    <div className="chart-page">
+      <ChartForCoin
+        key={iid}
+        instrumentId={iid}
+        toolMemory={toolMemory}
+        onToolUsed={rememberTool}
+        magnet={magnet}
+        onMagnet={setMagnet}
+        watchlistOpen={watchlistOpen}
+        onWatchlistToggle={toggleWatchlist}
+      />
+      {watchlistOpen && <WatchlistRail instrumentId={iid} />}
+    </div>
+  );
 }
 
-function ChartForCoin({ instrumentId }: { instrumentId: string }) {
+function ChartForCoin({
+  instrumentId,
+  toolMemory,
+  onToolUsed,
+  magnet,
+  onMagnet,
+  watchlistOpen,
+  onWatchlistToggle,
+}: {
+  instrumentId: string;
+  toolMemory: Partial<Record<string, ChartTool>>;
+  onToolUsed: (groupId: string, tool: ChartTool) => void;
+  magnet: MagnetMode;
+  onMagnet: (mode: MagnetMode) => void;
+  watchlistOpen: boolean;
+  onWatchlistToggle: () => void;
+}) {
+  // Story 33.12: the one fullscreen element, `.chart-stage`: the top bar (so the button that leaves
+  // stays on screen), the replay controls, the tool rail, the chart with every pane and its legends,
+  // and the Liquidation tape. Held here, above the per-timeframe remount of ChartInner, so a timeframe
+  // change (a click or a typed one) keeps fullscreen. The watchlist rail stays outside it.
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const fullscreen = useFullscreen(stageRef);
   // Story 32.6: the coin's saved layout (timeframe, volume, mode, crosshair, pane heights, zoom, volume
   // profile) is loaded BEFORE the chart mounts, so its first candle request already uses the saved
   // timeframe. Held here, not in ChartInner (remounted on every timeframe change).
@@ -1749,12 +2514,16 @@ function ChartForCoin({ instrumentId }: { instrumentId: string }) {
   }, [instrumentId, resetToDefault]);
 
   if (layout === null) {
-    return layoutStore.status === "failed" ? (
-      <p role="alert" className="chart-load-error">
-        The layout of {instrumentId} could not be loaded, so the chart is not drawn (see the error bar). A server or network failure is retried every few seconds.
-      </p>
-    ) : (
-      <p>Loading the layout of {instrumentId}...</p>
+    return (
+      <div className="chart-stage" ref={stageRef}>
+        {layoutStore.status === "failed" ? (
+          <p role="alert" className="chart-load-error">
+            The layout of {instrumentId} could not be loaded, so the chart is not drawn (see the error bar). A server or network failure is retried every few seconds.
+          </p>
+        ) : (
+          <p>Loading the layout of {instrumentId}...</p>
+        )}
+      </div>
     );
   }
 
@@ -1762,7 +2531,7 @@ function ChartForCoin({ instrumentId }: { instrumentId: string }) {
   // (coin, timeframe), rather than trying to re-point one long-lived chart instance (see
   // LightweightChart's own docstring -- lightweight-charts has no supported API for that).
   return (
-    <>
+    <div className="chart-stage" ref={stageRef}>
       <ChartInner
         // `revision` is bumped by Reset to default in the same render as the reset layout: ChartInner
         // remounts once and re-reads every field (and its picker refetches the reset indicator list).
@@ -1779,6 +2548,13 @@ function ChartForCoin({ instrumentId }: { instrumentId: string }) {
         onLayout={updateLayout}
         onSaveAsDefault={handleSaveAsDefault}
         onResetToDefault={handleResetToDefault}
+        toolMemory={toolMemory}
+        onToolUsed={onToolUsed}
+        magnet={magnet}
+        onMagnet={onMagnet}
+        fullscreen={fullscreen}
+        watchlistOpen={watchlistOpen}
+        onWatchlistToggle={onWatchlistToggle}
       />
       {layoutStore.saveError !== null && (
         <p role="alert" className="chart-load-error">
@@ -1790,6 +2566,6 @@ function ChartForCoin({ instrumentId }: { instrumentId: string }) {
           {actionError}
         </p>
       )}
-    </>
+    </div>
   );
 }

@@ -17,6 +17,7 @@
 from collections.abc import Mapping
 from collections.abc import Sequence
 
+from kernel.liquidation import Liquidation
 from kernel.second_snapshot import SecondRow
 
 from candles.infrastructure.sqlite_store import CandleStore
@@ -47,6 +48,21 @@ class CandleSink:
     def apply(self, instrument_id: str, rows: Sequence[SecondRow]) -> int:
         """Fold `rows` in, each second exactly once; returns the number of seconds applied."""
         return self._store.apply(instrument_id, rows)
+
+    def apply_liquidations(self, instrument_id: str, rows: Sequence[Liquidation]) -> int:
+        """
+        Fold flushed liquidations in, each venue event exactly once (the store's
+        `liquidations_applied`); returns how many were new. For an instrument with the feed only
+        (another raises `ValueError`).
+
+        Called by capture **before** the seconds of the same flush: this lowers the store's
+        persisted feed start (`liquidation_feed_since`) to the rows' earliest `ts_event`, and
+        `apply` then gives a bucket 0 `liq_*` only if it starts at or after that start. The
+        reverse order would fold an id's first-liquidation flush with no start known, null where a
+        rebuild of the same day stores 0 (audit D-160: live and rebuild agree bucket for bucket).
+        A liquidation landing before its seconds creates its row with `seconds_observed = 0`.
+        """
+        return self._store.apply_liquidations(instrument_id, rows)
 
     def watermarks(self) -> Mapping[str, int]:
         """instrument_id -> `ts_event` (ns) of the last second applied."""

@@ -262,6 +262,15 @@ def test_basis_in_bps() -> None:
     assert basis[2] == pytest.approx(-100.0)
 
 
+def test_basis_matches_the_chart_spread_fixture() -> None:
+    # Story 33.9's shared fixture, asserted by `frontend/src/lib/compare.test.ts` (`spreadBps`) too:
+    # (101 / 100 - 1) * 1e4 = 100 bps, a gap on either side stays a gap.
+    basis = basis_bps(np.array([101.0, math.nan, 101.0]), np.array([100.0, 100.0, math.nan]))
+    assert basis[0] == pytest.approx(100.0)
+    assert math.isnan(basis[1])
+    assert math.isnan(basis[2])
+
+
 @pytest.mark.parametrize("bad", [0.0, -1.0, math.inf])
 def test_basis_refuses_a_non_positive_or_infinite_price(bad: float) -> None:
     with pytest.raises(ValueError, match="positive"):

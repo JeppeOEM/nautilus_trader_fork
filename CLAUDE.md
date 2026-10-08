@@ -34,6 +34,23 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
 - Bybit **spot** yields trades and book only. `capture/venues/bybit/client.py` subscribes the
   ticker for `LINEAR` alone, so a spot id produces no mark/index price and no funding rate,
   and `capture/venues/bybit/open_interest.py` builds `-LINEAR.BYBIT` ids only.
+- Bybit **linear liquidations** (Story 33.1): every `allLiquidation.{symbol}` entry of a
+  collected LINEAR id, over a second, generic `nautilus_pyo3.WebSocketClient` (the Rust Bybit
+  handler drops the topic), as the shared `kernel.liquidation.Liquidation` (`custom_liquidation/`:
+  liquidated side, size and **bankruptcy** price in exact integer units at the definition's
+  precisions), published on `liquidations:raw`. Spot has no liquidation stream. A window the socket
+  missed is recorded as coverage `liquidations_unrecoverable`, never filled (Bybit has no
+  liquidation history). Hyperliquid liquidations are **not** collected: no market-wide feed, and
+  Story 33.2 refuted both public-data hypotheses (`platform/docs/DATA_DICTIONARY.md` §1.26).
+- Where each derivative is shown (Story 33.5; read through `views/derivatives.py`'s routes and
+  `/ws/live`'s `derivs:`/`liquidations:` channels, Story 33.4):
+  - the chart's pinned **Derivatives** group: Open Interest, Funding (held per bar between
+    change-deduped events), Basis (mark−index, mark−last) panes and the Mark / Index overlay;
+    Liquidations as mirrored bars plus **markers** on the price pane at the bankruptcy price,
+    and a live **Liquidation tape** panel (newest 50). Spot shows the group disabled;
+  - the History page's OI, Funding and Liquidations 1h tiles (`metrics.db`);
+  - the ranking fields `ranking` publishes on `rankings:live` (funding, OI and its change,
+    basis, liquidation sums and notional, Story 33.4), shown as screener columns from 33.7.
 
 ### Constraints
 
@@ -77,6 +94,21 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
   - Hyperliquid: forwarded over the WebSocket (`subscribe_open_interest`), so no poll.
   - All land in the one shared `kernel.open_interest.OpenInterest` custom `Data`
     type (story 22.3), registered for Arrow/Parquet serialization.
+- **Liquidations** arrive differently per venue and are likewise a per-venue investigation:
+  - Bybit: `allLiquidation.{symbol}` on the linear stream over a second, generic
+    `nautilus_pyo3.WebSocketClient` (the Rust handler drops the topic), Story 33.1.
+  - Hyperliquid: none (Story 33.2, `platform/docs/DATA_DICTIONARY.md` §1.26). There is no
+    market-wide feed, and both public hypotheses failed on a captured hour. The upgrade path, a
+    non-validator node's fill stream, is in the DDD spine's Deferred, declined by the operator on
+    cost (2026-10-05): liquidations come from Bybit only.
+    - (a) the all-zero trade `hash` marks TWAP slices, not liquidations: 0 of 4,104 candidates
+      confirmed, and 0 of 1,204 census liquidations carry it.
+    - (b) the liquidator vaults' backstop fills are real but rare and bursty, 0 in the window.
+  - dYdX: trades carry `type: LIQUIDATED` on REST (`crates/adapters/dydx/src/http/models.rs:184`)
+    and on the `v4_trades` WS payload (`websocket/messages.rs:480`), but the adapter's
+    `parse_trade_ticks` (`websocket/parse.rs:754`) drops it from `TradeTick`; not deployed since
+    29.3, out of scope.
+  - Only Bybit's land in the shared `kernel.liquidation.Liquidation` custom `Data` type.
 - **Rate limits:** dYdX relies on the Rust WebSocket client's built-in subscribe throttle
   (2/sec) and reconnect handling; no custom throttling. Bybit and Hyperliquid needed no cap
   for the instrument counts collected (stories 19.3/19.4). A new venue's limits are part of
@@ -119,9 +151,10 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
     WMA/Hull/Adaptive MA, RSI, MACD, Stochastics, CCI, ATR, Bollinger/Donchian/Keltner, OBV,
     VWAP, Ichimoku, more), `O(1)` per event via `update_raw()`. Reach for these before
     `pandas-ta` or a hand-rolled version. Only write a custom `Indicator` subclass when no
-    built-in covers it. The two precedents: `platform/kernel/indicators.py` (OFI/OBI/microprice)
-    and `platform/kernel/candle_patterns.py` (`CandlePattern`, the 22 candlestick patterns, Story
-    27.7).
+    built-in covers it. The three precedents: `platform/kernel/indicators.py` (OFI/OBI/microprice),
+    `platform/kernel/candle_patterns.py` (`CandlePattern`, the 22 candlestick patterns, Story
+    27.7) and `platform/kernel/ta.py` (Supertrend, Parabolic SAR, ADX, Williams %R, Pivot Points,
+    MFI, CMF, Awesome Oscillator, ZigZag: the TA indicators Nautilus lacks, Story 33.11).
 - **Future-proof the data pipeline.** Avoid loading entire catalog slices into memory
   (e.g. `catalog.trade_ticks()` with no time bounds). Prefer `BacktestDataConfig`
   streaming, which also enables parameter sweeps and time-range filtering.

@@ -70,6 +70,29 @@ class CandleItem(BaseModel):
     # understated. Set on every candle, stored or folded from raw 1s at read time (Story 31.8);
     # absent (None) on gap markers only.
     partial: bool | None = None
+    # Story 33.3 (`docs/DATA_DICTIONARY.md` §2.15): the bar's exact order-flow and liquidation sums,
+    # integers in units of this item's own `price_precision`/`size_precision` (the bar's finest,
+    # which may differ from the response's definition precisions after a venue changed them):
+    # `buy_v`/`sell_v`/`liq_long_v`/`liq_short_v` count `10^-size_precision`, `pv` (the
+    # second-close VWAP numerator) `10^-(price_precision + size_precision)`, the `_n` keys trades
+    # and liquidations. Null is unknown, never 0: a pre-migration bar's flow, an instrument without
+    # a liquidation feed's `liq_*` (Bybit linear only has one), a feed instrument's `liq_*` before
+    # its first archived liquidation (audit D-160), and every key of a gap marker.
+    # Known limit (JSON range): `pv` (and a very large volume) can exceed 2^53, which a browser's
+    # `JSON.parse` rounds to the nearest double; Python consumers (`verification`, research) get
+    # the exact int. The UI uses `pv` only as a VWAP numerator, `pv / (buy_v + sell_v)`, where a
+    # 2^-53 relative error is invisible. Upgrade path: a string encoding of the integer columns
+    # (an added key per AD-D12), parsed with `BigInt` where exactness matters in the browser.
+    buy_v: int | None = None
+    sell_v: int | None = None
+    buy_n: int | None = None
+    sell_n: int | None = None
+    pv: int | None = None
+    liq_long_v: int | None = None
+    liq_short_v: int | None = None
+    liq_n: int | None = None
+    price_precision: int | None = None
+    size_precision: int | None = None
 
 
 class CandlesResponse(BaseModel):
@@ -110,6 +133,7 @@ def get_candles(
             catalog_path=CATALOG_PATH,
             candles_dir=CANDLES_DB_DIR,
             recent_rows=buses.live_candle_bus.recent_rows,
+            recent_liquidations=buses.live_candle_bus.recent_liquidations,
         )
     except chart_series.ImpossibleCandle as exc:
         # An impossible candle means upstream code malfunctioned (DATA-07): views has already

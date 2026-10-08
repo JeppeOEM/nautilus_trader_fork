@@ -393,7 +393,7 @@ def test_capture_removes_the_empty_file_of_a_failed_connect(
 ) -> None:
     module = _script()
 
-    async def _refused(*args: Any) -> tuple[int, str]:
+    async def _refused(*args: Any, **kwargs: Any) -> tuple[int, str]:
         raise aiohttp.ClientConnectionError("dns")
 
     monkeypatch.setattr(module, "_stream", _refused)
@@ -453,3 +453,63 @@ def test_hyperliquid_summary_says_when_there_is_nothing_to_summarise(
 
 def _no_network(*args: Any) -> None:
     raise AssertionError("capture must not run")
+
+
+def test_topics_and_a_coin_list_build_every_subscription_and_split_bybit_at_ten_args() -> None:
+    coins = ",".join(f"C{i}USDT" for i in range(6))
+
+    url, subs = _script().subscribe_plan(
+        "bybit", coins, None, None, ["allLiquidation", "publicTrade"]
+    )
+
+    assert url == "wss://stream.bybit.com/v5/public/linear"
+    args = [arg for sub in subs for arg in sub["args"]]
+    assert [len(sub["args"]) for sub in subs] == [10, 2]
+    assert args[:2] == ["allLiquidation.C0USDT", "allLiquidation.C1USDT"]
+    assert args[-1] == "publicTrade.C5USDT"
+
+
+def test_hyperliquid_topics_subscribe_each_coin() -> None:
+    _, subs = _script().subscribe_plan("hyperliquid", "BTC,ETH", None, None, ["trades"])
+
+    assert subs == [
+        {"method": "subscribe", "subscription": {"type": "trades", "coin": "BTC"}},
+        {"method": "subscribe", "subscription": {"type": "trades", "coin": "ETH"}},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["--topic", "trades", "--subscribe", '{"a": 1}'], "--topic is not used with --subscribe"),
+        (["--venue", "other", "--url", "wss://x", "--topic", "t"], "--venue other requires"),
+        (["--coin", "BTC,"], "--coin must not be empty"),
+    ],
+)
+def test_cli_refuses_unusable_topic_and_coin_lists(
+    argv: list[str],
+    message: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    module = _script()
+    monkeypatch.setattr(module, "capture", _no_network)
+
+    with pytest.raises(SystemExit) as exc:
+        module.main(argv)
+
+    assert exc.value.code == 2
+    assert message in capsys.readouterr().err
+
+
+def test_cli_passes_topics_to_capture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    module = _script()
+    seen: list[dict[str, Any]] = []
+    monkeypatch.setattr(module, "capture", lambda *args, **kwargs: seen.append(kwargs))
+
+    module.main(["--venue", "bybit", "--coin", "BTCUSDT", "--topic", "allLiquidation"])
+
+    assert seen == [{"topics": ["allLiquidation"]}]

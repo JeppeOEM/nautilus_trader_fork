@@ -143,7 +143,7 @@ export class PositionPrimitive implements DrawingPrimitive {
     const g = this.geometry;
     if (!g) return null;
     const labels = this.precision === null ? null : positionLabels(this.position, this.precision);
-    const handles = this.handlesVisible ? this.handles(g) : [];
+    const handles = this.handlesVisible && !this.position.locked ? this.handles(g) : [];
     const up = chartVar("--chart-up");
     const down = chartVar("--chart-down");
     // A drawing's own colour (the context menu's) tints the entry line and its labels.

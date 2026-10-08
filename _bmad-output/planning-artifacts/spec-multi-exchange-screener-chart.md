@@ -56,7 +56,9 @@ placement/operation-parity tables — is the original spec, unmodified.
 - v5 creates every series via `chart.addSeries(SeriesType, options)`, e.g.
   `chart.addSeries(CandlestickSeries, {...})` — not `addCandlestickSeries()`.
 - Built-in series types: Candlestick, Bar, Line, Area, Baseline, Histogram.
-  Part A only ever instantiates Candlestick and Line (§A2).
+  Part A only ever instantiates Candlestick and Line (§A2). **[amended
+  2026-10-07: Story 33.9]** It now instantiates Candlestick, Bar, Line, Area
+  and Baseline for the main series (§A2).
 - Native multi-pane support (`chart.addPane()`, or a `paneIndex` on
   `addSeries`) — use this for the volume pane and indicator panes.
 - Volume Profile (§A7) has **no native support at all** — it's a from-
@@ -181,6 +183,20 @@ type IndicatorFn = (candles: Candle[], params: Record<string, number>) =>
 
 No right sidebar, ever, in this build (see §A9).
 
+> **[amended 2026-10-07: Story 33.12]** The operator's 2026-10-05 review lifts
+> part of this exclusion. A **watchlist rail** sits right of the chart while
+> its top-bar toggle is on: the operator's pinned chart instruments, saved
+> server-side (`GET`/`PUT /api/watchlist`, `chart_watchlist.toml`), each row
+> priced live from `rankings:live` (price, 24 h %, `—` where unranked). The
+> symbol in the top bar opens a **symbol search** (also `/` and Ctrl/Cmd+K;
+> the same dialog is the Compare picker), and a **Fullscreen** button (or
+> Shift+F) puts the whole chart stage on the screen: the top bar, the replay
+> controls, the tool rail, the chart with every pane and the Liquidation
+> tape (the rail stays outside). The same review **dropped** multi-chart grid
+> layouts, a synced crosshair and CSV/data export: fullscreen replaces them,
+> and they stay excluded (§A9). No alerts-manager panel, news or idea stream,
+> DOM or order entry is added to the rail.
+
 > **Grounded in this project:** the main chart pane + volume pane + stacked
 > indicator pane(s) stack already exists in `LightweightChart.tsx` and
 > `ChartPage.tsx` (Stories 15.3–15.4). The top toolbar and left toolbar in
@@ -197,6 +213,22 @@ menu of 13 types like TradingView):
 
 **Explicitly not offered:** Bar, Area, Baseline, Heikin Ashi, Renko, Kagi,
 Point & Figure, Range bars, Hollow candles, Volume candles.
+
+> **[amended 2026-10-07: Story 33.9]** The operator's 2026-10-05 review lifts
+> part of this restriction. A `Chart type` select offers seven types:
+> **Candles, Hollow candles, Bars, Line, Area, Baseline, Heikin Ashi**
+> (`lib/chartTypes.ts`, the layout key `chart_type`). Heikin Ashi, Hollow's
+> colours and the Line/Area/Baseline close values are display transforms
+> handed only to the main series: indicators, drawings, alerts, profiles and
+> gaps stay on the real OHLC (AD-F6). Hollow's rule: close >= open is a
+> hollow body, close < open filled; the colour is up when the close is at or
+> above the previous bar's close. The right price scale gains Normal / Log /
+> Percent / Indexed to 100, Auto and Invert (`price_scale`), and up to three
+> **compare symbols** draw as lines on the Percent (or Indexed) scale,
+> aligned on the main bar times with gaps, plus an optional cross-venue
+> Spread pane in bps (`compare`). Still excluded: **Renko, Kagi, Point &
+> Figure, Range bars and Volume candles.** The Candles/Lines toggle below
+> stays as the Lines (snapshot-seconds) mode, unchanged.
 
 ### Candle appearance — deliberately fixed, not customizable
 
@@ -218,6 +250,14 @@ Point & Figure, Range bars, Hollow candles, Volume candles.
 
 Only these three tools exist. No trendline variants, no Fibonacci, no
 shapes/text, no Elliott wave/Gann tools, no pitchfork, no brush/highlighter.
+
+> **[amended 2026-10-07: Story 33.10]** The operator's 2026-10-05 review lifts
+> this restriction for the TradingView tools the operator uses (see the
+> exclusions list, "Extra drawing tools"): the grouped rail now holds Lines
+> (trend, ray, extended, horizontal, vertical, parallel channel), Fibonacci
+> (retracement, extension), Projection (long, short), Shapes / Annotation
+> (rectangle, text, arrow), Measure (measure, price range, date range) and
+> Volume-based, plus the magnet, undo/redo, Hide all and Delete all actions.
 
 1. **Line (trendline)** — click-drag between two points on the price/time
    plane. Implemented as a custom Primitive holding two `{time, price}`
@@ -413,6 +453,27 @@ app.
 **Not built:** the Telegram bot itself, chat_id lookup flow, Discord/Slack/
 email/SMS delivery, "Notify on price change % " and other exotic condition
 types, alert templates library, multi-condition (AND/OR) logic.
+
+> **[amended 2026-10-07: Story 33.8]** The operator's 2026-10-05 review lifts
+> the exclusion of "Notify on price change %" and the other exotic condition
+> types. An alert holds one `condition` of 14 kinds (`alerting/domain/
+> conditions.py`): price crosses, crosses up, crosses down, above and below a
+> level; % move over N closed bars; channel exit; an indicator output `>`/`<`/
+> crosses up/crosses down a value (read through the chart's own indicator
+> replay); a cross of a saved trendline (the chart's own line, extrapolated past its anchors);
+> funding above/below a rate; open-interest change over a window; liquidation
+> notional over a window (optionally one side); and forced share over a window.
+> The existing three frequencies apply to every kind. The Alerts page is no
+> longer list-only: it creates an alert (instrument, timeframe, condition,
+> frequency, expiry, template, webhook) without a chart and edits one in a
+> dialog (`PUT /api/alerts/{id}`, with Re-arm for a triggered alert); a row
+> shows the server's condition text, its status (now also `invalid`, with the
+> reason, when its indicator or drawing is gone) and Delete. The chart's alert
+> dialog offers every kind, and the drawing menu's "Add alert…" prefills it from
+> a clicked horizontal line (a price cross at its price) or trendline (a
+> trendline cross). Templates gain `{{value}}` and `{{condition}}`. Still
+> excluded: multi-condition (AND/OR) alerts and an alert templates library;
+> delivery is unchanged (webhook and Telegram through `observability.notify`).
 
 > **Grounded in this project:** not built yet — a genuinely new epic. Since
 > `troll/data_api` already runs a live Redis-subscriber loop (`ws/live.py`,
@@ -689,6 +750,8 @@ doc, so it reads as one checklist:
 | Step through replay | Step-forward/back buttons move exactly one bar; Play/Pause runs it at the selected speed | §A5 |
 | Change replay start point mid-session | "Go to…" re-enters picker mode without losing replay state | §A5 |
 | Create an alert | Click the alert icon → condition builder → set frequency/expiration/webhook → save | §A6 |
+| Open another market **[amended 2026-10-07: Story 33.12]** | Click the symbol, `/` or Ctrl/Cmd+K → type (every word matched in symbol, venue or id) → ↑/↓ → Enter opens it | §A1 amendment |
+| Keyboard shortcuts **[amended 2026-10-07: Story 33.12]** | `?` lists them all (`lib/shortcuts.ts`, the one table): typed timeframe (`1`, `5`, `15`, `1h`, `4h`, `d`, `w` then Enter), Alt+T/H/F/V tools, Alt+R replay (candle charts only), Alt+C compare, Shift+L log scale, Shift+F fullscreen; none act while typing in a field or with a dialog open | §A1 amendment |
 
 Anything not in this table (visual styling, spacing, exact colors, fonts)
 is not part of "operates the same" and is entirely your call.
@@ -698,33 +761,73 @@ is not part of "operates the same" and is entirely your call.
 This is the explicit "do not build" list for the LLM — call this out loud in
 the code review if any of these sneak back in:
 
-- **Right sidebar** — no watchlist, no alerts-manager panel, no community
-  idea stream, no news feed, no DOM/order-entry panel. This entire vertical
-  strip does not exist in this build.
-- **Watchlist and Screener** — excluded entirely this round; different task.
+- **Right sidebar** — no ~~watchlist,~~ alerts-manager panel, no community
+  idea stream, no news feed, no DOM/order-entry panel. ~~This entire vertical
+  strip does not exist in this build.~~ **[amended 2026-10-07: Story 33.12]**
+  The operator's 2026-10-05 review adds one rail: the watchlist (§A1
+  amendment), pinned instruments with a live price and 24 h %. Everything
+  else in this item stays excluded, and the alerts are a page of their own
+  (Story 33.8), not a sidebar.
+- **Watchlist and Screener** — ~~excluded entirely this round; different
+  task.~~ **[amended 2026-10-07: Story 33.12]** The screener is Part B's
+  Rankings page; the chart gains the server-side watchlist rail and a symbol
+  search (§A1 amendment), per the operator's 2026-10-05 review.
 - **Candle customization** — no body/border/wick color pickers, no
   "color based on previous close" toggle, no hollow-candle or volume-candle
-  variants. One fixed up/down color pair, period.
-- **Extra chart types** — no Bar, Area, Baseline, Heikin Ashi, Renko, Kagi,
-  Point & Figure, Range bars, Hollow/Volume candles. Candlestick and Line
-  only.
-- **Extra drawing tools** — no Fibonacci retracement/extension tools, no
-  shapes, no text annotations, no pitchforks, no Gann/Elliott wave tools, no
-  brush/highlighter, no pattern-drawing helpers. Line, horizontal line, and
-  the measurement tool only.
+  variants. One fixed up/down color pair, period. **[amended 2026-10-07:
+  Story 33.9]** The Hollow candles chart type (§A2) is the one hollow
+  variant, with the same fixed pair; colour pickers stay excluded.
+- **Extra chart types** — no ~~Bar, Area, Baseline, Heikin Ashi,~~ Renko, Kagi,
+  Point & Figure, Range bars, ~~Hollow/~~Volume candles. ~~Candlestick and Line
+  only.~~ **[amended 2026-10-07: Story 33.9]** Bars, Area, Baseline, Heikin
+  Ashi and Hollow candles are built (§A2), with the price-scale modes and
+  compare symbols; Renko, Kagi, Point & Figure, Range bars and Volume candles
+  stay excluded.
+- **Extra drawing tools** — no ~~Fibonacci retracement/extension tools, no
+  shapes, no text annotations,~~ pitchforks, no Gann/Elliott wave tools, no
+  brush/highlighter, no pattern-drawing helpers. ~~Line, horizontal line, and
+  the measurement tool only.~~ **[amended 2026-10-07: Story 33.10]** The
+  operator's 2026-10-05 review lifts this exclusion for the TradingView set
+  the operator uses: the rail's groups (§A3, `lib/chartTools.ts`) add the
+  ray, extended line, vertical line and parallel channel (Lines), the
+  Fibonacci extension (Fibonacci; the retracement came with Story 32.5), the
+  rectangle, text and arrow (a new Shapes / Annotation group) and the saved
+  price and date ranges (Measure), each saved in `chart_drawings.toml`, with a
+  magnet (weak/strong, on the real OHLC), Shift angle snapping, undo/redo
+  (100 steps per coin, page state), per-drawing lock and hide, Hide all (the
+  layout key `drawings_hidden`) and Delete all. Pitchforks, Gann/Elliott wave
+  tools, brush/highlighter, pattern-drawing helpers and an object tree stay
+  excluded.
 - **Full indicator library** — no 100+ built-in indicator catalog, no
   Pine-Script-style custom scripting editor, no public/community script
   library or "Add to favorites" indicator list.
-- **Candlestick pattern auto-recognition** — no automated bullish/bearish
-  pattern scanner or pattern tooltips.
+- **Candlestick pattern auto-recognition** — no ~~automated bullish/bearish
+  pattern scanner or pattern tooltips~~. **[amended 2026-10-07: Story 33.11]**
+  The operator's 2026-10-05 review lifts this exclusion: a `CandlePattern`
+  indicator entry (Story 27.7's 22 patterns, `kernel/candle_patterns.py`) is
+  drawn as series markers on the candles by default (an arrow up below the
+  bar for a bullish hit, an arrow down above it for a bearish one, a circle
+  for a non-directional pattern), with the pattern's name and reading as the
+  marker's hover tooltip, through the one series-markers plugin it shares
+  with the liquidation markers; the gear's Display select (the view-only
+  style key `style.value.display`) switches an entry back to its ±100 pane.
+  Patterns are detected on the real OHLC (AD-F6) from served values only,
+  none after the Bar Replay cursor. A standalone pattern scanner page stays
+  excluded (the Technicals tab's pattern columns are the screener view).
 - **Multi-chart grid layouts** — no 2/4/6/8-pane workspace of different
-  symbols/timeframes; this build is a single chart.
+  symbols/timeframes; this build is a single chart. **[amended 2026-10-07:
+  Story 33.12]** Confirmed by the operator's 2026-10-05 review, which dropped
+  multi-chart layouts, a synced crosshair and CSV/data export: a fullscreen
+  single chart (§A1 amendment) is built instead. Also still excluded: candle
+  colour customisation, Volume candles, Renko/Kagi/Point & Figure/Range bars,
+  order entry, pitchforks/Gann/Elliott tools and an object tree.
 - ~~**Anchored Volume Profile** — the one Volume Profile variant we don't
   build (§A7 builds all the others). No "click one bar and grow forward
   indefinitely" mode.~~ **[amended 2026-10-05: Story 32.7]** Built: Anchored
   VP, Auto Anchored VP, Anchored VWAP and TPO are §A7.6.
 - **Volume Candles** — the chart-type variant that encodes volume into
-  candle width/shape. Not one of the two chart types in §A2, and not
+  candle width/shape. Not one of the ~~two~~ chart types in §A2 **[amended
+  2026-10-07: Story 33.9: seven since, Volume candles still not one]**, and not
   confused with the Volume Profile *indicators* in §A7, which are a
   completely different feature despite the similar name.
 - **Volume Footprint** — per-bar bid/ask order-flow breakdown inside each
@@ -968,6 +1071,19 @@ losses over time," not a user-configurable panel):
 > which of 1H/4H/1D/1W/1M/YTD/1Y are actually buildable today vs. requiring
 > a retention change.
 
+> **Amended 2026-10-07 (Story 33.7): derivatives, flow and range columns.**
+> After `Vol24h` the Performance tab shows ten published `rankings:live`
+> fields, appended to `views/ranking_columns.py`'s `RANKING_COLS` and its TS
+> mirror: OI (venue units), OI Δ1h % / OI Δ24h % (`oi_change_*_pct`, computed
+> by `ranking` in `Decimal`, SSOT-02), Funding (a fraction shown as a percent,
+> tooltip: annualised rate and the countdown to the next payment), Basis
+> (mark − index, bps), Liq 1h (quote notional in `K`, tooltip: long/short base
+> sizes), Liq L/S and Forced % (fractions as percents), Rel vol (`×`) and the
+> 24h range (a percent with an inline bar). The page only scales for display.
+> A spot row shows `—` in every derivatives column (`DERIVATIVE_COLUMN_KEYS`),
+> never 0; Rel vol and the range are not derivatives. Full units table:
+> `platform/docs/DATA_DICTIONARY.md` §2.10.
+
 ---
 
 ## B4. Filter panel
@@ -985,10 +1101,28 @@ losses over time," not a user-configurable panel):
 - Multiple filter conditions combine with AND (don't build OR/grouped
   logic for MVP).
 
+> **Amended 2026-10-07 (Story 33.7): new fields and saved presets.** Every
+> new Performance column is a filter field, typed in the row's raw units
+> with the unit in the label (`Funding (fraction/interval)`, `Liq 1h (raw
+> quote)`, `24h range (fraction)`, …); `=` matches what the cell shows. A spot
+> row's derivative never matches. Named presets are stored server-side
+> (`screener_filter_presets.toml` in the preferences directory, `GET`/`PUT
+> /api/rankings/filter-presets`, never `localStorage`): a select recalls one
+> (replacing the conditions, its name shown as a chip until the next edit),
+> Save / Overwrite stores the current conditions under a name, Delete
+> removes the last picked one; a recalled condition the page cannot apply
+> is named in a notice with its reason, not applied, and kept on the next
+> Save. Precision is not stored.
+
 ---
 
 ## B5. Table mechanics (baseline, not otherwise specified)
 - Sort by clicking any column header, ascending/descending toggle
+  *(built, Stories 29.1 and 33.7: Symbol, Exchange and every Performance
+  header cycle ascending → descending → rank order; a missing value sorts
+  last both ways, ties by rank; the sort is kept per browser in
+  `localStorage`; a metric-column sort orders the Performance tab only, Symbol
+  and Exchange both tabs; the Technicals tab's columns stay unsortable)*
 - A symbol/name search box above the table, filters rows by text match
 - No pagination assumption either way — infinite-scroll or simple
   pagination, your call, not a functional requirement either of us has

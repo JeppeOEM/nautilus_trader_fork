@@ -26,7 +26,6 @@ from observability import error_ledger
 from ranking.__main__ import settings_from_env
 from ranking.infrastructure.metrics_store import SqliteMetricsStore
 from views import catalog_reads
-from views import chart_series
 from views import coin_detail
 
 import data_api.app as app_module
@@ -37,7 +36,7 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
 _IID = "BTC-USD-PERP.DYDX"
-_CATALOG_ROUTES = ("/catalog/chart-series", "/catalog/snapshots")
+_CATALOG_ROUTES = ("/catalog/snapshots",)
 _CAP_NS = MAX_SNAPSHOTS_LIMIT * NS_PER_S
 _MAX_DAYS = coin_detail.METRICS_HISTORY_MAX_DAYS
 
@@ -128,20 +127,6 @@ def test_metrics_nearest_route_no_data(tmp_path: Path, monkeypatch: pytest.Monke
 
     assert response.status_code == 200
     assert response.json() is None
-
-
-def test_catalog_chart_series_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    catalog_path = str(tmp_path / "catalog")
-    _write_snapshot(catalog_path, ts=1_000_000_000, bid_price=100.0, ask_price=101.0)
-    _write_snapshot(catalog_path, ts=2_000_000_000, bid_price=100.5, ask_price=101.5)
-    client = _client(catalog_path, str(tmp_path / "metrics.db"), monkeypatch)
-
-    response = client.get(f"/catalog/chart-series/{_IID}?start_ns=0&end_ns=3000000000")
-
-    assert response.status_code == 200
-    assert response.json() == chart_series.compute_chart_series(
-        catalog_path, _IID, 0, 3_000_000_000
-    )
 
 
 def test_catalog_snapshots_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -249,7 +234,6 @@ def _refuse_read(*_args: object) -> None:
 
 
 def _no_catalog_reads(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(chart_series, "compute_chart_series", _refuse_read)
     monkeypatch.setattr(app_module.coin_detail, "catalog_snapshot_rows", _refuse_read)
 
 
@@ -295,12 +279,7 @@ def test_catalog_route_serves_the_widest_window_under_the_cap(
     response = client.get(f"{route}/{_IID}?start_ns=0&end_ns={_CAP_NS - 1}")
 
     assert response.status_code == 200
-    assert len(_served_rows(response.json())) == 1
-
-
-def _served_rows(body: list[dict] | dict[str, list[dict]]) -> list[dict]:
-    # /catalog/snapshots answers the rows; /catalog/chart-series one point per row per series.
-    return body if isinstance(body, list) else body["microprice"]
+    assert len(response.json()) == 1
 
 
 @pytest.mark.parametrize("route", _CATALOG_ROUTES)
@@ -315,7 +294,7 @@ def test_catalog_route_reads_at_the_highest_accepted_timestamp(
     response = client.get(f"{route}/{_IID}?start_ns={max_ts}&end_ns={max_ts}")
 
     assert response.status_code == 200
-    assert _served_rows(response.json()) == []
+    assert response.json() == []
 
 
 @pytest.mark.parametrize("route", _CATALOG_ROUTES)
@@ -352,21 +331,6 @@ def test_catalog_snapshots_route_unknown_id_is_empty(
     assert response.json() == []
 
 
-def test_catalog_chart_series_route_unknown_id_is_all_empty(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    catalog_path = str(tmp_path / "catalog")
-    _write_snapshot(catalog_path, ts=1_000_000_000)
-    client = _client(catalog_path, str(tmp_path / "metrics.db"), monkeypatch)
-
-    response = client.get("/catalog/chart-series/ZZZ-USD-PERP.DYDX?start_ns=0&end_ns=2000000000")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body
-    assert all(points == [] for points in body.values())
-
-
 @pytest.mark.parametrize("route", _CATALOG_ROUTES)
 def test_catalog_route_rejects_an_id_without_a_venue(
     route: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -383,7 +347,6 @@ def test_catalog_route_rejects_an_id_without_a_venue(
 @pytest.mark.parametrize(
     ("route", "module", "name"),
     [
-        ("/catalog/chart-series", chart_series, "compute_chart_series"),
         ("/catalog/snapshots", app_module.coin_detail, "catalog_snapshot_rows"),
     ],
 )
@@ -400,24 +363,6 @@ def test_catalog_read_failure_is_ledgered_and_explained(
     assert response.json()["detail"].startswith("failed to read catalog:")
     assert "disk unreadable" in response.json()["detail"]
     assert error_ledger.counts()["data_api.catalog_read"] == 1
-
-
-@pytest.mark.usefixtures("_clean_ledger")
-def test_catalog_chart_series_empty_top_of_book_keeps_its_message(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def _empty_top(*_args: object) -> None:
-        raise chart_series.EmptyTopOfBook("empty bid side at 1")
-
-    monkeypatch.setattr(chart_series, "compute_chart_series", _empty_top)
-    client = _client(str(tmp_path / "catalog"), str(tmp_path / "metrics.db"), monkeypatch)
-
-    response = client.get(f"/catalog/chart-series/{_IID}?start_ns=0&end_ns=1000000000")
-
-    assert response.status_code == 500
-    assert response.json()["detail"] == "empty bid side at 1"
-    # views ledgers its own malfunction; the route adds no second, misattributed entry.
-    assert "data_api.catalog_read" not in error_ledger.counts()
 
 
 @pytest.mark.parametrize("days", [0, -1, _MAX_DAYS + 1, 10**12])

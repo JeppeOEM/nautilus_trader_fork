@@ -28,6 +28,8 @@ the full lookback window regardless of arrival rate; `drop()` releases an aged-o
 """
 
 import math
+from decimal import Decimal
+from typing import NamedTuple
 
 import numpy as np
 
@@ -36,6 +38,33 @@ from ranking.domain.metrics import price_stats_from_series
 
 # 25h covers the full 24h pct-change calc with a small buffer.
 PRICE_LOOKBACK_HOURS: float = 25.0
+
+# The window of `high_24h`/`low_24h`/`range_position_24h` (Story 33.4): the 24 h the names promise,
+# cut from the 25 h the store keeps (the backfill margin), as `metrics.VOLATILITY_WINDOW_NS` is.
+RANGE_WINDOW_NS: int = 24 * 3_600 * 1_000_000_000
+
+
+class PricePoint(NamedTuple):
+    """
+    One archived traded second, as the `PriceHistory` port returns it (Story 33.4 added the exact
+    columns): `price` is the decoded float close the price series has always held; `close` and
+    `volume` (buy + sell size) are the same second's exact `Decimal`s, read from the stored integer
+    units at the row's precisions -- the hourly traded volume and the mark-last basis read these,
+    never a float (DATA-04).
+    """
+
+    ts_event: int
+    price: float
+    close: Decimal
+    volume: Decimal
+
+
+class PriceRange(NamedTuple):
+    """The highest, lowest and newest trade close inside `RANGE_WINDOW_NS`, as stored (floats)."""
+
+    high: float
+    low: float
+    last: float
 
 
 class _RingBuffer:
@@ -198,6 +227,21 @@ class PriceSeriesStore:
         ts, px = buf.ascending(cutoff_ns=now_ns - self.lookback_ns)
         series = list(zip(ts.tolist(), px.tolist(), strict=True))
         return price_stats_from_series(series)
+
+    def range_24h(self, instrument_id: str, now_ns: int) -> PriceRange | None:
+        """
+        Return the trade-close range over the `RANGE_WINDOW_NS` before `now_ns`; None with no close
+        in it. Known limit: a series younger than 24 h (a fresh start over a short archive) gives
+        the range of what it holds, not None -- the high/low of the hours seen; upgrade path: None
+        until the series reaches the window's start, as `pct_change_24h` does.
+        """
+        buf = self._buffers.get(instrument_id)
+        if buf is None or buf.count == 0:
+            return None
+        _ts, px = buf.ascending(cutoff_ns=now_ns - RANGE_WINDOW_NS)
+        if len(px) == 0:
+            return None
+        return PriceRange(high=float(px.max()), low=float(px.min()), last=float(px[-1]))
 
     def drop(self, instrument_id: str) -> None:
         """Release an aged-out instrument's buffer (MEM-02); a later return starts empty."""

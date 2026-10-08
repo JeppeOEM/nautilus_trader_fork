@@ -14,7 +14,9 @@
 """
 Indicator-signal strategy: one `signal` name picks a Nautilus (or kernel) bar indicator and the rule
 that turns it into +1 (long) / -1 (short) / 0, so a notebook compares every indicator with one
-parameter. It imports only `kernel` and `nautilus_trader` (and its sibling `_bars`).
+parameter. It imports only `kernel` and `nautilus_trader` (and its sibling `_bars`); the six signals
+of Story 33.11 read `kernel.ta`, the indicators Nautilus lacks (ZigZag, which repaints, and the
+non-directional pivot levels are deliberately not signals).
 
 **Signals** (`_SIGNALS`; every `signal_params` key below is optional, an unknown key raises). A
 mean-reversion signal also has a release: the position closes when the indicator is back past its
@@ -47,6 +49,12 @@ neutral level.
 | `fuzzy_candle` | period 10, min_size 4 (`SIZE_LARGE`) | bull / bear candle of size >= min_size |
 | `logistic_trend` | lookback 5, learning_rate 0.05, buy 0.6, sell 0.4 | value > buy / < sell |
 | `swings` | period 10 | the swing direction up / down |
+| `supertrend` | period 10, multiplier 3.0 | `direction` +1 / -1 (`kernel.ta.Supertrend`) |
+| `parabolic_sar` | step 0.02, max_step 0.2 | close > SAR / < SAR (`kernel.ta.ParabolicSAR`) |
+| `adx` | period 14, adx_min 25 | +DI > -DI / < when ADX >= adx_min, else 0 (`kernel.ta.AverageDirectionalIndex`) |
+| `mfi` | period 14, low 20, high 80, neutral 50 | value <= low / >= high; release (`kernel.ta.MoneyFlowIndex`) |
+| `cmf` | period 20 | value > 0 / < 0 (`kernel.ta.ChaikinMoneyFlow`) |
+| `awesome_oscillator` | fast 5, slow 34 | value > 0 / < 0 (`kernel.ta.AwesomeOscillator`) |
 
 **Filters** gate entries only (never exits): `none`; `vhf` (`VerticalHorizontalFilter`, passes at
 `value >= filter_min`, `filter_params` `period` 28); `volatility_ratio` (`VolatilityRatio`, passes at
@@ -84,6 +92,12 @@ from decimal import Decimal
 from typing import Any
 
 from kernel.indicators import OnlineLogisticTrend
+from kernel.ta import AverageDirectionalIndex
+from kernel.ta import AwesomeOscillator
+from kernel.ta import ChaikinMoneyFlow
+from kernel.ta import MoneyFlowIndex
+from kernel.ta import ParabolicSAR
+from kernel.ta import Supertrend
 
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.core.datetime import unix_nanos_to_dt
@@ -291,12 +305,20 @@ def _archer_rule(indicator: ArcherMovingAveragesTrends, bar: Bar, params: Params
     return 1 if indicator.long_run else -1 if indicator.short_run else 0
 
 
+def _adx_rule(indicator: AverageDirectionalIndex, bar: Bar, params: Params) -> int:
+    """Return the DI side when the trend is strong enough (ADX >= `adx_min`), else 0."""
+    if indicator.adx < params["adx_min"]:
+        return 0
+    return _sign(indicator.plus_di - indicator.minus_di)
+
+
 _RSI = _oscillator(lambda i: i.value)
 _STOCH = _oscillator(lambda i: i.value_k)
 _CCI = _oscillator(lambda i: i.value)
 _CMO = _oscillator(lambda i: i.value)
 _RVI = _oscillator(lambda i: i.value)
 _PSL = _oscillator(lambda i: i.value)
+_MFI = _oscillator(lambda i: i.value)
 
 
 def _levels(period: int, low: float, high: float, neutral: float) -> Params:
@@ -400,6 +422,33 @@ _SIGNALS: Mapping[str, _Signal] = {
         lambda p: Swings(p["period"]),
         _signed(lambda i: i.direction),
         feed=_feed_swings,
+    ),
+    # Story 33.11: `kernel.ta`.
+    "supertrend": _Signal(
+        {"period": 10, "multiplier": 3.0},
+        lambda p: Supertrend(int(p["period"]), p["multiplier"]),
+        _signed(lambda i: i.direction),
+    ),
+    "parabolic_sar": _Signal(
+        {"step": 0.02, "max_step": 0.2},
+        lambda p: ParabolicSAR(p["step"], p["max_step"]),
+        lambda i, bar, p: _sign(bar.close.as_double() - i.value),
+    ),
+    "adx": _Signal(
+        {"period": 14, "adx_min": 25.0},
+        lambda p: AverageDirectionalIndex(int(p["period"])),
+        _adx_rule,
+    ),
+    "mfi": _Signal(
+        _levels(14, 20.0, 80.0, 50.0), lambda p: MoneyFlowIndex(int(p["period"])), *_MFI
+    ),
+    "cmf": _Signal(
+        {"period": 20}, lambda p: ChaikinMoneyFlow(int(p["period"])), _signed(lambda i: i.value)
+    ),
+    "awesome_oscillator": _Signal(
+        {"fast": 5, "slow": 34},
+        lambda p: AwesomeOscillator(int(p["fast"]), int(p["slow"])),
+        _signed(lambda i: i.value),
     ),
 }
 

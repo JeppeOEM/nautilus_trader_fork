@@ -33,15 +33,28 @@ MultiLevelOBI/MultiLevelOFI were then consumed only by the web dashboard's live 
 the snapshot/OFI strategies consume them. This is an honest note, not a gap to close here.
 Story 27.3 added `RollingZScore` (the one z-score formula, which `MultiLevelOFI` delegates to)
 and moved `DepthProfile` here with the snapshot depth functions, for views and research alike.
+Story 33.4 added `basis_bps` and `funding_annualised`, the one derivatives formulas behind both the
+`views.derivatives` read model and the ranking row (it also moved `liquidity_distance` here,
+which Story 33.11 deleted: nothing called it).
+Story 33.14 added `LiquidationCascade`, the one cascade definition: the research cascade strategy
+(`research.strategies.liquidation_cascade_strategy`, backtest and live paper bot alike) feeds it,
+and `research.application.liquidations.replay_cascade` replays it for episodes -- 33.13's
+`cascade_episodes` extends that replay rather than redefining a cascade.
+Story 33.6 added `organic_delta_units`, `units_ratio` and `bar_vwap`, the per-bar order-flow
+formulas behind the chart's stored-aggregate indicators (`views.indicator_picker`).
 """
 
 import math
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
+from decimal import Decimal
+from fractions import Fraction
 
 import numpy as np
 
+from kernel.clocks import NS_PER_S
+from kernel.liquidation import LiquidatedSide
 from nautilus_trader.core.correctness import PyCondition
 from nautilus_trader.indicators import Indicator
 from nautilus_trader.model.data import Bar
@@ -478,6 +491,233 @@ class MultiLevelOFI(Indicator):
         self._prev_ask_sizes = None
 
 
+# The floor under `LiquidationCascade.baseline`, in notional units per second (Story 33.14). It
+# only prevents a division by zero: a market with no liquidation for a whole `baseline_s` has an EMA
+# decaying towards 0, and an intensity divided by it would become infinite. It is NOT below every
+# real rate (one unit in a `window_s > 1` window is `1 / window_s` units/s, under the floor), but a
+# unit is `10^-(price_precision + size_precision)` of the quote, so one unit per second is
+# negligible against any real liquidation flow. What it does not do is stop
+# a tiny liquidation after a long silence from reading as a huge intensity and opening an episode:
+# `min_episode_notional` (the strategy's rule) is the guard against acting on one.
+# Known limit: the floor is a fixed count of units, so its quote value depends on the instrument's
+# precisions; upgrade path: a floor in quote currency, converted at the definition's precisions by
+# the caller.
+BASELINE_FLOOR: float = 1.0
+
+
+class LiquidationCascade(Indicator):
+    """
+    A liquidation cascade detector (Story 33.14): the rate of forced notional over a trailing
+    `window_s`, per liquidated side, against its own exact continuous-time EMA over `baseline_s`.
+
+    Inputs: `update_liquidation(side, notional_units, ts_ns)` for each liquidation (the row's
+    `ts_init`, the receive time a live bot knows, and `Liquidation.notional_units()` at one fixed
+    `price_precision + size_precision` for the whole replay) and `advance(ts_ns)` to move the clock
+    without an event. Both are O(1) amortised. The clock never moves backwards: an event stamped
+    before it is placed at it.
+
+    Outputs, recomputed at every update:
+
+    - `rate_long` / `rate_short`: notional units per second of `LONG` (a forced sell) / `SHORT`
+      liquidations placed in the trailing `window_s` (an entry counts while `now < placed +
+      window_s`);
+    - `baseline`: `max(ema / (1 - exp(-elapsed / baseline_s)), BASELINE_FLOOR)`, `ema` the
+      continuous-time EMA (time constant `baseline_s`) of the piecewise-constant total window rate,
+      started at 0 at the first update, and `elapsed` the time since that update. Between two
+      breakpoints (an arrival, or an entry's expiry) the rate `r` is constant, so `ema <- r + (ema -
+      r) * exp(-dt / baseline_s)` integrates it analytically; every expiry is integrated in order,
+      so the value does not depend on how often `advance` is called (equal up to float rounding).
+      The division is the exact continuous-time bias correction: the EMA's weights over
+      `[first, now]` sum to `1 - exp(-elapsed / baseline_s)`, so the corrected value is the
+      weighted mean rate since the first update, not ~63 % of it at the end of the warm-up (which
+      would inflate intensity ~1.6x and open false episodes after every start or restart);
+    - `intensity`: total rate / `baseline` (finite: the floor);
+    - `initialized`: once `baseline_s` has passed since the first update;
+    - `active`: initialized and `intensity >= intensity_threshold`;
+    - `direction`: -1 when longs are being liquidated (`rate_long > rate_short`, the price is
+      falling), +1 for shorts, 0 when the two are equal or not `active` (audit D-147);
+    - an **episode** starts at the first `active` update while none is open: `episode_start_ns`
+      (the clock then), `episode_direction` (the direction then, or the first non-zero one after),
+      `episode_notional_units` (the window's notional at the start plus every event fed while it
+      is open) and `peak_rate` (the highest total rate since it started);
+    - `rising`: the total rate is the open episode's peak, or above the previous update's;
+    - `spent`: latched at the first update of the episode whose total rate is below
+      `peak_rate * decay_ratio`;
+    - `episode_ended`: True at the first update of an episode that is both `spent` and not
+      `active`. That update still shows the episode (spent, its direction, start and notional), so
+      a consumer always sees how an episode ends; the next update resets `peak_rate`, `spent` and
+      every `episode_*` field before it evaluates.
+
+    Invariant: the window holds exactly the events placed in the trailing `window_s` of the
+    clock, in placement order, and the per-side sums are their sums; the clock is monotonic. A bad
+    parameter raises at construction; a non-positive or non-int notional raises at update.
+
+    Parameters
+    ----------
+    window_s : int
+        The trailing window of the rates, in seconds (> 0).
+    baseline_s : int
+        The baseline EMA's time constant and the warm-up before `initialized`, in seconds (> 0).
+    intensity_threshold : float
+        The intensity at or above which the detector is `active` (> 0, finite).
+    decay_ratio : float
+        The share of the episode's peak rate below which it is `spent` (0 < decay_ratio < 1).
+
+    """
+
+    def __init__(
+        self,
+        window_s: int,
+        baseline_s: int,
+        intensity_threshold: float,
+        decay_ratio: float,
+    ) -> None:
+        PyCondition.positive_int(window_s, "window_s")
+        PyCondition.positive_int(baseline_s, "baseline_s")
+        PyCondition.positive(intensity_threshold, "intensity_threshold")
+        if not math.isfinite(intensity_threshold):
+            raise ValueError(f"intensity_threshold must be finite, was {intensity_threshold}")
+        if not 0.0 < decay_ratio < 1.0:
+            raise ValueError(f"decay_ratio must be in (0, 1), was {decay_ratio}")
+        super().__init__(params=[window_s, baseline_s, intensity_threshold, decay_ratio])
+        self.window_s = window_s
+        self.baseline_s = baseline_s
+        self.intensity_threshold = intensity_threshold
+        self.decay_ratio = decay_ratio
+        self._window_ns = window_s * NS_PER_S
+        self._baseline_ns = baseline_s * NS_PER_S
+        # (placed_ns, is_long, notional_units), in placement (= clock) order.
+        self._events: deque[tuple[int, bool, int]] = deque()
+        self._clear()
+
+    def _clear(self) -> None:
+        self._events.clear()
+        self._units_long = 0
+        self._units_short = 0
+        self._ema = 0.0
+        self._clock_ns: int | None = None
+        self._first_ns: int | None = None
+        self._previous_rate = 0.0
+        self.rate_long = 0.0
+        self.rate_short = 0.0
+        self.baseline = BASELINE_FLOOR
+        self.intensity = 0.0
+        self.direction = 0
+        self.active = False
+        self.rising = False
+        self._clear_episode()
+
+    def _clear_episode(self) -> None:
+        self.peak_rate = 0.0
+        self.spent = False
+        self.episode_ended = False
+        self.episode_direction = 0
+        self.episode_start_ns: int | None = None
+        self.episode_notional_units = 0
+
+    @property
+    def clock_ns(self) -> int | None:
+        """The detector's clock: the latest update's time (None before the first)."""
+        return self._clock_ns
+
+    def update_liquidation(self, side: LiquidatedSide, notional_units: int, ts_ns: int) -> None:
+        """Feed one liquidation of `notional_units` received at `ts_ns` (its `ts_init`)."""
+        if isinstance(notional_units, bool) or not isinstance(notional_units, int):
+            raise TypeError(f"notional_units must be an int, was {notional_units!r}")
+        if notional_units <= 0:
+            raise ValueError(f"notional_units must be > 0, was {notional_units}")
+        placed = self._move_clock(ts_ns)
+        is_long = side == LiquidatedSide.LONG
+        self._events.append((placed, is_long, notional_units))
+        self._add(is_long, notional_units)
+        if self.episode_start_ns is not None and not self.episode_ended:
+            self.episode_notional_units += notional_units
+        self._evaluate()
+
+    def advance(self, ts_ns: int) -> None:
+        """Move the clock to `ts_ns` (never backwards) and re-evaluate without an event."""
+        self._move_clock(ts_ns)
+        self._evaluate()
+
+    def _add(self, is_long: bool, units: int) -> None:
+        if is_long:
+            self._units_long += units
+        else:
+            self._units_short += units
+
+    def _move_clock(self, ts_ns: int) -> int:
+        """Integrate the EMA up to `max(ts_ns, clock)` through every expiry on the way."""
+        if self._clock_ns is None:
+            self._clock_ns = self._first_ns = ts_ns
+            self._set_has_inputs(True)
+            return ts_ns
+        target = max(ts_ns, self._clock_ns)
+        while self._events and self._events[0][0] + self._window_ns <= target:
+            placed, is_long, units = self._events[0]
+            self._integrate(placed + self._window_ns)
+            self._events.popleft()
+            self._add(is_long, -units)
+        self._integrate(target)
+        return target
+
+    def _integrate(self, to_ns: int) -> None:
+        assert self._clock_ns is not None  # set by the first update
+        elapsed = to_ns - self._clock_ns
+        if elapsed > 0:
+            rate = (self._units_long + self._units_short) / self.window_s
+            self._ema = rate + (self._ema - rate) * math.exp(-elapsed / self._baseline_ns)
+            self._clock_ns = to_ns
+
+    def _evaluate(self) -> None:
+        assert self._clock_ns is not None  # set by the first update
+        assert self._first_ns is not None
+        if self.episode_ended:
+            self._clear_episode()
+        self.rate_long = self._units_long / self.window_s
+        self.rate_short = self._units_short / self.window_s
+        rate = self.rate_long + self.rate_short
+        self.baseline = max(self._debiased_ema(), BASELINE_FLOOR)
+        self.intensity = rate / self.baseline
+        if not self.initialized and self._clock_ns - self._first_ns >= self._baseline_ns:
+            self._set_initialized(True)
+        self.active = self.initialized and self.intensity >= self.intensity_threshold
+        self.direction = self._direction() if self.active else 0
+        if self.episode_start_ns is None and self.active:
+            self.episode_start_ns = self._clock_ns
+            self.episode_notional_units = self._units_long + self._units_short
+        if self.episode_start_ns is None:
+            self.rising = rate > self._previous_rate
+        else:
+            self._track_episode(rate)
+        self._previous_rate = rate
+
+    def _debiased_ema(self) -> float:
+        """Return the EMA over the weight it has accumulated since the first update."""
+        assert self._clock_ns is not None  # set by the first update
+        assert self._first_ns is not None
+        elapsed = self._clock_ns - self._first_ns
+        if elapsed == 0:
+            return 0.0  # no time integrated yet: no rate observed, the floor applies
+        return self._ema / -math.expm1(-elapsed / self._baseline_ns)
+
+    def _direction(self) -> int:
+        if self._units_long > self._units_short:
+            return -1
+        return 1 if self._units_short > self._units_long else 0
+
+    def _track_episode(self, rate: float) -> None:
+        if self.episode_direction == 0:
+            self.episode_direction = self.direction
+        self.rising = rate >= self.peak_rate or rate > self._previous_rate
+        self.peak_rate = max(self.peak_rate, rate)
+        if not self.spent and rate < self.peak_rate * self.decay_ratio:
+            self.spent = True
+        self.episode_ended = self.spent and not self.active
+
+    def _reset(self) -> None:
+        self._clear()
+
+
 # -----------------------------------------------------------------------------------
 # Plain, stateless single-snapshot derivations (SSOT-01, platform/CLAUDE.md) -- pure
 # functions of one `DydxSecondSnapshot.as_floats()`-shaped dict (the decoded floats; the stored
@@ -560,6 +800,61 @@ def trade_aggregates(snapshots: list[dict]) -> tuple[float, float, int, int]:
         sum(s["buy_count"] for s in snapshots),
         sum(s["sell_count"] for s in snapshots),
     )
+
+
+# -----------------------------------------------------------------------------------
+# Per-bar order flow (Story 33.6, SSOT-01): the one formula per stored per-bar aggregate, over the
+# candle store's exact integer units (`candles.domain.fold`, `docs/DATA_DICTIONARY.md` §2.15). The
+# caller maps a null input to None before calling (DATA-01: null is unknown, never 0); these take
+# known integers only and turn a value into a `float` at the return, never before (DATA-04).
+# -----------------------------------------------------------------------------------
+
+
+def organic_delta_units(buy_v: int, sell_v: int, liq_long_v: int, liq_short_v: int) -> int:
+    """
+    Return the bar's delta without its forced flow, in the bar's `10^-size_precision` units:
+    `(buy_v - liq_short_v) - (sell_v - liq_long_v)`.
+
+    Sign mapping: a *long* liquidation closes a long position by selling, so `liq_long_v` is forced
+    sell volume and is taken out of `sell_v`; a *short* liquidation closes a short by buying, so
+    `liq_short_v` is forced buy volume and is taken out of `buy_v`. All four share the bar's one
+    `size_precision` (the fold stores the bucket's finest and rescales every part to it). A bar
+    with unknown flow or unknown liquidations has no organic delta: the caller returns None.
+    """
+    return (buy_v - liq_short_v) - (sell_v - liq_long_v)
+
+
+def units_ratio(
+    num_units: int, num_precision: int, den_units: int, den_precision: int
+) -> float | None:
+    """
+    Return `(num_units * 10^-num_precision) / (den_units * 10^-den_precision)` as one exact
+    `Fraction` rounded to a float once; None when the denominator is 0 (a quiet bar has no share
+    and no average, never a division error or an infinity). `ForcedShare` passes
+    `liq_long_v + liq_short_v` over `buy_v + sell_v` (one size precision), `AverageTradeSize`
+    `buy_v + sell_v` at the size precision over `buy_n + sell_n` at precision 0.
+    """
+    if den_units == 0:
+        return None
+    return float(Fraction(num_units * 10**den_precision, den_units * 10**num_precision))
+
+
+def bar_vwap(pv_units: int, volume_units: int, price_precision: int) -> float | None:
+    """
+    Return the volume-weighted price `pv / (volume * 10^price_precision)`, an exact `Fraction`
+    rounded to a float once; None at 0 volume (no trade, no price).
+
+    `pv_units` is in `10^-(price_precision + size_precision)` and `volume_units` in
+    `10^-size_precision`, so the size scale cancels and only the price scale remains: e.g.
+    `pv = 1_000_050` at `pp = 2, sp = 1` over 10 units of volume is `1_000_050 / (10 * 100)` =
+    1000.05. A sum over bars of mixed precisions is rescaled by the caller to the finest price and
+    size precision present first, so the same identity holds. The stored `pv` weights each second's
+    traded volume at that second's close (`candles.domain.fold`'s Known limit), so this is the
+    second-close VWAP, not every trade at its own price.
+    """
+    if volume_units == 0:
+        return None
+    return float(Fraction(pv_units, volume_units * 10**price_precision))
 
 
 # -----------------------------------------------------------------------------------
@@ -655,3 +950,52 @@ def depth_within_bps(
         [_within(bid_distance, bid_sizes, edge) for edge in bps_edges],
         [_within(ask_distance, ask_sizes, edge) for edge in bps_edges],
     )
+
+
+# -----------------------------------------------------------------------------------
+# Derivatives (Story 33.4, SSOT-02: the one basis and annualised-funding formulas, called by
+# `views.derivatives` and `ranking` alike; exact `Decimal` in and out, a float only at the edge).
+# -----------------------------------------------------------------------------------
+
+_BPS = 10_000  # an int: Decimal arithmetic with it stays exact
+_SECONDS_PER_YEAR = 31_536_000  # 365 days: the simple (non-compounded) annualisation convention
+
+
+def basis_bps(mark: Decimal, ref: Decimal) -> Decimal | None:
+    """
+    Return `(mark - ref) / ref` in basis points as a `Decimal` division at the default
+    28-significant-digit context (the quotient is rounded there, never through a `float`; not
+    exact for a non-terminating ratio); None when `ref <= 0` (no meaningful basis against a
+    non-positive reference, never a division error or an infinity).
+    `ref` is the index (mark-index basis) or the last traded close (mark-last basis).
+    """
+    if ref <= 0:
+        return None
+    return (mark - ref) / ref * _BPS
+
+
+def funding_annualised(rate: Decimal, interval_s: int | None) -> Decimal | None:
+    """
+    Return the per-interval funding `rate` scaled to a 365-day year (`rate * 31_536_000 /
+    interval_s`), simple, not compounded; None when the interval is unknown or not positive -- an
+    annualised rate is never guessed from a default interval. `interval_s` is in seconds
+    (`kernel.derivs_wire` converts `FundingRateUpdate.interval`'s minutes).
+    """
+    if interval_s is None or interval_s <= 0:
+        return None
+    return rate * _SECONDS_PER_YEAR / interval_s
+
+
+def pct_change(base: Decimal, latest: Decimal) -> Decimal | None:
+    """
+    Return `(latest - base) / base * 100`, the percent change from `base` to `latest`, as a
+    `Decimal` division at the default 28-significant-digit context (never through a `float`); None
+    when `base` is 0 (a percent of nothing is undefined, never 0 or an infinity).
+
+    SSOT-02: the one percent-change formula of a derivatives or price series -- ranking's
+    `oi_change_*_pct` (`ranking.domain.derivs.OpenInterestSeries`) and alerting's `pct_move` and
+    `oi_change` conditions (`alerting.domain.conditions`, Story 33.8) all call it.
+    """
+    if base == 0:
+        return None
+    return (latest - base) / base * 100

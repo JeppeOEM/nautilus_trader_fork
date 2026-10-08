@@ -16,6 +16,7 @@
 
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 from candles.infrastructure.sqlite_store import CandleStore
@@ -23,6 +24,7 @@ from fastapi.testclient import TestClient
 from kernel.catalog_files import SNAPSHOT_DIRNAME
 from kernel.catalog_files import CatalogReadError
 from kernel.second_snapshot import SecondOHLC
+from kernel.tests.snapshot_factory import make_second
 from kernel.tests.snapshot_factory import make_snapshot
 from observability import error_ledger
 from views import chart_series
@@ -56,14 +58,17 @@ _DAY0_MS = 20_000 * 86_400_000
 
 def _second(sec: int, price: float) -> SecondOHLC:
     """One traded second, `sec` seconds after `_DAY0_MS`, shaped like the candle tests' rows."""
-    return SecondOHLC(
-        ts_event=_DAY0_MS * 1_000_000 + sec * 1_000_000_000,
-        open_price=price,
-        high_price=price + 0.5,
-        low_price=price - 0.5,
-        close_price=price + 0.1,
+    p = Decimal(str(price))
+    return make_second(
+        _DAY0_MS * 1_000_000 + sec * 1_000_000_000,
+        p + Decimal("0.1"),
+        open_price=p,
+        high_price=p + Decimal("0.5"),
+        low_price=p - Decimal("0.5"),
         buy_volume=1.0,
         sell_volume=0.25,
+        buy_count=1,
+        sell_count=1,
     )
 
 
@@ -546,3 +551,70 @@ def test_a_catalog_read_error_on_a_route_that_does_not_map_it_is_a_ledgered_500(
     assert resp.status_code == 500
     assert resp.json()["detail"] == "x.parquet: unreadable, refused: no footer"
     assert error_ledger.counts() == {"data_api.catalog_read": 1}
+
+
+# -- Story 33.3: the per-bar order-flow and liquidation keys ----------------------------------------
+
+_AGGREGATE_KEYS = (
+    "buy_v",
+    "sell_v",
+    "buy_n",
+    "sell_n",
+    "pv",
+    "liq_long_v",
+    "liq_short_v",
+    "liq_n",
+    "price_precision",
+    "size_precision",
+)
+
+
+def test_store_items_carry_the_order_flow_keys_after_the_old_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Minute 29 of the store fixture: one second at price 129 buying 1.0 and selling 0.25 at the
+    factory's precision 4 (10_000 and 2_500 units), closing at 129.1 (1_291_000 units): pv =
+    1_291_000 x 12_500. A dYdX id has no liquidation feed, so `liq_*` are null.
+    """
+    client = _store_client(tmp_path, monkeypatch, range(30))
+    before_ns = (_DAY0_MS + 60 * 60_000) * 1_000_000
+    body = client.get(f"/api/candles/{_IID}", params={"before_ns": before_ns, "limit": 1}).json()
+    (item,) = body["items"]
+    assert list(item)[-len(_AGGREGATE_KEYS) :] == list(_AGGREGATE_KEYS)
+    assert {k: item[k] for k in _AGGREGATE_KEYS} == {
+        "buy_v": 10_000,
+        "sell_v": 2_500,
+        "buy_n": 1,
+        "sell_n": 1,
+        "pv": 1_291_000 * 12_500,
+        "liq_long_v": None,
+        "liq_short_v": None,
+        "liq_n": None,
+        "price_precision": 4,
+        "size_precision": 4,
+    }
+    assert item["v"] == 1.25  # every existing key keeps its value
+
+
+def test_a_bar_whose_flow_contradicts_its_volume_fails_the_request_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_path = str(tmp_path / "catalog")
+    _write_snapshots(catalog_path, [(_BASE_NS - i * 60_000_000_000, 100.0 + i) for i in range(3)])
+    real = chart_series.queries.candle_dicts_for_window
+
+    def corrupt(*args: Any, **kwargs: Any) -> list[dict]:
+        out = real(*args, **kwargs)
+        out[0] = {**out[0], "buy_v": out[0]["buy_v"] + 1}  # buy_v + sell_v is no longer v
+        return out
+
+    monkeypatch.setattr(chart_series.queries, "candle_dicts_for_window", corrupt)
+    error_ledger.reset()
+    resp = _client(catalog_path, monkeypatch).get(
+        f"/api/candles/{_IID}?before_ns={_BASE_NS + 60_000_000_000}&limit=10&bar_seconds=60",
+    )
+    assert resp.status_code == 500
+    assert "impossible candle" in resp.json()["detail"]
+    assert error_ledger.counts() == {"candles.invalid_candle": 1}
+    error_ledger.reset()

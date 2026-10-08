@@ -316,6 +316,32 @@ The bot owns `instrument_id`, `trade_size` and its identity (`bot_id` is pinned 
 field, an unknown strategy or params key fails loudly (never a silent `dummy`), and the
 `trend_*`/`ofi_confirm_threshold` keys belong to `dummy` alone.
 
+**The liquidation cascade bot** (`strategy = "liquidation_cascade"`, Story 33.14; params and rules
+in `bots/README.md`, a commented example at the end of `bots/config.toml`) trades Bybit LINEAR ids
+only (any other is refused at load) and needs a second live input no adapter delivers: the Bybit
+collector's `liquidations:raw`. For a fleet holding one, `build_node` adds a `LIQUIDATIONS` data
+client (`bots/infrastructure/liquidation_data_client.py`) that subscribes that channel on the bots'
+`REDIS_URL`; a fleet without one gets none. So `bybit_collector` must run on the same Redis and
+collect the bot's instrument (`capture/venues/bybit/config.toml`'s `instruments`). Its health shows
+the usual way: a dropped bridge, or a half-open socket that answers no PING within 60 s, is an ERROR
+at `bots.liquidation_feed.connection` (reconnected with backoff) and the bot reads `data_stale` in
+`bots:status` after 30 s more, while an hour with no liquidations is just a quiet market. **A
+stopped collector is not seen here:** with Redis up the channel just goes silent, which reads as a
+quiet market (the bot stays fresh on its quotes and never enters); the alarm is the collector's own
+(`docker ps` / Dozzle for `bybit-collector`, its `process_start` lines in
+`data/errors/bybit_collector.jsonl`, `liquidations_unrecoverable` windows in
+`data/coverage/bybit.jsonl`). **A warm-up hour after every start:** for the first `baseline_s`
+(default 3600 s) the detector is not initialized: no entry, every decision `not_ready` (an open
+position's exits still run); expected, not a fault. With `BOT_SIGNAL_LOG_DIR` set (an `.env` key of
+the `live-paper` service, which turns on the log of every paper bot of the fleet, the dummies' ~86
+MB per bot-day included) it writes a signal log, and `python3 -m bots.signal_replay --strategy
+liquidation_cascade` plus `python3 -m verification.bot_parity` check the live run against the
+catalog (`docs/DATA_DICTIONARY.md` §1.22). Backtest it first: notebook `08_strategy_gallery` or
+`research.strategies.backtest_liquidation_cascade.run(symbol, start, end, catalog_path=None,
+**params)` (`catalog_path` None reads `CATALOG_PATH`, else `platform/data/catalog`; with neither
+`stop_pct` nor `stop_atr_multiple` in `params` it injects `stop_pct=DEFAULT_STOP_PCT`, 1 %, the
+gallery's default too -- the one parameter it adds).
+
 To make another backtested strategy runnable as a paper bot:
 
 1. Keep it a `StrategyConfig` + `Strategy` pair in `research/strategies/` that imports only
@@ -330,7 +356,9 @@ To make another backtested strategy runnable as a paper bot:
    cannot follow a string; a test fails until it is there), and a read-only source mount
    `/app/strategy_source/<Class>.py` to the `bot_tui` service in `docker-compose.yml` for the
    `v` key. Never import the strategy from bots: `platform/tests/test_boundaries.py` fails a
-   bots → research import.
+   bots → research import. A strategy fed by a feed no venue adapter delivers (as the cascade bot's
+   liquidations) also needs a data client of its own registered by `build_node`, only for the fleets
+   that hold it, and its status capping the bot's heartbeat (`cache_reader_for`).
 3. Rebuild and restart — code is baked into the image, not bind-mounted:
    ```bash
    docker compose -f platform/docker-compose.yml --profile live-paper build live-paper

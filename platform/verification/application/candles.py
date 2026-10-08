@@ -120,8 +120,11 @@ from verification.domain.conservation import reasons
 from verification.domain.conservation import tally_seconds
 from verification.domain.conservation import trade_channels
 from verification.domain.conservation import wire_index
+from verification.domain.liquidation_check import StoredLiquidation
+from verification.domain.liquidation_check import has_liquidation_feed
 from verification.domain.plan_file import RecordingPlan
 from verification.domain.reference_signals import WEEK_SECONDS
+from verification.domain.reference_signals import KnownLiquidations
 from verification.domain.reference_signals import RefCandle
 from verification.domain.reference_signals import fold_candles
 from verification.domain.trade_check import TradeColumns
@@ -161,15 +164,32 @@ class ServedSource(Protocol):
     ) -> Mapping[int, ServedBar]: ...
 
 
+class LiquidationSource(Protocol):
+    """
+    The catalog's archived liquidations, read raw: an instrument's rows in `[start, end)`, and its
+    earliest archived `ts_event` (None: nothing archived), the oracle's own known-from bound.
+    """
+
+    def liquidations(
+        self, instrument_id: str, start_ns: int, end_ns: int
+    ) -> list[StoredLiquidation]: ...
+
+    def first_ts_event(self, instrument_id: str) -> int | None: ...
+
+
 @dataclass(frozen=True)
 class CandleInputs:
-    """The read-only sources one run judges; `served` None skips the served checks."""
+    """
+    The read-only sources one run judges; `served` None skips the served checks. `liquidations`
+    is read only for an instrument with the feed (`has_liquidation_feed`, section 2.15).
+    """
 
     reference: ReferenceRecords
     catalog: CatalogRows
     store: StoreBars
     coverage: TradeCoverage
     served: ServedSource | None
+    liquidations: LiquidationSource
 
 
 @dataclass(frozen=True)
@@ -184,6 +204,10 @@ class _Run:
     gaps: Mapping[str, Intervals]
     inputs: CandleInputs
     now_ns: int
+    # Each feed instrument's liquidations of the judged day's week, read once per run
+    # (`_liquidation_rows`): the day fold and the seven week-day folds slice it. Empty at the run's
+    # start, filled by it, dropped with it: per-run state, never module state.
+    week_liquidations: dict[str, list[StoredLiquidation]]
 
 
 # --- the reference --------------------------------------------------------------------------------
@@ -232,17 +256,68 @@ def _causes(instrument_id: str, coverage: InstrumentCoverage, run: _Run) -> Caus
 # --- the week -------------------------------------------------------------------------------------
 
 
+def _liquidations(instrument_id: str, start_ns: int, run: _Run) -> KnownLiquidations | None:
+    """
+    One day's archived liquidations of a feed instrument with the instrument's first archived one
+    as their known start (§2.15: buckets before it read None, never 0); None for one without the
+    feed or with nothing archived.
+    """
+    if not has_liquidation_feed(run.venue, instrument_id):
+        return None
+    known_from = run.inputs.liquidations.first_ts_event(instrument_id)
+    if known_from is None:
+        return None
+    return KnownLiquidations(tuple(_liquidation_rows(instrument_id, start_ns, run)), known_from)
+
+
+def _liquidation_rows(instrument_id: str, start_ns: int, run: _Run) -> list[StoredLiquidation]:
+    """
+    One day's archived liquidations, sliced from the instrument's whole week (the judged day's,
+    Monday-aligned) read once per run: the day fold and the seven week-day folds ask for days of
+    that one week, so the archive is read once per instrument, not eight times. A day outside it
+    (none today) is read on its own.
+    """
+    week_start_ns = week_start_ms(run.start_ns) * NS_PER_MS
+    week_end_ns = week_start_ns + WEEK_SECONDS * NS_PER_S
+    end_ns = start_ns + NS_PER_DAY
+    source = run.inputs.liquidations
+    if not (week_start_ns <= start_ns and end_ns <= week_end_ns):
+        return source.liquidations(instrument_id, start_ns, end_ns)
+    if instrument_id not in run.week_liquidations:
+        rows = source.liquidations(instrument_id, week_start_ns, week_end_ns)
+        run.week_liquidations[instrument_id] = rows
+    return [r for r in run.week_liquidations[instrument_id] if start_ns <= r.ts_event < end_ns]
+
+
+def _week_known(day: KnownLiquidations | None, week_start_ns: int) -> KnownLiquidations | None:
+    """
+    Judge a day part's liquidations at the week's width: the week bucket is known only if it starts
+    at or after the feed start (§2.15), and then every day of it is; otherwise every part is None,
+    so the merged week is None, never a partial count.
+    """
+    if day is None or week_start_ns < day.since_ns():
+        return None
+    return day
+
+
 def _week_fold(
     instrument_id: str, week_start_ns: int, day_rows: Sequence[TradeRow], run: _Run
 ) -> tuple[RefCandle | None, tuple[int, int]]:
-    """Fold the week's seven days of catalog rows, read and folded one day at a time (MEM-01)."""
+    """
+    Fold the week's seven days of catalog rows, read and folded one day at a time (MEM-01). The
+    liquidations' known start is judged at the week's width (§2.15: a bucket is known only when it
+    starts at or after the feed start), so a week straddling the start is None whole and a week
+    after it is known whole (`_week_known`).
+    """
     parts: list[RefCandle] = []
     price = size = 0
     for start in range(week_start_ns, week_start_ns + WEEK_SECONDS * NS_PER_S, NS_PER_DAY):
         rows = day_rows
         if start != run.start_ns:
             rows = run.inputs.catalog.trade_rows(instrument_id, start, start + NS_PER_DAY)
-        parts += fold_candles([row.book() for row in rows], SECONDS_PER_DAY).values()
+        books = [row.book() for row in rows]
+        forced = _week_known(_liquidations(instrument_id, start, run), week_start_ns)
+        parts += fold_candles(books, SECONDS_PER_DAY, forced).values()
         price = max([price, *(row.price_precision for row in rows)])
         size = max([size, *(row.size_precision for row in rows)])
     week = merge_candles(week_start_ns // NS_PER_MS, parts) if parts else None
@@ -312,7 +387,9 @@ def _instrument(instrument_id: str, coverage: InstrumentCoverage, run: _Run) -> 
         first.setdefault(row.ts_event // NS_PER_S, row)
     reason_of, _ = reasons(start_s, coverage.runs)
     folded, unobserved = _reference(instrument_id, first, reason_of, run)
-    day = prepare_day(start_s, rows, folded, _causes(instrument_id, coverage, run))
+    causes = _causes(instrument_id, coverage, run)
+    forced = _liquidations(instrument_id, run.start_ns, run)
+    day = prepare_day(start_s, rows, folded, causes, forced)
     bars, unknown = run.inputs.store.bars(instrument_id, run.start_ns)
     seconds = tally_seconds(start_s, Counter(r.ts_event // NS_PER_S for r in rows), coverage.runs)
     return InstrumentCandles(
@@ -335,7 +412,7 @@ def check_day(
     coverage = collect_coverage(inputs.coverage.entries(), plan.instruments, start_ns)
     channels = trade_channels(plan)
     gaps = {c.name: channel_gaps(c, hours, inputs.reference) for c in channels if not c.rest}
-    run = _Run(plan.venue, start_ns, hours, channels, wire_index(plan), gaps, inputs, now_ns)
+    run = _Run(plan.venue, start_ns, hours, channels, wire_index(plan), gaps, inputs, now_ns, {})
     instruments = tuple(_instrument(iid, coverage[iid], run) for iid in plan.instruments)
     return CandlesDayReport(
         venue=plan.venue,

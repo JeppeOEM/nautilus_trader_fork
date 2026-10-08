@@ -18,8 +18,10 @@ import contextlib
 import os
 import threading
 import tomllib
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 import tomli_w
 from observability import error_ledger
@@ -41,15 +43,18 @@ class AlertStore:
     rather than starting empty -- the next save would otherwise silently destroy it.
 
     Persistence mirrors `views/preferences.py` (TOML, full rewrite); the key set is `Alert`'s
-    fields, frozen.
+    fields, frozen, with Story 33.8's `condition` table and `invalid_reason` appended. Every loaded
+    condition is validated (`Alert.__post_init__`): a bad one raises naming the entry, never
+    dropped.
 
     Invariants (DW-197/DW-199): a save is atomic -- serialized first, written to a sibling temp
     file, fsynced and renamed over the target, then the directory fsynced (a failure of that last
     step is ledgered at `alerting.store.fsync_dir`, not raised: the file is already published) --
     so a failed or interrupted save leaves the previous file byte-identical and no temp behind.
-    `add`/`delete` restore the previous in-memory list when their save raises and re-raise, so
-    memory never holds an alert the file lacks (or lacks one the file holds). `record_fire` alone
-    keeps its in-memory change on a failed save (see there).
+    `add`/`update`/`delete` restore the previous in-memory list when their save raises and
+    re-raise, so memory never holds an alert the file lacks (or lacks one the file holds).
+    `record_fire` and `mark_invalid` alone keep their in-memory change on a failed save, ledgered
+    (`_persist_or_ledger`).
     """
 
     def __init__(self, path: Path) -> None:
@@ -62,15 +67,26 @@ class AlertStore:
             return []
         with self._path.open("rb") as f:
             raw = tomllib.load(f)
-        return [Alert(**entry) for entry in raw.get("alerts", [])]
+        alerts = []
+        for index, entry in enumerate(raw.get("alerts", [])):
+            try:
+                # `Alert.__post_init__` validates the condition and its level mirror (Story 33.8).
+                # A non-level kind stores no `level` (TOML has no null): it reads back as None.
+                alerts.append(Alert(**{"level": None, **entry}))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{self._path}: alerts[{index}] is not a valid alert: {exc}"
+                ) from exc
+        return alerts
 
     def _save(self) -> None:
         self._publish()
         self._confirm_durable()
 
     def _publish(self) -> None:
-        # TOML has no null: drop None fields, Alert's defaults restore them on load.
-        entries = [{k: v for k, v in asdict(a).items() if v is not None} for a in self._alerts]
+        # TOML has no null: drop None fields (recursively: a condition's absent optional field),
+        # Alert's defaults and the condition's normalisation restore them on load.
+        entries = [_without_none(asdict(a)) for a in self._alerts]
         # Serialized before touching the disk: an unencodable value fails with the file untouched.
         _write_atomic(self._path, tomli_w.dumps({"alerts": entries}).encode())
 
@@ -100,6 +116,18 @@ class AlertStore:
             raise
         self._confirm_durable()
 
+    def _persist_or_ledger(self, alert: Alert, what: str) -> None:
+        try:
+            self._save()
+        except OSError as exc:
+            # The in-memory state still holds this run; a failed save must never swallow the
+            # change itself -- but it is ledgered, not just logged (DATA-07): a lost `triggered`
+            # flag would let an only_once alert refire after a restart, a lost `invalid_reason`
+            # would evaluate a dead alert again.
+            error_ledger.record(
+                "alerting.store.persist", f"alert {alert.id} {what} but was not persisted", exc
+            )
+
     def list(self) -> list[Alert]:
         with self._lock:
             return list(self._alerts)
@@ -109,6 +137,18 @@ class AlertStore:
             previous = self._alerts
             self._alerts = [*previous, alert]
             self._save_or_restore(previous)
+
+    def update(self, alert_id: str, edit: Callable[[Alert], Alert]) -> Alert | None:
+        with self._lock:
+            index = self._index(alert_id)
+            if index is None:
+                return None
+            previous = self._alerts
+            edited = edit(previous[index])  # raises before anything changes
+            # Not acknowledged when the save raises: the stored alert stands (`_save_or_restore`).
+            self._alerts = [*previous[:index], edited, *previous[index + 1 :]]
+            self._save_or_restore(previous)
+            return edited
 
     def delete(self, alert_id: str) -> bool:
         with self._lock:
@@ -124,16 +164,25 @@ class AlertStore:
         with self._lock:
             alert.last_fired_ns = ts_ns
             alert.triggered = alert.frequency == FiringPolicy.ONLY_ONCE
-            try:
-                self._save()
-            except OSError as exc:
-                # The in-memory state still stops an only_once repeat this run; a failed save
-                # must never swallow the fire itself -- but it is ledgered, not just logged
-                # (DATA-07): a lost `triggered` flag would let an only_once alert refire after a
-                # restart.
-                error_ledger.record(
-                    "alerting.store.persist", f"alert {alert.id} fired but was not persisted", exc
-                )
+            stored = self._stored(alert.id)
+            if stored is not None and stored is not alert:
+                stored.last_fired_ns = ts_ns  # an edit replaced it while it fired
+            self._persist_or_ledger(alert, "fired")
+
+    def mark_invalid(self, alert: Alert, reason: str) -> bool:
+        with self._lock:
+            alert.invalid_reason = reason
+            if self._stored(alert.id) is not alert:
+                return False
+            self._persist_or_ledger(alert, "was marked invalid")
+            return True
+
+    def _index(self, alert_id: str) -> int | None:
+        return next((i for i, a in enumerate(self._alerts) if a.id == alert_id), None)
+
+    def _stored(self, alert_id: str) -> Alert | None:
+        index = self._index(alert_id)
+        return None if index is None else self._alerts[index]
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
@@ -169,3 +218,9 @@ def _fsync_dir(directory: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _without_none(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _without_none(v) for k, v in value.items() if v is not None}
+    return value

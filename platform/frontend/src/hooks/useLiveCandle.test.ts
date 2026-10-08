@@ -1,57 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// Story 15.5: this hook's socket lifecycle (subscribe-on-open, resubscribe-on-reconnect,
-// unsubscribe-on-teardown) is the thing under test, so -- unlike RankingsPage.test.tsx,
-// which mocks useLiveChannel at the module level -- a minimal hand-rolled fake
-// WebSocket global is needed here instead (no existing pattern for this in the repo;
-// this file establishes the first one, per the spec's own guidance). Kept deliberately
-// small: just enough surface (onopen/onmessage/onclose/onerror/send/close/readyState)
-// for the hook's own code, driven manually from each test via open()/receive()/close().
-class FakeWebSocket {
-  static readonly CONNECTING = 0;
-  static readonly OPEN = 1;
-  static readonly CLOSED = 3;
-  static instances: FakeWebSocket[] = [];
-
-  readyState: number = FakeWebSocket.CONNECTING;
-  onopen: (() => void) | null = null;
-  onmessage: ((event: { data: string }) => void) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  sent: string[] = [];
-  url: string;
-
-  constructor(url: string) {
-    this.url = url;
-    FakeWebSocket.instances.push(this);
-  }
-
-  send(data: string): void {
-    this.sent.push(data);
-  }
-
-  close(): void {
-    this.readyState = FakeWebSocket.CLOSED;
-    this.onclose?.();
-  }
-
-  // --- test-only driver methods, not part of the real WebSocket API ---
-  open(): void {
-    this.readyState = FakeWebSocket.OPEN;
-    this.onopen?.();
-  }
-
-  receive(data: unknown): void {
-    this.onmessage?.({ data: JSON.stringify(data) });
-  }
-}
-
-function latestSocket(): FakeWebSocket {
-  const socket = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
-  if (!socket) throw new Error("no FakeWebSocket instance was created");
-  return socket;
-}
+import { FakeWebSocket, latestSocket } from "../test/fakeWebSocket";
 
 function candleMessage(overrides: { channel?: string; t?: number } = {}) {
   return {
@@ -87,7 +37,37 @@ describe("useLiveCandle", () => {
 
     act(() => latestSocket().receive(candleMessage()));
 
-    expect(result.current).toEqual({ time: 60, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10 });
+    expect(result.current).toEqual({ time: 60, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10, buy_v: null, sell_v: null });
+  });
+
+  it("parses a bar carrying Story 33.3's order-flow keys to the same candle, plus its buy/sell volume", () => {
+    // AD-D12: the /ws/live bar only gains keys (appended after t,o,h,l,c,v); the chart reads only
+    // buy_v/sell_v of them (Story 33.6's Volume colour), the candle itself is unchanged.
+    const withFlow = {
+      ...candleMessage(),
+      bar: {
+        ...candleMessage().bar,
+        buy_v: 6000,
+        sell_v: 4000,
+        buy_n: 3,
+        sell_n: 2,
+        pv: 15_000_000,
+        liq_long_v: null,
+        liq_short_v: null,
+        liq_n: null,
+        price_precision: 1,
+        size_precision: 3,
+      },
+    };
+    const plain = renderHook(() => useLiveCandle("BTC-USD-PERP.DYDX", 60));
+    act(() => latestSocket().open());
+    act(() => latestSocket().receive(candleMessage()));
+    const flow = renderHook(() => useLiveCandle("BTC-USD-PERP.DYDX", 60));
+    act(() => latestSocket().open());
+    act(() => latestSocket().receive(withFlow));
+
+    expect(plain.result.current).toEqual({ time: 60, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10, buy_v: null, sell_v: null });
+    expect(flow.result.current).toEqual({ time: 60, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10, buy_v: 6000, sell_v: 4000 });
   });
 
   it("ignores a message for a channel it did not subscribe to", () => {
@@ -106,7 +86,7 @@ describe("useLiveCandle", () => {
 
     act(() => latestSocket().onmessage?.({ data: "not json" }));
 
-    expect(result.current).toEqual({ time: 60, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10 });
+    expect(result.current).toEqual({ time: 60, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10, buy_v: null, sell_v: null });
   });
 
   it(

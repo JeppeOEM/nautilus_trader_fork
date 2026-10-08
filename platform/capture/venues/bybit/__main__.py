@@ -21,7 +21,10 @@ policy skips the sample, ledgers it, and -- because `BybitClient` exposes `resyn
 forces a fresh snapshot only once it stayed crossed past `crossed_resync_seconds` (DATA-03
 fallback). The `u` sequence canary is `capture.venues.bybit.policies` (DATA-08). Open interest is
 dropped by the Rust bindings on the linear ticker path, so it is polled over REST through the
-service's `poll_loop`.
+service's `poll_loop`. Liquidations (Story 33.1) arrive on a second, generic socket the client
+factory builds (`capture.venues.bybit.liquidations`): its rows go through the service's
+`ingest_rows`, its `feed_down` windows through `note_coverage`, its live rows on the same
+`RedisLiveStream` as the snapshots, and its monitor and publisher run as one extra loop.
 """
 
 import asyncio
@@ -47,6 +50,8 @@ from collection_control.infrastructure.redis import RedisStatusBus
 from capture.application import sites
 from capture.application.capture_service import CaptureService
 from capture.application.capture_service import run_forever
+from capture.application.ports import Ledger
+from capture.application.ports import OnData
 from capture.domain.policies import CapturePolicies
 from capture.infrastructure.config import load_venue_config
 from capture.infrastructure.parquet_writer import ParquetArchiveWriter
@@ -55,6 +60,7 @@ from capture.infrastructure.redis_stream import redis_url_from_env
 from capture.venues.bybit.client import BybitClient
 from capture.venues.bybit.config import CONFIG_PATH
 from capture.venues.bybit.config import BybitConfig
+from capture.venues.bybit.liquidations import BybitLiquidationFeed
 from capture.venues.bybit.open_interest import fetch_open_interest
 from capture.venues.bybit.policies import BybitSequenceCanary
 from capture.venues.bybit.trade_history import BybitTradeHistory
@@ -69,26 +75,36 @@ def build_capture(config: BybitConfig, plan_ids: Iterable[str]) -> CaptureServic
     Wire Bybit onto the shared gate: the client, the `u` sequence canary
     (`capture.venues.bybit.policies`, DATA-08 -- a gap or regress drops the book, ledgers
     `collector.book_sequence` and queues a resync), the core's central-book crossed policy, the
-    `recent-trade` history, the archive and live-stream adapters, the candle store and the REST
-    open-interest poll (the plan's ids only).
+    `recent-trade` history, the archive and live-stream adapters, the candle store, the REST
+    open-interest poll (the plan's ids only) and the liquidation socket (Story 33.1).
     """
     env = BybitEnvironment.TESTNET if config.environment == "testnet" else BybitEnvironment.MAINNET
     # This process owns Bybit's candle store (`CANDLES_DB_PATH`), so it opens it, hands capture
     # the sink port and runs the retention loop.
     store = store_from_env(config.catalog_path)
-    capture = CaptureService(
-        config,
-        lambda on_data, ledger: BybitClient(
+    live = RedisLiveStream(redis_url_from_env())
+    # The feed needs capture's ledger, which only the client factory receives: the factory keeps
+    # the one it builds here, so the root can attach it to the service built around it.
+    feeds: list[BybitLiquidationFeed] = []
+
+    def client(on_data: OnData, ledger: Ledger) -> BybitClient:
+        feeds.append(BybitLiquidationFeed(config.environment, ledger=ledger))
+        return BybitClient(
             on_data=on_data,
             environment=env,
             trade_feeds=config.trade_feeds,
             ledger=ledger,
-        ),
+            liquidations=feeds[-1],
+        )
+
+    capture = CaptureService(
+        config,
+        client,
         (candle_prune_loop(store),),
         venue=VENUE,
         plan=plan_ids,
         archive=ParquetArchiveWriter(config.catalog_path),
-        live_stream=RedisLiveStream(redis_url_from_env()),
+        live_stream=live,
         second_sink=CandleSink(store),
         policies=CapturePolicies(canary=BybitSequenceCanary()),
         trade_history=BybitTradeHistory(config.environment),
@@ -103,6 +119,9 @@ def build_capture(config: BybitConfig, plan_ids: Iterable[str]) -> CaptureServic
             plan_only=True,
         ),
     )
+    (liquidations,) = feeds
+    liquidations.attach(capture.ingest_rows, capture.note_coverage, live.publish_liquidations)
+    capture.add_loops(liquidations.loop)
     return capture
 
 

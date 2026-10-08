@@ -76,3 +76,9 @@ DISCONNECT = "collector.disconnect"
 CRASH = "collector.crash"
 # venue REST polls
 OPEN_INTEREST_POLL = "collector.open_interest_poll"
+# the liquidation socket (Story 33.1): a refused subscribe ack, a failed send, a transition to
+# `down`; and a failed `liquidations:raw` publish
+LIQUIDATION_FEED = "collector.liquidation_feed"
+LIQUIDATION_PUBLISH = "collector.liquidation_publish"
+# a failed `derivs:raw` publish, or rows the pending cap turned away (Story 33.4)
+DERIVS_PUBLISH = "collector.derivs_publish"

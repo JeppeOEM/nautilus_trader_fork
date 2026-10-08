@@ -8,8 +8,8 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
-import { CHART_PANE_TOKENS, CHART_TOKENS, chartPalette, chartVar } from "./chartTheme";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { CHART_PANE_TOKENS, CHART_TOKENS, chartPalette, chartVar, chartVarAlpha } from "./chartTheme";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const themeCss = readFileSync(join(here, "..", "..", "theme.css"), "utf8");
@@ -48,6 +48,10 @@ const DRAWN: (keyof typeof CHART_TOKENS)[] = [
   "--chart-drawing",
   "--chart-poc",
   ...CHART_PANE_TOKENS,
+  "--chart-line",
+  "--chart-compare-1",
+  "--chart-compare-2",
+  "--chart-compare-3",
 ];
 
 describe("chart tokens", () => {
@@ -83,6 +87,45 @@ describe("chartVar", () => {
     expect(chartVar("--chart-up")).toBe(CHART_TOKENS["--chart-up"]);
     expect(chartPalette()).toEqual(CHART_PANE_TOKENS.map((t) => CHART_TOKENS[t]));
   });
+});
+
+describe("chartVarAlpha", () => {
+  afterEach(() => {
+    document.body.innerHTML = "";
+    vi.restoreAllMocks();
+  });
+
+  const withLine = (value: string): void => {
+    const workspace = document.createElement("div");
+    workspace.className = "chart-workspace";
+    workspace.style.setProperty("--chart-line", value);
+    document.body.appendChild(workspace);
+  };
+
+  it.each([
+    ["#2962ff", "rgba(41, 98, 255, 0.25)"],
+    ["#26F", "rgba(34, 102, 255, 0.25)"],
+    ["rgb(41, 98, 255)", "rgba(41, 98, 255, 0.25)"],
+    ["rgba(41,98,255,0.9)", "rgba(41, 98, 255, 0.25)"],
+  ])("puts %s at the requested alpha", (value, expected) => {
+    withLine(value);
+    expect(chartVarAlpha("--chart-line", 0.25)).toBe(expected);
+  });
+
+  it("clamps alpha to 0..1", () => {
+    expect(chartVarAlpha("--chart-line", 2)).toBe("rgba(41, 98, 255, 1)");
+    expect(chartVarAlpha("--chart-line", -1)).toBe("rgba(41, 98, 255, 0)");
+  });
+
+  it.each(["hsl(220 100% 58%)", "blue", "#12345", "rgb(300, 0, 0)"])(
+    "names the token and fills transparent for an unparseable %s",
+    (value) => {
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      withLine(value);
+      expect(chartVarAlpha("--chart-line", 0.28)).toBe("rgba(0, 0, 0, 0)");
+      expect(error).toHaveBeenCalledWith(expect.stringContaining("--chart-line"));
+    },
+  );
 });
 
 describe("chart drawing code takes its colours from the chart tokens and nothing else", () => {

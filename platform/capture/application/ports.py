@@ -30,6 +30,7 @@ from typing import Any
 from typing import NamedTuple
 from typing import Protocol
 
+from kernel.liquidation import Liquidation
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import SecondRow
 
@@ -74,7 +75,15 @@ class VenueFeed(Protocol):
     dYdX markets); `fetch_book_snapshot(iid) -> BookSnapshot` (the aligned REST cross-check,
     22.5/D-64); `resync_orderbook(iid)` (force a fresh snapshot -- only a venue whose local book can
     drift; a full-snapshot venue must not have it); `feed_states() -> dict[Feed, bool]`
-    (*synchronous*: each connection's `is_active()`, polled every 0.1 s for reconnects).
+    (*synchronous*: each connection's `is_active()`, polled every 0.1 s for reconnects). Story
+    33.1, both synchronous: `liquidation_state() -> str | None` (the liquidation socket's
+    `connected`/`reconnecting`/`down`, carried on `CaptureStatus.liquidations`; None for a client
+    built without the feed) and
+    `note_liquidation_restart(iid, from_ns, to_ns)` (an id's `restart` span on its first verdict in
+    the process: the client's liquidation feed writes it as a `not_running` window when the id has
+    a liquidation topic, held yet or not). A `subscribe` may raise
+    `capture.application.feed.ChannelRetry` after its required channels are held: the id stays
+    applied and is retried.
     """
 
     async def fetch_instruments(self) -> list: ...
@@ -229,11 +238,18 @@ class LiveStream(Protocol):
     `publish_hotpath(venue, report)` sends one flush window's `HotPathReport.to_dict()` (queue
     depth, messages, sample-loop lag, write time; `docs/DATA_DICTIONARY.md` §1.25). It raises on
     failure too; the service ledgers it (`collector.hotpath_publish`), never touching Parquet.
+
+    Since Story 33.4 `publish_derivs(rows)` sends one sample tick's mark, index, funding and
+    open-interest rows on `derivs:raw`, each already a `kernel.derivs_wire.to_wire` row (the
+    archive buffer holds the same objects). It raises on failure; the service ledgers it
+    (`collector.derivs_publish`) with the row count, never touching Parquet.
     """
 
     async def publish(self, snapshots: list[DydxSecondSnapshot]) -> None: ...
 
     async def publish_hotpath(self, venue: str, report: dict[str, Any]) -> None: ...
+
+    async def publish_derivs(self, rows: list[dict[str, Any]]) -> None: ...
 
     async def close(self) -> None: ...
 
@@ -263,6 +279,16 @@ class SecondSink(Protocol):
     `apply` returns the number of seconds it actually took (rows at or before its own watermark are
     a replay and count 0). It may raise: capture ledgers the failure per instrument and carries on.
 
+    `apply_liquidations` (Story 33.3) takes the same flush's archived `Liquidation` rows of one
+    instrument with the feed, under the same never-ahead-of-the-archive rule, and capture calls it
+    **before** that flush's `apply`: the liquidations lower the store's persisted feed start
+    (`liquidation_feed_since`) first, so the seconds folded next read 0 `liq_*` for every bucket
+    starting at or after it -- the other order would leave an id's very first flush with a
+    liquidation null where the rebuild of the same day stores 0 (audit D-160). The sink applies
+    each venue event once (`venue_event_id`), so the startup catch-up may replay a whole day of
+    them. It returns how many were new and may raise like `apply`; a failed call is not retried
+    live, only re-applied by the next start's catch-up (the last day) or the nightly rebuild.
+
     `close` releases what the sink holds (the candle store's SQLite connection). The service owns
     the sink it was handed: `CaptureService.run()` calls `close` exactly once, last, however `run`
     ends -- after the final flush, so nothing is applied after it, and also when `run` fails before
@@ -271,6 +297,8 @@ class SecondSink(Protocol):
     """
 
     def apply(self, instrument_id: str, rows: Sequence[SecondRow]) -> int: ...
+
+    def apply_liquidations(self, instrument_id: str, rows: Sequence[Liquidation]) -> int: ...
 
     def watermarks(self) -> Mapping[str, int]: ...
 
@@ -352,3 +380,6 @@ class CaptureStatus:
     lingering: frozenset[str] = frozenset()
     last_applied: Applied | None = None
     last_applied_ns: int = 0
+    # Story 33.1: the liquidation socket's state, `connected`/`reconnecting`/`down`, from the
+    # client's `liquidation_state()`; None for a client without the feed (a venue without one).
+    liquidations: str | None = None

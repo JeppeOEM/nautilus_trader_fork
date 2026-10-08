@@ -47,6 +47,7 @@ from verification.domain.catalog_check import StoredBar
 from verification.domain.catalog_check import StoredLeg
 from verification.domain.catalog_check import parse_file_name
 from verification.domain.catalog_check import schema_signature
+from verification.domain.reference_signals import AGGREGATE_FIELDS
 
 
 _TS_INIT = "ts_init"
@@ -253,6 +254,9 @@ class CatalogScan:
         return StoredLeg(total, beyond)
 
 
+_BAR_COLUMNS = ("bar_seconds", "t", "o", "h", "l", "c", "v", "seconds_observed")
+
+
 class CandleStoreFile:
     """
     The candle store (`candles_<venue>.db`, schema in `docs/DATA_DICTIONARY.md` section 2.5 and
@@ -267,15 +271,23 @@ class CandleStoreFile:
         return str(self._path)
 
     def bars(self, instrument_id: str, day_start_ns: int) -> tuple[list[StoredBar], int]:
-        """Read the instrument's rows with `t` in the day: known widths, and the others' count."""
+        """
+        Read the instrument's rows with `t` in the day: known widths, and the others' count. A
+        file its collector has not migrated yet lacks section 2.15's columns: they read NULL
+        (unknown), never 0.
+        """
         start_ms = day_start_ns // NS_PER_MS
         end_ms = start_ms + NS_PER_DAY // NS_PER_MS
-        query = (
-            "SELECT bar_seconds, t, o, h, l, c, v, seconds_observed FROM candles "
-            "WHERE instrument_id = ? AND t >= ? AND t < ? ORDER BY bar_seconds, t"
-        )
         db = sqlite3.connect(f"file:{quote(str(self._path))}?mode=ro", uri=True)
         try:
+            present = {row[1] for row in db.execute("PRAGMA table_info(candles)").fetchall()}
+            columns = ", ".join(
+                (*_BAR_COLUMNS, *(k if k in present else f"NULL AS {k}" for k in AGGREGATE_FIELDS))
+            )
+            query = (
+                f"SELECT {columns} FROM candles "  # noqa: S608 -- constant column names only
+                "WHERE instrument_id = ? AND t >= ? AND t < ? ORDER BY bar_seconds, t"
+            )
             rows = db.execute(query, (instrument_id, start_ms, end_ms)).fetchall()
         finally:
             db.close()

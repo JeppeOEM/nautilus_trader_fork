@@ -2370,3 +2370,78 @@ location: platform/kernel/catalog_files.py:382
 source_spec: `_bmad-output/implementation-artifacts/spec-dw-208-215-archive-retention-rule-ordering.md`
 reason: `mypy platform/kernel/catalog_files.py` fails with one pre-existing error at line 382: `SecondOHLC(...)` gets a `*Generator[float | None, ...]` star-arg where it expects `float`, so a None open/high/low/close is not excluded by the types. Evidence: The error is reproduced on HEAD 6ca8d50d6a with this review's patches stashed (`../.venv/bin/mypy archive/domain/retention.py archive/application/prune.py kernel/catalog_files.py` from `platform/`: 1 error, `[arg-type]`). Line 382 is outside the DW-208/215 diff, which only adds `DEFINITION_DIRNAMES` near line 98. It surfaced because this pass ran mypy over the whole module.
 status: open
+
+### DW-293: Epic 33.12's "Bar Replay works in Lines mode too" is retracted by the operator: Replay is a candle-chart feature, Lines-mode replay is not planned
+
+origin: operator decision 2026-10-07 (17:20 UTC, clarified 17:25 UTC) during Story 33.12
+location: platform/frontend/src/pages/ChartPage.tsx, platform/frontend/src/hooks/useReplay.ts
+source_spec: `_bmad-output/implementation-artifacts/spec-33-12-symbol-search-watchlist-fullscreen-shortcuts-time-zone-countdown.md`
+reason: The epic's Story 33.12 AC sentence "Bar Replay works in **Lines mode** too (the five snapshot series cut at the replay time like the candles)" is retracted, not deferred: Bar Replay is supported only on candle charts (candles mode, every `CHART_TYPES` entry incl. Line/Area), and Lines mode (the snapshot-seconds view) never gets Replay. Nothing is to be built. evidence: the Replay button is disabled in Lines mode with the visible reason "Replay is available on candle charts", Alt+R is a no-op there (`ChartPage.test.tsx`: "is disabled in Lines mode, saying why", "ignores Alt+R in Lines mode"); `useReplay.ts` is unchanged from the baseline; `epics.md` Story 33.12 carries the dated `[amended 2026-10-07: operator]` strike-through.
+status: done 2026-10-07
+resolution: closed by human decision: Retracted by the operator; Lines-mode replay is not planned (Replay is a candle-chart feature)
+decision: 2026-10-07 Operator: Bar Replay only on candle charts; Lines mode never gets Replay
+
+### DW-294: Story 33.2's planned `price_kind` and nullable `confirmed` columns on `kernel.liquidation.Liquidation` leave `custom_liquidation/` with mixed-schema files; 33.2 must prove the catalog reads and consolidates them, or rewrite the 33.1 files
+
+origin: migrated from legacy ledger (flat append from spec-33-1-bybit-liquidations-captured-over-a-second-socket-into-one-shared-liquidation-type.md), 2026-10-08 (epic-33 merge)
+location: platform/kernel/liquidation.py
+source_spec: `_bmad-output/implementation-artifacts/spec-33-1-bybit-liquidations-captured-over-a-second-socket-into-one-shared-liquidation-type.md`
+reason: Story 33.2's planned `price_kind` (`dictionary<int8,string>`) and nullable `confirmed` (`bool`) columns on `kernel.liquidation.Liquidation` will leave `custom_liquidation/` holding Bybit files written under 33.1's 9-column schema beside files with the extended schema, so 33.2 must prove `ParquetDataCatalog` reads and consolidates the mixed-schema directory, or rewrite the 33.1 files (`price_kind="bankruptcy"`, `confirmed=null`) in the same story. Evidence: The epic assigns both columns to 33.2 ("added to the type in this story"); 33.1's `Liquidation.schema()` has neither, and `register_arrow` binds one schema per class, so files written before and after 33.2 differ in column set. Raised by the 33.1 Blind Hunter review (finding 10).
+status: open
+
+### DW-295: `verification.catalog`'s structure check does not know the `custom_liquidation` data type, so a real Bybit day holding liquidation files is likely flagged by the catalog tool
+
+origin: migrated from legacy ledger (flat append from spec-33-3-per-bar-order-flow-and-liquidation-aggregates-in-the-candle-store-folded-once.md), 2026-10-08 (epic-33 merge)
+location: platform/verification/application/catalog.py
+source_spec: `_bmad-output/implementation-artifacts/spec-33-3-per-bar-order-flow-and-liquidation-aggregates-in-the-candle-store-folded-once.md`
+reason: `verification.catalog`'s structure check does not know the `custom_liquidation` data type (Story 33.1), so a real Bybit day whose catalog holds liquidation files is likely flagged by the catalog tool; it needs a `NautilusReads.known` entry (or equivalent) and a test over an on-disk liquidation directory. Evidence: Story 33.3's implementation had to monkeypatch `LiquidationCatalog.first_ts_event` in `verification/tests/test_catalog.py` because writing a real `Liquidation` into the fixture catalog made the structure check fail; raised by the 33.3 Blind Hunter review (loop-1 re-derivation pass, finding 16).
+status: open
+
+### DW-296: The Volume overlays dialog lists VRVP, the session slot and placed FRVPs but not the Anchored VP / Anchored VWAP drawings
+
+origin: migrated from legacy ledger (flat append from spec-quick-volume-overlays-modal-and-grouped-tool-rail.md), 2026-10-08 (epic-33 merge)
+location: platform/frontend/src/components/chart/VolumeOverlaysDialog.tsx
+source_spec: `_bmad-output/implementation-artifacts/spec-quick-volume-overlays-modal-and-grouped-tool-rail.md`
+reason: The Volume overlays dialog lists VRVP, the session slot and placed FRVPs but not the Anchored VP / Anchored VWAP drawings, which are volume overlays too and are still edited only from their chart context menu. Evidence: `VolumeOverlaysDialog.tsx` takes no drawings; Anchored VP/VWAP live in `useChartDrawings` with their own `DrawingSettingsDialog` (Story 32.7). Raised by the quick-dev Blind Hunter review; left out because the operator's request named FRVPs only and these already have a working edit path.
+status: open
+
+### DW-297: The rail's last-used tool per group (`ChartPage`'s `toolMemory`) is not persisted, so a reload shows each group's first tool again
+
+origin: migrated from legacy ledger (flat append from spec-quick-volume-overlays-modal-and-grouped-tool-rail.md), 2026-10-08 (epic-33 merge)
+location: platform/frontend/src/pages/ChartPage.tsx
+source_spec: `_bmad-output/implementation-artifacts/spec-quick-volume-overlays-modal-and-grouped-tool-rail.md`
+reason: The rail's last-used tool per group (`ChartPage`'s `toolMemory`) is not persisted, so a page reload shows each group's first tool again (Known limit in `ChartPage.tsx`). Evidence: TradingView keeps the last-used tool across sessions; persisting it needs a per-viewer UI preference beside the coin layout, since the layout table's shape (`lib/chartLayout.ts`, `views/preferences.py`) was out of scope for this change.
+status: open
+
+### DW-298: Every `/ws/live` connection gets the full `rankings:live` and alerts relay unconditionally, and the frontend opens one socket per live hook, so a chart holds 3 sockets that each discard every rankings snapshot
+
+origin: migrated from legacy ledger (flat append from spec-33-4-derivatives-and-liquidations-read-models-api-and-live-channel.md), 2026-10-08 (epic-33 merge)
+location: platform/data_api/ws/live.py
+source_spec: `_bmad-output/implementation-artifacts/spec-33-4-derivatives-and-liquidations-read-models-api-and-live-channel.md`
+reason: Every `/ws/live` connection is subscribed to the full `rankings:live` and alerts relay unconditionally, and the frontend opens one socket per live hook (`liveSubscription.ts`), so a chart with candles, derivs and liquidations hooks holds 3 sockets that each receive and discard every rankings snapshot. Evidence: `data_api/ws/live.py`'s `ws_live` adds the rankings/alerts listeners before any control message (pre-existing with `useLiveCandle`); Story 33.4's two new hooks multiply it. Upgrade path: one shared multiplexed socket per page, or opt-in rankings relay. Raised by the 33.4 Blind Hunter review (finding 5).
+status: open
+
+### DW-299: A bot stopped over `bots:control` cannot be started again in-process: Nautilus refuses `Strategy.start()` from `STOPPED`, so the bot stays stopped with only an ERROR log and no ledger entry
+
+origin: migrated from legacy ledger (flat append from spec-33-14-liquidation-cascade-bot-shorts-into-a-long-liquidation-cascade-backtested-and-paper-run.md), 2026-10-08 (epic-33 merge)
+location: platform/bots/application/supervise.py
+source_spec: `_bmad-output/implementation-artifacts/spec-33-14-liquidation-cascade-bot-shorts-into-a-long-liquidation-cascade-backtested-and-paper-run.md`
+reason: A bot stopped over `bots:control` cannot be started again in-process: `BotSupervisor.handle_control`'s `start` calls `StrategyCacheReader.start` → `Strategy.start()`, which Nautilus refuses from `STOPPED` (only `RESUME`/`RESET` leave it), so the bot stays stopped with only an ERROR log and the error ledger never sees it. Evidence: `nautilus_trader/common/component.pyx`'s FSM table has `(STOPPED, RESUME)`, `(STOPPED, RESET)`, no `(STOPPED, START)`; reproduced in the 33.14 follow-up review on a registered `LiquidationCascadeStrategy` (start, stop, start leaves `state == STOPPED` and `on_start` is not re-run). Pre-existing for every hosted strategy (`bots/application/supervise.py:237-239`, `bots/infrastructure/cache_reader.py:178`); the fix (resume, or reset then start, and what a new signal-log segment means for parity) is the bots context's.
+status: open
+
+### DW-300: `AlertStore._save` rewrites `alerts.toml` in place, so a write that fails partway leaves a truncated file the next `data_api` start refuses to load
+
+origin: migrated from legacy ledger (flat append from spec-33-8-alert-conditions-beyond-a-price-cross-and-an-alerts-page-that-creates-and-edits.md), 2026-10-08 (epic-33 merge)
+location: platform/alerting/infrastructure/toml_store.py
+source_spec: `_bmad-output/implementation-artifacts/spec-33-8-alert-conditions-beyond-a-price-cross-and-an-alerts-page-that-creates-and-edits.md`
+reason: `AlertStore._save` rewrites `alerts.toml` in place (`open("wb")` then `tomli_w.dump`), so a write that fails partway (a full disk) leaves a truncated file that the next `data_api` start refuses to load, which loses every alert. Temp-file-plus-rename cannot fix it while compose bind-mounts the single file (`./data_api/alerts.toml:/app/data_api/alerts.toml:rw`), because a rename over a bind-mount target fails with EBUSY. Evidence: `platform/alerting/infrastructure/toml_store.py` `_save`; `platform/docker-compose.yml:320`. The in-place write predates Story 33.8 (Story 20.1). `views.preferences` solved the same problem in Story 32.5 by mounting the directory, and `AlertRepository.update`'s docstring now carries this as a `Known limit:`. The fix moves `ALERTS_PATH`, which is frozen (AD-D12), into a mounted directory, so it needs a compose change and a deploy step. Raised by the 33.8 follow-up Blind Hunter review.
+status: done 2026-10-08
+resolution: already resolved: DW-197/DW-199 (sweep dw2-alert-store-durability, 5792c82c16) made `AlertStore`'s save atomic (temp file, fsync, rename, directory fsync) and moved `ALERTS_PATH` into the mounted `platform/data/alerts/` directory; the epic-33 merge carried Story 33.8's `update` onto that save (`_save_or_restore`) and removed the `Known limit:` from `AlertRepository.update`'s docstring
+
+### DW-301: `nextDrawingId` reuses a deleted trendline's id, so a `trendline_cross` alert naming a deleted `trendline-N` silently re-attaches to the next trendline placed
+
+origin: migrated from legacy ledger (flat append from spec-33-10-drawing-tools-two-ray-vline-rectangle-channel-text-arrow-magnet-undo-lock.md), 2026-10-08 (epic-33 merge)
+location: platform/frontend/src/lib/drawings.ts
+source_spec: `_bmad-output/implementation-artifacts/spec-33-10-drawing-tools-two-ray-vline-rectangle-channel-text-arrow-magnet-undo-lock.md`
+reason: `nextDrawingId` reuses a deleted trendline's id (max+1 over the current list), so a `trendline_cross` alert naming a deleted `trendline-N` silently re-attaches to the next trendline placed; Story 33.10's Delete all makes this likely. Evidence: `frontend/src/lib/drawings.ts` `nextDrawingId` (pre-existing since 32.5) and `data_api/alert_inputs.py` `DrawingFileReader.trendline`, which resolves by id only; nothing invalidates or removes an alert when its drawing is deleted.
+status: open

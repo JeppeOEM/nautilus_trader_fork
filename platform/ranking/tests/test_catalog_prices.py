@@ -15,6 +15,7 @@
 """Integration tests for ranking.infrastructure.catalog_prices over a real catalog (TEST-01)."""
 
 import tempfile
+from decimal import Decimal
 
 from kernel.tests.snapshot_factory import make_snapshot
 
@@ -22,10 +23,15 @@ from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import Price
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from ranking.domain.price_series import PricePoint
 from ranking.infrastructure.catalog_prices import CatalogPriceHistory
 
 
 _IID = "BTC-USD-PERP.DYDX"
+
+
+def _pairs(series: list[PricePoint]) -> list[tuple[int, float]]:
+    return [(point.ts_event, point.price) for point in series]
 
 
 def _write_snapshot(catalog_path: str, close_price: float | None, ts: int) -> None:
@@ -57,7 +63,7 @@ def test_series_uses_second_snapshot_close_price() -> None:
         _write_snapshot(tmp, close_price=100.0, ts=1_000_000_000)
         _write_snapshot(tmp, close_price=101.0, ts=2_000_000_000)
         series = CatalogPriceHistory(tmp).series(_IID, start_ns=0)
-    assert series == [(1_000_000_000, 100.0), (2_000_000_000, 101.0)]
+    assert _pairs(series) == [(1_000_000_000, 100.0), (2_000_000_000, 101.0)]
 
 
 def test_series_starts_at_start_ns() -> None:
@@ -65,7 +71,7 @@ def test_series_starts_at_start_ns() -> None:
         _write_snapshot(tmp, close_price=100.0, ts=1_000_000_000)
         _write_snapshot(tmp, close_price=101.0, ts=2_000_000_000)
         series = CatalogPriceHistory(tmp).series(_IID, start_ns=1_500_000_000)
-    assert series == [(2_000_000_000, 101.0)]
+    assert _pairs(series) == [(2_000_000_000, 101.0)]
 
 
 def test_series_skips_seconds_with_no_trade() -> None:
@@ -73,7 +79,7 @@ def test_series_skips_seconds_with_no_trade() -> None:
         _write_snapshot(tmp, close_price=100.0, ts=1_000_000_000)
         _write_snapshot(tmp, close_price=None, ts=2_000_000_000)  # no trade this second
         series = CatalogPriceHistory(tmp).series(_IID, start_ns=0)
-    assert series == [(1_000_000_000, 100.0)]
+    assert _pairs(series) == [(1_000_000_000, 100.0)]
 
 
 def test_a_window_without_a_trade_is_an_empty_series_even_with_mark_prices() -> None:
@@ -92,3 +98,33 @@ def test_a_window_without_a_trade_is_an_empty_series_even_with_mark_prices() -> 
         )
         series = CatalogPriceHistory(tmp).series(_IID, start_ns=0)
     assert series == []
+
+
+def test_each_point_carries_the_exact_close_and_traded_volume_of_its_second() -> None:
+    """Story 33.4: the hourly-volume backfill rides the price read, exact from the stored units."""
+    with tempfile.TemporaryDirectory() as tmp:
+        ParquetDataCatalog(tmp).write_data(
+            [
+                make_snapshot(
+                    instrument_id=InstrumentId.from_str(_IID),
+                    bid_prices=[100.1],
+                    bid_sizes=[1.0],
+                    ask_prices=[100.3],
+                    ask_sizes=[1.0],
+                    buy_volume=0.3,
+                    sell_volume=0.1,
+                    buy_count=2,
+                    sell_count=1,
+                    open_price=100.2,
+                    high_price=100.2,
+                    low_price=100.2,
+                    close_price=100.2,
+                    ts_event=1_000_000_000,
+                    ts_init=1_000_000_000,
+                )
+            ]
+        )
+        (point,) = CatalogPriceHistory(tmp).series(_IID, start_ns=0)
+    assert point.price == 100.2
+    assert point.close == Decimal("100.2")
+    assert point.volume == Decimal("0.4")  # 0.3 + 0.1 in exact units, never 0.30000000000000004

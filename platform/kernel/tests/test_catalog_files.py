@@ -15,6 +15,7 @@
 """`kernel.catalog_files`: read-only helpers over the catalog's second-snapshot files."""
 
 import ast
+import glob
 import math
 import shutil
 from collections.abc import Callable
@@ -31,6 +32,8 @@ from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import NS_PER_DAY
 from kernel.clocks import NS_PER_S
 from kernel.clocks import READ_SPAN_MARGIN_NS
+from kernel.liquidation import LiquidatedSide
+from kernel.liquidation import Liquidation
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import LegacySnapshotLayoutError
 from kernel.second_snapshot import SecondOHLC
@@ -112,8 +115,23 @@ def test_data_file_ranges_ascending_from_names(catalog: str) -> None:
 def test_query_second_ohlc_filters_on_ts_event(catalog: str) -> None:
     rows = catalog_files.query_second_ohlc(catalog, _IID, _DAY0, _DAY0 + 20 * NS_PER_S)
     assert rows == [
-        SecondOHLC(_DAY0 + 10 * NS_PER_S, 10.0, 10.0, 10.0, 10.0, 1.0, 0.5),
-        SecondOHLC(_DAY0 + 20 * NS_PER_S, None, None, None, None, 0.0, 0.0),
+        SecondOHLC(
+            _DAY0 + 10 * NS_PER_S,
+            10.0,
+            10.0,
+            10.0,
+            10.0,
+            1.0,
+            0.5,
+            4,
+            4,
+            100_000,
+            10_000,
+            5_000,
+            1,
+            1,
+        ),
+        SecondOHLC(_DAY0 + 20 * NS_PER_S, None, None, None, None, 0.0, 0.0, 4, 4, None, 0, 0, 0, 0),
     ]
 
 
@@ -146,6 +164,21 @@ def test_second_ohlc_arrays(catalog: str) -> None:
     assert math.isnan(cols["c"][1])
     assert list(cols["v"]) == [1.5, 0.0, 1.5, 1.5, 1.5]
     assert len(catalog_files.second_ohlc_arrays([])["ts_ms"]) == 0
+
+
+def test_second_ohlc_arrays_carry_the_integer_flow_columns(catalog: str) -> None:
+    """Story 33.3: the units as int64, a no-trade close read as 0, never through a float."""
+    cols = catalog_files.second_ohlc_arrays(sorted(catalog_files.snapshot_files(catalog, _IID)))
+    assert cols["close_units"].dtype == np.int64
+    assert cols["close_units"].tolist() == [100_000, 0, 110_000, 120_000, 130_000]
+    assert cols["buy_units"].tolist() == [10_000, 0, 10_000, 10_000, 10_000]
+    assert cols["sell_units"].tolist() == [5_000, 0, 5_000, 5_000, 5_000]
+    assert cols["buy_n"].tolist() == [1, 0, 1, 1, 1]
+    assert cols["sell_n"].tolist() == [1, 0, 1, 1, 1]
+    assert cols["price_precision"].tolist() == [4] * 5
+    assert cols["size_precision"].tolist() == [4] * 5
+    empty = catalog_files.second_ohlc_arrays([])
+    assert all(len(empty[k]) == 0 for k in ("close_units", "buy_n", "size_precision"))
 
 
 def _book(ts_event: int, bids: list[float], asks: list[float]) -> DydxSecondSnapshot:
@@ -235,6 +268,49 @@ def test_query_top_of_book_empty_window_and_unknown_instrument(book_catalog: str
     assert catalog_files.query_top_of_book(book_catalog, "NOPE.DYDX", 0, 2 * _DAY0) == []
 
 
+# -- Story 33.6: the two-pass per-bar book read ------------------------------------------------
+
+
+def test_query_snapshot_times_lists_every_row_ascending_across_files(book_catalog: str) -> None:
+    times = catalog_files.query_snapshot_times(book_catalog, _IID, _DAY0, _DAY0 + NS_PER_DAY)
+    assert times.dtype == np.int64
+    assert times.tolist() == [_DAY0 + k * NS_PER_S for k in range(6)]
+
+
+def test_query_snapshot_times_bounds_are_inclusive_ts_event(book_catalog: str) -> None:
+    lo, hi = _DAY0 + NS_PER_S, _DAY0 + 2 * NS_PER_S
+    assert catalog_files.query_snapshot_times(book_catalog, _IID, lo, hi).tolist() == [lo, hi]
+
+
+def test_query_snapshot_times_empty_window_and_unknown_instrument(book_catalog: str) -> None:
+    after = _DAY0 + 10 * NS_PER_S
+    assert catalog_files.query_snapshot_times(book_catalog, _IID, after, after + NS_PER_S).size == 0
+    assert catalog_files.query_snapshot_times(book_catalog, "NOPE.DYDX", 0, 2 * _DAY0).size == 0
+
+
+def test_query_books_at_decodes_only_the_requested_rows(book_catalog: str) -> None:
+    """Gap-encoded prices come back absolute, best first, at the stored precisions (4 and 4)."""
+    at = [_DAY0 + k * NS_PER_S for k in range(6)]
+    books = catalog_files.query_books_at(book_catalog, _IID, [at[3], at[0], at[4]])
+    assert sorted(books) == [at[0], at[3], at[4]]
+    assert books[at[3]] == {
+        "ts_event": at[3],
+        "price_precision": 4,
+        "size_precision": 4,
+        "bid_prices": [103.0, 102.0],
+        "bid_sizes": [10.3, 10.2],
+        "ask_prices": [104.0, 105.0],
+        "ask_sizes": [10.4, 10.5],
+    }
+    assert (books[at[4]]["bid_prices"], books[at[4]]["ask_prices"]) == ([], [106.0])
+
+
+def test_query_books_at_omits_a_stamp_no_row_carries(book_catalog: str) -> None:
+    missing = _DAY0 + NS_PER_S // 3
+    assert catalog_files.query_books_at(book_catalog, _IID, [missing]) == {}
+    assert catalog_files.query_books_at(book_catalog, _IID, []) == {}
+
+
 def test_module_never_writes_or_builds_a_catalog() -> None:
     """AD-D3: read helpers only -- no `ParquetDataCatalog`, no write/rename/delete call."""
     tree = ast.parse(Path(catalog_files.__file__).read_text())
@@ -273,6 +349,8 @@ def _legacy_file(tmp_path: Path) -> Path:
     [
         lambda root: catalog_files.query_second_ohlc(root, _IID, 0, 2 * _DAY0),
         lambda root: catalog_files.query_top_of_book(root, _IID, 0, 2 * _DAY0),
+        lambda root: catalog_files.query_snapshot_times(root, _IID, 0, 2 * _DAY0),
+        lambda root: catalog_files.query_books_at(root, _IID, [_DAY0]),
         lambda root: catalog_files.second_ohlc_arrays(catalog_files.snapshot_files(root, _IID)),
     ],
 )
@@ -355,6 +433,109 @@ def test_query_index_prices_refuses_a_precision_label_this_build_cannot_hold(
     pq.write_table(table.replace_schema_metadata({b"price_precision": b"99"}), path)
     with pytest.raises(ValueError, match="outside this build"):
         catalog_files.query_index_prices(catalog, _IID, 0, 1 << 62)
+
+
+def test_query_price_columns_reads_the_exact_units_at_each_files_label(tmp_path: Path) -> None:
+    """
+    The two files carry labels 2 and 5: 100.25 is 10 025 units of 0.01 and 61090.59855 is
+    6 109 059 855 units of 0.00001 (the value `Price(Decimal, 16)` mis-stamps), inclusive bounds.
+    """
+    catalog = _index_catalog(tmp_path)
+    rows = catalog_files.query_price_columns(
+        catalog, catalog_files.INDEX_PRICE_DIRNAME, _IID, _DAY0 + NS_PER_S, _DAY0 + 2 * NS_PER_S
+    )
+    assert (rows.ts_event - _DAY0).tolist() == [NS_PER_S, 2 * NS_PER_S]
+    assert rows.units.tolist() == [10_025, 6_109_059_855]
+    assert rows.precision.tolist() == [2, 5]
+
+
+def test_query_price_columns_keeps_a_copy_once_and_refuses_a_disagreeing_one(
+    tmp_path: Path,
+) -> None:
+    """A row in two files: one row when the copies agree (100.25 and 100.250 agree), else refused."""
+    iid = InstrumentId.from_str(_IID)
+    writer = ParquetDataCatalog(str(tmp_path))
+    writer.write_data([IndexPriceUpdate(iid, Price.from_str("100.25"), _DAY0, _DAY0)])
+    writer.write_data(
+        [
+            IndexPriceUpdate(iid, Price.from_str("100.250"), _DAY0, _DAY0),
+            IndexPriceUpdate(iid, Price.from_str("100.300"), _DAY0 + NS_PER_S, _DAY0 + NS_PER_S),
+        ],
+        skip_disjoint_check=True,
+    )
+    dirname = catalog_files.INDEX_PRICE_DIRNAME
+    rows = catalog_files.query_price_columns(str(tmp_path), dirname, _IID, 0, 1 << 62)
+    assert (rows.units.tolist(), rows.precision.tolist()) == ([10_025, 100_300], [2, 3])
+    late = _DAY0 + 2 * NS_PER_S  # a third file name, so the write is not skipped
+    writer.write_data(
+        [
+            IndexPriceUpdate(iid, Price.from_str("100.26"), _DAY0, _DAY0),
+            IndexPriceUpdate(iid, Price.from_str("100.30"), late, late),
+        ],
+        skip_disjoint_check=True,
+    )
+    with pytest.raises(ValueError, match="stored twice with different values"):
+        catalog_files.query_price_columns(str(tmp_path), dirname, _IID, 0, 1 << 62)
+
+
+def test_query_price_columns_of_a_missing_directory_is_empty(tmp_path: Path) -> None:
+    rows = catalog_files.query_price_columns(
+        str(tmp_path), catalog_files.MARK_PRICE_DIRNAME, _IID, 0, 1 << 62
+    )
+    assert [len(column) for column in rows] == [0, 0, 0, 0]
+
+
+def test_newest_ts_event_before_is_the_newest_row_strictly_before_the_bound(
+    tmp_path: Path,
+) -> None:
+    """Rows at seconds 0..3 over two files: before second 3 -> 2, before 0 -> None."""
+    catalog = _index_catalog(tmp_path)
+    dirnames = (catalog_files.INDEX_PRICE_DIRNAME, catalog_files.MARK_PRICE_DIRNAME)
+    newest = catalog_files.newest_ts_event_before(catalog, _IID, dirnames, _DAY0 + 3 * NS_PER_S)
+    assert newest == _DAY0 + 2 * NS_PER_S
+    assert catalog_files.newest_ts_event_before(catalog, _IID, dirnames, _DAY0) is None
+
+
+def _losing_listing(monkeypatch: pytest.MonkeyPatch, losing: int) -> None:
+    """Make the first `losing` listings also name a file the consolidation already removed."""
+    real = glob.glob
+    calls = {"n": 0}
+
+    def listing(pattern: str) -> list[str]:
+        paths = real(pattern)
+        calls["n"] += 1
+        if calls["n"] > losing or not paths:
+            return paths
+        return [str(Path(paths[0]).parent / "removed" / Path(paths[0]).name), *paths]
+
+    monkeypatch.setattr(catalog_files.glob, "glob", listing)
+
+
+def test_the_derivatives_readers_list_again_after_a_consolidation_removed_a_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One listing names a file gone by the read: the read lists again and returns every row."""
+    catalog = _index_catalog(tmp_path)
+    dirname = catalog_files.INDEX_PRICE_DIRNAME
+    whole = catalog_files.query_price_columns(catalog, dirname, _IID, 0, 1 << 62)
+    _losing_listing(monkeypatch, 1)
+    rows = catalog_files.query_price_columns(catalog, dirname, _IID, 0, 1 << 62)
+    assert rows.units.tolist() == whole.units.tolist()
+    assert rows.ts_event.tolist() == whole.ts_event.tolist()
+    _losing_listing(monkeypatch, 1)
+    newest = catalog_files.newest_ts_event_before(catalog, _IID, (dirname,), _DAY0 + 3 * NS_PER_S)
+    assert newest == _DAY0 + 2 * NS_PER_S
+
+
+def test_a_derivatives_listing_that_keeps_losing_files_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _index_catalog(tmp_path)
+    _losing_listing(monkeypatch, 1 << 30)
+    with pytest.raises(ValueError, match="kept disappearing"):
+        catalog_files.query_price_columns(
+            catalog, catalog_files.INDEX_PRICE_DIRNAME, _IID, 0, 1 << 62
+        )
 
 
 def test_price_precision_labels_read_each_overlapping_files_label(tmp_path: Path) -> None:
@@ -884,3 +1065,74 @@ def test_second_ohlc_arrays_refuses_a_vanished_file_never_reads_partially(catalo
     with pytest.raises(catalog_files.CatalogReadError, match="gone before it was read") as raised:
         catalog_files.second_ohlc_arrays([gone, *paths[1:]])
     assert str(raised.value).startswith(f"{gone}: ")
+
+
+@pytest.mark.parametrize("column", ["buy_volume", "sell_volume", "buy_count", "sell_count"])
+def test_second_ohlc_arrays_refuses_a_null_flow_column(
+    catalog: str, tmp_path: Path, column: str
+) -> None:
+    """
+    A null volume, count or precision is never read as 0 (no fabricated "nothing traded"): the
+    rebuild read raises naming the file and the column. Only the close may be null (no trade).
+    """
+    source = sorted(catalog_files.snapshot_files(catalog, _IID))[0]
+    table = pq.read_table(source)
+    index = table.schema.get_field_index(column)
+    field = table.schema.field(index).with_nullable(True)
+    nulls = pa.nulls(table.num_rows, field.type)
+    broken = tmp_path / Path(source).name
+    pq.write_table(table.set_column(index, field, nulls), broken)
+    with pytest.raises(ValueError, match=f"null value.*{column!r}") as raised:
+        catalog_files.second_ohlc_arrays([str(broken)])
+    assert str(broken) in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "column",
+    ["buy_volume", "sell_volume", "buy_count", "sell_count", "price_precision", "size_precision"],
+)
+def test_the_second_ohlc_rows_refuse_a_null_flow_column(
+    catalog: str, tmp_path: Path, column: str
+) -> None:
+    """`query_second_ohlc`'s per-file read refuses the same nulls, naming the file and column."""
+    source = sorted(catalog_files.snapshot_files(catalog, _IID))[0]
+    table = pq.read_table(source)
+    index = table.schema.get_field_index(column)
+    field = table.schema.field(index).with_nullable(True)
+    broken = tmp_path / Path(source).name
+    pq.write_table(table.set_column(index, field, pa.nulls(table.num_rows, field.type)), broken)
+    with pytest.raises(ValueError, match=f"null value.*{column!r}") as raised:
+        catalog_files._ohlc_rows(str(broken), 0, 1 << 62)
+    assert str(broken) in str(raised.value)
+
+
+def _liquidation_at(ts_event: int, ts_init: int, key: str) -> Liquidation:
+    iid = InstrumentId.from_str("BTCUSDT-LINEAR.BYBIT")
+    return Liquidation.from_wire_text(
+        iid, LiquidatedSide.LONG, "0.001", "84000.00", (2, 3), key, ts_event, ts_init
+    )
+
+
+def test_liquidation_feed_since_is_none_without_an_archived_liquidation(tmp_path: Path) -> None:
+    assert catalog_files.liquidation_feed_since_ns(str(tmp_path), "BTCUSDT-LINEAR.BYBIT") is None
+
+
+def test_liquidation_feed_since_is_the_earliest_ts_event_across_files(tmp_path: Path) -> None:
+    """
+    Three files: the first (by name span) starts at ts_init T+100 s and holds an event at T+90 s;
+    the second's span starts at T+200 s, within the 300 s skew bound of T+90 s, and holds an event
+    at T+10 s (its ts_init trails by 190 s): the earliest, T+10 s. The third starts at T+1,000 s,
+    past T+10 s + 300 s, so no row of it can be earlier: it is never opened (made unreadable).
+    """
+    t = _DAY0
+    writer = ParquetDataCatalog(str(tmp_path))
+    writer.write_data([_liquidation_at(t + 90 * NS_PER_S, t + 100 * NS_PER_S, "a")])
+    writer.write_data([_liquidation_at(t + 10 * NS_PER_S, t + 200 * NS_PER_S, "b")])
+    writer.write_data([_liquidation_at(t + 900 * NS_PER_S, t + 1_000 * NS_PER_S, "c")])
+    directory = tmp_path / "data" / "custom_liquidation" / "BTCUSDT-LINEAR.BYBIT"
+    files = sorted(directory.glob("*.parquet"))
+    assert len(files) == 3
+    files[-1].write_bytes(b"not parquet")  # opened only if the walk failed to stop
+    since = catalog_files.liquidation_feed_since_ns(str(tmp_path), "BTCUSDT-LINEAR.BYBIT")
+    assert since == t + 10 * NS_PER_S
+    assert MAX_TS_INIT_SKEW_NS == 300 * NS_PER_S

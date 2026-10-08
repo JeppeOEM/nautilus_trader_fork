@@ -20,12 +20,16 @@ capture can write parses back to the same values.
 """
 
 from capture.domain.coverage import DEPTH
+from capture.domain.coverage import LIQUIDATION_REASONS
 from capture.domain.coverage import SECOND_REASONS
+from capture.domain.coverage import LiquidationsUnrecoverable
 from capture.domain.coverage import SecondsRun
 from capture.domain.coverage import TradesBackfilled
 from capture.domain.coverage import TradesDropped
 from capture.domain.coverage import TradesUnrecoverable
+from verification.application.conservation import collect_coverage
 from verification.domain.conservation import Backfilled
+from verification.domain.conservation import LiquidationWindow
 from verification.domain.conservation import SecondsRun as ParsedRun
 from verification.domain.conservation import TradeWindow
 from verification.domain.conservation import parse_coverage_line
@@ -56,3 +60,16 @@ def test_trade_lines_capture_writes_parse() -> None:
     assert isinstance(filled, Backfilled)
     assert (dropped.from_ns, dropped.to_ns, lost.from_ns, lost.to_ns) == (5, 9, 7, 11)
     assert filled.trade_ids == ("a", "b")
+
+
+def test_every_liquidation_window_capture_writes_parses() -> None:
+    """Story 33.1: the fifth kind parses for each reason capture writes."""
+    for reason in sorted(LIQUIDATION_REASONS):
+        line = LiquidationsUnrecoverable(_IID, reason, 5, 9).to_json_line()
+        assert parse_coverage_line(line, "c") == LiquidationWindow(_IID, reason, 5, 9)
+
+
+def test_a_liquidation_window_explains_no_trade_and_no_second() -> None:
+    line = LiquidationsUnrecoverable(_IID, "feed_down", 0, 10**18).to_json_line()
+    (coverage,) = collect_coverage([parse_coverage_line(line, "c")], [_IID], 0).values()
+    assert (coverage.runs, coverage.windows, coverage.backfilled) == ((), (), frozenset())

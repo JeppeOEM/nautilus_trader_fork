@@ -26,6 +26,7 @@ from collections.abc import Sequence
 from decimal import Decimal
 
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import SecondOHLC
 from kernel.second_snapshot import SnapshotTradeUnits
 from nautilus_trader.model.identifiers import InstrumentId
 
@@ -110,6 +111,61 @@ def make_snapshot(
         high_price_units=_optional_units(high_price, pp),
         low_price_units=_optional_units(low_price, pp),
         close_price_units=_optional_units(close_price, pp),
+    )
+
+
+def second_of(snapshot: DydxSecondSnapshot) -> SecondOHLC:
+    """Project a snapshot onto the fold's per-second fields (its floats, then its units)."""
+    return SecondOHLC(
+        snapshot.ts_event,
+        snapshot.open_price,
+        snapshot.high_price,
+        snapshot.low_price,
+        snapshot.close_price,
+        snapshot.buy_volume,
+        snapshot.sell_volume,
+        snapshot.price_precision,
+        snapshot.size_precision,
+        snapshot.close_price_units,
+        snapshot.buy_volume_units,
+        snapshot.sell_volume_units,
+        snapshot.buy_count,
+        snapshot.sell_count,
+    )
+
+
+def make_second(
+    ts_event: int,
+    close_price: Number | None = None,
+    *,
+    open_price: Number | None = None,
+    high_price: Number | None = None,
+    low_price: Number | None = None,
+    buy_volume: Number = 0,
+    sell_volume: Number = 0,
+    buy_count: int = 0,
+    sell_count: int = 0,
+    price_precision: int = DEFAULT_PRICE_PRECISION,
+    size_precision: int = DEFAULT_SIZE_PRECISION,
+) -> SecondOHLC:
+    """
+    Build one `SecondOHLC` from literals, its units exact at the given precisions (`units`) and its
+    floats decoded from them as the catalog read decodes them. `open/high/low` default to the close.
+    """
+    return second_of(
+        make_snapshot(
+            ts_event=ts_event,
+            buy_volume=buy_volume,
+            sell_volume=sell_volume,
+            buy_count=buy_count,
+            sell_count=sell_count,
+            open_price=close_price if open_price is None else open_price,
+            high_price=close_price if high_price is None else high_price,
+            low_price=close_price if low_price is None else low_price,
+            close_price=close_price,
+            price_precision=price_precision,
+            size_precision=size_precision,
+        )
     )
 
 

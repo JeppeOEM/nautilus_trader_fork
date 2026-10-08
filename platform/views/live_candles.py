@@ -33,6 +33,30 @@ constructor's argument and the one running instance is built by `data_api.buses`
 reads no interface settings and holds no module state. The module also declares `BarObserver`, the
 port through which a consumer (alerting, attached by `data_api`'s composition root) sees the same
 forming bar the chart sees.
+
+Story 33.3: the bus also subscribes `liquidations:raw` (one JSON array of `Liquidation.to_dict`
+rows per frame). For an instrument with the feed (`kernel.liquidation.has_liquidation_feed`) each
+decoded row joins a `RECENT_SECONDS`-bounded tail (`recent_liquidations`, the chart's unflushed
+tail) and the current bucket of every buffer of its instrument, deduped by `venue_event_id`, so the
+forming bar's `liq_*` columns are the same fold's as the stored bar's; a no-feed instrument's bar
+carries them null. The forming bar is bounded by the one feed-start rule
+(`candles.domain.fold.LiquidationArrays.since_ns`): its `liq_*` are known only if its bucket starts
+at or after the instrument's feed start, the earliest of the archive's first liquidation
+(`kernel.catalog_files.liquidation_feed_since_ns`, never read on the event loop: in each seed's
+thread, and otherwise refreshed at most every `FEED_SINCE_REFRESH_SECONDS` by a background
+`asyncio.to_thread` read) and the earliest liquidation seen live. That is the rule the store and
+the rebuild apply, but not necessarily the same bound: the store's is its persisted
+`liquidation_feed_since`, the bus's the archive's (possibly not read yet) and its own live rows, so
+the forming bar can read null where the stored bar of the same bucket reads a known value, and,
+until a rebuild lowers the store's start to the archive's, known where the stored bar is null. The
+bound never makes a false 0 (every source is a liquidation the feed actually delivered); a
+liquidation the bus never received can -- see `LiveCandleBus`'s Known limits (Story 33.3 review
+loop 2 and the follow-up review).
+
+Story 33.4: the bus is still the process's one `liquidations:raw` subscriber, and hands every row
+of a frame it accepted (an instrument with the feed) to each attached `LiquidationListener`
+(`data_api`'s composition root attaches `views.live_derivs.LiveDerivsBus`), which relays them on
+`/ws/live`'s `liquidations:{iid}` channels -- one decode, one subscription.
 """
 
 import asyncio
@@ -42,12 +66,17 @@ import time
 from collections import defaultdict
 from collections import deque
 from collections.abc import Callable
+from typing import NamedTuple
 from typing import Protocol
 
 import redis.asyncio as aioredis
 from candles.application.forming import forming_bar
 from candles.domain.fold import bucket_start_ms
+from kernel.catalog_files import liquidation_feed_since_ns
+from kernel.catalog_files import query_liquidations
 from kernel.catalog_files import query_second_ohlc
+from kernel.liquidation import Liquidation
+from kernel.liquidation import has_liquidation_feed
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import SecondOHLC
 from observability import error_ledger
@@ -59,8 +88,14 @@ from views.rankings_bus import put_drop_oldest
 logger = logging.getLogger(__name__)
 
 SNAPSHOTS_CHANNEL = "snapshots:raw"
+# Capture's liquidation channel (`capture.infrastructure.redis_stream.LIQUIDATIONS_CHANNEL`, the
+# published language: views never imports capture, AD-D2).
+LIQUIDATIONS_CHANNEL = "liquidations:raw"
 
 _BufferKey = tuple[str, int]  # (instrument_id, bar_seconds)
+
+# `_try_publish`'s "this publish failed and was ledgered", distinct from None ("no trade yet").
+_PUBLISH_FAILED = object()
 
 # The collector flushes to the catalog every flush_interval_seconds (60s), so a history read
 # right after a refresh misses the newest unflushed seconds. Keeping the last few minutes of
@@ -73,6 +108,11 @@ RECENT_SECONDS = 600
 # pair's buffer to one day of `SecondOHLC` rows (MEM-02).
 MAX_OBSERVED_BAR_SECONDS = 86_400
 
+# How long an archive feed-start read stands before a publish schedules another (in a thread, never
+# on the event loop): the archive's first liquidation only ever moves earlier when older history is
+# archived (a backfill), so a few minutes' lag only keeps a bucket null a little longer.
+FEED_SINCE_REFRESH_SECONDS = 300
+
 
 class BarObserver(Protocol):
     """
@@ -84,7 +124,9 @@ class BarObserver(Protocol):
     evaluates exactly the bar the chart shows -- one fold, `forming_bar` -- without importing views'
     internals or opening a second `snapshots:raw` subscription, so an alert's bar close can never
     disagree with the candle on screen. `ts_ns` is the `ts_event` of the second that produced this
-    bar update. `on_bar` runs on the event loop: blocking work (a network send) belongs on a
+    bar update; it reaches the observer once per second tick, `ts_ns` monotonic per pair -- a
+    liquidation-driven republish goes to the chart's listeners only, and the observer sees that
+    liquidation in its next tick's bar. `on_bar` runs on the event loop: blocking work (a network send) belongs on a
     thread. Only live ticks reach it -- a subscription's seed republishes the bucket for the chart
     but is not a new tick, so between a seed and the pair's next tick the chart's `o`/`h`/`l`/`v`
     may already include catalog seconds the observer's last bar lacked; `c` is the same in both.
@@ -93,8 +135,9 @@ class BarObserver(Protocol):
     bus asks it once per `snapshots:raw` batch and calls `on_bar` only for those pairs, so no pair
     is folded for nobody and an observer needs no chart open to see its bar.
 
-    Known limit: `bar` is the frozen `{t, o, h, l, c, v}` dict `candles.application.forming.
-    forming_bar` returns (the `/ws/live` wire shape), not a Nautilus `Bar`. Upgrade path: pass a
+    Known limit: `bar` is the frozen `{t, o, h, l, c, v, ...}` dict `candles.application.forming.
+    forming_bar` returns (the `/ws/live` wire shape, with Story 33.3's ten order-flow and
+    liquidation keys appended), not a Nautilus `Bar`. Upgrade path: pass a
     `nautilus_trader.model.data.Bar` once views owns the wire format and serializes it at the
     WebSocket boundary (see `forming_bar`'s own `Known limit:`).
     """
@@ -108,13 +151,25 @@ class BarObserver(Protocol):
         ...
 
 
+class LiquidationListener(Protocol):
+    """
+    A consumer of the liquidations `liquidations:raw` delivered, decoded once by this bus.
+
+    Invariant: the bus stays the process's only `liquidations:raw` subscriber (`data_api.buses`);
+    a listener gets the rows of each frame the bus accepted, in frame order, once. A listener that
+    raises is ledgered (`live_candles.liquidation_listener`) and never stops the candle fold.
+    """
+
+    def publish_liquidations(self, rows: list[Liquidation]) -> None: ...
+
+
 def _bucket_of(ts_ns: int, bar_seconds: int) -> int:
     """Return the bucket start (ms) of a ns stamp (`candles.domain.fold.bucket_start_ms`)."""
     return bucket_start_ms(ts_ns // 1_000_000, bar_seconds)
 
 
 def _second_row(snapshot: DydxSecondSnapshot) -> SecondOHLC:
-    """Project a snapshot onto the fold's 7 per-second fields, not its 20-level book."""
+    """Project a snapshot onto the fold's per-second fields (floats and units), not its book."""
     return SecondOHLC(
         snapshot.ts_event,
         snapshot.open_price,
@@ -123,6 +178,13 @@ def _second_row(snapshot: DydxSecondSnapshot) -> SecondOHLC:
         snapshot.close_price,
         snapshot.buy_volume,
         snapshot.sell_volume,
+        snapshot.price_precision,
+        snapshot.size_precision,
+        snapshot.close_price_units,
+        snapshot.buy_volume_units,
+        snapshot.sell_volume_units,
+        snapshot.buy_count,
+        snapshot.sell_count,
     )
 
 
@@ -167,17 +229,58 @@ def _is_valid_pair(pair: object) -> bool:
     )
 
 
+class _SeedRows(NamedTuple):
+    """One seed's archive read: the bucket's seconds, its liquidations, the id's feed start."""
+
+    seconds: list[SecondOHLC]
+    liquidations: list[Liquidation]
+    feed_since_ns: int | None
+
+
 def _catalog_rows_for_seed(
     catalog_path: str, instrument_id: str, bar_seconds: int, start_ns: int, end_ns: int
-) -> list[SecondOHLC]:
+) -> _SeedRows:
     """
-    Read the current bucket's traded rows straight from the raw 1s archive.
+    Read the current bucket's rows straight from the raw 1s archive, and for an instrument with the
+    feed its archived liquidations and its first archived one (`liquidation_feed_since_ns`).
 
     A wide bucket (4H, 1D) is up to ~1,440 small files, read once per subscription off the event loop.
     """
-    return query_second_ohlc(
+    seconds = query_second_ohlc(
         catalog_path, instrument_id, start_ns, end_ns, on_foreign=error_ledger.record
     )
+    if not has_liquidation_feed(instrument_id):
+        return _SeedRows(seconds, [], None)
+    return _SeedRows(
+        seconds,
+        query_liquidations(catalog_path, instrument_id, start_ns, end_ns),
+        liquidation_feed_since_ns(catalog_path, instrument_id),
+    )
+
+
+def _liquidation_rows(payload: object) -> list[Liquidation]:
+    """
+    Decode one `liquidations:raw` frame: a JSON array of `Liquidation.to_dict` rows, each decoded
+    by the kernel's own `from_dict`. A malformed frame or row is ledgered at
+    `live_candles.liquidation` and skipped, never folded and never silently dropped (DATA-07).
+    """
+    if not isinstance(payload, list):
+        error_ledger.record(
+            "live_candles.liquidation",
+            f"liquidations:raw payload is not a list, SKIPPED: {payload!r}",
+        )
+        return []
+    rows = []
+    for entry in payload:
+        try:
+            if not isinstance(entry, dict):
+                raise TypeError(f"entry is not a dict: {entry!r}")
+            rows.append(Liquidation.from_dict(entry))
+        except Exception as exc:
+            error_ledger.record(
+                "live_candles.liquidation", "liquidations:raw entry failed to decode, SKIPPED", exc
+            )
+    return rows
 
 
 class LiveCandleBus:
@@ -201,6 +304,36 @@ class LiveCandleBus:
     `c`, the one field alerting reads, is exact from the first traded tick. Upgrade path: run
     `seed` for newly observed pairs too, once an observer needs more than the close.
 
+    Known limit: an observer-only pair's buffer misses the liquidations of its bucket older than the
+    `RECENT_SECONDS` tail: its bucket is not seeded (above), and a fresh or rolled buffer's first
+    tick restores the bucket's liquidations only from that tail (`_roll_liquidations`), so a wide
+    pair first watched late in its bucket starts without the earlier ones. Upgrade path: the same
+    seed for observed pairs, which reads the bucket's archived ones.
+
+    Known limit (feed start, bus vs store): the archive's feed start is read in the seed's thread
+    or, for an instrument no seed has read (an observer-only pair), by a background
+    `asyncio.to_thread` refresh its first publish schedules, then at most every
+    `FEED_SINCE_REFRESH_SECONDS` (a failed read is ledgered at `live_candles.feed_since` once per
+    refresh and leaves the previous value). Until the first read lands, and whenever the store's
+    persisted start (`liquidation_feed_since`, lowered by capture's own flushes) is earlier than
+    both the archive's and the earliest row this process saw live, the forming bar's `liq_*` read
+    null where the stored bar of the same bucket reads known. The reverse holds until a rebuild
+    lowers the store's start to the archive's (the store's start is the earliest liquidation the
+    live sink applied, so after a deploy it can be later than the archive's, DEPLOY_CHECKLIST
+    33-3): a bucket between the two reads known here and null in the store, the stored null being
+    the conservative side. The bound never makes a false 0, since every start the bus uses is a
+    liquidation the feed delivered. The chart's next history read shows the stored value. Upgrade
+    path: the store's persisted start published with the `liquidations:raw` frames (or read
+    through candles' query service), so both bounds are one.
+
+    Known limit (unreceived liquidations): `liquidations:raw` is Redis pub/sub, at most once. A
+    frame dropped across a reconnect, or published before this process subscribed and not yet
+    flushed to the archive when the seed read it (up to the collector's flush interval after a
+    data_api restart), is missing from the forming bar, which then undercounts -- 0 where the
+    bucket holds a liquidation -- until the bucket rolls; the stored bar holds it, and the chart's
+    next history read shows it. Upgrade path: a re-seed of the bucket's archived liquidations one
+    flush interval after the seed, or a sequence number on the frames so a gap is detected.
+
     Known limit: each tick refolds the pair's whole current bucket through `forming_bar`, O(bucket
     seconds) -- up to 86,400 rows per tick for a 1D pair an alert keeps always-on. Upgrade path: an
     incremental forming-bar fold in `candles.domain` that applies one second to the running bar,
@@ -223,10 +356,44 @@ class LiveCandleBus:
         # pair, and asyncio holds only a weak reference to a task, so an unheld one can vanish.
         self._seed_tasks: dict[_BufferKey, asyncio.Task[None]] = {}
         self._recent: defaultdict[str, deque[SecondOHLC]] = defaultdict(deque)
+        # Story 33.3: each buffer's liquidations of its current bucket, keyed by `venue_event_id`
+        # (one venue event once), reset when the bucket rolls; and the unflushed tail per
+        # instrument, `RECENT_SECONDS`-bounded like `_recent` (MEM-02).
+        self._buffer_liquidations: dict[_BufferKey, dict[str, Liquidation]] = {}
+        # The bucket (ms) each pair's held liquidations belong to: a fresh buffer's first tick into
+        # the bucket a seed already filled keeps them; only a changed bucket resets them.
+        self._liquidations_bucket: dict[_BufferKey, int] = {}
+        self._recent_liquidations: defaultdict[str, deque[Liquidation]] = defaultdict(deque)
+        # The tail's ids (its dedup) and newest `ts_event` (its horizon), kept incrementally so a
+        # liquidation cascade costs O(1) per row, not an O(tail) scan.
+        self._recent_liquidation_ids: defaultdict[str, set[str]] = defaultdict(set)
+        self._newest_liquidation_ns: dict[str, int] = {}
+        # The feed-start rule's two sources: the archive's first liquidation per instrument (None:
+        # nothing archived; absent: not read yet) and the earliest liquidation seen live. Each
+        # archive read's `time.monotonic()` and the pending background refresh, one per instrument.
+        self._archive_feed_since: dict[str, int | None] = {}
+        self._archive_feed_read_at: dict[str, float] = {}
+        self._feed_refresh_tasks: dict[str, asyncio.Task[None]] = {}
+        self._live_feed_since: dict[str, int] = {}
+        # Story 33.4: who else sees each accepted frame's rows (keyed by id(), like `_observers`).
+        self._liquidation_listeners: dict[int, LiquidationListener] = {}
 
     def recent_rows(self, instrument_id: str, start_ns: int, end_ns: int) -> list[SecondOHLC]:
         """Traded seconds seen live in [start_ns, end_ns], oldest first (see RECENT_SECONDS)."""
-        return [r for r in self._recent.get(instrument_id, ()) if start_ns <= r.ts_event <= end_ns]
+        # Snapshot first: see `recent_liquidations`.
+        rows = tuple(self._recent.get(instrument_id, ()))
+        return [r for r in rows if start_ns <= r.ts_event <= end_ns]
+
+    def recent_liquidations(
+        self, instrument_id: str, start_ns: int, end_ns: int
+    ) -> list[Liquidation]:
+        """Liquidations seen live with `ts_event` in [start_ns, end_ns] (see RECENT_SECONDS)."""
+        # The sync routes call this from the threadpool while the event loop appends to and pops
+        # from the deque: a Python-level loop over it can be interrupted by a thread switch and
+        # raise "deque mutated during iteration". `tuple()` copies it in one C call under the GIL
+        # (no bytecode runs in between, so no switch), and the filter then walks the copy.
+        rows = tuple(self._recent_liquidations.get(instrument_id, ()))
+        return [row for row in rows if start_ns <= row.ts_event <= end_ns]
 
     def _remember(self, snapshot: DydxSecondSnapshot) -> None:
         if snapshot.close_price is None:
@@ -245,6 +412,24 @@ class LiveCandleBus:
         """
         self._observers.setdefault(id(observer), (observer, frozenset()))
 
+    def attach_liquidations(self, listener: LiquidationListener) -> None:
+        """Hand `listener` every accepted `liquidations:raw` row from the next frame on."""
+        self._liquidation_listeners[id(listener)] = listener
+
+    def detach_liquidations(self, listener: LiquidationListener) -> None:
+        self._liquidation_listeners.pop(id(listener), None)
+
+    def _forward_liquidations(self, rows: list[Liquidation]) -> None:
+        for listener in list(self._liquidation_listeners.values()):
+            try:
+                listener.publish_liquidations(rows)
+            except Exception as exc:
+                error_ledger.record(
+                    "live_candles.liquidation_listener",
+                    f"a liquidation listener failed on {len(rows)} rows, not relayed",
+                    exc,
+                )
+
     def detach(self, observer: BarObserver) -> None:
         """Stop calling `observer`; buffers only it watched are dropped at the next batch."""
         self._observers.pop(id(observer), None)
@@ -258,6 +443,7 @@ class LiveCandleBus:
         unheld = [k for k in self._buffers if k not in self._listeners and k not in self._observed]
         for key in unheld:
             del self._buffers[key]
+            self._drop_liquidations(key)
 
     def subscribe(self, instrument_id: str, bar_seconds: int) -> "asyncio.Queue[dict]":
         """
@@ -289,6 +475,7 @@ class LiveCandleBus:
             del self._listeners[key]
             if key not in self._observed:
                 self._buffers.pop(key, None)
+                self._drop_liquidations(key)
             self._seeded.discard(key)
             task = self._seed_tasks.pop(key, None)
             if task is not None:
@@ -324,27 +511,38 @@ class LiveCandleBus:
         volume miss the start of the bucket (D-18). Runs once per pair; the catalog read is one
         bucket, off the event loop, and unions the unflushed tail (`recent_rows`) so the seconds
         since the collector's last flush are covered too.
+
+        The seed's publish goes through the tick path's isolation (`_try_publish`: ledgered at
+        `live_candles.publish`, never raised). Any failure -- the read, the merge, a cancel or that
+        publish -- un-marks the pair, so it is never left seeded-but-unseeded and a later
+        `start_seed` (the next subscribe) seeds it again.
         """
         key = (instrument_id, bar_seconds)
         if key in self._seeded or key not in self._listeners:
             return
         self._seeded.add(key)
-        now_ns = self._clock()
-        start_ns = _bucket_of(now_ns, bar_seconds) * 1_000_000
         try:
-            rows = await asyncio.to_thread(
-                _catalog_rows_for_seed,
-                self._catalog_path,
-                instrument_id,
-                bar_seconds,
-                start_ns,
-                now_ns,
-            )
+            published = await self._seed_bucket(key)
         except BaseException:  # a cancel too: never leave the pair marked seeded but unseeded
             self._seeded.discard(key)
             raise
+        if not published:
+            self._seeded.discard(key)
+
+    async def _seed_bucket(self, key: _BufferKey) -> bool:
+        """Read and merge the seed's rows; False only when its publish failed (ledgered)."""
+        instrument_id, bar_seconds = key
+        now_ns = self._clock()
+        start_ns = _bucket_of(now_ns, bar_seconds) * 1_000_000
+        read = await asyncio.to_thread(
+            _catalog_rows_for_seed, self._catalog_path, instrument_id, bar_seconds, start_ns, now_ns
+        )
         if key not in self._listeners:
-            return  # everyone left while the read ran
+            return True  # everyone left while the read ran (`unsubscribe` already un-marked it)
+        if has_liquidation_feed(instrument_id):
+            self._set_archive_feed_since(instrument_id, read.feed_since_ns)  # refreshed per seed
+        liquidations = read.liquidations + self.recent_liquidations(instrument_id, start_ns, now_ns)
+        rows = read.seconds
         have = {r.ts_event for r in rows}
         rows += [
             r for r in self.recent_rows(instrument_id, start_ns, now_ns) if r.ts_event not in have
@@ -361,8 +559,10 @@ class LiveCandleBus:
             and (not buffer or r.ts_event < buffer[0].ts_event)
         ]
         self._buffers[key] = older + buffer
-        if self._buffers[key]:
-            self._publish(key, instrument_id, bar_seconds, self._buffers[key])
+        self._add_buffer_liquidations(key, target, liquidations)
+        if not self._buffers[key]:
+            return True
+        return self._try_publish(key, self._buffers[key]) is not _PUBLISH_FAILED
 
     def handle_batch(self, payload: object) -> None:
         """
@@ -414,16 +614,19 @@ class LiveCandleBus:
         buffer = self._buffers.setdefault(key, [])
         if buffer and row.ts_event <= buffer[-1].ts_event:
             return  # out-of-order/duplicate (e.g. around a Redis reconnect) -- never fold in
-        if buffer and _bucket_of(buffer[-1].ts_event, bar_seconds) != _bucket_of(
-            row.ts_event, bar_seconds
-        ):
-            buffer = [row]  # bucket boundary crossed -- previous bar's last publish stands
+        bucket = _bucket_of(row.ts_event, bar_seconds)
+        if not buffer or _bucket_of(buffer[-1].ts_event, bar_seconds) != bucket:
+            # A fresh buffer, or a bucket boundary crossed (the previous bar's last publish
+            # stands): the bucket's liquidations are those already held for it (a seed's) plus
+            # those the recent tail holds.
+            buffer = [row]
             self._buffers[key] = buffer
+            self._roll_liquidations(key, bucket)
         else:
             # In place: an always-on 1D pair holds up to 86,400 rows, so copying the list on every
             # tick would add a second O(bucket) pass to the fold's.
             buffer.append(row)
-        bar = self._publish(key, instrument_id, bar_seconds, buffer)
+        bar = self._safe_publish(key, buffer)
         if bar is not None:
             self._notify_observers(key, bar, row.ts_event)
 
@@ -442,6 +645,88 @@ class LiveCandleBus:
                     exc,
                 )
 
+    def _safe_publish(self, key: _BufferKey, buffer: list[SecondOHLC]) -> dict | None:
+        """`_try_publish`, its failure read as "no bar" (the tick and liquidation paths)."""
+        bar = self._try_publish(key, buffer)
+        return bar if isinstance(bar, dict) else None
+
+    def _try_publish(self, key: _BufferKey, buffer: list[SecondOHLC]) -> object:
+        """
+        `_publish`, isolated per pair: an exception folding or fanning out one pair's bar (a
+        malformed row) is ledgered at `live_candles.publish` and that pair skips this publish
+        (`_PUBLISH_FAILED`), so it never escapes `handle_batch`, `handle_liquidations` or a seed
+        into `run()`, whose reconnect would drop every pair's subscription.
+        """
+        try:
+            return self._publish(key, key[0], key[1], buffer)
+        except Exception as exc:
+            error_ledger.record(
+                "live_candles.publish",
+                f"forming bar of {key[0]}/{key[1]}s failed; this publish is SKIPPED",
+                exc,
+            )
+            return _PUBLISH_FAILED
+
+    def _feed_since_ns(self, instrument_id: str) -> int | None:
+        """
+        Return the instrument's liquidation feed start: the earliest of its first archived
+        liquidation (as last read, `_refresh_feed_since`) and the earliest one seen live (None:
+        neither known, `liq_*` null). Never reads the archive itself: this runs per tick on the
+        event loop.
+        """
+        self._refresh_feed_since(instrument_id)
+        starts = [
+            since
+            for since in (
+                self._archive_feed_since.get(instrument_id),
+                self._live_feed_since.get(instrument_id),
+            )
+            if since is not None
+        ]
+        return min(starts) if starts else None
+
+    def _set_archive_feed_since(self, instrument_id: str, since_ns: int | None) -> None:
+        self._archive_feed_since[instrument_id] = since_ns
+        self._archive_feed_read_at[instrument_id] = time.monotonic()
+
+    def _refresh_feed_since(self, instrument_id: str) -> None:
+        """
+        Schedule a background archive read of the feed start when none ran in the last
+        `FEED_SINCE_REFRESH_SECONDS` and none is pending. Without a running loop (a synchronous
+        caller) nothing is scheduled and the last value stands.
+        """
+        read_at = self._archive_feed_read_at.get(instrument_id)
+        if instrument_id in self._feed_refresh_tasks or (
+            read_at is not None and time.monotonic() - read_at < FEED_SINCE_REFRESH_SECONDS
+        ):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._read_feed_since(instrument_id))
+        self._feed_refresh_tasks[instrument_id] = task
+
+    async def _read_feed_since(self, instrument_id: str) -> None:
+        """One refresh, in a thread; a failure is ledgered once and keeps the previous value."""
+        try:
+            since = await asyncio.to_thread(
+                liquidation_feed_since_ns, self._catalog_path, instrument_id
+            )
+        except Exception as exc:
+            error_ledger.record(
+                "live_candles.feed_since",
+                f"archive feed-start read for {instrument_id} failed; the previous value "
+                f"{self._archive_feed_since.get(instrument_id)!r} stands until the next refresh "
+                f"in {FEED_SINCE_REFRESH_SECONDS}s",
+                exc,
+            )
+            self._archive_feed_read_at[instrument_id] = time.monotonic()
+        else:
+            self._set_archive_feed_since(instrument_id, since)
+        finally:
+            self._feed_refresh_tasks.pop(instrument_id, None)
+
     def _publish(
         self,
         key: _BufferKey,
@@ -452,8 +737,15 @@ class LiveCandleBus:
         # The one and only aggregation call (AD-F7/AD-F2) -- `buffer` holds only the
         # current bucket's seconds, so the candles context's forming bar over it *is* this
         # pair's forming bar. None means no trade occurred in this bucket yet (close_price is
-        # None for every buffered second) -- a no-op, not an error.
-        bar = forming_bar(buffer, bar_seconds)
+        # None for every buffered second) -- a no-op, not an error. The bucket's liquidations go
+        # in with it, bounded by the feed start; None for an instrument without the feed, or one
+        # whose start is known nowhere yet (null `liq_*`, never 0).
+        liquidations, since_ns = None, None
+        if has_liquidation_feed(instrument_id):
+            since_ns = self._feed_since_ns(instrument_id)
+            if since_ns is not None:
+                liquidations = list(self._buffer_liquidations.get(key, {}).values())
+        bar = forming_bar(buffer, bar_seconds, liquidations, liquidations_since_ns=since_ns)
         if bar is None:
             return None
         message = {"channel": f"candles:{instrument_id}:{bar_seconds}", "bar": bar}
@@ -461,36 +753,176 @@ class LiveCandleBus:
             put_drop_oldest(queue, message)
         return bar
 
+    def handle_liquidations(self, payload: object) -> None:
+        """
+        Apply one decoded `liquidations:raw` frame: each row of an instrument with the feed joins
+        the recent tail and the current bucket of every buffer of its instrument whose bucket holds
+        its `ts_event` (once per `venue_event_id`); then each changed buffer republishes its bar
+        once for the whole frame -- a cascade of N rows is one fold per pair, not N -- to its
+        listeners (not its observers: `BarObserver`), each pair isolated (`_safe_publish`). A row
+        of an instrument without the feed is not folded (its bar's `liq_*` stay null) -- capture
+        publishes none, so one arriving is ledgered, never silently dropped. The accepted rows go to
+        every attached `LiquidationListener` too (Story 33.4).
+        """
+        changed: set[_BufferKey] = set()
+        accepted: list[Liquidation] = []
+        for row in _liquidation_rows(payload):
+            instrument_id = row.instrument_id.value
+            if not has_liquidation_feed(instrument_id):
+                error_ledger.record(
+                    "live_candles.liquidation",
+                    f"liquidations:raw row for {instrument_id}, which has no liquidation feed, "
+                    "SKIPPED",
+                )
+                continue
+            if self._remember_liquidation(row):  # a replayed venue event is forwarded once
+                accepted.append(row)
+            for key in [k for k in self._buffers if k[0] == instrument_id]:
+                if self._apply_liquidation(key, row):
+                    changed.add(key)
+        if accepted:
+            self._forward_liquidations(accepted)
+        for key in sorted(changed):
+            buffer = self._buffers.get(key)
+            if buffer:
+                self._safe_publish(key, buffer)
+
+    def _remember_liquidation(self, row: Liquidation) -> bool:
+        """
+        Add a row to its instrument's recent tail, once per `venue_event_id`, and lower the live
+        feed start to it. The tail's newest `ts_event` and ids are kept incrementally: O(1) per
+        row. A row already older than the tail's horizon is not kept (the tail serves the
+        unflushed recent seconds only), though it still lowers the feed start. Return False only
+        for a venue event the tail already holds (a replayed frame), so the attached listeners
+        relay each event once.
+        """
+        instrument_id = row.instrument_id.value
+        since = self._live_feed_since.get(instrument_id)
+        if since is None or row.ts_event < since:
+            self._live_feed_since[instrument_id] = row.ts_event
+        ids = self._recent_liquidation_ids[instrument_id]
+        if row.venue_event_id in ids:
+            return False  # a replayed frame: the tail holds it once
+        newest = max(self._newest_liquidation_ns.get(instrument_id, row.ts_event), row.ts_event)
+        self._newest_liquidation_ns[instrument_id] = newest
+        horizon = newest - RECENT_SECONDS * 1_000_000_000
+        if row.ts_event < horizon:
+            return True
+        tail = self._recent_liquidations[instrument_id]
+        tail.append(row)
+        ids.add(row.venue_event_id)
+        while tail and tail[0].ts_event < horizon:
+            ids.discard(tail.popleft().venue_event_id)
+        return True
+
+    def _apply_liquidation(self, key: _BufferKey, row: Liquidation) -> bool:
+        """
+        Add one liquidation to the buffer's forming bucket; True when it changed the bucket (the
+        caller republishes the bar to the listeners once per frame).
+
+        Known limit: a liquidation arriving after its bucket rolled (published late, or delayed in
+        Redis) is in the store (capture applies it at its flush) but not in the last forming bar
+        published for that bucket, which no later tick republishes; the chart's next history read
+        shows it. Upgrade path: republish the previous bucket's bar on a late liquidation, as a
+        correction frame the client merges.
+        """
+        bar_seconds = key[1]
+        buffer = self._buffers.get(key, [])
+        if not buffer or _bucket_of(row.ts_event, bar_seconds) != _bucket_of(
+            buffer[-1].ts_event, bar_seconds
+        ):
+            # Not the bucket being formed: an older one is the store's (closed), a newer one's
+            # first second has not arrived (its first tick pulls it from the recent tail).
+            return False
+        held = self._held_liquidations(key, _bucket_of(row.ts_event, bar_seconds))
+        if row.venue_event_id in held:
+            return False  # the same venue event again (a replayed frame): counted once
+        held[row.venue_event_id] = row
+        # Listeners only: an observer keeps exactly one `on_bar` per second tick, with a monotonic
+        # `ts_ns` (a liquidation's `ts_event` may precede the tick that already reached it). The
+        # observer's next tick carries the liquidation in its bar.
+        return True
+
+    def _held_liquidations(self, key: _BufferKey, bucket_ms: int) -> dict[str, Liquidation]:
+        """Return the pair's liquidations of `bucket_ms`, emptied first only if the bucket changed."""
+        if self._liquidations_bucket.get(key) != bucket_ms:
+            self._buffer_liquidations[key] = {}
+            self._liquidations_bucket[key] = bucket_ms
+        return self._buffer_liquidations[key]
+
+    def _drop_liquidations(self, key: _BufferKey) -> None:
+        self._buffer_liquidations.pop(key, None)
+        self._liquidations_bucket.pop(key, None)
+
+    def _add_buffer_liquidations(
+        self, key: _BufferKey, bucket_ms: int, rows: list[Liquidation]
+    ) -> None:
+        """Merge liquidations of the buffer's bucket in, each venue event once."""
+        held = self._held_liquidations(key, bucket_ms)
+        for row in rows:
+            if _bucket_of(row.ts_event, key[1]) == bucket_ms:
+                held.setdefault(row.venue_event_id, row)
+
+    def _roll_liquidations(self, key: _BufferKey, bucket_ms: int) -> None:
+        """
+        At a fresh buffer's first tick or a bucket roll: union the recent tail's liquidations of
+        `bucket_ms` into the held ones, which are reset only when the bucket actually changed -- a
+        first tick into the bucket a seed already filled keeps the seed's archived liquidations,
+        including those older than the `RECENT_SECONDS` tail.
+        """
+        tail = self.recent_liquidations(key[0], bucket_ms * 1_000_000, 1 << 62)
+        self._add_buffer_liquidations(key, bucket_ms, tail)
+
     async def run(self, redis_url: str) -> None:
         """
-        Subscribe to `snapshots:raw` forever, reconnecting on any error.
+        Subscribe to `snapshots:raw` and `liquidations:raw` forever, reconnecting on any error.
 
         Mirrors `RankingsBus.run()`'s discipline exactly: reconnect forever, 2s sleep
         between attempts.
         """
         logger.info("LiveCandleBus starting, url=%s", redis_url)
+        handlers = {
+            SNAPSHOTS_CHANNEL: self.handle_batch,
+            LIQUIDATIONS_CHANNEL: self.handle_liquidations,
+        }
         while True:
             try:
                 logger.info("LiveCandleBus connecting...")
                 async with aioredis.Redis.from_url(redis_url, decode_responses=True) as client:
                     pubsub = client.pubsub()
-                    await pubsub.subscribe(SNAPSHOTS_CHANNEL)
-                    logger.info("LiveCandleBus subscribed to %s", SNAPSHOTS_CHANNEL)
+                    await pubsub.subscribe(*handlers)
+                    logger.info("LiveCandleBus subscribed to %s", ", ".join(handlers))
                     async for message in pubsub.listen():
                         if message["type"] != "message":
                             continue
-                        try:
-                            payload = json.loads(message["data"])
-                        except Exception as exc:
-                            error_ledger.record(
-                                "live_candles.parse",
-                                "snapshots:raw message is not JSON, SKIPPED",
-                                exc,
-                            )
-                            continue
-                        self.handle_batch(payload)
+                        self._dispatch(handlers, message)
             except asyncio.CancelledError:
                 raise  # propagate cancellation cleanly (app shutdown)
             except Exception as exc:
                 logger.warning("LiveCandleBus subscriber error — reconnecting in 2s: %s", exc)
                 await asyncio.sleep(2)
+
+    def _dispatch(self, handlers: dict, message: dict) -> None:
+        """
+        Parse one pub/sub message and hand it to its channel's handler; bad JSON is ledgered, and
+        so is a channel the bus did not subscribe (`live_candles.payload`), never read as a
+        `snapshots:raw` batch by default.
+        """
+        channel = message.get("channel")
+        handler = handlers.get(channel)
+        if handler is None:
+            error_ledger.record(
+                "live_candles.payload", f"message on unexpected channel {channel!r}, SKIPPED"
+            )
+            return
+        try:
+            payload = json.loads(message["data"])
+        except Exception as exc:
+            site = (
+                "live_candles.liquidation"
+                if channel == LIQUIDATIONS_CHANNEL
+                else "live_candles.parse"
+            )
+            error_ledger.record(site, f"{channel} message is not JSON, SKIPPED", exc)
+            return
+        handler(payload)

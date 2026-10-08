@@ -199,6 +199,41 @@ table {
   color: var(--color-text-dim);
 }
 
+/* Story 33.7: the saved filter presets -- a select, a name and its Save, beside the chips; the
+   recalled preset's chip is the one undimmed chip. */
+.filter-presets {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-chip.filter-preset-active {
+  color: inherit;
+  border-color: var(--color-link);
+}
+
+/* Story 33.7: the 24h range cell's inline bar -- the 24 h low at the left end, the high at the
+   right, a marker where the last close sits. */
+.rankings-range {
+  position: relative;
+  display: inline-block;
+  width: 3em;
+  height: 0.5em;
+  margin-right: 0.4em;
+  background: var(--color-border);
+  vertical-align: middle;
+}
+
+.rankings-range-marker {
+  position: absolute;
+  top: -0.15em;
+  width: 2px;
+  height: 0.8em;
+  margin-left: -1px;
+  background: var(--color-link);
+}
+
 /* Story 18.1: the chart page's left tool rail -- the .tabs/.tabbtn shared pattern
    (theme.css) with only the overrides a narrow vertical rail needs (no flex:1
    stretch, compact padding), same scoped-override precedent as .filter-panel
@@ -207,6 +242,48 @@ table {
   display: flex;
   align-items: flex-start;
   gap: 8px;
+}
+
+/* Story 33.5: the Liquidation tape, a fixed-width panel beside the chart in the chart's own light
+   palette; its rows scroll inside it (the page itself never clips, see chart-layout.test.mjs). */
+.liquidation-tape {
+  flex: none;
+  width: 300px;
+  margin: 1.4em 0 0;
+  padding: 4px 6px;
+  color: var(--chart-text);
+  background: var(--chart-bg);
+  border: 1px solid var(--chart-border);
+  font-size: 12px;
+}
+
+.liquidation-tape-body {
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.liquidation-tape-body table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.liquidation-tape th,
+.liquidation-tape td {
+  padding: 1px 4px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.liquidation-tape-long {
+  color: var(--chart-down);
+}
+
+.liquidation-tape-short {
+  color: var(--chart-up);
+}
+
+.liquidation-tape-note {
+  color: var(--chart-text-dim);
 }
 
 .chart-workspace > .term-box {
@@ -229,6 +306,56 @@ table {
 .chart-toolbar .tabbtn {
   flex: none;
   padding: 7px 10px;
+}
+
+/* A rail group (TradingView-style): the tool button, a narrow expander for a group of several
+   tools, and the group's flyout menu opening to the right of the rail, over the chart. */
+.chart-tool-group {
+  position: relative;
+  display: flex;
+}
+
+.chart-tool-group > .tabbtn {
+  flex: 1;
+}
+
+.chart-tool-expander {
+  flex: none;
+  padding: 0 3px;
+  font-size: 0.7em;
+  color: var(--color-text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.chart-tool-expander:hover,
+.chart-tool-expander:focus-visible,
+.chart-tool-expander[aria-expanded="true"] {
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+
+.chart-tool-flyout {
+  position: absolute;
+  top: 0;
+  left: calc(100% + 4px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 120px;
+  padding: 4px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-link);
+}
+
+.chart-tool-flyout button {
+  text-align: left;
+  white-space: nowrap;
+}
+
+.chart-tool-flyout button[aria-checked="true"] {
+  color: var(--color-link);
 }
 
 /* Spec §A8.1 top toolbar: three clusters (symbol+timeframe | chart type | indicators+fit+
@@ -329,6 +456,12 @@ table {
   align-items: center;
 }
 
+/* Story 33.5: the pinned Derivatives group's heading. */
+.indicator-dialog-group {
+  color: var(--color-text-strong);
+  margin-right: 8px;
+}
+
 .indicator-dialog-results {
   list-style: none;
   margin: 0;
@@ -346,6 +479,70 @@ table {
 .indicator-dialog-tag,
 .indicator-dialog-empty {
   color: var(--color-text-dim);
+}
+
+/* The Volume overlays dialog: the add list, then each overlay on the chart with its settings.
+   Wider than a settings dialog (an entry carries the whole profile settings row), and its body
+   scrolls inside the dialog's 70vh cap once several overlays are on. */
+.volume-overlays-dialog {
+  width: min(560px, 92vw);
+}
+
+.volume-overlays-dialog .indicator-settings-body {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* DW-151/153 under the chart: which volume overlay is drawn from incomplete data. */
+.chart-overlay-notices {
+  margin: 4px 0;
+  padding: 0;
+  list-style: none;
+  color: var(--color-text-dim);
+}
+
+.volume-overlays-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.volume-overlays-dialog h2,
+.volume-overlays-dialog h3 {
+  margin: 0;
+  font-size: 1em;
+}
+
+/* The head (title + close) stays in view while the body scrolls. */
+.volume-overlays-dialog .indicator-dialog-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--color-bg);
+}
+
+.volume-overlay {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+}
+
+.volume-overlay-head,
+.volume-overlay-ranges li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.volume-overlay-ranges {
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
 
 /* Spec §A4.1 chart legend: top-left of each pane, values in their line colors. Click-through
@@ -493,4 +690,160 @@ table {
   margin: 0;
   border: 0;
   border-top: 1px solid var(--color-border);
+}
+
+/* Story 33.12: the chart page is the per-coin stage beside the optional watchlist rail. Neither
+   clips nor fixes a height (chart-layout.test.mjs): the page scrolls, as with the panes. */
+.chart-page {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.chart-stage {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The fullscreen element: the top bar, the replay controls, the tool rail, the chart with every pane
+   and the Liquidation tape. LightweightChart scales the panes so the chart fits this element's height
+   (refitting on a viewport resize). Known limit: a message under the chart (a load error, an overlay
+   notice) is not in that budget, so it sits below the screen edge and the stage scrolls to it.
+   Upgrade path: subtract the content under the chart from the budget and refit when it changes. */
+.chart-stage:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  padding: 8px;
+  overflow: auto;
+  background: var(--color-bg);
+}
+
+.chart-stage::backdrop {
+  background: var(--color-bg);
+}
+
+/* The symbol in the top bar is the symbol search's button: it reads as the heading it replaced. */
+.chart-symbol {
+  padding: 0;
+  font: inherit;
+  color: var(--color-text-strong);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.chart-symbol:hover,
+.chart-symbol:focus-visible {
+  color: var(--color-link);
+  text-decoration: underline;
+}
+
+/* The timeframe typed so far, until Enter, Esc or 3 s idle. */
+.chart-timeframe-buffer {
+  padding: 0 6px;
+  color: var(--color-active);
+  border: 1px solid var(--color-active);
+}
+
+.symbol-search {
+  width: min(560px, 92vw);
+}
+
+.symbol-search-results {
+  max-height: 50vh;
+}
+
+.symbol-search-active {
+  color: var(--color-active);
+  background: var(--color-active-bg);
+}
+
+.shortcut-sheet-table {
+  border-collapse: collapse;
+}
+
+.shortcut-sheet-table th,
+.shortcut-sheet-table td {
+  padding: 2px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.shortcut-sheet-table kbd {
+  color: var(--color-text-strong);
+  white-space: nowrap;
+}
+
+/* The watchlist rail: a narrow column right of the stage, in the terminal palette. */
+.watchlist-rail {
+  flex: none;
+  width: 260px;
+  padding: 6px;
+  border: 1px solid var(--color-border);
+  font-size: 12px;
+}
+
+.watchlist-rail-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.watchlist-rail-note {
+  color: var(--color-text-dim);
+}
+
+.watchlist-rail-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.watchlist-rail-list li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.watchlist-rail-list a {
+  display: grid;
+  flex: 1;
+  grid-template-columns: 1fr auto;
+  gap: 0 8px;
+  padding: 2px 4px;
+  color: var(--color-text);
+  text-decoration: none;
+}
+
+.watchlist-rail-list a:hover {
+  background: var(--color-active-bg);
+}
+
+.watchlist-rail-current a {
+  color: var(--color-text-strong);
+}
+
+.watchlist-rail-symbol {
+  font-weight: bold;
+}
+
+.watchlist-rail-venue {
+  color: var(--color-text-dim);
+  text-align: right;
+}
+
+.watchlist-rail-price {
+  font-variant-numeric: tabular-nums;
+}
+
+.watchlist-rail-up {
+  color: var(--color-up);
+  text-align: right;
+}
+
+.watchlist-rail-down {
+  color: var(--color-down);
+  text-align: right;
 }

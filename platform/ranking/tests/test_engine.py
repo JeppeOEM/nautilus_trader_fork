@@ -20,23 +20,36 @@ loop and the publish lock, driven through fake ports and a real board, SQLite st
 import asyncio
 import json
 from collections.abc import Iterator
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from kernel.derivs_wire import DerivsTick
+from kernel.liquidation import LiquidatedSide
+from kernel.liquidation import Liquidation
+from kernel.open_interest import OpenInterest
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.tests.snapshot_factory import make_snapshot
 from observability import error_ledger
 
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from ranking.application.engine import DERIVS_BACKFILL_SITE
+from ranking.application.engine import DERIVS_SITE
+from ranking.application.engine import LIQUIDATION_SITE
 from ranking.application.engine import MARKETS_SITE
 from ranking.application.engine import RankingConfig
 from ranking.application.engine import RankingEngine
 from ranking.application.engine import markets_message
+from ranking.application.engine import short_repr
 from ranking.application.ports import CONTROL_CHANNEL
+from ranking.application.ports import DERIVS_CHANNEL
+from ranking.application.ports import LIQUIDATIONS_CHANNEL
 from ranking.application.ports import SNAPSHOTS_CHANNEL
+from ranking.application.ports import PriceHistory
 from ranking.domain.board import STALE_NS
 from ranking.domain.board import RankingBoard
+from ranking.domain.price_series import PricePoint
 from ranking.infrastructure.catalog_prices import CatalogPriceHistory
 from ranking.infrastructure.metrics_store import SqliteMetricsStore
 from ranking.tests.support import NOW_NS
@@ -97,11 +110,38 @@ class FakePrices:
         self.calls: list[str] = []
         self._fail = fail
 
-    def series(self, instrument_id: str, start_ns: int) -> list[tuple[int, float]]:
+    def series(self, instrument_id: str, start_ns: int) -> list[PricePoint]:
         self.calls.append(instrument_id)
         if self._fail:
             raise RuntimeError("simulated corrupt catalog partition")
         return []
+
+
+class FakeDerivs:
+    """A `DerivsHistory` returning the rows given, recording each read; `fail` makes reads raise."""
+
+    def __init__(
+        self,
+        open_interest: list[OpenInterest] | None = None,
+        liquidations: list[Liquidation] | None = None,
+        fail: bool = False,
+    ) -> None:
+        self.calls: list[tuple[str, str, int, int]] = []
+        self._open_interest = open_interest or []
+        self._liquidations = liquidations or []
+        self._fail = fail
+
+    def open_interest(self, instrument_id: str, start_ns: int, end_ns: int) -> list[OpenInterest]:
+        self.calls.append(("oi", instrument_id, start_ns, end_ns))
+        if self._fail:
+            raise RuntimeError("simulated corrupt open-interest partition")
+        return self._open_interest
+
+    def liquidations(self, instrument_id: str, start_ns: int, end_ns: int) -> list[Liquidation]:
+        self.calls.append(("liq", instrument_id, start_ns, end_ns))
+        if self._fail:
+            raise RuntimeError("simulated corrupt liquidation partition")
+        return self._liquidations
 
 
 _OPENED: list[SqliteMetricsStore] = []
@@ -119,7 +159,8 @@ def _engine(
     b: RankingBoard | None = None,
     *,
     sources: list[FakeSource] | None = None,
-    prices: object | None = None,
+    prices: PriceHistory | None = None,
+    derivs: FakeDerivs | None = None,
     clock: FakeClock | None = None,
     config: RankingConfig | None = None,
     markets: FakeMarkets | None = None,
@@ -131,7 +172,8 @@ def _engine(
     engine = RankingEngine(
         b or board(clock),
         volume_sources=sources or [],
-        prices=prices or FakePrices(),  # type: ignore[arg-type]
+        prices=prices or FakePrices(),
+        derivs=derivs or FakeDerivs(),
         history=history,
         live=live,
         markets=markets or FakeMarkets(),
@@ -519,7 +561,7 @@ class _SlowPrices(FakePrices):
         self._clock = clock
         self._seconds = seconds
 
-    def series(self, instrument_id: str, start_ns: int) -> list[tuple[int, float]]:
+    def series(self, instrument_id: str, start_ns: int) -> list[PricePoint]:
         self._clock.ns += self._seconds * SEC_NS
         return super().series(instrument_id, start_ns)
 
@@ -572,3 +614,145 @@ def test_a_failed_backfill_is_ledgered_and_never_retried() -> None:
 
     assert prices.calls == [BTC]
     assert error_ledger.counts() == {"ranking_engine.price_backfill": 1}
+
+
+# --- derivs:raw / liquidations:raw (Story 33.4) ------------------------------------------------
+
+LINEAR = "BTCUSDT-LINEAR.BYBIT"
+SPOT = "BTCUSDT-SPOT.BYBIT"
+HL = "SOL-USD-PERP.HYPERLIQUID"
+
+
+def _funding_row(iid: str = LINEAR) -> dict:
+    tick = DerivsTick(iid, "funding", NOW_NS, NOW_NS, Decimal("0.0001"), 28_800, NOW_NS + 1)
+    return tick.to_wire()
+
+
+def _liquidation(event: str = "e1", ts: int = NOW_NS - SEC_NS) -> Liquidation:
+    return Liquidation(
+        instrument_id=InstrumentId.from_str(LINEAR),
+        side=LiquidatedSide.LONG,
+        size_units=2000,
+        price_units=1000,
+        price_precision=1,
+        size_precision=3,
+        venue_event_id=event,
+        ts_event=ts,
+        ts_init=ts,
+    )
+
+
+def _slow_row(b: RankingBoard, iid: str) -> dict:
+    (row,) = [r for r in b.slow_rows(NOW_NS, {}, {}) if r["instrument_id"] == iid]
+    return row
+
+
+def test_a_derivs_batch_reaches_the_board_and_a_bad_row_is_ledgered_alone() -> None:
+    b = board()
+    mark_fresh(b, LINEAR, NOW_NS)
+    engine, live, _ = _engine(b)
+    bad = {**_funding_row(), "value": 0.0001}  # a JSON number: not exact text
+
+    asyncio.run(engine.handle(DERIVS_CHANNEL, json.dumps([bad, _funding_row()])))
+
+    assert error_ledger.counts() == {DERIVS_SITE: 1}
+    assert _slow_row(b, LINEAR)["funding_rate"] == 0.0001
+    assert live.messages == []  # a derivs row waits for the slow row: no publish decision
+
+
+def test_a_derivs_row_the_board_refuses_is_ledgered() -> None:
+    b = board()
+    engine = _engine(b)[0]
+    older = DerivsTick(LINEAR, "mark", NOW_NS - SEC_NS, NOW_NS, Decimal(1)).to_wire()
+    newer = DerivsTick(LINEAR, "mark", NOW_NS, NOW_NS, Decimal(2)).to_wire()
+
+    asyncio.run(engine.handle(DERIVS_CHANNEL, json.dumps([newer, older])))
+
+    assert error_ledger.counts() == {DERIVS_SITE: 1}
+
+
+def test_a_liquidation_batch_reaches_the_board_and_a_bad_row_is_ledgered_alone() -> None:
+    b = board()
+    mark_fresh(b, LINEAR, NOW_NS)
+    engine = _engine(b)[0]
+    good = Liquidation.to_dict(_liquidation())
+
+    asyncio.run(engine.handle(LIQUIDATIONS_CHANNEL, json.dumps([{"side": "long"}, good, good])))
+
+    assert error_ledger.counts() == {LIQUIDATION_SITE: 1}
+    assert _slow_row(b, LINEAR)["liq_long_1h"] == 2.0  # the redelivered row counted once
+
+
+def test_a_message_of_many_bad_entries_is_ledgered_capped_with_one_summary_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Ten undecodable entries (each a 1 000-character value): the first three itemised, their repr
+    cut to 200 characters, then one line naming all ten: four ledger lines, not ten.
+    """
+    engine = _engine()[0]
+    bad = [{**_funding_row(), "value": 0.0001, "pad": "x" * 1000} for _ in range(10)]
+    details: list[str] = []
+    record = error_ledger.record
+
+    def recording(site: str, detail: str, exc: BaseException | None = None) -> None:
+        details.append(detail)
+        record(site, detail, exc)
+
+    monkeypatch.setattr(error_ledger, "record", recording)
+
+    asyncio.run(engine.handle(DERIVS_CHANNEL, json.dumps(bad)))
+
+    assert error_ledger.counts() == {DERIVS_SITE: 4}
+    assert all(detail.endswith(f"... ({len(repr(bad[0]))} chars)") for detail in details[:3])
+    assert all(len(detail) < 300 for detail in details)
+    summary = error_ledger.last_details()[DERIVS_SITE]
+    assert summary.startswith("10 derivs:raw entries of one message were malformed or refused")
+
+
+def test_a_ledgered_entry_repr_is_cut_short() -> None:
+    entry = {"pad": "x" * 1000}
+    text = short_repr(entry)
+    assert text == f"{repr(entry)[:200]}... ({len(repr(entry))} chars)"
+
+
+def test_a_non_list_derivs_payload_is_one_failed_message() -> None:
+    engine = _engine()[0]
+
+    asyncio.run(engine.handle(DERIVS_CHANNEL, json.dumps({"kind": "mark"})))
+
+    assert error_ledger.counts() == {"ranking_engine.message": 1}
+
+
+def test_the_first_backfill_reads_25h_of_oi_and_1h_of_liquidations_once() -> None:
+    b = board()
+    for iid in (LINEAR, SPOT, HL):
+        mark_fresh(b, iid, NOW_NS)
+    oi = OpenInterest(InstrumentId.from_str(LINEAR), Decimal(1200), NOW_NS - SEC_NS, NOW_NS)
+    derivs = FakeDerivs(open_interest=[oi], liquidations=[_liquidation()])
+    engine = _engine(b, derivs=derivs)[0]
+
+    asyncio.run(engine.slow_loop_once())
+    asyncio.run(engine.slow_loop_once())
+
+    hour = 3_600 * SEC_NS
+    assert sorted(derivs.calls) == [
+        ("liq", LINEAR, NOW_NS - hour, NOW_NS),
+        ("oi", LINEAR, NOW_NS - 25 * hour, NOW_NS),
+        ("oi", HL, NOW_NS - 25 * hour, NOW_NS),
+    ]  # spot: neither; Hyperliquid: no liquidation feed; never a second read
+    row = _slow_row(b, LINEAR)
+    assert (row["open_interest"], row["liq_long_1h"]) == (1200.0, 2.0)
+
+
+def test_a_failed_derivs_backfill_is_ledgered_and_never_retried() -> None:
+    b = board()
+    mark_fresh(b, LINEAR, NOW_NS)
+    derivs = FakeDerivs(fail=True)
+    engine = _engine(b, derivs=derivs)[0]
+
+    asyncio.run(engine.slow_loop_once())
+    asyncio.run(engine.slow_loop_once())
+
+    assert len(derivs.calls) == 2  # one open-interest and one liquidation read, ever
+    assert error_ledger.counts() == {DERIVS_BACKFILL_SITE: 2}

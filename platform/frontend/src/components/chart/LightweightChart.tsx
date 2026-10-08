@@ -1,13 +1,21 @@
 import {
+  AreaSeries,
+  BarSeries,
+  BaselineSeries,
   CandlestickSeries,
   HistogramSeries,
   LineSeries,
   createChart,
+  createSeriesMarkers,
+  type CandlestickData,
   type IChartApi,
   type IPaneApi,
   type IPriceLine,
   LineStyle,
+  LineType,
+  PriceScaleMode,
   type ISeriesApi,
+  type ISeriesMarkersPluginApi,
   type LineWidth,
   type LogicalRange,
   type LineData,
@@ -15,16 +23,34 @@ import {
   type Time,
   type WhitespaceData,
 } from "lightweight-charts";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import type { ChartDatum, VolumeDatum } from "../../hooks/useCandles";
 import type { LiveBar } from "../../hooks/useLiveCandle";
-import type { IndicatorDatum } from "../../hooks/useIndicatorSeries";
 import type { SnapshotLinesData } from "../../hooks/useSnapshotSeries";
 import { type GapRun, MAX_GAP_ROWS_PER_GAP, findGapRuns, gapRunsBySlot } from "../../lib/gaps";
-import { type GapLookup, type LegendAction, type LegendSeries, renderLegends } from "./legend";
+import {
+  type GapLookup,
+  type IndicatorDatum,
+  type LegendAction,
+  type LegendSeries,
+  renderLegends,
+} from "./legend";
 import { DEFAULT_LINE_STYLE, DEFAULT_LINE_WIDTH, type LineStyleName } from "../../lib/indicatorStyle";
-import { chartVar, fibLevelColor } from "./chartTheme";
+import { chartVar, chartVarAlpha, fibLevelColor, newDrawingContext } from "./chartTheme";
+import {
+  type ChartType,
+  type MainRow,
+  type MainSeriesKind,
+  PRICE_SCALE_LABELS,
+  PRICE_SCALE_MODES,
+  type PriceScaleModeName,
+  type UpDownColors,
+  firstVisibleClose,
+  liveSeriesRow,
+  seriesKindOf,
+  seriesRows,
+} from "../../lib/chartTypes";
 import { assignPaneColor, cssVar } from "./paneColors";
 import {
   type MeasurementIndex,
@@ -36,30 +62,87 @@ import {
 import { attachRangeDrag, localPoint, plotPoint, timeAtX } from "./rangeDrag";
 import { VolumeProfilePrimitive, type VolumeProfileRenderSpec } from "./primitives/VolumeProfilePrimitive";
 import { VerticalMarkerPrimitive } from "./primitives/VerticalMarkerPrimitive";
+import { SessionBreaksPrimitive } from "./primitives/SessionBreaksPrimitive";
+import { CountdownPrimitive } from "./primitives/CountdownPrimitive";
+import {
+  type TimeZoneSetting,
+  barCountdown,
+  formatChartTime,
+  formatCountdown,
+  sessionBreakTimes,
+  tickMarkFormatter,
+} from "../../lib/time";
 import { GapPrimitive } from "./primitives/GapPrimitive";
-import { TrendlinePrimitive, type TrendlineAnchor } from "./primitives/TrendlinePrimitive";
+import { type LineOptions, TrendlinePrimitive, type TrendlineAnchor } from "./primitives/TrendlinePrimitive";
 import { FibPrimitive } from "./primitives/FibPrimitive";
+import { VlinePrimitive } from "./primitives/VlinePrimitive";
+import { RectPrimitive } from "./primitives/RectPrimitive";
+import { ChannelPrimitive } from "./primitives/ChannelPrimitive";
+import { TextPrimitive } from "./primitives/TextPrimitive";
+import { RangePrimitive } from "./primitives/RangePrimitive";
 import { PositionPrimitive } from "./primitives/PositionPrimitive";
 import { AnchoredVpPrimitive } from "./primitives/AnchoredVpPrimitive";
 import { AnchoredVwapPrimitive } from "./primitives/AnchoredVwapPrimitive";
 import { FootprintPrimitive, type FootprintRenderSpec } from "./primitives/FootprintPrimitive";
 import { footprintLegendText } from "../../lib/footprint";
+import type { MarkerSpec } from "./LiquidationMarkers";
+import type { AlertCondition } from "../../lib/alertConditions";
 import { BarGrid, type DrawingPrimitive } from "./primitives/drawingPrimitive";
 import type { VwapPoint } from "../../lib/anchoredVwap";
 import {
   type Anchor,
   type AnchoredVpDrawing,
   type AnchoredVwapDrawing,
+  type ChannelDrawing,
+  DEFAULT_DRAWING_LINE_WIDTH,
   type DragPoint,
   type FibDrawing,
+  type FibExtensionDrawing,
   type InstrumentPrecision,
   type PositionDrawing,
+  type RangeDrawing,
+  type RayDrawing,
+  type RectDrawing,
+  type TextDrawing,
+  type TrendlineDrawing,
+  type VlineDrawing,
   defaultFibLevels,
+  extendOf,
+  placementOf,
+  previewDrawing,
 } from "../../lib/drawings";
+import { type MagnetBar, type MagnetMode, constrainAngle, constrainsAngle, magnetPrice } from "../../lib/drawingKit";
+import type { ChartTool } from "../../lib/chartTools";
 
 export type PaneSeriesKind = "Line" | "Histogram";
 
 export type ChartMode = "candles" | "lines";
+
+/** Story 33.9: the right price scale of the price pane, as the page wants it on screen (the mode is
+ * the effective one: Percent while a compare is drawn). */
+export interface PriceScaleSettings {
+  mode: PriceScaleModeName;
+  autoScale: boolean;
+  invert: boolean;
+}
+
+/** A change to the price scale the operator made on the chart itself (the scale's menu, a double-click
+ * or a drag of the scale), in the layout's own field names. */
+export interface PriceScalePatch {
+  mode?: PriceScaleModeName;
+  auto_scale?: boolean;
+  invert?: boolean;
+}
+
+/** The library's `PriceScaleMode` of each stored mode name. */
+const SCALE_MODE_OF: Record<PriceScaleModeName, PriceScaleMode> = {
+  normal: PriceScaleMode.Normal,
+  log: PriceScaleMode.Logarithmic,
+  percent: PriceScaleMode.Percentage,
+  indexed: PriceScaleMode.IndexedTo100,
+};
+
+const DEFAULT_PRICE_SCALE_SETTINGS: PriceScaleSettings = { mode: "normal", autoScale: true, invert: false };
 
 // Story 18.10: a one-shot view command from the page's Fit / Latest buttons. `seq` makes a
 // repeated identical click a NEW command (the effect keys on the object).
@@ -97,7 +180,8 @@ export interface IndicatorPaneSpec {
    * and re-added at its former position and height when shown. The spec (and its data) stays in
    * this array either way, so showing refetches nothing. */
   hidden?: boolean;
-  /** False for Volume: its legend row gets the eye and the x but no settings gear. */
+  /** False for a row with no settings: it gets the eye and the x but no gear (Volume has one since
+   * Story 33.6: its colour mode). */
   configurable?: boolean;
   /** False for a series no configured entry owns (stale values between an Apply and its refetch):
    * its legend row is a plain readout, with no buttons that could act on nothing. Default true. */
@@ -108,7 +192,25 @@ export interface IndicatorPaneSpec {
   /** A histogram output's colours for value >= 0 and < 0; absent = the one `color`. */
   upColor?: string;
   downColor?: string;
+  /** Story 33.5: how the legend prints this series' value at a slot (`time`, chart seconds) -- the
+   * exact text its row carries there, through `lib/units.ts` -- instead of the plain readout. */
+  format?: (value: number, time: number | null) => string;
+  /** Story 33.5: a fixed legend readout in place of the value (e.g. "load failed"). */
+  text?: string;
+  /** Story 33.5: a dashed line at 0 in this series' pane (Basis). */
+  zeroLine?: boolean;
+  /** Story 33.11: how a line output is drawn (the catalog's `plot` hint; absent = `line`): `steps` a
+   * stepped line (pivot levels), `points` dots with no line (Parabolic SAR), `swing` a line through
+   * the valued points only, its whitespace dropped so the swings join (ZigZag). */
+  plot?: IndicatorPlot;
+  /** Story 33.11: a series that only hosts a legend row (a `CandlePattern` drawn as markers): an
+   * invisible overlay on its own hidden price scale that never autoscales, so its values never move
+   * the price axis; no line, crosshair marker, last-value label or price line. */
+  markersOnly?: boolean;
 }
+
+/** Story 33.11: the catalog's per-output plot hint. */
+export type IndicatorPlot = "line" | "steps" | "points" | "swing";
 
 // Story 18.1: a tool-drawn horizontal price line (AC #2). `id` is the caller's stable
 // key (ChartPage uses deterministic "hline-N" counter ids), diffed exactly like
@@ -118,17 +220,19 @@ export interface PriceLineSpec {
   price: number;
   color: string;
   title?: string;
+  /** Story 33.10: the horizontal line's stored look (absent = 1 px, solid). */
+  lineWidth?: number;
+  lineStyle?: LineStyleName;
+  /** Story 33.10: no drag (its menu still opens). */
+  locked?: boolean;
 }
 
 // Story 18.2: a tool-drawn custom-primitive drawing. A tagged union so Story 18.3's
 // measurement joins as another `kind`; kept separate from PriceLineSpec because a
 // two-anchor primitive and a native single-value price line are different mechanisms.
-export interface TrendlineSpec {
-  id: string;
-  kind: "trendline";
-  anchors: [Anchor, Anchor];
-  color: string;
-}
+// Story 33.10: the ray, extended line and arrow are trendlines drawn further (`TrendlinePrimitive`'s
+// `LineOptions`), so they share the spec; the colour is resolved by the page.
+export type TrendlineSpec = (TrendlineDrawing | RayDrawing) & { color: string };
 // Story 32.5: the Fibonacci retracement and the Long/Short position are the same kind of drawing
 // (anchors in time + price, a series primitive); their specs are `lib/drawings.ts`'s own types.
 // Story 32.7: the Anchored VP (its anchor marker and handle; the profile itself is a `volumeProfiles`
@@ -140,31 +244,87 @@ export interface AnchoredVpSpec extends AnchoredVpDrawing {
 export interface AnchoredVwapSpec extends AnchoredVwapDrawing {
   points: readonly VwapPoint[];
 }
-export type DrawingSpec = TrendlineSpec | FibDrawing | PositionDrawing | AnchoredVpSpec | AnchoredVwapSpec;
+// Story 33.10: the vertical line, rectangle, channel, text, Fibonacci extension and the two ranges
+// join them as their `lib/drawings.ts` types (absent colour = the drawing token).
+export type DrawingSpec =
+  | TrendlineSpec
+  | FibDrawing
+  | FibExtensionDrawing
+  | PositionDrawing
+  | AnchoredVpSpec
+  | AnchoredVwapSpec
+  | VlineDrawing
+  | RectDrawing
+  | ChannelDrawing
+  | TextDrawing
+  | RangeDrawing;
 type DrawingPrimitiveOf =
   | TrendlinePrimitive
   | FibPrimitive
   | PositionPrimitive
   | AnchoredVpPrimitive
-  | AnchoredVwapPrimitive;
+  | AnchoredVwapPrimitive
+  | VlinePrimitive
+  | RectPrimitive
+  | ChannelPrimitive
+  | TextPrimitive
+  | RangePrimitive;
 
-/** A drawing's primitive, new. */
+/** Story 33.10: a click-placed tool in progress -- the points clicked so far (`placementOf(tool)` in
+ * all), drawn with the pointer as the next one until the last click. */
+export interface Placement {
+  tool: ChartTool;
+  points: Anchor[];
+}
+
+/** Story 33.10: a reported chart click; `shift` when Shift constrained it to 0/45/90 degrees. */
+export type ChartPoint = TrendlineAnchor & { shift?: boolean };
+
+/** A line kind's look and extension, from its spec. */
+function lineOptionsOf(spec: TrendlineSpec): LineOptions {
+  return {
+    extend: extendOf(spec.kind),
+    arrow: spec.kind === "arrow",
+    lineWidth: spec.line_width ?? DEFAULT_DRAWING_LINE_WIDTH,
+    lineStyle: spec.line_style,
+    locked: spec.locked === true,
+  };
+}
+
+/** A drawing's primitive, new. `measure` reads the chart's candle/volume index (the ranges' numbers),
+ * null while the axis is not the candles' (Lines mode). */
 function createDrawingPrimitive(
   spec: DrawingSpec,
   precision: InstrumentPrecision | null,
   grid: BarGrid,
+  measure: () => MeasurementIndex | null,
 ): DrawingPrimitiveOf {
   switch (spec.kind) {
     case "trendline":
-      return new TrendlinePrimitive(spec.anchors, spec.color, grid);
+    case "ray":
+    case "extended":
+    case "arrow":
+      return new TrendlinePrimitive(spec.anchors, spec.color, grid, lineOptionsOf(spec));
     case "fib":
+    case "fib_extension":
       return new FibPrimitive(spec, precision?.price ?? null, grid);
     case "position":
       return new PositionPrimitive(spec, precision, grid);
     case "anchored_vp":
-      return new AnchoredVpPrimitive(spec.time, spec.anchorPrice, grid);
+      return new AnchoredVpPrimitive(spec.time, spec.anchorPrice, grid, spec.locked === true);
     case "anchored_vwap":
       return new AnchoredVwapPrimitive(spec, spec.points);
+    case "vline":
+      return new VlinePrimitive(spec, grid);
+    case "rect":
+      return new RectPrimitive(spec, precision?.price ?? null, grid);
+    case "channel":
+      return new ChannelPrimitive(spec, grid);
+    case "text":
+      return new TextPrimitive(spec, grid);
+    case "price_range":
+    case "date_range":
+      return new RangePrimitive(spec, precision, measure, grid);
   }
 }
 
@@ -172,25 +332,47 @@ function createDrawingPrimitive(
 function updateDrawingPrimitive(primitive: DrawingPrimitiveOf, spec: DrawingSpec, precision: InstrumentPrecision | null): void {
   switch (spec.kind) {
     case "trendline":
-      (primitive as TrendlinePrimitive).update(spec.anchors, spec.color);
+    case "ray":
+    case "extended":
+    case "arrow":
+      (primitive as TrendlinePrimitive).update(spec.anchors, spec.color, lineOptionsOf(spec));
       break;
     case "fib":
+    case "fib_extension":
       (primitive as FibPrimitive).update(spec, precision?.price ?? null);
       break;
     case "position":
       (primitive as PositionPrimitive).update(spec, precision);
       break;
     case "anchored_vp":
-      (primitive as AnchoredVpPrimitive).update(spec.time, spec.anchorPrice);
+      (primitive as AnchoredVpPrimitive).update(spec.time, spec.anchorPrice, spec.locked === true);
       break;
     case "anchored_vwap":
       (primitive as AnchoredVwapPrimitive).update(spec, spec.points);
+      break;
+    case "vline":
+      (primitive as VlinePrimitive).update(spec);
+      break;
+    case "rect":
+      (primitive as RectPrimitive).update(spec, precision?.price ?? null);
+      break;
+    case "channel":
+      (primitive as ChannelPrimitive).update(spec);
+      break;
+    case "text":
+      (primitive as TextPrimitive).update(spec);
+      break;
+    case "price_range":
+    case "date_range":
+      (primitive as RangePrimitive).update(spec, precision);
       break;
   }
 }
 interface DrawingEntry {
   kind: DrawingSpec["kind"];
   primitive: DrawingPrimitiveOf;
+  /** Story 33.10: a locked drawing is hit by its body alone (no handle, so no grab). */
+  locked: boolean;
 }
 
 /** What the pointer grabbed: a drawing and the named handle of it (null: only its body). */
@@ -212,6 +394,8 @@ export interface LegendExtra {
   /** The value shown, or null while there is none (a VWAP with no volume yet). */
   value: number | null;
   format: (value: number) => string;
+  /** Story 33.6: a fixed readout in place of the value (a stored VWAP's replay error). */
+  text?: string;
 }
 
 interface LightweightChartProps {
@@ -277,17 +461,30 @@ interface LightweightChartProps {
   /** Story 18.2: reports a chart click as a `{time, price}` point (same click subscription
    * and grab-suppression as `onPriceClick`; a click with no resolvable time -- past the
    * last bar's coordinate space -- is not reported). Works in both modes. */
-  onPointClick?: (point: TrendlineAnchor) => void;
-  /** Trendline first click, previewed as a line following the cursor until the second. */
-  pendingAnchor?: TrendlineAnchor | null;
+  onPointClick?: (point: ChartPoint) => void;
+  /** Story 33.10: a click-placed tool in progress (replacing 18.2's pending trendline anchor): its
+   * drawing is previewed to the pointer, Shift and the magnet applied, by the primitive that draws
+   * the finished one (`previewDrawing`), until the last click; null/omitted draws none. */
+  placement?: Placement | null;
+  /** Story 33.10: snap every reported point (a click, a handle drag, the Fibonacci drag) to the
+   * nearest O/H/L/C of the real bar under it (`data`, never Heikin Ashi rows; nothing in Lines mode). */
+  magnet?: MagnetMode;
+  /** Story 33.10: a drawing's handle (or a horizontal line) was grabbed: the drag that follows is
+   * one gesture, one undo step. */
+  onDrawingDragStart?: (id: string) => void;
+  /** Story 33.10: the menu's Lock / Unlock and Hide. */
+  onDrawingLock?: (id: string, locked: boolean) => void;
+  onDrawingHide?: (id: string) => void;
   /** True while no tool is armed: a click on a drawn line then opens its edit menu. */
   drawEditable?: boolean;
   /** Edit-menu actions; `id` is a `PriceLineSpec` or `DrawingSpec` id. */
   onDrawingColor?: (id: string, color: string) => void;
   onDrawingDelete?: (id: string) => void;
-  /** Story 32.5: the menu's "Settings..." entry, shown for the kinds that have a modal (Fibonacci,
-   * position). */
+  /** Story 32.5: the menu's "Settings..." entry; Story 33.10: shown for every kind (each has a modal). */
   onDrawingSettings?: (id: string) => void;
+  /** Story 33.8: the menu's "Add alert…" entry, on a horizontal line (a `price_cross` at its price)
+   * or a trendline (a `trendline_cross` naming it); the page opens its alert dialog prefilled. */
+  onDrawingAlert?: (condition: AlertCondition) => void;
   /** Story 32.5: the instrument's price/size decimals (the catalog definition's, from the candles
    * response); `null` until known, and then no drawing prints a label. */
   precision?: InstrumentPrecision | null;
@@ -356,6 +553,9 @@ interface LightweightChartProps {
    * before the live socket's first message, or synchronously reset on instrument/bar-size
    * change) and is a no-op, not a clear of the last-drawn bar. */
   liveBar?: LiveBar | null;
+  /** Story 33.6: the forming bar's Volume colour (the page's `volume_color_by` mapping, the same one
+   * its closed bars are painted with); absent = the volume pane's own colour. */
+  liveVolumeColor?: string;
   /** Story 32.8: the volume footprint of the closed bars, drawn by one `FootprintPrimitive` on the
    * candle series (Candles mode only) with a "Footprint" legend row (gear and x) on the price pane;
    * `null`/omitted removes both. */
@@ -377,7 +577,71 @@ interface LightweightChartProps {
   /** Story 32.6: the visible bar count after a zoom, debounced; silent until `initialVisibleBars`
    * was applied (the library's own first fit must not overwrite the saved zoom) and in Lines mode. */
   onVisibleBars?: (bars: number) => void;
+  /** Story 33.5: liquidation markers on the candle series (Candles mode only), one lightweight-charts
+   * `createSeriesMarkers` plugin set on every change and detached on unmount; hovering one shows its
+   * `tooltip` lines. Empty/omitted draws none. */
+  liquidationMarkers?: readonly MarkerSpec[];
+  /** Story 33.11: candle-pattern markers, merged with `liquidationMarkers` into the one plugin (sorted
+   * by time; the ids are disjoint, `pat:` against `liq:`), hovering one shows its `tooltip` lines. */
+  patternMarkers?: readonly MarkerSpec[];
+  /** Story 33.5: the time scale's bar spacing (px), reported on mount and on every zoom, so the page
+   * can hide markers too narrow to read. */
+  onBarSpacing?: (barSpacing: number) => void;
+  /** Story 33.9: how the main series is drawn in Candles mode (default `candles`). Its rows come from
+   * `lib/chartTypes.ts`'s `seriesRows` and go to the main series' `setData`/`update` alone (AD-F6):
+   * every other consumer here -- gap runs, measure, profiles, footprint, markers, price lines,
+   * drawings, the legend -- keeps reading the real `data`. A type drawn by another series definition
+   * replaces the main series (the same teardown and re-attach as a mode switch) without a view reset.
+   *
+   * Known limit: in Percent / Indexed to 100 the library converts price <-> y through each series' own
+   * first visible value, so while Heikin Ashi is drawn a click, a drag or a drawing converts through
+   * the HA series' first close rather than the real one (Normal and Log are exact: no base value).
+   * Upgrade path: host the drawings on a hidden real-close series in those modes. */
+  chartType?: ChartType;
+  /** Story 33.9: the price pane's right scale; default Normal, auto-scaled, not inverted. */
+  priceScale?: PriceScaleSettings;
+  /** Story 33.9: the operator changed the scale on the chart (its right-click menu, a double-click on
+   * it that restores auto-scale, or a drag of it that turned auto-scale off). The page persists it. */
+  onPriceScale?: (patch: PriceScalePatch) => void;
+  /** Story 33.9: why the scale menu's Normal and Log entries are disabled (a compare forces Percent);
+   * null/omitted enables them. */
+  scaleModesLocked?: string | null;
+  /** Story 33.9: the read-only legend row shown while Heikin Ashi is the chart type. */
+  heikinLabel?: string;
+  /** Story 33.12: the zone every time on the chart prints in (the crosshair label and the time axis,
+   * through `lib/time.ts`). Formatting only: no bar's `time` is ever changed by it. Default UTC. */
+  timeZone?: TimeZoneSetting;
+  /** Story 33.12: a dashed line at the first bar of each UTC day (none at bars of a day or longer). */
+  sessionBreaks?: boolean;
+  /** Story 33.12: the candle bar size in seconds (Candles mode), which the session breaks and the
+   * crosshair's time label read (a bar of a day or longer prints its UTC date). Independent of the
+   * countdown setting. Omitted = no session breaks in Candles mode. */
+  barSeconds?: number | null;
+  /** Story 33.12: the countdown's bar size and whether the countdown to the last bar's close shows
+   * under the last-price label. The page turns it off in Lines mode and during a replay; with no bars
+   * it shows nothing. Omitted = no countdown. */
+  countdown?: CountdownSettings | null;
+  /** Story 33.12: the main series' last-price line and its axis label (Lines mode: the `price` line's).
+   * Default both shown. */
+  lastPrice?: LastPriceSettings;
+  /** Story 33.12: the page's stage is the browser's fullscreen element. Entering scales every pane's
+   * height so the whole chart fits the stage (relative heights kept), leaving restores the stored
+   * heights; both re-apply the container's width at once. View state only: never reported through
+   * `onPaneHeights` as a layout change. */
+  fullscreen?: boolean;
 }
+
+export interface CountdownSettings {
+  barSeconds: number;
+  enabled: boolean;
+}
+
+export interface LastPriceSettings {
+  line: boolean;
+  label: boolean;
+}
+
+const DEFAULT_LAST_PRICE_SETTINGS: LastPriceSettings = { line: true, label: true };
 
 /** DW-145: after a replay `setData`, bring the newest bar back into view when its time changed
  * and it lies outside the visible logical range: the range keeps its width and ends half a bar
@@ -417,6 +681,8 @@ interface PaneEntry {
   gap: GapPrimitive | null;
   /** `upColor|downColor` last painted into the histogram's per-point colours. */
   lastUpDown: string;
+  /** Story 33.5: the spec's dashed zero line, while `zeroLine` is set. */
+  zero: IPriceLine | null;
 }
 
 // Story 32.3: the library's `LineStyle` for each persisted style name (Solid 0, Dotted 1, Dashed 2).
@@ -441,11 +707,41 @@ function lineOptions(spec: IndicatorPaneSpec): { lineWidth?: LineWidth; lineStyl
   return { lineWidth: width as LineWidth, lineStyle: style };
 }
 
+/** What the series is drawn with beyond colour, width and style, fixed at creation: the plot hint, or
+ * the markers-only host's invisible overlay on its own price scale (`markersScaleId`). */
+function shapeOptions(spec: IndicatorPaneSpec): Record<string, unknown> {
+  if (spec.markersOnly) {
+    return {
+      lineVisible: false,
+      pointMarkersVisible: false,
+      crosshairMarkerVisible: false,
+      lastValueVisible: false,
+      priceLineVisible: false,
+      priceScaleId: markersScaleId(spec),
+      autoscaleInfoProvider: () => null,
+    };
+  }
+  if (spec.kind !== "Line") return {};
+  if (spec.plot === "steps") return { lineType: LineType.WithSteps };
+  if (spec.plot === "points") return { lineVisible: false, pointMarkersVisible: true };
+  return {};
+}
+
+/** The markers-only host's own overlay price scale: never the right scale the candles use. */
+const markersScaleId = (spec: IndicatorPaneSpec): string => `markers:${spec.id}`;
+
+/** What, once a series exists, can only change by re-creating it: where it lives and its shape. */
+const structureKey = (spec: IndicatorPaneSpec): string =>
+  [spec.kind, spec.placement === "overlay" ? "overlay" : "pane", spec.group ?? spec.id, spec.markersOnly ? "markers" : "", spec.plot ?? ""].join("|");
+
 const upDownKey = (spec: IndicatorPaneSpec): string =>
   spec.kind === "Histogram" ? `${spec.upColor ?? ""}|${spec.downColor ?? ""}` : "";
 
 /** A histogram with up/down colours paints each bar by its sign; the data in state is untouched. */
 function paintedData(spec: IndicatorPaneSpec): IndicatorDatum[] {
+  // A swing output's whitespace is no gap to draw: one line joins its valued points (ZigZag). A
+  // non-finite value is a gap like elsewhere, never a joined point.
+  if (spec.plot === "swing") return spec.data.filter((d) => "value" in d && Number.isFinite(d.value));
   if (spec.kind !== "Histogram" || (!spec.upColor && !spec.downColor)) return spec.data;
   return spec.data.map((d) => {
     // A null / NaN value is a gap, not a positive bar: no colour (never "up").
@@ -462,6 +758,63 @@ function setSeriesData(series: AnySeriesApi, data: IndicatorDatum[]): void {
 }
 
 type MainLineSeriesApi = ISeriesApi<"Line", Time>;
+/** The main series of Candles mode, whichever definition its chart type draws with (Story 33.9). */
+export type MainSeriesApi = ISeriesApi<MainSeriesKind, Time>;
+
+/** Adds the main series of `kind` on the price pane, every colour from the chart tokens (Story 32.4). */
+function addMainSeries(chart: IChartApi, kind: MainSeriesKind): MainSeriesApi {
+  const up = chartVar("--chart-up");
+  const down = chartVar("--chart-down");
+  switch (kind) {
+    case "Candlestick": {
+      const dim = chartVar("--chart-text-dim");
+      return chart.addSeries(CandlestickSeries, {
+        upColor: up,
+        downColor: down,
+        borderUpColor: up,
+        borderDownColor: down,
+        wickUpColor: up,
+        wickDownColor: down,
+        // The base borderColor/wickColor fields (as opposed to the Up/Down variants above) are
+        // vestigial fallbacks whose library defaults are otherwise never overridden -- set explicitly
+        // so nothing non-token-derived can ever render.
+        borderColor: dim,
+        wickColor: dim,
+      });
+    }
+    case "Bar":
+      return chart.addSeries(BarSeries, { upColor: up, downColor: down });
+    case "Line":
+      return chart.addSeries(LineSeries, { color: chartVar("--chart-line") });
+    case "Area":
+      return chart.addSeries(AreaSeries, {
+        lineColor: chartVar("--chart-line"),
+        topColor: chartVarAlpha("--chart-line", 0.28),
+        bottomColor: chartVarAlpha("--chart-line", 0.02),
+      });
+    case "Baseline":
+      return chart.addSeries(BaselineSeries, {
+        topLineColor: up,
+        topFillColor1: chartVarAlpha("--chart-up", 0.28),
+        topFillColor2: chartVarAlpha("--chart-up", 0.05),
+        bottomLineColor: down,
+        bottomFillColor1: chartVarAlpha("--chart-down", 0.05),
+        bottomFillColor2: chartVarAlpha("--chart-down", 0.28),
+      });
+  }
+}
+
+/** Whether a client point lies on the price pane's right scale strip. In container x the strip starts
+ * after a visible left price scale and the plot (`left.width() + timeScale.width()`), never at the plot
+ * width alone. */
+function onRightScale(container: HTMLElement, chart: IChartApi, clientX: number, clientY: number): boolean {
+  const height = chart.panes()[0]?.getHeight() ?? 0;
+  const box = container.getBoundingClientRect();
+  const x = clientX - box.left;
+  const y = clientY - box.top;
+  const start = chart.priceScale("left").width() + chart.timeScale().width();
+  return height > 0 && y >= 0 && y < height && x >= start && x < start + chart.priceScale("right").width();
+}
 
 // Story 32.2: pane heights in px. The chart's total height is the price pane plus one entry per
 // extra pane, so adding a pane grows the page (the operator scrolls) instead of squeezing the
@@ -542,6 +895,102 @@ function layoutPaneHeights(
   return axisPx > 0;
 }
 
+/** A pane group's default height: the price pane, the Volume pane, or any other pane. */
+function defaultPanePx(group: string): number {
+  if (group === "price") return PRICE_PANE_PX;
+  return group === VOLUME_PANE_ID ? VOLUME_PANE_PX : INDICATOR_PANE_PX;
+}
+
+/** A group -> px map in `snapshotPaneHeights`' shape, so `layoutPaneHeights` pins exactly those
+ * heights (a pane's own height outranks every other source there). */
+function snapshotOf(registry: Map<string, PaneEntry>, heights: Record<string, number>): ReturnType<typeof snapshotPaneHeights> {
+  const panes = new Map<IPaneApi<Time>, number>();
+  for (const entry of registry.values()) {
+    if (entry.pane && heights[entry.group] !== undefined) panes.set(entry.pane, heights[entry.group]);
+  }
+  return { price: heights.price ?? null, panes };
+}
+
+/** Story 33.12: the fullscreen fit -- the stored (unscaled) height of every pane group and the factor
+ * the shown heights are scaled by. View state only, never a layout value. */
+interface FullscreenFit {
+  stored: Record<string, number>;
+  scale: number;
+}
+
+/** `stored` scaled by one factor so the panes fill `panesPx`: relative heights kept, each floored, at
+ * least 1 px. The 1 px floor can lift a tiny budget's sum over it, so the excess is taken back off the
+ * tallest panes: the sum never exceeds `panesPx` while it holds a pixel per pane. Null when nothing can
+ * be laid out. */
+function fitPaneHeights(stored: Record<string, number>, panesPx: number): { heights: Record<string, number>; scale: number } | null {
+  const total = Object.values(stored).reduce((sum, px) => sum + px, 0);
+  if (total <= 0 || panesPx <= 0) return null;
+  const scale = panesPx / total;
+  const heights = Object.fromEntries(Object.entries(stored).map(([group, px]) => [group, Math.max(1, Math.floor(px * scale))]));
+  let excess = Object.values(heights).reduce((sum, px) => sum + px, 0) - panesPx;
+  while (excess > 0) {
+    const [tallest, px] = Object.entries(heights).reduce((a, b) => (b[1] > a[1] ? b : a));
+    if (px <= 1) break; // every pane at 1 px: more panes than pixels, nothing left to take
+    const take = Math.min(excess, px - 1);
+    heights[tallest] = px - take;
+    excess -= take;
+  }
+  return { heights, scale };
+}
+
+/** The px the chart may take inside the fullscreen element: from the container's top to the element's
+ * bottom, less its bottom padding and the chart box's own chrome under the chart (the top bar, the
+ * replay controls and the legend rows above it are on screen already). Null when the container is
+ * not inside the fullscreen element. */
+function fullscreenBudget(container: HTMLElement): number | null {
+  const host = document.fullscreenElement;
+  if (!(host instanceof HTMLElement) || !host.contains(container)) return null;
+  const box = container.getBoundingClientRect();
+  const top = box.top - host.getBoundingClientRect().top + host.scrollTop;
+  const parentBottom = container.parentElement?.getBoundingClientRect().bottom ?? box.bottom;
+  const padding = parseFloat(getComputedStyle(host).paddingBottom) || 0;
+  return host.clientHeight - padding - top - Math.max(0, parentBottom - box.bottom);
+}
+
+/**
+ * Story 33.12: scales every laid-out pane so the whole chart (panes, separators, time axis) fits the
+ * fullscreen element. A pane first seen in fullscreen (added there, or the chart mounted there by a
+ * timeframe change) is stored at its layout or default height, so the fit stays proportional to
+ * what the page shows outside fullscreen. Idempotent: the heights come from `fit.stored`, never from
+ * the measured (already scaled) ones, so a resize-observer round trip settles.
+ */
+function refitFullscreen(chart: IChartApi, container: HTMLElement, registry: Map<string, PaneEntry>, fit: FullscreenFit, known: Map<string, number>): void {
+  const budget = fullscreenBudget(container);
+  if (budget === null) return;
+  const stored: Record<string, number> = {};
+  for (const group of Object.keys(currentPaneHeights(chart, registry))) {
+    fit.stored[group] ??= known.get(group) ?? defaultPanePx(group);
+    stored[group] = fit.stored[group];
+  }
+  const separators = Math.max(0, Object.keys(stored).length - 1);
+  const fitted = fitPaneHeights(stored, budget - separators - chart.timeScale().height());
+  if (fitted === null) return;
+  fit.scale = fitted.scale;
+  layoutPaneHeights(chart, registry, snapshotOf(registry, fitted.heights), true, new Map(), known);
+}
+
+/** Adds or removes a series' dashed zero line to match its spec (Story 33.5's Basis pane). */
+function syncZeroLine(entry: PaneEntry): void {
+  const wanted = entry.spec.zeroLine === true;
+  if (wanted && !entry.zero) {
+    entry.zero = entry.series.createPriceLine({
+      price: 0,
+      color: chartVar("--chart-text-dim"),
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: false,
+    });
+  } else if (!wanted && entry.zero) {
+    entry.series.removePriceLine(entry.zero);
+    entry.zero = null;
+  }
+}
+
 // Story 32.1: the dedicated gap colour -- a chart-only token no other code reads.
 function gapColor(): string {
   return chartVar("--chart-gap");
@@ -561,9 +1010,16 @@ function priceGapRuns(
   return findGapRuns(linesData?.bid ?? [], (d) => "value" in d);
 }
 
-// Story 18.1: one fixed width for every tool-drawn price line -- no per-line width in
-// PriceLineSpec until a drawing tool actually needs one (YAGNI).
-const PRICE_LINE_WIDTH = 1;
+// Story 18.1: a tool-drawn price line is 1 px solid; Story 33.10: unless the horizontal line stores
+// its own width and style (a hand-edited width is clamped to the library's 1..4).
+function priceLineWidth(spec: PriceLineSpec): LineWidth {
+  const width = spec.lineWidth ?? DEFAULT_DRAWING_LINE_WIDTH;
+  return (Number.isInteger(width) ? Math.min(4, Math.max(1, width)) : DEFAULT_DRAWING_LINE_WIDTH) as LineWidth;
+}
+
+function priceLineStyle(spec: PriceLineSpec): LineStyle {
+  return (spec.lineStyle && LINE_STYLE_OF[spec.lineStyle]) ?? LineStyle.Solid;
+}
 
 // Drag grab tolerance in pixels, close enough to the library's own price-line hit
 // radius that a hover the library reports as "custom-price-line" is also the line this
@@ -582,7 +1038,7 @@ const PRICE_LINE_GRAB_TOLERANCE_PX = 5;
  */
 function findDrawingHit(
   point: { x: number; y: number },
-  series: ISeriesApi<"Candlestick"> | null,
+  series: MainSeriesApi | null,
   drawings: Map<string, DrawingEntry>,
   specs: PriceLineSpec[],
   options: { hlineReachable: boolean; primitives: boolean; bodies: boolean },
@@ -592,7 +1048,8 @@ function findDrawingHit(
   for (const [id, entry] of options.primitives ? drawings : []) {
     const hit = (entry.primitive as DrawingPrimitive).hit(point.x, point.y);
     if (!hit) continue;
-    if (hit.handle !== null) {
+    // Story 33.10: a locked drawing's handle counts as its body: no grab starts, its menu still opens.
+    if (hit.handle !== null && !entry.locked) {
       if (handleHit === null || hit.distance < handleHit.distance) handleHit = { id, handle: hit.handle, distance: hit.distance };
     } else if (bodyHit === null || hit.distance < bodyHit.distance) {
       bodyHit = { id, handle: null, distance: hit.distance };
@@ -602,7 +1059,10 @@ function findDrawingHit(
     const y = series?.priceToCoordinate(spec.price);
     if (y === null || y === undefined) continue;
     const distance = Math.abs(point.y - y);
-    if (distance <= PRICE_LINE_GRAB_TOLERANCE_PX && (handleHit === null || distance < handleHit.distance)) {
+    if (distance > PRICE_LINE_GRAB_TOLERANCE_PX) continue;
+    if (spec.locked) {
+      if (bodyHit === null || distance < bodyHit.distance) bodyHit = { id: spec.id, handle: null, distance };
+    } else if (handleHit === null || distance < handleHit.distance) {
       handleHit = { id: spec.id, handle: "price", distance };
     }
   }
@@ -611,13 +1071,46 @@ function findDrawingHit(
 }
 
 /** Whether the library's crosshair param says the pointer is over one of the main series' price lines. */
-function overPriceLine(param: MouseEventParams, series: ISeriesApi<"Candlestick"> | null): boolean {
+function overPriceLine(param: MouseEventParams, series: MainSeriesApi | null): boolean {
   const info = param.hoveredInfo;
   return series !== null && info?.objectKind === "custom-price-line" && info.series === series;
 }
 
 // The measurement index before the first history arrives; the effect replaces it.
 const EMPTY_MEASUREMENT_INDEX: MeasurementIndex = buildMeasurementIndex([], []);
+const NO_MARKERS: readonly MarkerSpec[] = [];
+const NO_TIMES: readonly number[] = [];
+
+interface LastBar {
+  time: number;
+  open: number;
+  close: number;
+}
+
+/**
+ * Story 33.12: the newest bar as the main series draws it -- the forming one when it is newer than
+ * history -- for the last-price line's colour and the countdown's place, so both sit on the drawn
+ * last-price label. Under Heikin Ashi that is the HA row, not the real bar; a close-only type (Line,
+ * Area, Baseline) draws the real close, so its direction is the real bar's. Indicators and every
+ * other reader keep the real OHLC (AD-F6).
+ */
+function drawnLastBar(
+  type: ChartType,
+  data: readonly ChartDatum[],
+  rows: readonly MainRow[],
+  liveBar: LiveBar | null,
+  colors: UpDownColors,
+): LastBar | null {
+  let index = data.length - 1;
+  while (index >= 0 && !("open" in data[index])) index--;
+  const history = index >= 0 ? (data[index] as CandlestickData<Time>) : null;
+  const live = liveBar && (history === null || (liveBar.time as number) >= (history.time as number)) ? liveBar : null;
+  const real = live ?? history;
+  if (real === null) return null;
+  const row = live ? liveSeriesRow(type, data, rows, live, colors) : rows[index];
+  const drawn = row !== undefined && "open" in row ? row : real;
+  return { time: real.time as number, open: drawn.open, close: drawn.close };
+}
 
 /**
  * Owns the one `lightweight-charts` `createChart()` call for a coin's chart page
@@ -639,11 +1132,16 @@ export default function LightweightChart({
   onPriceLineDrag,
   onPriceClick,
   drawings = [],
-  pendingAnchor = null,
+  placement = null,
+  magnet = "off",
+  onDrawingDragStart,
+  onDrawingLock,
+  onDrawingHide,
   drawEditable = false,
   onDrawingColor,
   onDrawingDelete,
   onDrawingSettings,
+  onDrawingAlert,
   precision = null,
   onDrawingDrag,
   fibActive = false,
@@ -667,15 +1165,36 @@ export default function LightweightChart({
   onProfileEdgeCommit,
   onProfileEdgeCancel,
   liveBar,
+  liveVolumeColor,
   onLegendAction,
   initialPaneHeights,
   onPaneHeights,
   initialVisibleBars,
   onVisibleBars,
+  liquidationMarkers = NO_MARKERS,
+  patternMarkers = NO_MARKERS,
+  onBarSpacing,
+  chartType = "candles",
+  priceScale = DEFAULT_PRICE_SCALE_SETTINGS,
+  onPriceScale,
+  scaleModesLocked = null,
+  heikinLabel = "Heikin Ashi (derived)",
+  timeZone = "utc",
+  sessionBreaks = false,
+  barSeconds = null,
+  countdown = null,
+  lastPrice = DEFAULT_LAST_PRICE_SETTINGS,
+  fullscreen = false,
 }: LightweightChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const seriesRef = useRef<MainSeriesApi | null>(null);
+  // Story 33.9: the definition the main series was created with, and the view a series swap keeps.
+  const seriesKindRef = useRef<MainSeriesKind | null>(null);
+  const keptRangeRef = useRef<LogicalRange | null>(null);
+  // Null in Lines mode, where no main series exists: a chart type change there must not re-run the
+  // host swap and the primitive effects keyed on it (they would re-attach beside the live ones).
+  const mainKind = mode === "candles" ? seriesKindOf(chartType) : null;
   const lineSeriesRef = useRef<Record<LineSeriesId, MainLineSeriesApi> | null>(null);
   const prevFirstTimeRef = useRef<Time | null>(null);
   const prevLinesLengthRef = useRef(0);
@@ -686,6 +1205,17 @@ export default function LightweightChart({
   // Story 32.6: last known pane heights by group id ("price" included): the saved layout's at mount,
   // then whatever the operator dragged to. A ref read at mount, so a later prop change re-pins nothing.
   const knownHeightsRef = useRef<Map<string, number>>(new Map(Object.entries(initialPaneHeights ?? {})));
+  // Story 33.12: the fullscreen fit while the page is fullscreen (null otherwise), the resize observer
+  // that also watches the fullscreen element then, and the element it watches.
+  const fullscreenFitRef = useRef<FullscreenFit | null>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const observedHostRef = useRef<Element | null>(null);
+  const refitNow = useCallback((): void => {
+    const chart = chartRef.current;
+    const container = containerRef.current;
+    const fit = fullscreenFitRef.current;
+    if (chart && container && fit) refitFullscreen(chart, container, panesRef.current, fit, knownHeightsRef.current);
+  }, []);
   const paneHeightsCallbackRef = useRef(onPaneHeights);
   paneHeightsCallbackRef.current = onPaneHeights;
   const visibleBarsCallbackRef = useRef(onVisibleBars);
@@ -713,10 +1243,11 @@ export default function LightweightChart({
   const dragIdRef = useRef<GrabTarget | null>(null);
   const suppressNextClickRef = useRef(false);
   const dragMovedRef = useRef(false);
-  const previewRef = useRef<TrendlinePrimitive | null>(null);
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
-  const editRef = useRef({ priceLines, drawEditable, onDrawingDrag });
-  editRef.current = { priceLines, drawEditable, onDrawingDrag };
+  // Story 33.10: the pointer the placement preview last saw, which seeds the next preview.
+  const lastPreviewParamRef = useRef<MouseEventParams | null>(null);
+  const editRef = useRef({ priceLines, drawEditable, onDrawingDrag, drawings, onDrawingDragStart });
+  editRef.current = { priceLines, drawEditable, onDrawingDrag, drawings, onDrawingDragStart };
   // Filled by the effect below before any drag can read it; the forming bar is read per move.
   const measureIndexRef = useRef<MeasurementIndex>(EMPTY_MEASUREMENT_INDEX);
   const liveBarRef = useRef(liveBar);
@@ -728,6 +1259,21 @@ export default function LightweightChart({
   const markerRef = useRef<VerticalMarkerPrimitive | null>(null);
   const anchorMarkerRef = useRef<VerticalMarkerPrimitive | null>(null);
   const footprintRef = useRef<FootprintPrimitive | null>(null);
+  // Story 33.5: the liquidation markers' plugin on the candle series, and the hovered marker's tooltip.
+  // Story 33.11: the candle-pattern markers share it, one array sorted by time (the plugin's contract).
+  const allMarkers = useMemo(
+    () =>
+      patternMarkers.length === 0
+        ? liquidationMarkers
+        : [...liquidationMarkers, ...patternMarkers].sort((a, b) => (a.time as number) - (b.time as number)),
+    [liquidationMarkers, patternMarkers],
+  );
+  const markersPluginRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const markerSpecsRef = useRef<readonly MarkerSpec[]>(allMarkers);
+  markerSpecsRef.current = allMarkers;
+  const [markerTip, setMarkerTip] = useState<{ lines: readonly string[]; x: number; y: number } | null>(null);
+  const barSpacingCallbackRef = useRef(onBarSpacing);
+  barSpacingCallbackRef.current = onBarSpacing;
   const drawingRegistryRef = useRef<Map<string, DrawingEntry>>(new Map());
   // Story 32.5: the bar times every drawing primitive snaps its anchors to (one grid per chart).
   const gridRef = useRef(new BarGrid());
@@ -744,6 +1290,7 @@ export default function LightweightChart({
   // Story 32.8: a string, so the legend effect re-runs on a settings change, never on new bars.
   const footprintLegend =
     footprint && mode === "candles" ? footprintLegendText(footprint.settings.mode, footprint.settings.row_ticks) : null;
+  const heikinLegend = chartType === "heikin_ashi" && mode === "candles" ? heikinLabel : null;
   const gapRuns = useMemo(() => priceGapRuns(mode, data, linesData, liveTime), [mode, data, linesData, liveTime]);
   const gapRunsRef = useRef(gapRuns);
   gapRunsRef.current = gapRuns;
@@ -760,10 +1307,132 @@ export default function LightweightChart({
     return times;
   }, [mode, data, linesData, liveTime]);
   gridRef.current.set(barTimes);
+  // Story 33.10: the real bars by time -- what the magnet snaps to, never the Heikin Ashi rows the
+  // main series may draw (AD-F6) -- and the latest magnet and placement, read by the click, drag and
+  // preview handlers without re-subscribing them.
+  const barByTime = useMemo(() => {
+    const bars = new Map<number, MagnetBar>();
+    for (const d of data) if ("open" in d) bars.set(d.time as number, d);
+    return bars;
+  }, [data]);
+  const pointerRef = useRef({ magnet, mode, barByTime, liveBar, placement });
+  pointerRef.current = { magnet, mode, barByTime, liveBar, placement };
+
+  /**
+   * The magnet's price for a point at `time` and `price`. Only a real bar at exactly `time` (a loaded
+   * one or the forming one) snaps: a whitespace slot, or a time past the newest bar, has no OHLC of
+   * its own and keeps the raw price (`BarGrid.snap` would clamp it onto the last bar's).
+   */
+  const snapPrice = useCallback((time: number | null, price: number): number => {
+    const { magnet: strength, mode: chartMode, barByTime: bars, liveBar: live } = pointerRef.current;
+    const host = seriesRef.current;
+    // Lines mode has no OHLC to snap to: the magnet does nothing there.
+    if (strength === "off" || chartMode !== "candles" || time === null || !host) return price;
+    const bar = bars.get(time) ?? (live && (live.time as number) === time ? live : null);
+    const y = host.priceToCoordinate(price);
+    return y === null ? price : magnetPrice(price, y, bar, (p) => host.priceToCoordinate(p), strength);
+  }, []);
+
+  /** The bar time at a logical index inside the loaded bars, or null past the newest or before the
+   * oldest (where `BarGrid.timeAtLogical` would clamp). */
+  const loadedBarAt = useCallback((logical: number): number | null => {
+    const index = Math.round(logical);
+    const times = gridRef.current.times;
+    return index < 0 || index >= times.length ? null : times[index];
+  }, []);
+
+  /**
+   * Shift: the pointer pixel `to` constrained to 0/45/90 degrees from `from`'s pixel, back in time (via
+   * the logical index, so past the last bar too) and price; null when either end has no position.
+   */
+  const constrainedPoint = useCallback(
+    (from: Anchor, to: { x: number; y: number }): { time: number; price: number; logical: number } | null => {
+      const chart = chartRef.current;
+      const host = seriesRef.current ?? lineSeriesRef.current?.price;
+      const slot = gridRef.current.snap(from.time);
+      const x = slot === null || !chart ? null : chart.timeScale().timeToCoordinate(slot as Time);
+      const y = host?.priceToCoordinate(from.price) ?? null;
+      if (!chart || !host || x === null || y === null) return null;
+      const at = constrainAngle({ x, y }, to);
+      const logical = chart.timeScale().coordinateToLogical(at.x);
+      // A constrained point past the loaded bars has no bar of its own: clamping its time while
+      // keeping its price would bend the angle, so the caller keeps the unconstrained point.
+      if (logical === null || loadedBarAt(logical) === null) return null;
+      const time = gridRef.current.timeAtLogical(logical);
+      const price = host.coordinateToPrice(at.y);
+      return time === null || price === null ? null : { time, price, logical };
+    },
+    [loadedBarAt],
+  );
+
+  /**
+   * The point a placement click (or its preview) means: Shift on a line tool's second point
+   * constrains it from the first; otherwise the bar under the pointer and its price, magnet applied.
+   * Null where no time or price resolves (past the last bar's coordinate space).
+   */
+  const pointerPoint = useCallback(
+    (param: MouseEventParams): ChartPoint | null => {
+      const chart = chartRef.current;
+      const host = seriesRef.current ?? lineSeriesRef.current?.price;
+      if (!chart || !host || !param.point) return null;
+      const placing = pointerRef.current.placement;
+      if (param.sourceEvent?.shiftKey && placing && placing.points.length === 1 && constrainsAngle(placing.tool)) {
+        const constrained = constrainedPoint(placing.points[0], param.point);
+        if (constrained) return { time: constrained.time as Time, price: constrained.price, shift: true };
+      }
+      const raw = host.coordinateToPrice(param.point.y);
+      // `param.time` is only set over an existing bar; the time scale converts the empty area right of it.
+      const time = param.time ?? chart.timeScale().coordinateToTime(param.point.x);
+      if (raw === null || time === null || time === undefined) return null;
+      return { time, price: snapPrice(time as number, raw) };
+    },
+    [constrainedPoint, snapPrice],
+  );
+
+  /** The anchor a dragged line handle is constrained from with Shift: its line's other anchor. */
+  const otherAnchor = useCallback((target: GrabTarget): Anchor | null => {
+    const spec = editRef.current.drawings.find((d) => d.id === target.id);
+    if (!spec || !constrainsAngle(spec.kind) || !("anchors" in spec)) return null;
+    if (target.handle === "a") return spec.anchors[1];
+    return target.handle === "b" ? spec.anchors[0] : null;
+  }, []);
   // False until a layout has sized the chart with the time axis measured: before that the price
   // pane's own height is not the 500 px budget (the library took the axis out of the initial 500).
   const laidOutRef = useRef(false);
-  const priceGapRef = useRef<{ host: ISeriesApi<"Candlestick"> | MainLineSeriesApi; primitive: GapPrimitive } | null>(null);
+  const priceGapRef = useRef<{ host: MainSeriesApi | MainLineSeriesApi; primitive: GapPrimitive } | null>(null);
+  // Story 33.9: the main series' rows -- the one place a derived value (Heikin Ashi, hollow colours,
+  // a close-only line) exists; read by its `setData`/`update` and the Baseline's base value only.
+  const upDown = useMemo<UpDownColors>(() => ({ up: chartVar("--chart-up"), down: chartVar("--chart-down") }), []);
+  const mainRows = useMemo<MainRow[]>(() => seriesRows(chartType, data, upDown), [chartType, data, upDown]);
+  // Story 33.12: the newest bar as the main series draws it (the Heikin Ashi row under Heikin Ashi),
+  // whose close the last-price line is coloured by and the countdown sits at (null with no bars).
+  const lastBar = useMemo(
+    () => (mode === "candles" ? drawnLastBar(chartType, data, mainRows, liveBar ?? null, upDown) : null),
+    [mode, chartType, data, mainRows, liveBar, upDown],
+  );
+  // Story 33.12: the session breaks over the real bars (Lines mode: the snapshot seconds), always at
+  // UTC day boundaries whatever the display zone. The forming bar counts, so a new day's first bar
+  // that arrives live gets its break without a history refetch.
+  const breakBarSeconds = mode === "candles" ? barSeconds : 1;
+  const breakTimes = useMemo(() => {
+    if (!sessionBreaks || breakBarSeconds === null) return NO_TIMES;
+    const source: readonly { time: Time }[] = mode === "candles" ? data.filter((d) => "open" in d) : (linesData?.price ?? []).filter((d) => "value" in d);
+    const times = source.map((d) => d.time as number);
+    const liveTime = mode === "candles" && liveBar ? (liveBar.time as number) : null;
+    if (liveTime !== null && (times.length === 0 || liveTime > times[times.length - 1])) times.push(liveTime);
+    return sessionBreakTimes(times, breakBarSeconds);
+  }, [sessionBreaks, breakBarSeconds, mode, data, linesData, liveBar]);
+  const [scaleMenu, setScaleMenu] = useState<{ x: number; y: number } | null>(null);
+  // The scale menu's measured height, so its `top` keeps it inside the viewport like `right` does.
+  const scaleMenuRef = useRef<HTMLDivElement | null>(null);
+  const [scaleMenuHeight, setScaleMenuHeight] = useState(0);
+  useLayoutEffect(() => {
+    if (scaleMenu && scaleMenuRef.current) setScaleMenuHeight(scaleMenuRef.current.offsetHeight);
+  }, [scaleMenu]);
+  const priceScaleCallbackRef = useRef(onPriceScale);
+  priceScaleCallbackRef.current = onPriceScale;
+  const autoScaleRef = useRef(priceScale.autoScale);
+  autoScaleRef.current = priceScale.autoScale;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -838,12 +1507,16 @@ export default function LightweightChart({
             knownHeightsRef.current,
           );
         }
+        // Story 33.12: in fullscreen a new viewport size, or a pane added there, refits every pane.
+        refitNow();
       });
     };
     // ResizeObserver, not window "resize": catches layout-only reflows and a container that
     // was hidden (clientWidth 0) at mount. Fires once on observe, so it also does the first sync.
+    // In fullscreen it watches the fullscreen element too, whose height is the viewport's.
     const resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(container);
+    resizeObserverRef.current = resizeObserver;
     const panes = panesRef.current;
     const collapsedHeights = collapsedHeightsRef.current;
     // Captured to a local for the cleanup below, same as `panes` -- reading
@@ -855,6 +1528,8 @@ export default function LightweightChart({
     return () => {
       cancelled = true;
       resizeObserver.disconnect();
+      resizeObserverRef.current = null;
+      observedHostRef.current = null;
       cancelAnimationFrame(resizeFrame);
       chartRef.current = null;
       seriesRef.current = null;
@@ -862,6 +1537,9 @@ export default function LightweightChart({
       // The gap primitives die with the chart below (chart.remove()), like the panes.
       priceGapRef.current = null;
       footprintRef.current = null;
+      // Story 33.5: the markers plugin is detached while its series still exists.
+      markersPluginRef.current?.detach();
+      markersPluginRef.current = null;
       panes.clear();
       collapsedHeights.clear();
       // Story 18.1: the price lines die with the chart here, same as the panes -- the
@@ -901,8 +1579,20 @@ export default function LightweightChart({
       if (!start || !chart) return;
       const now = currentPaneHeights(chart, panesRef.current);
       if (!Object.keys(now).some((id) => id in start && Math.abs(now[id] - start[id]) >= 1)) return;
-      for (const [id, px] of Object.entries(now)) knownHeightsRef.current.set(id, px);
-      paneHeightsCallbackRef.current?.(now);
+      // Story 33.12: a drag in fullscreen moved scaled panes; the layout keeps the stored scale, so
+      // the heights are unscaled first (and the fit keeps them, so leaving restores the drag).
+      const fit = fullscreenFitRef.current;
+      // Only a pane the drag resized is unscaled: the others keep their stored height exactly, since
+      // floor-then-round would move each of them by a pixel on every drag.
+      const unscaled = (id: string, px: number): number => {
+        const kept = fit?.stored[id];
+        const moved = !(id in start) || Math.abs(px - start[id]) >= 1;
+        return kept !== undefined && !moved ? kept : Math.round(px / (fit?.scale ?? 1));
+      };
+      const stored = fit === null ? now : Object.fromEntries(Object.entries(now).map(([id, px]) => [id, unscaled(id, px)]));
+      if (fit !== null) Object.assign(fit.stored, stored);
+      for (const [id, px] of Object.entries(stored)) knownHeightsRef.current.set(id, px);
+      paneHeightsCallbackRef.current?.(stored);
     };
     // A press the browser cancels (a touch turned into a scroll, a lost pointer) moved no divider:
     // forgetting it keeps a later, unrelated pointerup from reporting a relayout as a drag.
@@ -980,6 +1670,9 @@ export default function LightweightChart({
     anchorMarkerRef.current = null;
     // Story 32.8: the footprint lives on the candle series only, re-attached on a return to Candles.
     footprintRef.current = null;
+    // Story 33.5: so do the liquidation markers; detached here, while their series still exists.
+    markersPluginRef.current?.detach();
+    markersPluginRef.current = null;
     // Story 32.1: the price gap painter is detached from the old host while that series still
     // exists; the [gapRuns, mode] effect below attaches a fresh one to the new host.
     const priceGap = priceGapRef.current;
@@ -988,38 +1681,41 @@ export default function LightweightChart({
       priceGapRef.current = null;
     }
 
-    if (mode === "candles") {
+    if (mainKind !== null) {
+      // Candles mode (`mainKind` is set exactly then).
       if (lineSeriesRef.current) {
         for (const id of LINE_SERIES_IDS) chart.removeSeries(lineSeriesRef.current[id]);
         lineSeriesRef.current = null;
         prevLinesLengthRef.current = 0;
       }
+      // Story 33.9: a chart type drawn by another definition replaces the main series. Its price lines
+      // die with it (re-created by the [priceLines] effect) and the view it showed is restored after
+      // the new series' first setData, so a type switch never moves the chart.
+      if (seriesRef.current && seriesKindRef.current !== mainKind) {
+        // A range still pending (a switch while the data was empty) is the view to restore, not the
+        // empty series' own.
+        keptRangeRef.current ??= chart.timeScale().getVisibleLogicalRange();
+        chart.removeSeries(seriesRef.current);
+        seriesRef.current = null;
+        priceLineRegistryRef.current.clear();
+      }
       if (!seriesRef.current) {
-        // Up/down candle colours explicitly from the chart tokens (Story 32.4) --
-        // lightweight-charts' own defaults are never relied on.
-        const up = chartVar("--chart-up");
-        const down = chartVar("--chart-down");
-        const dim = chartVar("--chart-text-dim");
-        seriesRef.current = chart.addSeries(CandlestickSeries, {
-          upColor: up,
-          downColor: down,
-          borderUpColor: up,
-          borderDownColor: down,
-          wickUpColor: up,
-          wickDownColor: down,
-          // The base borderColor/wickColor fields (as opposed to the Up/Down
-          // variants above) are vestigial fallbacks whose library defaults
-          // are otherwise never overridden -- set
-          // explicitly so nothing non-token-derived can ever render.
-          borderColor: dim,
-          wickColor: dim,
-        });
+        // Up/down colours explicitly from the chart tokens (Story 32.4) -- lightweight-charts' own
+        // defaults are never relied on.
+        seriesRef.current = addMainSeries(chart, mainKind);
+        // A series added after the price-pane overlays (a type switch, a return from Lines) would be
+        // the pane's last: drawn over the compare and indicator lines, and no longer the series the
+        // right scale takes its formatter from (the lowest index). Back to the first, as on mount.
+        seriesRef.current.setSeriesOrder(0);
+        seriesKindRef.current = mainKind;
         prevFirstTimeRef.current = null;
       }
     } else {
+      keptRangeRef.current = null; // a type switch's pending view does not outlive Candles mode
       if (seriesRef.current) {
         chart.removeSeries(seriesRef.current);
         seriesRef.current = null;
+        seriesKindRef.current = null;
         prevFirstTimeRef.current = null;
         // Story 18.1: the candlestick series' price lines die with the series here --
         // drop the registry entries without removePriceLine() calls (the series is
@@ -1037,7 +1733,7 @@ export default function LightweightChart({
         prevLinesLengthRef.current = 0;
       }
     }
-  }, [mode]);
+  }, [mode, mainKind]);
 
   useEffect(() => {
     if (mode !== "candles") return;
@@ -1061,9 +1757,17 @@ export default function LightweightChart({
     const rangeBeforeUpdate = addedAtFront > 0 ? chart?.timeScale().getVisibleLogicalRange() : null;
     const prevNewest = lastPaintedTimeRef.current;
 
-    series.setData(data);
+    // AD-F6: the main series alone gets the chart type's rows; `data` stays the input of the rest.
+    (series.setData as (rows: MainRow[]) => void)(mainRows);
     prevFirstTimeRef.current = data.length > 0 ? data[0].time : null;
     lastPaintedTimeRef.current = data.length > 0 ? (data[data.length - 1].time as unknown as number) : null;
+    // The view kept across a type switch is restored only once the new series has bars: on an empty
+    // series the library has no logical range to hold it, so it stays pending until data arrives.
+    const kept = keptRangeRef.current;
+    if (kept && chart && mainRows.length > 0) {
+      keptRangeRef.current = null;
+      chart.timeScale().setVisibleLogicalRange(kept);
+    }
 
     if (rangeBeforeUpdate && chart) {
       chart.timeScale().setVisibleLogicalRange({
@@ -1085,7 +1789,118 @@ export default function LightweightChart({
     }
 
     if (followNewestRef.current && chart) followNewestBar(chart, data, prevNewest);
-  }, [data, mode]);
+    // `mainRows` changes with `data` and `chartType`; `mainKind` re-runs it on a fresh series.
+  }, [data, mainRows, mode, mainKind]);
+
+  useEffect(() => {
+    // Story 33.12: the last-price line and label of the main series (Lines mode: the `price` line), the
+    // line in the up / down colour of the last bar (close against open), as the candle is drawn.
+    // Declared before the Baseline's base-value effect, so a new series takes these first and the
+    // base value stays its latest option.
+    const host = mode === "candles" ? seriesRef.current : (lineSeriesRef.current?.price ?? null);
+    if (!host) return;
+    const wanted: Record<string, unknown> = { priceLineVisible: lastPrice.line, lastValueVisible: lastPrice.label };
+    if (mode === "candles" && lastBar !== null) wanted.priceLineColor = lastBar.close >= lastBar.open ? upDown.up : upDown.down;
+    const current = host.options() as unknown as Record<string, unknown>;
+    const changed = Object.fromEntries(Object.entries(wanted).filter(([key, value]) => current[key] !== value));
+    if (Object.keys(changed).length > 0) host.applyOptions(changed);
+  }, [lastPrice.line, lastPrice.label, lastBar, mode, mainKind, upDown]);
+
+  // Story 33.9: the Baseline's base value is the close of the first visible bar, re-applied whenever
+  // the visible range moves (TradingView's baseline follows the left edge the same way).
+  const dataRef = useRef(data);
+  dataRef.current = data;
+  useEffect(() => {
+    const chart = chartRef.current;
+    const series = seriesRef.current;
+    if (!chart || !series || mode !== "candles" || chartType !== "baseline") return;
+    const timeScale = chart.timeScale();
+    let applied: number | null = null;
+    // The logical range only signals a move; the left edge is read as a time (`firstVisibleClose`).
+    const apply = (): void => {
+      const range = timeScale.getVisibleRange();
+      if (!range) return;
+      const price = firstVisibleClose(dataRef.current, range.from as number);
+      if (price === null || price === applied) return;
+      applied = price;
+      (series as ISeriesApi<"Baseline", Time>).applyOptions({ baseValue: { type: "price", price } });
+    };
+    apply();
+    timeScale.subscribeVisibleLogicalRangeChange(apply);
+    return () => timeScale.unsubscribeVisibleLogicalRangeChange(apply);
+  }, [chartType, mode, mainKind, data]);
+
+  useEffect(() => {
+    // Story 33.9: the price pane's right scale. Auto off keeps the range the operator dragged to
+    // through scrolls; the library's own double-click on the scale turns it back on (reported below).
+    const chart = chartRef.current;
+    if (!chart) return;
+    chart.priceScale("right").applyOptions({
+      mode: SCALE_MODE_OF[priceScale.mode],
+      autoScale: priceScale.autoScale,
+      invertScale: priceScale.invert,
+    });
+  }, [priceScale.mode, priceScale.autoScale, priceScale.invert]);
+
+  useEffect(() => {
+    // Story 33.9: the scale strip's own gestures. A double-click on it is the library's auto-scale
+    // reset, persisted as `auto_scale: true`; a drag (of the scale or the plot) that the library ended
+    // with auto-scale off is persisted as `auto_scale: false`, so the header's Auto toggle never lies.
+    // A right-click on it opens the scale menu.
+    const container = containerRef.current;
+    const chart = chartRef.current;
+    if (!container || !chart) return;
+    const report = (patch: PriceScalePatch): void => priceScaleCallbackRef.current?.(patch);
+    const handleDblClick = (event: MouseEvent): void => {
+      if (onRightScale(container, chart, event.clientX, event.clientY)) report({ auto_scale: true });
+    };
+    let pressed = false;
+    const handleDown = (): void => {
+      pressed = true;
+    };
+    const handleUp = (): void => {
+      if (!pressed) return;
+      pressed = false;
+      if (autoScaleRef.current && chart.priceScale("right").options().autoScale === false) report({ auto_scale: false });
+    };
+    const handleContextMenu = (event: MouseEvent): void => {
+      // Without an `onPriceScale` no menu choice could act: the browser's own menu stays.
+      if (!priceScaleCallbackRef.current || !onRightScale(container, chart, event.clientX, event.clientY)) return;
+      event.preventDefault();
+      setScaleMenu({ x: event.clientX, y: event.clientY });
+    };
+    container.addEventListener("dblclick", handleDblClick);
+    container.addEventListener("pointerdown", handleDown);
+    // A drag the browser cancels (a touch turned scroll, a lost capture) still ended the library's drag.
+    window.addEventListener("pointerup", handleUp);
+    window.addEventListener("pointercancel", handleUp);
+    container.addEventListener("contextmenu", handleContextMenu);
+    return () => {
+      container.removeEventListener("dblclick", handleDblClick);
+      container.removeEventListener("pointerdown", handleDown);
+      window.removeEventListener("pointerup", handleUp);
+      window.removeEventListener("pointercancel", handleUp);
+      container.removeEventListener("contextmenu", handleContextMenu);
+    };
+  }, []);
+
+  useEffect(() => {
+    // The scale menu closes on Esc or a press anywhere outside it.
+    if (!scaleMenu) return;
+    const close = (): void => setScaleMenu(null);
+    const handleKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") close();
+    };
+    const handleDown = (event: MouseEvent): void => {
+      if (!(event.target instanceof Element && event.target.closest("[data-scale-menu]"))) close();
+    };
+    window.addEventListener("keydown", handleKey);
+    window.addEventListener("mousedown", handleDown);
+    return () => {
+      window.removeEventListener("keydown", handleKey);
+      window.removeEventListener("mousedown", handleDown);
+    };
+  }, [scaleMenu]);
 
   useEffect(() => {
     if (mode !== "lines") return;
@@ -1127,7 +1942,10 @@ export default function LightweightChart({
     // Remove ids no longer present first -- never touches timeScale/visible range, just
     // `chart.removePane()` (AC #4). A shared pane goes only with its group's last series.
     for (const [id, entry] of [...registry]) {
-      if (specsById.has(id)) continue;
+      // A spec whose shape changed (a CandlePattern switched between markers and its pane) is
+      // re-created below: a series cannot move between the price pane and a pane of its own.
+      const next = specsById.get(id);
+      if (next && structureKey(next) === structureKey(entry.spec)) continue;
       registry.delete(id);
       // A pane's gap painter goes with its host series; a pane that stays gets a new one on a
       // sibling below.
@@ -1165,15 +1983,17 @@ export default function LightweightChart({
         const definition = spec.kind === "Line" ? LineSeries : HistogramSeries;
         const series = chart.addSeries(
           definition,
-          { color: spec.color, ...lineOptions(spec), ...(spec.hidden ? { visible: false } : {}) },
+          { color: spec.color, ...lineOptions(spec), ...shapeOptions(spec), ...(spec.hidden ? { visible: false } : {}) },
           pane ? pane.paneIndex() : 0,
         ) as AnySeriesApi;
-        entry = { pane, group, spec, series, lastData: spec.data, gap: null, lastUpDown: upDownKey(spec) };
+        entry = { pane, group, spec, series, lastData: spec.data, gap: null, lastUpDown: upDownKey(spec), zero: null };
         registry.set(spec.id, entry);
         setSeriesData(entry.series, paintedData(spec));
+        syncZeroLine(entry);
         continue;
       }
       entry.spec = spec;
+      syncZeroLine(entry);
       const options = entry.series.options() as { color?: string; visible?: boolean; lineWidth?: number; lineStyle?: LineStyle };
       const changes: { color?: string; visible?: boolean; lineWidth?: LineWidth; lineStyle?: LineStyle } = {};
       if (options.color !== spec.color) changes.color = spec.color;
@@ -1242,6 +2062,24 @@ export default function LightweightChart({
               text: footprintLegend,
             },
           ];
+    // Story 33.9: while Heikin Ashi draws the main series a read-only row says so -- the bars are
+    // derived, not prices (AD-F6); no button, nothing to hide.
+    const heikinRows: LegendSeries[] =
+      heikinLegend === null
+        ? []
+        : [
+            {
+              group: "heikin-ashi",
+              groupLabel: heikinLegend,
+              outputLabel: heikinLegend,
+              color: chartVar("--chart-text-dim"),
+              series: null,
+              data: [],
+              pane: null,
+              actionable: false,
+              text: "display only",
+            },
+          ];
     const extraRows = legendExtras.map(
       (extra): LegendSeries => ({
         group: extra.id,
@@ -1252,6 +2090,7 @@ export default function LightweightChart({
         data: extra.value === null ? [] : [{ time: 0 as Time, value: extra.value }],
         pane: null,
         format: extra.format,
+        text: extra.text,
         actionable: false,
       }),
     );
@@ -1268,8 +2107,10 @@ export default function LightweightChart({
         hidden: spec.hidden === true,
         configurable: spec.configurable !== false,
         actionable: spec.actionable !== false,
+        format: spec.format,
+        text: spec.text,
       };
-    }).concat(footprintRows, extraRows);
+    }).concat(heikinRows, footprintRows, extraRows);
     // A new pane's element only exists after the library's next paint: retry per frame
     // (bounded) until every pane has one.
     let frame = 0;
@@ -1280,7 +2121,7 @@ export default function LightweightChart({
     };
     draw();
     return () => cancelAnimationFrame(frame);
-  }, [panes, legendExtras, footprintLegend, handleLegendAction]);
+  }, [panes, legendExtras, footprintLegend, heikinLegend, handleLegendAction]);
 
   useEffect(() => {
     // Story 32.1: the price pane's labelled gap painter lives on the current host series (the
@@ -1299,7 +2140,7 @@ export default function LightweightChart({
     }
     priceGap.primitive.setRuns(gapRuns);
     for (const entry of panesRef.current.values()) entry.gap?.setRuns(gapRuns);
-  }, [gapRuns, mode]);
+  }, [gapRuns, mode, mainKind]);
 
   useEffect(() => {
     // Story 15.5's live edge: paints the already-aggregated forming bar `useLiveCandle`
@@ -1320,15 +2161,21 @@ export default function LightweightChart({
     lastPaintedTimeRef.current = time;
     // The server seeds its forming bar with the whole bucket (LiveCandleBus.seed), so it is
     // painted as-is -- no client-side merge with history (one aggregation path, AD-F7).
-    const { volume, ...candle } = liveBar;
-    series.update(candle);
+    const { time: barTime, open, high, low, close, volume } = liveBar;
+    // Story 33.9: the chart type's row of the forming bar (Heikin Ashi chained on the last closed HA
+    // bar, so earlier bars never change); the volume pane below keeps the real bar.
+    const row = liveSeriesRow(chartType, data, mainRows, { time: barTime, open, high, low, close }, upDown);
+    (series.update as (row: MainRow) => void)(row);
     // Volume pane follows the forming bar; its series only exists once the panes effect has
-    // added it, and is absent in Lines mode's registry-less state -- both are no-ops.
-    panesRef.current.get("volume")?.series.update({ time: liveBar.time, value: volume });
+    // added it, and is absent in Lines mode's registry-less state -- both are no-ops. Story 33.6:
+    // painted like its closed bars (`liveVolumeColor`), so a forming bar is never the flat colour.
+    panesRef.current
+      .get("volume")
+      ?.series.update({ time: barTime, value: volume, ...(liveVolumeColor ? { color: liveVolumeColor } : {}) });
     // `mode`: Lines -> Candles recreates seriesRef with no data. `data`: every setData()
     // replaces the series with history that lacks the forming bar. Both must repaint the
     // held `liveBar` at once, not wait for the next websocket tick.
-  }, [liveBar, mode, panes, data]);
+  }, [liveBar, liveVolumeColor, mode, panes, data, chartType, mainKind, mainRows, upDown]);
 
   useEffect(() => {
     // Story 18.1 (AC #2/#4): the priceLines prop's own registry-diff effect, the exact
@@ -1358,8 +2205,8 @@ export default function LightweightChart({
             id: spec.id,
             price: spec.price,
             color: spec.color,
-            lineWidth: PRICE_LINE_WIDTH,
-            lineStyle: LineStyle.Solid,
+            lineWidth: priceLineWidth(spec),
+            lineStyle: priceLineStyle(spec),
             axisLabelVisible: true,
             title: spec.title,
           }),
@@ -1374,8 +2221,10 @@ export default function LightweightChart({
       if (current.price !== spec.price) line.applyOptions({ price: spec.price });
       if (current.color !== spec.color) line.applyOptions({ color: spec.color });
       if (current.title !== (spec.title ?? "")) line.applyOptions({ title: spec.title ?? "" });
+      if (current.lineWidth !== priceLineWidth(spec)) line.applyOptions({ lineWidth: priceLineWidth(spec) });
+      if (current.lineStyle !== priceLineStyle(spec)) line.applyOptions({ lineStyle: priceLineStyle(spec) });
     }
-  }, [priceLines, mode]);
+  }, [priceLines, mode, mainKind]);
 
   useEffect(() => {
     // DW-144: built once per history change, read by every measurement mouse-move.
@@ -1405,7 +2254,7 @@ export default function LightweightChart({
       host.attachPrimitive(created);
       registry.set(spec.id, created);
     }
-  }, [volumeProfiles, mode]);
+  }, [volumeProfiles, mode, mainKind]);
 
   const crosshairShownRef = useRef(true);
   useEffect(() => {
@@ -1428,6 +2277,105 @@ export default function LightweightChart({
     else timeScale.scrollToRealTime();
   }, [viewCommand]);
 
+  const labelBarSeconds = mode === "candles" ? barSeconds : null;
+  useEffect(() => {
+    // Story 33.12: the zone the crosshair label and the time axis print in. Formatters only: the data
+    // every series holds keeps its UTC `time` (audit D-218).
+    chartRef.current?.applyOptions({
+      // A daily or weekly candle prints its UTC date (its bucket is a UTC day); Lines-mode seconds and
+      // intraday bars print in the zone.
+      localization: { timeFormatter: (time: Time) => formatChartTime(time as number, timeZone, labelBarSeconds) },
+      timeScale: { tickMarkFormatter: tickMarkFormatter(timeZone) },
+    });
+  }, [timeZone, labelBarSeconds]);
+
+  // False at mount, so a chart mounted in fullscreen (a timeframe change there remounts it) fits too.
+  const fullscreenSeenRef = useRef(false);
+  useEffect(() => {
+    // Story 33.12: entering fullscreen scales the panes to fit the stage (relative heights kept) and
+    // watches the fullscreen element for viewport resizes; leaving restores the stored heights. Both
+    // apply the container's new width at once (the resize observer would follow a frame later). View
+    // only: nothing here reports `onPaneHeights`, so the layout never saves a scaled height.
+    if (fullscreenSeenRef.current === fullscreen) return;
+    fullscreenSeenRef.current = fullscreen;
+    const chart = chartRef.current;
+    const container = containerRef.current;
+    if (!chart || !container) return;
+    chart.applyOptions({ width: container.clientWidth });
+    const observer = resizeObserverRef.current;
+    if (fullscreen) {
+      fullscreenFitRef.current = { stored: currentPaneHeights(chart, panesRef.current), scale: 1 };
+      const host = document.fullscreenElement;
+      if (observer && host) observer.observe(host);
+      observedHostRef.current = host;
+      refitNow();
+      return;
+    }
+    if (observer && observedHostRef.current) observer.unobserve(observedHostRef.current);
+    observedHostRef.current = null;
+    const fit = fullscreenFitRef.current;
+    fullscreenFitRef.current = null;
+    if (fit === null) return;
+    const registry = panesRef.current;
+    layoutPaneHeights(chart, registry, snapshotOf(registry, fit.stored), true, new Map(), knownHeightsRef.current);
+  }, [fullscreen, refitNow]);
+
+  const sessionBreaksRef = useRef<{ host: MainSeriesApi | MainLineSeriesApi; primitive: SessionBreaksPrimitive } | null>(null);
+  useEffect(() => {
+    // Story 33.12: the session breaks, one primitive on the current price host while they are on.
+    const host = mode === "candles" ? seriesRef.current : (lineSeriesRef.current?.price ?? null);
+    const held = sessionBreaksRef.current;
+    if (held && (held.host !== host || !sessionBreaks)) {
+      // A host replaced by a mode or type switch took its primitives with it: nothing to detach.
+      if (held.host === host) held.host.detachPrimitive(held.primitive);
+      sessionBreaksRef.current = null;
+    }
+    if (!host || !sessionBreaks) return;
+    if (sessionBreaksRef.current) {
+      sessionBreaksRef.current.primitive.setTimes(breakTimes);
+      return;
+    }
+    const primitive = new SessionBreaksPrimitive(breakTimes);
+    host.attachPrimitive(primitive);
+    sessionBreaksRef.current = { host, primitive };
+  }, [sessionBreaks, breakTimes, mode, mainKind]);
+
+  const countdownRef = useRef<{ host: MainSeriesApi; primitive: CountdownPrimitive } | null>(null);
+  const countdownOn = mode === "candles" && countdown !== null && countdown.enabled;
+  useEffect(() => {
+    // Story 33.12: the countdown label lives on the candle-mode main series while it is on.
+    const host = mode === "candles" ? seriesRef.current : null;
+    const held = countdownRef.current;
+    if (held && (held.host !== host || !countdownOn)) {
+      if (held.host === host) held.host.detachPrimitive(held.primitive);
+      countdownRef.current = null;
+    }
+    if (!host || !countdownOn || countdownRef.current) return;
+    const primitive = new CountdownPrimitive();
+    host.attachPrimitive(primitive);
+    countdownRef.current = { host, primitive };
+  }, [countdownOn, mode, mainKind]);
+
+  const countdownSeconds = countdown?.barSeconds ?? null;
+  useEffect(() => {
+    // Story 33.12: re-labelled every second from the viewer's clock (audit D-219), and at once on a new
+    // bar or tick. No bars, no label.
+    const primitive = countdownRef.current?.primitive;
+    if (!primitive || !countdownOn || countdownSeconds === null) return;
+    const tick = (): void => {
+      if (lastBar === null) {
+        primitive.setLabel(null);
+        return;
+      }
+      const left = barCountdown(lastBar.time, countdownSeconds, Date.now() / 1000);
+      const color = lastBar.close >= lastBar.open ? upDown.up : upDown.down;
+      primitive.setLabel({ price: lastBar.close, text: formatCountdown(left), color });
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [countdownOn, countdownSeconds, lastBar, upDown, mainKind]);
+
   useEffect(() => {
     // Story 18.4 (AC #2/#6): add/move/remove the replay start marker.
     const host = seriesRef.current;
@@ -1443,7 +2391,7 @@ export default function LightweightChart({
     }
     markerRef.current = new VerticalMarkerPrimitive(markerTime);
     host.attachPrimitive(markerRef.current);
-  }, [markerTime, mode]);
+  }, [markerTime, mode, mainKind]);
 
   useEffect(() => {
     // Story 32.7: the Auto Anchored profile's anchor marker, on the same discipline as the replay
@@ -1461,7 +2409,7 @@ export default function LightweightChart({
     }
     anchorMarkerRef.current = new VerticalMarkerPrimitive(anchorMarkerTime, "--chart-drawing");
     host.attachPrimitive(anchorMarkerRef.current);
-  }, [anchorMarkerTime, mode]);
+  }, [anchorMarkerTime, mode, mainKind]);
 
   useEffect(() => {
     // Story 32.8: add / update / remove the footprint, on the same discipline as the markers above.
@@ -1478,7 +2426,20 @@ export default function LightweightChart({
     }
     footprintRef.current = new FootprintPrimitive(footprint);
     host.attachPrimitive(footprintRef.current);
-  }, [footprint, mode]);
+  }, [footprint, mode, mainKind]);
+
+  useEffect(() => {
+    // Story 33.5: the liquidation markers, one `createSeriesMarkers` plugin on the candle series, its
+    // markers replaced on every change (created on the first marker, re-created after a mode flip).
+    const host = seriesRef.current;
+    if (!host || mode !== "candles") return;
+    const markers = allMarkers.map(({ tooltip: _tooltip, ...marker }) => marker);
+    // A tooltip open on a marker that this change removed (or merged) would outlive it under a still
+    // pointer; the next crosshair move re-opens it on whatever marker is there now.
+    setMarkerTip((prev) => (prev === null ? prev : null));
+    if (markersPluginRef.current) markersPluginRef.current.setMarkers(markers);
+    else if (markers.length > 0) markersPluginRef.current = createSeriesMarkers(host, markers);
+  }, [allMarkers, mode, mainKind]);
 
   useEffect(() => {
     latestRef.current = { volumeProfiles, onRangeSelect, onProfileEdgeDrag, onProfileEdgeCommit, onProfileEdgeCancel };
@@ -1514,7 +2475,7 @@ export default function LightweightChart({
       stopDrag();
       if (attached) host.detachPrimitive(preview);
     };
-  }, [rangeSelectActive, mode]);
+  }, [rangeSelectActive, mode, mainKind]);
 
   useEffect(() => {
     // Story 18.6 (AC #3): edge grab-and-drag for placed profiles. Off while a range tool
@@ -1618,7 +2579,7 @@ export default function LightweightChart({
       // for will never arrive here, so the caller's ghost is cleared -- never committed.
       if (grabbed) latestRef.current.onProfileEdgeCancel?.();
     };
-  }, [profileEdgesEditable, rangeSelectActive, measureActive, fibActive, mode]);
+  }, [profileEdgesEditable, rangeSelectActive, measureActive, fibActive, mode, mainKind]);
 
   useEffect(() => {
     // Story 18.3 (AC #2/#3/#5): the transient click-drag measurement, on the shared
@@ -1652,7 +2613,7 @@ export default function LightweightChart({
       stopDrag();
       if (attached) host.detachPrimitive(primitive);
     };
-  }, [measureActive, onMeasureEnd, mode]);
+  }, [measureActive, onMeasureEnd, mode, mainKind]);
 
   useEffect(() => {
     // Story 32.5: the Fibonacci tool, on the same range-drag plumbing as the measurement: a live
@@ -1665,8 +2626,12 @@ export default function LightweightChart({
     if (!container || !chart || !host || !fibActive) return;
 
     let preview: FibPrimitive | null = null;
+    // Story 33.10: both ends land on the magnet's price, the preview as the placed drawing.
+    const snapped = (p: TrendlineAnchor): TrendlineAnchor => ({ time: p.time, price: snapPrice(p.time as number, p.price) });
     const stopDrag = attachRangeDrag(container, chart, host, gridRef.current, {
-      onMove: (start, end) => {
+      onMove: (rawStart, rawEnd) => {
+        const start = snapped(rawStart);
+        const end = snapped(rawEnd);
         const shape: FibDrawing = {
           kind: "fib",
           id: "fib-preview",
@@ -1690,14 +2655,14 @@ export default function LightweightChart({
         if (!last || !preview) return;
         host.detachPrimitive(preview);
         preview = null;
-        onFibPlace?.(last.start, last.end);
+        onFibPlace?.(snapped(last.start), snapped(last.end));
       },
     });
     return () => {
       stopDrag();
       if (preview) host.detachPrimitive(preview);
     };
-  }, [fibActive, onFibPlace, mode]);
+  }, [fibActive, onFibPlace, mode, mainKind, snapPrice]);
 
   useEffect(() => {
     // Story 18.2 (AC #4): the drawings prop's registry-diff effect -- same per-id
@@ -1707,8 +2672,11 @@ export default function LightweightChart({
     const host = seriesRef.current ?? lineSeriesRef.current?.price;
     if (!host) return;
     const registry = drawingRegistryRef.current;
-    const specsById = new Map(drawings.map((spec) => [spec.id, spec] as const));
+    // Story 33.10: a hidden drawing is neither drawn nor hit-tested: it is not in the registry at all.
+    const shown = drawings.filter((spec) => spec.hidden !== true);
+    const specsById = new Map(shown.map((spec) => [spec.id, spec] as const));
     const grid = gridRef.current;
+    const measure = (): MeasurementIndex | null => (pointerRef.current.mode === "candles" ? measureIndexRef.current : null);
 
     for (const [id, entry] of [...registry]) {
       if (specsById.get(id)?.kind !== entry.kind) {
@@ -1717,18 +2685,19 @@ export default function LightweightChart({
       }
     }
 
-    for (const spec of drawings) {
+    for (const spec of shown) {
       const entry = registry.get(spec.id);
       if (entry) {
         updateDrawingPrimitive(entry.primitive, spec, precision);
+        entry.locked = spec.locked === true;
         continue;
       }
-      const created = createDrawingPrimitive(spec, precision, grid);
+      const created = createDrawingPrimitive(spec, precision, grid, measure);
       created.setHandlesVisible(editRef.current.drawEditable);
       host.attachPrimitive(created);
-      registry.set(spec.id, { kind: spec.kind, primitive: created });
+      registry.set(spec.id, { kind: spec.kind, primitive: created, locked: spec.locked === true });
     }
-  }, [drawings, mode, precision]);
+  }, [drawings, mode, mainKind, precision]);
 
   useEffect(() => {
     // Story 32.5: handles are drawn only while drawings are editable (the Cursor tool), and every
@@ -1737,7 +2706,7 @@ export default function LightweightChart({
       primitive.setHandlesVisible(drawEditable);
       primitive.refresh();
     }
-  }, [drawEditable, barTimes, drawings, mode]);
+  }, [drawEditable, barTimes, drawings, mode, mainKind]);
 
   useEffect(() => {
     // Story 18.1 (AC #3): the one crosshairMove subscription serves both halves of the
@@ -1762,22 +2731,31 @@ export default function LightweightChart({
       if (dragged === null) return;
       if (!param.point || param.paneIndex !== 0) return;
       const host = seriesRef.current ?? lineSeriesRef.current?.price;
-      const price = host?.coordinateToPrice(param.point.y);
-      if (price === null || price === undefined) return;
+      const raw = host?.coordinateToPrice(param.point.y);
+      if (raw === null || raw === undefined) return;
       dragMovedRef.current = true;
+      const grid = gridRef.current;
+      const pointerLogical = param.logical ?? chart.timeScale().coordinateToLogical(param.point.x);
+      const pointerTime = pointerLogical === null ? null : grid.timeAtLogical(pointerLogical);
+      // The magnet's bar is the one under the pointer: none past the newest or before the oldest bar
+      // (where the reported time is clamped), so the price stays raw there.
+      const barTime = pointerLogical === null ? null : loadedBarAt(pointerLogical);
       if (dragged.handle === "price") {
-        onPriceLineDrag?.(dragged.id, price);
+        onPriceLineDrag?.(dragged.id, snapPrice(barTime, raw));
         return;
       }
-      const grid = gridRef.current;
-      const logical = param.logical ?? chart.timeScale().coordinateToLogical(param.point.x);
+      // Story 33.10: Shift constrains a line's dragged end from its other anchor; else the magnet.
+      const from = param.sourceEvent?.shiftKey ? otherAnchor(dragged) : null;
+      const constrained = from ? constrainedPoint(from, param.point) : null;
+      const logical = constrained ? constrained.logical : pointerLogical;
       onDrawingDrag?.(dragged.id, dragged.handle ?? "", {
-        price,
-        time: logical === null ? null : grid.timeAtLogical(logical),
+        price: constrained ? constrained.price : snapPrice(barTime, raw),
+        time: constrained ? constrained.time : pointerTime,
         barsSince: (time) => {
-          const from = grid.indexOf(time);
-          return from === null || logical === null ? null : Math.round(logical) - from;
+          const start = grid.indexOf(time);
+          return start === null || logical === null ? null : Math.round(logical) - start;
         },
+        ...(constrained ? { shift: true } : {}),
       });
     };
 
@@ -1788,7 +2766,21 @@ export default function LightweightChart({
       // this lifetime must never be able to start a drag in the next one.
       lastCrosshairRef.current = null;
     };
-  }, [onPriceLineDrag, onDrawingDrag, mode]);
+  }, [onPriceLineDrag, onDrawingDrag, mode, snapPrice, otherAnchor, constrainedPoint, loadedBarAt]);
+
+  // Story 33.5: a hovered liquidation marker (the library reports its id as `hoveredObjectId`) shows
+  // its tooltip lines beside the pointer; read on the legend's own crosshair subscription.
+  const showMarkerTip = useCallback((param: MouseEventParams): void => {
+    const id = param.hoveredObjectId;
+    const spec = typeof id === "string" ? markerSpecsRef.current.find((m) => m.id === id) : undefined;
+    const container = containerRef.current;
+    if (!spec || !param.point || !container) {
+      setMarkerTip((prev) => (prev === null ? prev : null));
+      return;
+    }
+    const rect = container.getBoundingClientRect();
+    setMarkerTip({ lines: spec.tooltip, x: rect.left + param.point.x, y: rect.top + param.point.y });
+  }, []);
 
   useEffect(() => {
     // Legend values follow the crosshair; off-chart (time undefined) they fall back to the
@@ -1797,10 +2789,11 @@ export default function LightweightChart({
     if (!chart) return;
     const handle = (param: MouseEventParams): void => {
       renderLegends(chart, legendItemsRef.current, param, gapLookupRef.current, handleLegendAction);
+      showMarkerTip(param);
     };
     chart.subscribeCrosshairMove(handle);
     return () => chart.unsubscribeCrosshairMove(handle);
-  }, [mode, handleLegendAction]);
+  }, [mode, handleLegendAction, showMarkerTip]);
 
   useEffect(() => {
     // Story 18.1 (AC #3): the drag's start/end. Capture phase so a line grab runs
@@ -1842,6 +2835,7 @@ export default function LightweightChart({
       suppressNextClickRef.current = false;
       if (grabbedId === null) return;
       event.stopPropagation();
+      editRef.current.onDrawingDragStart?.(grabbedId);
     };
 
     const handleMouseUp = (): void => {
@@ -1859,6 +2853,28 @@ export default function LightweightChart({
       window.removeEventListener("mouseup", handleMouseUp);
     };
   }, [priceLines, onPriceLineDrag, onDrawingDrag, mode, fibActive]);
+
+  useEffect(() => {
+    // Story 33.8: in Cursor mode a right-click on a drawing opens the same edit menu a click does
+    // (the browser's own menu is suppressed only then); anywhere else it stays the browser's.
+    const container = containerRef.current;
+    const chart = chartRef.current;
+    if (!container || !chart || !drawEditable) return;
+    const handleContextMenu = (event: MouseEvent): void => {
+      const point = plotPoint(container, chart, event.clientX, event.clientY); // price pane only
+      if (!point) return;
+      const hitId = findDrawingHit(point, seriesRef.current, drawingRegistryRef.current, editRef.current.priceLines, {
+        hlineReachable: true,
+        primitives: true,
+        bodies: true,
+      })?.id;
+      if (!hitId) return;
+      event.preventDefault();
+      setMenu({ id: hitId, x: event.clientX, y: event.clientY });
+    };
+    container.addEventListener("contextmenu", handleContextMenu);
+    return () => container.removeEventListener("contextmenu", handleContextMenu);
+  }, [drawEditable]);
 
   useEffect(() => {
     // Story 18.1/18.2: click reporting. `onPriceClick` is candles-only; `onPointClick`
@@ -1887,49 +2903,160 @@ export default function LightweightChart({
       const host = seriesRef.current ?? lineSeriesRef.current?.price;
       const price = host?.coordinateToPrice(param.point.y);
       if (price === null || price === undefined) return;
-      if (wantsPrice) onPriceClick(price);
       // Story 18.2: `param.time` is only set over an existing bar; fall back to the
       // time scale's own x->time conversion for the empty area right of the last bar.
       const time = param.time ?? chart.timeScale().coordinateToTime(param.point.x);
-      if (time !== null && time !== undefined) onPointClick?.({ time, price });
+      if (wantsPrice) onPriceClick(snapPrice((time ?? null) as number | null, price));
+      // Story 33.10: the same point with the magnet (or Shift) applied, `pointerPoint`.
+      const point = pointerPoint(param);
+      if (point) onPointClick?.(point);
     };
 
     chart.subscribeClick(handleClick);
     return () => chart.unsubscribeClick(handleClick);
-  }, [onPriceClick, onPointClick, drawEditable, mode]);
+  }, [onPriceClick, onPointClick, drawEditable, mode, snapPrice, pointerPoint]);
 
   useEffect(() => {
-    // Trendline preview: the pending first anchor drawn to the cursor until the second click.
+    // Story 33.10: the placement preview -- the tool's own drawing (`previewDrawing`, drawn by the
+    // primitive of the finished one) from the points clicked so far to the pointer, Shift and the
+    // magnet applied, until the last click. Esc / disarm (placement null) removes it with no residue.
     const chart = chartRef.current;
     const host = seriesRef.current ?? lineSeriesRef.current?.price;
-    if (!chart || !host || !pendingAnchor) return;
-    const preview = new TrendlinePrimitive([pendingAnchor, pendingAnchor], chartVar("--chart-drawing"));
-    host.attachPrimitive(preview);
-    previewRef.current = preview;
+    if (!chart || !host || !placement || placement.points.length === 0 || placementOf(placement.tool) < 2) return;
+    const ctx = newDrawingContext(precisionRef.current);
+    let preview: DrawingPrimitiveOf | null = null;
     const move = (param: MouseEventParams): void => {
-      const price = param.point ? host.coordinateToPrice(param.point.y) : null;
-      const time = param.point ? (param.time ?? chart.timeScale().coordinateToTime(param.point.x)) : null;
-      if (price !== null && time !== null) preview.update([pendingAnchor, { time, price }], chartVar("--chart-drawing"));
+      if (param.point) lastPreviewParamRef.current = param;
+      const cursor = pointerPoint(param);
+      const shape = cursor && previewDrawing(placement.tool, placement.points, { time: cursor.time as number, price: cursor.price }, ctx);
+      if (!shape) return;
+      const spec = shape as DrawingSpec; // a placed tool's drawing is one of the chart's kinds, its colour set
+      if (preview) {
+        updateDrawingPrimitive(preview, spec, precisionRef.current);
+        return;
+      }
+      preview = createDrawingPrimitive(spec, precisionRef.current, gridRef.current, () =>
+        pointerRef.current.mode === "candles" ? measureIndexRef.current : null,
+      );
+      host.attachPrimitive(preview);
     };
     chart.subscribeCrosshairMove(move);
+    // A placement that just gained a point is previewed at once from where the pointer last was (it
+    // has not moved since the click), never blank until the next move.
+    const seed = lastCrosshairRef.current ?? lastPreviewParamRef.current;
+    if (seed) move(seed);
     return () => {
       chart.unsubscribeCrosshairMove(move);
-      host.detachPrimitive(preview);
-      previewRef.current = null;
+      if (preview) host.detachPrimitive(preview);
     };
-  }, [pendingAnchor, mode]);
+  }, [placement, mode, mainKind, pointerPoint]);
+
+  useEffect(() => {
+    // Story 33.5: the bar spacing, on mount and after every zoom (the visible range changes with it).
+    const chart = chartRef.current;
+    if (!chart) return;
+    const timeScale = chart.timeScale();
+    let last: number | null = null;
+    const report = (): void => {
+      const spacing = timeScale.options().barSpacing;
+      if (spacing === last) return;
+      last = spacing;
+      barSpacingCallbackRef.current?.(spacing);
+    };
+    report();
+    timeScale.subscribeVisibleLogicalRangeChange(report);
+    return () => timeScale.unsubscribeVisibleLogicalRangeChange(report);
+  }, []);
 
   const menuSpec = menu ? (priceLines.find((l) => l.id === menu.id) ?? drawings.find((d) => d.id === menu.id)) : undefined;
-  const menuHasSettings =
-    !!menuSpec &&
-    "kind" in menuSpec &&
-    (menuSpec.kind === "fib" || menuSpec.kind === "position" || menuSpec.kind === "anchored_vp" || menuSpec.kind === "anchored_vwap");
+  // Story 33.10: every kind has a settings dialog, and every drawing can be locked and hidden.
+  const menuHasSettings = !!menuSpec;
+  const menuLocked = menuSpec?.locked === true;
   // An Anchored VP has no single colour: the menu's one colour is its up colour.
   const specColor = menuSpec && "kind" in menuSpec && menuSpec.kind === "anchored_vp" ? menuSpec.up_color : menuSpec?.color;
   const menuColor = /^#[0-9a-f]{6}$/i.test(specColor ?? "") ? specColor! : chartVar("--chart-drawing");
+  // Story 33.8: the alert a horizontal line (a price line, no `kind`) or a trendline prefills.
+  const menuAlert: AlertCondition | null = !menu || !menuSpec
+    ? null
+    : !("kind" in menuSpec)
+      ? { kind: "price_cross", level: menuSpec.price }
+      : menuSpec.kind === "trendline"
+        ? { kind: "trendline_cross", drawing_id: menu.id }
+        : null;
+  const pickScale = (patch: PriceScalePatch): void => {
+    setScaleMenu(null);
+    onPriceScale?.(patch);
+  };
   return (
     <>
       <div ref={containerRef} />
+      {scaleMenu && (
+        <div
+          role="menu"
+          aria-label="Price scale"
+          data-scale-menu=""
+          ref={scaleMenuRef}
+          style={{
+            position: "fixed",
+            right: Math.max(0, window.innerWidth - scaleMenu.x),
+            top: Math.max(0, Math.min(scaleMenu.y, window.innerHeight - scaleMenuHeight)),
+            zIndex: 1000,
+            display: "flex", flexDirection: "column", gap: 4, padding: 6, background: chartVar("--chart-bg"),
+            color: chartVar("--chart-text"), border: `1px solid ${chartVar("--chart-border")}`,
+          }}
+        >
+          {PRICE_SCALE_MODES.map((m) => {
+            const locked = scaleModesLocked !== null && (m === "normal" || m === "log");
+            return (
+              <button
+                key={m}
+                type="button"
+                role="menuitemradio"
+                aria-checked={priceScale.mode === m}
+                className="tabbtn"
+                disabled={locked}
+                title={locked ? scaleModesLocked : undefined}
+                onClick={() => pickScale({ mode: m })}
+              >
+                {PRICE_SCALE_LABELS[m]}
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            role="menuitemcheckbox"
+            aria-checked={priceScale.autoScale}
+            className="tabbtn"
+            onClick={() => pickScale({ auto_scale: !priceScale.autoScale })}
+          >
+            Auto (fits data to screen)
+          </button>
+          <button
+            type="button"
+            role="menuitemcheckbox"
+            aria-checked={priceScale.invert}
+            className="tabbtn"
+            onClick={() => pickScale({ invert: !priceScale.invert })}
+          >
+            Invert scale
+          </button>
+        </div>
+      )}
+      {markerTip && (
+        <div
+          role="tooltip"
+          className="chart-marker-tip"
+          style={{
+            position: "fixed", left: markerTip.x + 12, top: markerTip.y + 12, zIndex: 1000, padding: "4px 6px",
+            background: chartVar("--chart-bg"), color: chartVar("--chart-text"),
+            border: `1px solid ${chartVar("--chart-border")}`, pointerEvents: "none",
+          }}
+        >
+          {markerTip.lines.map((line) => (
+            <div key={line}>{line}</div>
+          ))}
+        </div>
+      )}
       {menu && menuSpec && (
         <div
           role="menu"
@@ -1956,6 +3083,42 @@ export default function LightweightChart({
               }}
             >
               Settings…
+            </button>
+          )}
+          {menuAlert && onDrawingAlert && (
+            <button
+              type="button"
+              className="tabbtn"
+              onClick={() => {
+                onDrawingAlert(menuAlert);
+                setMenu(null);
+              }}
+            >
+              Add alert…
+            </button>
+          )}
+          {onDrawingLock && (
+            <button
+              type="button"
+              className="tabbtn"
+              onClick={() => {
+                onDrawingLock(menu.id, !menuLocked);
+                setMenu(null);
+              }}
+            >
+              {menuLocked ? "Unlock" : "Lock"}
+            </button>
+          )}
+          {onDrawingHide && (
+            <button
+              type="button"
+              className="tabbtn"
+              onClick={() => {
+                onDrawingHide(menu.id);
+                setMenu(null);
+              }}
+            >
+              Hide
             </button>
           )}
           <button

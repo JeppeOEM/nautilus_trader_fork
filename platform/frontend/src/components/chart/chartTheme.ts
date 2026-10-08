@@ -1,3 +1,5 @@
+import type { InstrumentPrecision, NewDrawingContext } from "../../lib/drawings";
+
 // Story 32.4 (quick-dev, 2026-10-01): the classic light chart inside the dark terminal app.
 //
 // Everything the chart draws takes its colour from the `--chart-*` tokens declared on
@@ -29,6 +31,10 @@ export const CHART_TOKENS = {
   "--chart-pane-6": "#00838f", // indicator slot 6 (teal: TradingView's #00bcd4 reads 2.3:1 on white)
   "--chart-pane-7": "#795548", // indicator slot 7
   "--chart-pane-8": "#131722", // indicator slot 8
+  "--chart-line": "#2962ff", // Story 33.9: the Line and Area main series (TradingView's line blue)
+  "--chart-compare-1": "#ad1457", // Story 33.9: compare symbol 1 (pink), apart from the candle and indicator slots
+  "--chart-compare-2": "#4527a0", // Story 33.9: compare symbol 2 (deep purple)
+  "--chart-compare-3": "#827717", // Story 33.9: compare symbol 3 (olive)
 } as const;
 
 export type ChartToken = keyof typeof CHART_TOKENS;
@@ -61,6 +67,37 @@ export function chartVar(name: ChartToken): string {
   return value || CHART_TOKENS[name];
 }
 
+/** The `[r, g, b]` channels of a `#rgb`, `#rrggbb`, `rgb(...)` or `rgba(...)` colour (the notations
+ * a computed custom property holds for a hex or rgb literal), else null. */
+function rgbChannels(value: string): [number, number, number] | null {
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(value);
+  if (hex) {
+    const digits = hex[1].length === 3 ? [...hex[1]].map((d) => d + d) : (hex[1].match(/../g) ?? []);
+    const [r, g, b] = digits.map((pair) => parseInt(pair, 16));
+    return [r, g, b];
+  }
+  const rgb = /^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*(?:,\s*[\d.]+%?\s*)?\)$/i.exec(value);
+  if (!rgb) return null;
+  const channels = [rgb[1], rgb[2], rgb[3]].map(Number);
+  if (channels.some((c) => c > 255)) return null;
+  return [channels[0], channels[1], channels[2]];
+}
+
+/** Story 33.9: a token at `alpha` (0..1) for a fill under a line (the Area and Baseline series), as
+ * `rgba(r, g, b, alpha)` from the resolved `#rgb`, `#rrggbb`, `rgb(...)` or `rgba(...)` value (its own
+ * alpha replaced). A value in any other notation is a stylesheet defect: a console error names the
+ * token and the fill is transparent, never an opaque fill over the pane. */
+export function chartVarAlpha(name: ChartToken, alpha: number): string {
+  const value = chartVar(name);
+  const channels = rgbChannels(value);
+  if (channels === null) {
+    console.error(`chart token ${name}: unparseable colour ${JSON.stringify(value)}, its fill is transparent`);
+    return "rgba(0, 0, 0, 0)";
+  }
+  const a = Math.min(1, Math.max(0, alpha));
+  return `rgba(${channels[0]}, ${channels[1]}, ${channels[2]}, ${a})`;
+}
+
 /** The pane palette, resolved through `chartVar`. */
 export function chartPalette(): string[] {
   return CHART_PANE_TOKENS.map((token) => chartVar(token));
@@ -84,4 +121,19 @@ const FIB_LEVEL_TOKENS: Record<number, ChartToken> = {
 /** A Fibonacci ratio's default colour, for the placed drawing and its drag preview alike. */
 export function fibLevelColor(ratio: number): string {
   return chartVar(FIB_LEVEL_TOKENS[ratio] ?? "--chart-drawing");
+}
+
+/**
+ * Story 33.10: the chart tokens a new drawing is made with (`buildDrawing`), resolved now: the page's
+ * placement and the chart's preview of it read this one function, so the preview is the drawing.
+ */
+export function newDrawingContext(precision: InstrumentPrecision | null): NewDrawingContext {
+  return {
+    precision,
+    color: chartVar("--chart-drawing"),
+    upColor: chartVar("--chart-up"),
+    downColor: chartVar("--chart-down"),
+    bandColor: chartVar("--chart-pane-4"),
+    fibColor: fibLevelColor,
+  };
 }

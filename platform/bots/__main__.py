@@ -50,10 +50,11 @@ from bots.application.ports import Connect
 from bots.application.supervise import Supervisor
 from bots.domain.config import ExecBot
 from bots.domain.config import PaperFleet
-from bots.infrastructure.cache_reader import StrategyCacheReader
 from bots.infrastructure.config import resolve_config
 from bots.infrastructure.fills_store import SqliteFillsStore
+from bots.infrastructure.liquidation_data_client import LiquidationFeedStatus
 from bots.infrastructure.nautilus_host import build_node
+from bots.infrastructure.nautilus_host import cache_reader_for
 from bots.infrastructure.redis import connect
 
 
@@ -200,8 +201,10 @@ def _run(
     outlast a TTL) and released by `release` on every way out: right away when the node cannot
     be built, else once the bots' loops have unwound.
     """
+    # One liquidation-feed status per node: the bridge writes it, the cascade bots' readers read it.
+    liquidation_status = LiquidationFeedStatus()
     try:
-        node, hosted = build_node(fleet, settings.redis_url)
+        node, hosted = build_node(fleet, settings.redis_url, liquidation_status)
     except BaseException:
         loop.run_until_complete(release())
         raise
@@ -219,7 +222,7 @@ def _run(
         control_bus = partial(connect, settings.redis_url, subscribe_control=True)
         bus = partial(connect, settings.redis_url)
         for bot, strategy in hosted:
-            runtime = StrategyCacheReader(strategy)
+            runtime = cache_reader_for(bot, strategy, liquidation_status)
             supervisor = Supervisor(
                 bot.bot_id, fleet.mode_label, runtime, fills, control_bus, owner=owner
             )

@@ -30,6 +30,9 @@ Fields are only ever appended:
   the plan refused (`PlanRejected`) since the collector started, `{ts, action, id, reason}` (`id`
   null for `pin_top_liquid`), or null before any. Without it a refused `bot_tui` add would read
   `pending` until the TUI's own no-answer timeout, with no reason shown.
+- Story 33.1: the aggregate carries, after `last_refusal`, `liquidations`: the venue's liquidation
+  socket, `"connected"`, `"reconnecting"` or `"down"` (capture's `CaptureStatus.liquidations`), or
+  null for a venue without the feed. Always present, always last.
 """
 
 import asyncio
@@ -97,7 +100,7 @@ def plan_aggregate(
     """
     Return the per-venue aggregate: `unpinned_ids` (every excluded id sorted) first,
     byte-identical to the pre-29.2 message up to its closing brace, then the appended plan facts,
-    `last_refusal` (Story 29.5) last.
+    `last_refusal` (Story 29.5), then `liquidations` (Story 33.1) last.
     """
     aggregate: dict[str, object] = {
         "unpinned_ids": sorted(plan.excluded),
@@ -107,6 +110,7 @@ def plan_aggregate(
         "min_liquidity_usd": plan.min_liquidity_usd,
         "last_apply": last_apply_field(status.last_applied, status.last_applied_ns),
         "last_refusal": last_refusal,
+        "liquidations": status.liquidations,
     }
     return json.dumps(aggregate)
 

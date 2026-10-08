@@ -28,6 +28,15 @@ export type FilterCondition =
   | { field: string; op: "="; value: string }
   | { field: string; op: FilterOperator; value: number; precision: DisplayPrecision };
 
+/** The typed (raw) value in display units, `value / scale`, without the division's float noise:
+ * `0.0007 / 0.01` is `0.06999999999999999`, which no shown cell (`0.0700`) could equal. Rounding to
+ * 15 significant digits removes only that noise: a typed value of up to 15 significant digits keeps
+ * every digit (a double holds no more than 15 reliably), and it is never rounded to the display's
+ * decimals, so typing more digits than the cell shows still cannot match `=`. */
+function typedInDisplayUnits(value: number, precision: DisplayPrecision): number {
+  return precision.scale === undefined ? value : Number((value / precision.scale).toPrecision(15));
+}
+
 /** A missing/non-numeric value never satisfies a condition -- a row with no data for the
  * filtered field is excluded, not treated as 0.
  *
@@ -49,7 +58,7 @@ export function compare(actual: unknown, condition: FilterCondition): boolean {
   }
   if (typeof actual !== "number" || Number.isNaN(actual)) return false;
   const { value, precision } = condition;
-  const eq = displayed(actual, precision) === value / (precision.scale ?? 1);
+  const eq = displayed(actual, precision) === typedInDisplayUnits(value, precision);
   switch (condition.op) {
     case "=":
       return eq;

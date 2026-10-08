@@ -14,7 +14,9 @@
 # -------------------------------------------------------------------------------------------------
 """
 The strategy gallery service, behind `research/notebooks/08_strategy_gallery`: a fixed list of
-`RunSpec`s (upstream example strategies by string path, plus the two family strategies), each run
+`RunSpec`s (upstream example strategies by string path, plus the two family strategies, plus the
+four liquidation cascade runs of Story 33.14 and the four `OFIStrategy` forced-flow runs of Story
+33.13 on a liquidation-feed id), each run
 through the `BacktestRunner` port, as a leaderboard, an equity overlay and the same spec repeated
 across the execution models (fill, fee, latency). It runs nothing itself and computes no statistic:
 the numbers are `RunResult`'s, and a notebook copies a row's spec into `04_backtest_evaluation`.
@@ -29,6 +31,7 @@ leaderboard orders strategies by what they did on that window, not by what they 
 path: `04_backtest_evaluation`'s sweep and walk-forward on the row that interests you.
 """
 
+import json
 import logging
 import math
 import time
@@ -39,17 +42,27 @@ from dataclasses import dataclass
 from dataclasses import replace
 
 import pandas as pd
+from kernel.clocks import NS_PER_DAY
+from kernel.clocks import NS_PER_MS
+from kernel.liquidation import has_liquidation_feed
 
+from nautilus_trader.model.instruments import Instrument
+from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from research.application.backtest_runner import settlement_currency
 from research.application.evaluation import equity_frame as equity_frame_of
 from research.application.evaluation import fills_frame
 from research.application.indicator_atlas import Sizer
+from research.application.liquidations import read_liquidations
+from research.application.liquidations import replay_cascade
 from research.application.ports import FEE_MODELS
 from research.application.ports import FILL_MODELS
 from research.application.ports import BacktestRunner
 from research.application.ports import RunResult
 from research.application.ports import RunSpec
+from research.application.ports import window_ns
 from research.domain.report import MetricReport
+from research.strategies.liquidation_cascade_strategy import DEFAULT_STOP_PCT
+from research.strategies.liquidation_cascade_strategy import LiquidationCascadeStrategyConfig
 
 
 logger = logging.getLogger(__name__)
@@ -58,8 +71,40 @@ _EXAMPLES = "nautilus_trader.examples.strategies"
 _TWAP = "nautilus_trader.examples.algorithms.twap:TWAPExecAlgorithm"
 _MA_CROSS = "research.strategies.ma_cross_strategy"
 _SIGNAL = "research.strategies.indicator_signal_strategy"
+_CASCADE = "research.strategies.liquidation_cascade_strategy:LiquidationCascadeStrategy"
+# The four cascade runs: (mode, position sides allowed, label suffix).
+CASCADE_RUNS = (
+    ("follow", ("short",), "short only"),
+    ("follow", ("short", "long"), "both sides"),
+    ("fade", ("short",), "short only"),
+    ("fade", ("short", "long"), "both sides"),
+)
+# The data kind every cascade run uses, also named in its label.
+CASCADE_DATA = "liquidations"
+_OFI = "research.strategies.ofi_strategy:OFIStrategy"
+# The four OFI runs (Story 33.13): (label, the forced-flow fields), each run setting both fields so
+# a `params` override never turns the baseline into a variant; they differ by exactly one input.
+OFI_RUNS = (
+    ("baseline", {"forced_flow_filter": False, "liquidation_cascade_mode": "off"}),
+    ("forced-flow filter", {"forced_flow_filter": True, "liquidation_cascade_mode": "off"}),
+    ("cascade fade", {"forced_flow_filter": False, "liquidation_cascade_mode": "fade"}),
+    ("cascade follow", {"forced_flow_filter": False, "liquidation_cascade_mode": "follow"}),
+)
+# The parameters every OFI run starts from, under `params` and each run's own fields: the
+# cumulative-delta gate on (net flow over `cum_delta_seconds` must agree with the entry's side),
+# the one OFI decision the forced-flow filter changes -- with the gate off, the filter run would
+# trade exactly as the baseline by construction.
+OFI_BASE_PARAMS: dict[str, object] = {"cum_delta_threshold": 0.0}
+# The data kind every OFI run uses (the snapshots plus the liquidations), also named in its label.
+OFI_DATA = "seconds_liquidations"
+# `OFIStrategyConfig`'s detector fields -> `LiquidationCascadeStrategyConfig`'s, for the sample.
+_OFI_DETECTOR_FIELDS = {
+    "cascade_window_s": "window_s",
+    "cascade_baseline_s": "baseline_s",
+    "cascade_intensity_threshold": "intensity_threshold",
+    "cascade_decay_ratio": "decay_ratio",
+}
 TRADE_SIZE = "0.01"
-NS_PER_MS = 1_000_000
 BPS = 10_000.0
 LEADERBOARD_COUNTS = ("trades", "orders", "fills")
 SLIPPAGE_COLUMNS = ("client_order_id", "side", "price", "baseline_price", "difference_bps")
@@ -254,6 +299,206 @@ def default_specs(
     }
     rows = [*_upstream(base, periods), *_ma_cross(base, periods), *_signals(base, periods)]
     return [GallerySpec(label, spec) for label, spec in rows]
+
+
+def cascade_specs(
+    catalog_path: str,
+    instrument: str,
+    start: str | int,
+    end: str | int,
+    params: Mapping[str, object],
+    starting_balance: int = 10_000,
+) -> list[GallerySpec]:
+    """
+    Return the four `LiquidationCascadeStrategy` runs (`CASCADE_RUNS`: follow and fade, each short
+    only and both sides) on `instrument` with `data="liquidations"`, `params` (any
+    `LiquidationCascadeStrategyConfig` field) over every run's own mode and sides, and
+    `stop_pct=DEFAULT_STOP_PCT` (the strategy module's one default, the CLI's too) unless `params`
+    names a stop. Each label names the run, the instrument and the data kind, e.g. `Cascade follow
+    short only (BTCUSDT-LINEAR.BYBIT, liquidations)`, so a cascade row is told apart from a bar
+    strategy's in the shared leaderboard and equity chart.
+
+    Invariant: `[]` for an id without a liquidation feed (`has_liquidation_feed`) -- the caller
+    states it (`cascade_sample`), nothing is run or faked; labels are distinct; nothing is run here.
+    """
+    if not has_liquidation_feed(instrument):
+        return []
+    base = {
+        "catalog_path": catalog_path,
+        "instrument_ids": (instrument,),
+        "start": start,
+        "end": end,
+        "starting_balance": starting_balance,
+        "data": CASCADE_DATA,
+    }
+    stop = {} if {"stop_pct", "stop_atr_multiple"} & set(params) else {"stop_pct": DEFAULT_STOP_PCT}
+    return [
+        GallerySpec(
+            f"Cascade {mode} {suffix} ({instrument}, {CASCADE_DATA})",
+            _spec(base, _CASCADE, {**stop, **params, "mode": mode, "sides": list(sides)}),
+        )
+        for mode, sides, suffix in CASCADE_RUNS
+    ]
+
+
+@dataclass(frozen=True)
+class CascadeSample:
+    """
+    The sample behind the cascade runs: the window's UTC days, its archived liquidations, the
+    episodes `replay_cascade` finds in them with the runs' detector parameters and the rows it
+    skipped because the definition's precisions cannot hold their notional.
+
+    Invariant: `has_feed` is False exactly for an id without a liquidation feed, and
+    `has_definition` False for one whose catalog holds no instrument definition; the counts are
+    then 0 and the text says which -- a missing feed or definition is stated, never read as a quiet
+    market.
+    """
+
+    instrument: str
+    has_feed: bool
+    days: int
+    liquidations: int
+    episodes: int
+    unscalable_rows: int = 0
+    has_definition: bool = True
+
+    def __str__(self) -> str:
+        if not self.has_feed:
+            return f"{self.instrument} has no liquidation feed (Bybit LINEAR only): no cascade runs"
+        if not self.has_definition:
+            return f"{self.instrument} has no instrument definition in the catalog: no sample"
+        return (
+            f"{self.instrument} cascade sample: {self.days} UTC day(s), {self.liquidations} "
+            f"liquidations, {self.episodes} episode(s), {self.unscalable_rows} unscalable row(s) "
+            "skipped"
+        )
+
+
+def _detector(instrument: str, params: Mapping[str, object]) -> LiquidationCascadeStrategyConfig:
+    """Return a strategy config holding `params`' detector fields, the defaults elsewhere."""
+    keys = ("window_s", "baseline_s", "intensity_threshold", "decay_ratio")
+    chosen = {key: params[key] for key in keys if key in params}
+    # Parsed, not keyword-built: the config validates each value's type (as a run's build does).
+    return LiquidationCascadeStrategyConfig.parse(
+        json.dumps({"instrument_id": instrument, **chosen})
+    )
+
+
+def _definition(catalog_path: str, instrument: str) -> Instrument | None:
+    """
+    Return the catalog's definition of `instrument`, or None. Duplicate-tolerant, as
+    `backtest_runner._instruments`: one definition stored twice is one id, never an unpack error.
+    """
+    found = {
+        str(i.id): i
+        for i in ParquetDataCatalog(catalog_path).instruments(instrument_ids=[instrument])
+    }
+    return found.get(instrument)
+
+
+def cascade_sample(
+    catalog_path: str,
+    instrument: str,
+    start: str | int,
+    end: str | int,
+    params: Mapping[str, object],
+) -> CascadeSample:
+    """
+    Return the `CascadeSample` of `instrument` over `[start, end)`: the window's UTC days, the
+    liquidations read day by day (`read_liquidations`) and the episodes of `replay_cascade` from
+    the window's start, at the instrument definition's precisions and with the detector fields of
+    `params` (else the strategy config's defaults) -- the strategy's own detector.
+    """
+    if not has_liquidation_feed(instrument):
+        return CascadeSample(instrument, False, 0, 0, 0)
+    definition = _definition(catalog_path, instrument)
+    if definition is None:
+        return CascadeSample(instrument, True, 0, 0, 0, has_definition=False)
+    start_ns, end_ns = window_ns(start, end)
+    rows = read_liquidations(catalog_path, instrument, start_ns, end_ns)
+    detector = _detector(instrument, params)
+    episodes = replay_cascade(
+        rows,
+        detector.window_s,
+        detector.baseline_s,
+        detector.intensity_threshold,
+        detector.decay_ratio,
+        end_ns,
+        start_ns=start_ns,
+        precisions=(definition.price_precision, definition.size_precision),
+    )
+    days = (end_ns - 1) // NS_PER_DAY - start_ns // NS_PER_DAY + 1
+    return CascadeSample(instrument, True, days, len(rows), len(episodes), episodes.unscalable_rows)
+
+
+def ofi_specs(
+    catalog_path: str,
+    instrument: str,
+    start: str | int,
+    end: str | int,
+    params: Mapping[str, object],
+    starting_balance: int = 10_000,
+) -> list[GallerySpec]:
+    """
+    Return the four `OFIStrategy` runs of Story 33.13 (`OFI_RUNS`: the baseline, the forced-flow
+    filter, the cascade fade and the cascade follow gates) on `instrument` with
+    `data="seconds_liquidations"`, `OFI_BASE_PARAMS` (the cumulative-delta gate on, so the filter
+    can change a decision) under `params` (any `OFIStrategyConfig` field) under each run's own
+    forced-flow fields; the execution models stay the venue defaults (the gallery's), so a row
+    differs from the baseline by its one field. Each label names the run, the instrument and the
+    data kind, e.g. `OFI cascade fade (BTCUSDT-LINEAR.BYBIT, seconds_liquidations)`.
+
+    Invariant: `[]` for an id without a liquidation feed (`has_liquidation_feed`) -- nothing is run
+    or faked; labels are distinct; nothing is run here.
+    """
+    if not has_liquidation_feed(instrument):
+        return []
+    base = {
+        "catalog_path": catalog_path,
+        "instrument_ids": (instrument,),
+        "start": start,
+        "end": end,
+        "starting_balance": starting_balance,
+        "data": OFI_DATA,
+    }
+    return [
+        GallerySpec(
+            f"OFI {name} ({instrument}, {OFI_DATA})",
+            _spec(base, _OFI, {**OFI_BASE_PARAMS, **params, **run}),
+        )
+        for name, run in OFI_RUNS
+    ]
+
+
+def ofi_sample(
+    catalog_path: str,
+    instrument: str,
+    start: str | int,
+    end: str | int,
+    params: Mapping[str, object],
+) -> CascadeSample:
+    """
+    Return the `cascade_sample` behind the OFI runs: the same window and liquidations, with the
+    detector fields of `params` (`cascade_window_s`, ... mapped to the cascade strategy's names,
+    else its defaults, which are `OFIStrategyConfig`'s too). The same detector with the same
+    parameters, but not the same clock: the sample advances it on every whole second
+    (`replay_cascade`, the cascade strategy's timer), `OFIStrategy` at each snapshot's `ts_init`
+    (~0.2 s after the second's close), so an episode's start and end can differ by up to a second
+    and a borderline episode can appear on one side only (audit D-223) -- a sample size, not the
+    gates' exact episodes.
+    """
+    detector = {_OFI_DETECTOR_FIELDS[k]: v for k, v in params.items() if k in _OFI_DETECTOR_FIELDS}
+    return cascade_sample(catalog_path, instrument, start, end, detector)
+
+
+def ofi_outcomes(outcomes: Sequence[Outcome]) -> list[Outcome]:
+    """Return the outcomes of the forced-flow OFI runs (`data="seconds_liquidations"`), in order."""
+    return [o for o in outcomes if o.gallery.spec.data == OFI_DATA]
+
+
+def cascade_outcomes(outcomes: Sequence[Outcome]) -> list[Outcome]:
+    """Return the outcomes of cascade runs (`data="liquidations"`), in order."""
+    return [o for o in outcomes if o.gallery.spec.data == CASCADE_DATA]
 
 
 def run_specs(runner: BacktestRunner, specs: Sequence[GallerySpec]) -> list[Outcome]:

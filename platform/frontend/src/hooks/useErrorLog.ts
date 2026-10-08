@@ -12,8 +12,7 @@ export interface ErrorLogState {
   lastBackend: Record<string, string>;
 }
 
-const EMPTY: ErrorLogState = { frontend: 0, lastFrontend: "", backend: {}, lastBackend: {} };
-let state: ErrorLogState = EMPTY;
+let state: ErrorLogState = { frontend: 0, lastFrontend: "", backend: {}, lastBackend: {} };
 const listeners = new Set<() => void>();
 let installed = false;
 
@@ -74,10 +73,4 @@ export function useErrorLog(): ErrorLogState {
     },
     () => state,
   );
-}
-
-/** Tests only. */
-export function resetErrorLog(): void {
-  state = EMPTY;
-  listeners.forEach((l) => l());
 }

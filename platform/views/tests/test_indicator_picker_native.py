@@ -18,15 +18,21 @@ the INDICATOR_CATALOG dispatch/replay mechanism. `replay_indicator` is `replay_n
 """
 
 import random
+import re
+from pathlib import Path
 
 import pytest
+from kernel.candle_patterns import NON_DIRECTIONAL
 from kernel.candle_patterns import CandlePattern
 from kernel.candle_patterns import PatternName
+from kernel.ta import AverageDirectionalIndex
 
 import nautilus_trader.indicators as nt_indicators
 from views.indicator_picker import INDICATOR_CATALOG
+from views.indicator_picker import PLOT_STYLES
 from views.indicator_picker import PRICE_SOURCES
 from views.indicator_picker import _resolve_enum_params
+from views.indicator_picker import check_params
 from views.indicator_picker import indicator_id
 from views.indicator_picker import merged_catalog
 from views.indicator_picker import native_catalog_json
@@ -285,3 +291,79 @@ if __name__ == "__main__":
     test_catalog_entries_all_construct_and_replay_with_default_params()
     test_unknown_indicator_name_raises_value_error()
     print("ok")
+
+
+def test_the_pattern_marker_mirror_names_exactly_the_non_directional_patterns() -> None:
+    """
+    Story 33.11: the chart draws a `NON_DIRECTIONAL` pattern's hit as a neutral circle; the
+    frontend's list is held to the kernel's by member name, so a pattern made non-directional on
+    one side only would draw an arrow (or a circle) that reads the wrong way.
+    """
+    path = Path(__file__).parents[2] / "frontend/src/lib/patternMarkers.ts"
+    match = re.search(
+        r"export const NON_DIRECTIONAL_PATTERNS\b[^=]*=\s*\[([^\]]*)\]", path.read_text()
+    )
+    assert match is not None
+    mirrored = re.findall(r"[\"']([A-Z_]+)[\"']", match.group(1))
+    assert sorted(mirrored) == sorted(pattern.name for pattern in NON_DIRECTIONAL)
+
+
+# --- Story 33.11: `kernel.ta`'s native entries ---------------------------------------------------
+
+_TA_NATIVE = {
+    "ParabolicSAR": ("overlay", {"value": "points"}),
+    "AverageDirectionalIndex": ("oscillator", {}),
+    "WilliamsPercentR": ("oscillator", {}),
+    "MoneyFlowIndex": ("oscillator", {}),
+    "ChaikinMoneyFlow": ("oscillator", {}),
+    "AwesomeOscillator": ("histogram", {}),
+}
+
+
+def test_the_six_kernel_ta_entries_are_listed_with_their_panel_and_plot() -> None:
+    catalog = merged_catalog()
+    for name, (panel, plot) in _TA_NATIVE.items():
+        assert catalog[name]["category"] == "native", name
+        assert (catalog[name]["panel"], catalog[name]["plot"], catalog[name]["note"]) == (
+            panel,
+            plot,
+            None,
+        ), name
+        assert catalog[name]["source_selectable"] is False, name
+
+
+def test_every_entry_serializes_plot_and_note_and_only_known_styles() -> None:
+    for name, entry in merged_catalog().items():
+        assert set(entry["plot"]) <= set(entry["outputs"]), name
+        assert set(entry["plot"].values()) <= set(PLOT_STYLES), name
+        assert entry["note"] is None or isinstance(entry["note"], str), name
+    assert native_catalog_json()["SimpleMovingAverage"]["plot"] == {}
+    assert native_catalog_json()["SimpleMovingAverage"]["note"] is None
+
+
+def test_the_adx_replay_equals_the_kernel_indicator() -> None:
+    candles = _walk_candles(7, 80)
+    replayed = replay_indicator(candles, "AverageDirectionalIndex", {"period": 5})
+    adx = AverageDirectionalIndex(5)
+    for i, candle in enumerate(candles):
+        adx.update_raw(candle["h"], candle["l"], candle["c"])
+        want = (adx.adx, adx.plus_di, adx.minus_di) if adx.initialized else (None, None, None)
+        got = (replayed["adx"][i], replayed["plus_di"][i], replayed["minus_di"][i])
+        assert got == want, i
+    assert replayed["adx"][7] is None
+    assert replayed["adx"][8] is not None  # initialized at the (2 * period - 1)th bar
+
+
+@pytest.mark.parametrize(
+    ("name", "params"),
+    [
+        ("ParabolicSAR", {"step": 0.5, "max_step": 0.2}),
+        ("WilliamsPercentR", {"period": 0}),
+        ("AwesomeOscillator", {"fast": 34}),
+    ],
+)
+def test_a_kernel_ta_constructor_refusal_is_the_save_time_error(
+    name: str, params: dict[str, object]
+) -> None:
+    with pytest.raises(ValueError, match="cannot be built"):
+        check_params(name, params)

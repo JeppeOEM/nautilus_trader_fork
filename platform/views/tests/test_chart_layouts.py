@@ -25,20 +25,35 @@ from typing import Any
 import pytest
 
 from views.preferences import BUILTIN_DEFAULT_LAYOUT
+from views.preferences import CHART_TYPES
+from views.preferences import COMPARE_DEFAULTS
+from views.preferences import DERIVATIVE_KEYS
+from views.preferences import DERIVATIVE_LINE_STYLES
+from views.preferences import DERIVATIVE_OUTPUTS
+from views.preferences import DERIVATIVES_DEFAULTS
 from views.preferences import FOOTPRINT_DEFAULT_IMBALANCE_RATIO
 from views.preferences import FOOTPRINT_DEFAULTS
 from views.preferences import FOOTPRINT_MODES
+from views.preferences import LAST_PRICE_DEFAULTS
 from views.preferences import LAYOUT_BAR_SECONDS
+from views.preferences import LIQUIDATION_MEASURES
+from views.preferences import MAX_COMPARE_SYMBOLS
+from views.preferences import MAX_DERIVATIVE_LINE_WIDTH
 from views.preferences import MAX_FOOTPRINT_ROW_TICKS
 from views.preferences import MAX_IB_MINUTES
+from views.preferences import MAX_INSTRUMENT_ID_LENGTH
 from views.preferences import MAX_PANE_ID_LENGTH
 from views.preferences import MAX_PROFILE_ROWS
 from views.preferences import MAX_PROFILE_SESSIONS
 from views.preferences import MIN_IB_MINUTES
 from views.preferences import MIN_PROFILE_ROWS
+from views.preferences import PRICE_SCALE_DEFAULTS
+from views.preferences import PRICE_SCALE_MODES
 from views.preferences import PROFILE_ANCHORS
 from views.preferences import PROFILE_KINDS
 from views.preferences import PROFILE_SESSIONS
+from views.preferences import TIME_ZONES
+from views.preferences import VOLUME_COLOR_MODES
 from views.preferences import ChartLayouts
 from views.preferences import IndicatorEntry
 from views.preferences import LayoutError
@@ -550,3 +565,488 @@ def test_the_footprint_defaults_are_off_auto_bid_ask_ratio_3_with_text() -> None
     }
     assert FOOTPRINT_MODES == ("bid_ask", "delta", "volume")
     assert FOOTPRINT_DEFAULT_IMBALANCE_RATIO == 3
+
+
+# -- Story 33.5: the optional derivatives table ----------------------------------------------------
+
+
+def _derivatives(**entries: Any) -> dict[str, Any]:
+    return {**copy.deepcopy(DERIVATIVES_DEFAULTS), **entries}
+
+
+def test_a_layout_saved_before_story_33_5_loads_with_every_derivative_off(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    path.write_text(_PRE_32_8_FILE)  # no [derivatives] table (nor a [footprint] one)
+    loaded = load_chart_layouts(path).layouts[_IID]
+    assert loaded["derivatives"] == DERIVATIVES_DEFAULTS
+    assert not any(entry["on"] for entry in loaded["derivatives"].values())
+    assert DERIVATIVES_DEFAULTS["liquidations"] == {"on": False, "measure": "size", "markers": True}
+
+
+def test_derivatives_settings_round_trip_through_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    derivatives = _derivatives(
+        oi={"on": True, "style": {"oi": {"color": "#26a69a", "line_width": 2}}},
+        funding={"on": True, "style": {"rate": {"up_color": "#00ff00", "down_color": "#ff0000"}}},
+        basis={"on": False, "style": {"mark_last": {"line_style": "dashed"}}},
+        liquidations={"on": True, "measure": "notional", "markers": False},
+    )
+    heights = {"price": 420, "deriv_oi": 150, "deriv_liquidations": 90}
+    layout = _layout(derivatives=derivatives, pane_heights=heights)
+    save_chart_layouts(ChartLayouts({_IID: layout}, default=layout), path)
+    loaded = load_chart_layouts(path)
+    assert loaded.layouts[_IID]["derivatives"] == derivatives
+    assert loaded.layouts[_IID]["pane_heights"] == heights
+    assert loaded.default is not None
+    assert loaded.default["derivatives"] == derivatives
+
+
+@pytest.mark.parametrize(
+    ("derivatives", "key"),
+    [
+        (_derivatives(oi={"on": "yes"}), "derivatives.oi.on"),
+        (_derivatives(oi={}), "derivatives.oi.on"),
+        (_derivatives(oi={"on": True, "glow": 1}), "derivatives.oi.glow"),
+        ({**_derivatives(), "screener": {"on": True}}, "derivatives.screener"),
+        ({k: v for k, v in _derivatives().items() if k != "basis"}, "derivatives.basis"),
+        (_derivatives(funding=[]), "derivatives.funding"),
+        (
+            _derivatives(liquidations={"on": True, "markers": True}),
+            "derivatives.liquidations.measure",
+        ),
+        (
+            _derivatives(liquidations={"on": True, "measure": "usd", "markers": True}),
+            "derivatives.liquidations.measure",
+        ),
+        (
+            _derivatives(liquidations={"on": True, "measure": "size", "markers": "no"}),
+            "derivatives.liquidations.markers",
+        ),
+        (_derivatives(oi={"on": True, "style": "red"}), "derivatives.oi.style"),
+        (_derivatives(oi={"on": True, "style": {"open": {}}}), "derivatives.oi.style.open"),
+        (_derivatives(oi={"on": True, "style": {"oi": 3}}), "derivatives.oi.style.oi"),
+        (
+            _derivatives(oi={"on": True, "style": {"oi": {"glow": True}}}),
+            "derivatives.oi.style.oi.glow",
+        ),
+        (
+            _derivatives(oi={"on": True, "style": {"oi": {"color": ""}}}),
+            "derivatives.oi.style.oi.color",
+        ),
+        (
+            _derivatives(oi={"on": True, "style": {"oi": {"line_width": 5}}}),
+            "derivatives.oi.style.oi.line_width",
+        ),
+        (
+            _derivatives(oi={"on": True, "style": {"oi": {"line_style": "wavy"}}}),
+            "derivatives.oi.style.oi.line_style",
+        ),
+    ],
+)
+def test_a_bad_derivatives_setting_is_refused_naming_it(
+    derivatives: dict[str, Any], key: str
+) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(derivatives=derivatives))
+    assert raised.value.key == key
+
+
+def test_a_derivatives_value_that_is_not_a_table_is_refused() -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(derivatives=True))
+    assert raised.value.key == "derivatives"
+
+
+def test_derivatives_settings_mirror_the_frontend() -> None:
+    source = (_FRONTEND / "lib/chartLayout.ts").read_text()
+    keys = re.search(r"DERIVATIVE_KEYS: readonly DerivativeKey\[\] = \[([^\]]*)\]", source)
+    assert keys is not None
+    assert tuple(re.findall(r'"(\w+)"', keys.group(1))) == DERIVATIVE_KEYS
+    outputs = _ts_block("lib/chartLayout.ts", "export const DERIVATIVE_OUTPUTS")
+    listed = {
+        k: tuple(re.findall(r'"(\w+)"', v)) for k, v in re.findall(r"(\w+): \[([^\]]*)\]", outputs)
+    }
+    assert listed == DERIVATIVE_OUTPUTS
+    measures = re.search(
+        r"LIQUIDATION_MEASURES: readonly LiquidationMeasure\[\] = \[([^\]]*)\]", source
+    )
+    assert measures is not None
+    assert tuple(re.findall(r'"(\w+)"', measures.group(1))) == LIQUIDATION_MEASURES
+    style = (_FRONTEND / "lib/indicatorStyle.ts").read_text()
+    styles = re.search(r"LINE_STYLES: readonly LineStyleName\[\] = \[([^\]]*)\]", style)
+    assert styles is not None
+    assert tuple(re.findall(r'"(\w+)"', styles.group(1))) == DERIVATIVE_LINE_STYLES
+    widths = re.search(r"LINE_WIDTHS = \[([^\]]*)\]", style)
+    assert widths is not None
+    assert max(int(w) for w in widths.group(1).split(",")) == MAX_DERIVATIVE_LINE_WIDTH
+
+
+@pytest.mark.parametrize(
+    ("value", "accepted"),
+    [("#26a69a", True), ("red", True), ("", False), (7, False), (True, False), (None, False)],
+)
+def test_a_derivative_colour_is_refused_exactly_when_the_client_would_drop_it(
+    value: Any, accepted: bool
+) -> None:
+    """
+    The client's normaliser keeps a colour that is a non-empty string (`lib/chartLayout.ts`'s
+    `isColor`, the footprint colours' rule) and drops anything else; the server refuses exactly that.
+    """
+    source = (_FRONTEND / "lib/chartLayout.ts").read_text()
+    assert (
+        'const isColor = (value: unknown): value is string => typeof value === "string" '
+        "&& value.length > 0;"
+    ) in source
+    for key in ("color", "up_color", "down_color"):
+        derivatives = _derivatives(oi={"on": True, "style": {"oi": {key: value}}})
+        if accepted:
+            assert validate_layout(_layout(derivatives=derivatives))["derivatives"]["oi"]["style"]
+            continue
+        with pytest.raises(LayoutError) as raised:
+            validate_layout(_layout(derivatives=derivatives))
+        assert raised.value.key == f"derivatives.oi.style.oi.{key}"
+
+
+# -- Story 33.6: the optional volume_color_by key --------------------------------------------------
+
+
+def test_a_layout_saved_before_story_33_6_loads_colouring_volume_by_direction(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    path.write_text(_PRE_32_8_FILE)  # no volume_color_by key
+    assert load_chart_layouts(path).layouts[_IID]["volume_color_by"] == "direction"
+    assert BUILTIN_DEFAULT_LAYOUT["volume_color_by"] == "direction"
+
+
+def test_volume_color_by_round_trips_through_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    layout = _layout(volume_color_by="delta")
+    save_chart_layouts(ChartLayouts({_IID: layout}, default=layout), path)
+    loaded = load_chart_layouts(path)
+    assert loaded.layouts[_IID]["volume_color_by"] == "delta"
+    assert loaded.default is not None
+    assert loaded.default["volume_color_by"] == "delta"
+
+
+@pytest.mark.parametrize("mode", ["buy_sell", "", None, 1, True, ["delta"]])
+def test_a_bad_volume_color_by_is_refused_naming_it(mode: Any) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(volume_color_by=mode))
+    assert raised.value.key == "volume_color_by"
+
+
+def test_volume_color_modes_mirror_the_frontend() -> None:
+    source = (_FRONTEND / "lib/chartLayout.ts").read_text()
+    modes = re.search(r"VOLUME_COLOR_MODES: readonly VolumeColorMode\[\] = \[([^\]]*)\]", source)
+    assert modes is not None
+    assert tuple(re.findall(r'"(\w+)"', modes.group(1))) == VOLUME_COLOR_MODES
+
+
+# -- Story 33.9: the optional chart_type, price_scale and compare keys -----------------------------
+
+_SOL = "SOL-PERP.HYPERLIQUID"
+_BYBIT_BTC = "BTCUSDT-LINEAR.BYBIT"
+
+
+def test_a_layout_saved_before_story_33_9_loads_with_the_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    path.write_text(_PRE_32_8_FILE)  # no chart_type, price_scale or compare
+    layout = load_chart_layouts(path).layouts[_IID]
+    assert layout["chart_type"] == "candles"
+    assert layout["price_scale"] == {"mode": "normal", "auto_scale": True, "invert": False}
+    assert layout["compare"] == {"symbols": [], "spread": False}
+
+
+def test_the_builtin_default_carries_the_story_33_9_defaults() -> None:
+    assert BUILTIN_DEFAULT_LAYOUT["chart_type"] == CHART_TYPES[0] == "candles"
+    assert BUILTIN_DEFAULT_LAYOUT["price_scale"] == PRICE_SCALE_DEFAULTS
+    assert BUILTIN_DEFAULT_LAYOUT["compare"] == COMPARE_DEFAULTS
+
+
+def test_chart_type_price_scale_and_compare_round_trip_through_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    layout = _layout(
+        chart_type="heikin_ashi",
+        price_scale={"mode": "indexed", "auto_scale": False, "invert": True},
+        compare={"symbols": [_BYBIT_BTC, _SOL], "spread": True},
+    )
+    save_chart_layouts(ChartLayouts({_IID: layout}, default=layout), path)
+    loaded = load_chart_layouts(path)
+    for got in (loaded.layouts[_IID], loaded.default):
+        assert got is not None
+        assert got["chart_type"] == "heikin_ashi"
+        assert got["price_scale"] == layout["price_scale"]
+        assert got["compare"] == layout["compare"]
+
+
+def test_an_empty_compare_list_is_written_as_an_empty_array(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    save_chart_layouts(ChartLayouts({_IID: _layout()}), path)
+    table = tomllib.loads(path.read_text())[_IID]
+    assert table["compare"] == {"symbols": [], "spread": False}
+    assert load_chart_layouts(path).layouts[_IID]["compare"]["symbols"] == []
+
+
+@pytest.mark.parametrize("chart_type", ["renko", "", None, 1, True, ["line"], "Candles"])
+def test_a_bad_chart_type_is_refused_naming_it(chart_type: Any) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(chart_type=chart_type))
+    assert raised.value.key == "chart_type"
+
+
+@pytest.mark.parametrize(
+    ("scale", "key"),
+    [
+        ("log", "price_scale"),
+        ({"mode": "x", "auto_scale": True, "invert": False}, "price_scale.mode"),
+        ({"mode": None, "auto_scale": True, "invert": False}, "price_scale.mode"),
+        ({"mode": "log", "auto_scale": 1, "invert": False}, "price_scale.auto_scale"),
+        ({"mode": "log", "auto_scale": True, "invert": "no"}, "price_scale.invert"),
+        ({"mode": "log", "auto_scale": True}, "price_scale.invert"),
+        ({"mode": "log", "auto_scale": True, "invert": False, "lock": 1}, "price_scale.lock"),
+        (None, "price_scale"),
+    ],
+)
+def test_a_bad_price_scale_is_refused_naming_the_key(scale: Any, key: str) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(price_scale=scale))
+    assert raised.value.key == key
+
+
+@pytest.mark.parametrize(
+    ("compare", "key"),
+    [
+        ([_SOL], "compare"),
+        ({"symbols": [_SOL]}, "compare.spread"),
+        ({"symbols": [_SOL], "spread": False, "colors": []}, "compare.colors"),
+        ({"symbols": _SOL, "spread": False}, "compare.symbols"),
+        ({"symbols": [_SOL, _ETH, _BYBIT_BTC, _IID], "spread": False}, "compare.symbols"),
+        ({"symbols": [_SOL, _SOL], "spread": False}, "compare.symbols"),
+        ({"symbols": ["BTCUSDT"], "spread": False}, "compare.symbols.0"),
+        ({"symbols": [_SOL, ""], "spread": False}, "compare.symbols.1"),
+        ({"symbols": [_SOL, 7], "spread": False}, "compare.symbols.1"),
+        ({"symbols": [_SOL], "spread": 0}, "compare.spread"),
+        (
+            {"symbols": ["A" * MAX_INSTRUMENT_ID_LENGTH + ".X"], "spread": False},
+            "compare.symbols.0",
+        ),
+        (None, "compare"),
+    ],
+)
+def test_a_bad_compare_is_refused_naming_the_key(compare: Any, key: str) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(compare=compare))
+    assert raised.value.key == key
+
+
+def test_three_compare_symbols_are_the_maximum() -> None:
+    symbols = [_SOL, _ETH, _BYBIT_BTC]
+    assert len(symbols) == MAX_COMPARE_SYMBOLS
+    layout = validate_layout(_layout(compare={"symbols": symbols, "spread": False}))
+    assert layout["compare"]["symbols"] == symbols
+
+
+def test_an_absent_price_scale_or_compare_defaults() -> None:
+    layout = _layout()
+    layout.pop("price_scale", None)
+    layout.pop("compare", None)
+    validated = validate_layout(layout)
+    assert validated["price_scale"] == PRICE_SCALE_DEFAULTS
+    assert validated["compare"] == COMPARE_DEFAULTS
+
+
+def test_a_compare_id_of_the_maximum_length_is_kept() -> None:
+    iid = "A" * (MAX_INSTRUMENT_ID_LENGTH - 2) + ".X"
+    layout = validate_layout(_layout(compare={"symbols": [iid], "spread": False}))
+    assert layout["compare"]["symbols"] == [iid]
+
+
+def test_instrument_id_length_mirrors_the_frontend() -> None:
+    source = (_FRONTEND / "lib/compare.ts").read_text()
+    assert int(_ts_value(source, "export const MAX_INSTRUMENT_ID_LENGTH")) == (
+        MAX_INSTRUMENT_ID_LENGTH
+    )
+
+
+def test_chart_type_and_scale_settings_mirror_the_frontend() -> None:
+    source = (_FRONTEND / "lib/chartTypes.ts").read_text()
+    types = re.search(r"CHART_TYPES: readonly ChartType\[\] = \[([^\]]*)\]", source)
+    modes = re.search(r"PRICE_SCALE_MODES: readonly PriceScaleModeName\[\] = \[([^\]]*)\]", source)
+    assert types is not None
+    assert modes is not None
+    assert tuple(re.findall(r'"(\w+)"', types.group(1))) == CHART_TYPES
+    assert tuple(re.findall(r'"(\w+)"', modes.group(1))) == PRICE_SCALE_MODES
+    assert int(_ts_value(source, "export const MAX_COMPARE_SYMBOLS")) == MAX_COMPARE_SYMBOLS
+    scale = _ts_block("lib/chartLayout.ts", "export const DEFAULT_PRICE_SCALE")
+    assert _ts_value(scale, "mode") == PRICE_SCALE_DEFAULTS["mode"]
+    assert _ts_value(scale, "auto_scale") == str(PRICE_SCALE_DEFAULTS["auto_scale"]).lower()
+    assert _ts_value(scale, "invert") == str(PRICE_SCALE_DEFAULTS["invert"]).lower()
+    compare = _ts_block("lib/chartLayout.ts", "export const DEFAULT_COMPARE")
+    assert _ts_value(compare, "symbols") == "[]"
+    assert _ts_value(compare, "spread") == str(COMPARE_DEFAULTS["spread"]).lower()
+
+
+# -- Story 33.10: the optional drawings_hidden key -------------------------------------------------
+
+
+def test_a_layout_saved_before_story_33_10_loads_with_drawings_shown(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    path.write_text(_PRE_32_8_FILE)  # no drawings_hidden key
+    assert load_chart_layouts(path).layouts[_IID]["drawings_hidden"] is False
+    assert BUILTIN_DEFAULT_LAYOUT["drawings_hidden"] is False
+
+
+def test_an_absent_drawings_hidden_defaults_to_false() -> None:
+    layout = _layout()
+    layout.pop("drawings_hidden")
+    assert validate_layout(layout)["drawings_hidden"] is False
+
+
+def test_drawings_hidden_round_trips_through_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    layout = _layout(drawings_hidden=True)
+    save_chart_layouts(ChartLayouts({_IID: layout}, default=layout), path)
+    assert tomllib.loads(path.read_text())[_IID]["drawings_hidden"] is True
+    loaded = load_chart_layouts(path)
+    assert loaded.layouts[_IID]["drawings_hidden"] is True
+    assert loaded.default is not None
+    assert loaded.default["drawings_hidden"] is True
+
+
+@pytest.mark.parametrize("hidden", [None, "yes", 1, 0, [True]])
+def test_a_bad_drawings_hidden_is_refused_naming_it(hidden: Any) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(drawings_hidden=hidden))
+    assert raised.value.key == "drawings_hidden"
+
+
+# -- Story 33.12: time_zone, session_breaks, bar_countdown and last_price ---------------------------
+
+_STORY_33_12_KEYS = ("time_zone", "session_breaks", "bar_countdown", "last_price")
+
+
+def test_a_layout_saved_before_story_33_12_loads_with_the_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    path.write_text(_PRE_32_8_FILE)  # none of the four keys
+    layout = load_chart_layouts(path).layouts[_IID]
+    assert {key: layout[key] for key in _STORY_33_12_KEYS} == {
+        "time_zone": "utc",
+        "session_breaks": False,
+        "bar_countdown": True,
+        "last_price": {"line": True, "label": True},
+    }
+
+
+def test_a_default_template_saved_before_story_33_12_loads_with_the_defaults(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    # The coin table re-headed as `[default]`, the strict read.
+    path.write_text(re.sub(r"\[(\"?)" + re.escape(_IID) + r"\1", "[default", _PRE_32_8_FILE))
+    loaded = load_chart_layouts(path).default
+    assert loaded is not None
+    assert {key: loaded[key] for key in _STORY_33_12_KEYS} == {
+        key: BUILTIN_DEFAULT_LAYOUT[key] for key in _STORY_33_12_KEYS
+    }
+
+
+def test_the_builtin_default_carries_the_story_33_12_defaults() -> None:
+    assert BUILTIN_DEFAULT_LAYOUT["time_zone"] == TIME_ZONES[0] == "utc"
+    assert BUILTIN_DEFAULT_LAYOUT["session_breaks"] is False
+    assert BUILTIN_DEFAULT_LAYOUT["bar_countdown"] is True
+    assert (
+        BUILTIN_DEFAULT_LAYOUT["last_price"] == LAST_PRICE_DEFAULTS == {"line": True, "label": True}
+    )
+
+
+def test_the_story_33_12_settings_round_trip_through_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "chart_layouts.toml"
+    layout = _layout(
+        time_zone="local",
+        session_breaks=True,
+        bar_countdown=False,
+        last_price={"line": True, "label": False},
+    )
+    save_chart_layouts(ChartLayouts({_IID: layout}, default=layout), path)
+    table = tomllib.loads(path.read_text())[_IID]
+    assert {key: table[key] for key in _STORY_33_12_KEYS} == {
+        key: layout[key] for key in _STORY_33_12_KEYS
+    }
+    loaded = load_chart_layouts(path)
+    for got in (loaded.layouts[_IID], loaded.default):
+        assert got is not None
+        assert {key: got[key] for key in _STORY_33_12_KEYS} == {
+            key: layout[key] for key in _STORY_33_12_KEYS
+        }
+
+
+@pytest.mark.parametrize("zone", ["UTC", "Europe/Copenhagen", "", None, 0, True, ["utc"]])
+def test_a_bad_time_zone_is_refused_naming_it(zone: Any) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(time_zone=zone))
+    assert raised.value.key == "time_zone"
+
+
+@pytest.mark.parametrize("key", ["session_breaks", "bar_countdown"])
+@pytest.mark.parametrize("flag", [None, "true", 1, 0, [True]])
+def test_a_bad_session_breaks_or_countdown_flag_is_refused_naming_it(key: str, flag: Any) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(**{key: flag}))
+    assert raised.value.key == key
+
+
+@pytest.mark.parametrize(
+    ("last_price", "key"),
+    [
+        (True, "last_price"),
+        (None, "last_price"),
+        ([True, True], "last_price"),
+        ({"line": True}, "last_price.label"),
+        ({"label": True}, "last_price.line"),
+        ({}, "last_price.label"),
+        ({"line": True, "label": True, "color": "#ffffff"}, "last_price.color"),
+        ({"line": 1, "label": True}, "last_price.line"),
+        ({"line": True, "label": None}, "last_price.label"),
+    ],
+)
+def test_a_bad_last_price_is_refused_naming_the_key(last_price: Any, key: str) -> None:
+    with pytest.raises(LayoutError) as raised:
+        validate_layout(_layout(last_price=last_price))
+    assert raised.value.key == key
+
+
+def test_every_time_zone_is_accepted() -> None:
+    assert [validate_layout(_layout(time_zone=z))["time_zone"] for z in TIME_ZONES] == list(
+        TIME_ZONES
+    )
+
+
+def _built_in_layout_source() -> str:
+    source = (_FRONTEND / "lib/chartLayout.ts").read_text()
+    start = source.index("export const BUILT_IN_LAYOUT")
+    return source[start : source.index("\n};", start)]
+
+
+def _ts_bool_table(block: str, key: str) -> dict[str, bool]:
+    """Parse `key: { a: true, b: false }` (inline or a named constant) into a dict of booleans."""
+    match = re.search(rf"\b{key}\s*:\s*(\{{[^}}]*\}}|\w+)", block)
+    assert match is not None, f"{key} not found"
+    literal = match.group(1)
+    if not literal.startswith("{"):
+        literal = _ts_block("lib/chartLayout.ts", f"const {literal}") + "}"
+    return {
+        name: value == "true" for name, value in re.findall(r"(\w+)\s*:\s*(true|false)", literal)
+    }
+
+
+def test_time_zone_and_last_price_settings_mirror_the_frontend() -> None:
+    time_source = (_FRONTEND / "lib/time.ts").read_text()
+    zones = re.search(r"export type TimeZoneSetting\s*=\s*([^;]+);", time_source)
+    assert zones is not None
+    assert tuple(re.findall(r'"(\w+)"', zones.group(1))) == TIME_ZONES
+    block = _built_in_layout_source()
+    assert _ts_value(block, "time_zone") == BUILTIN_DEFAULT_LAYOUT["time_zone"]
+    assert _ts_value(block, "session_breaks") == "false"
+    assert _ts_value(block, "bar_countdown") == "true"
+    assert _ts_bool_table(block, "last_price") == LAST_PRICE_DEFAULTS

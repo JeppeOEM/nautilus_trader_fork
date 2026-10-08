@@ -24,12 +24,17 @@ import re
 import sqlite3
 import time
 from contextlib import closing
+from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
+
+from kernel.second_snapshot import SecondOHLC
+from kernel.second_snapshot import unit_float
 
 from candles.application import queries
 from candles.application.forming import bars_from_rows
 from candles.domain.candle import PARTIAL_OBSERVED_FRACTION
+from candles.domain.candle import is_valid_candle
+from candles.domain.fold import AGGREGATE_KEYS
 from candles.domain.fold import BAR_SECONDS
 from candles.domain.fold import DAY_MS
 from candles.domain.fold import RETAIN_DAYS
@@ -40,31 +45,61 @@ from candles.infrastructure.sqlite_store import CandleStore
 _IID = "BTC-USD-PERP.DYDX"
 _DAY0_MS = 20_000 * 86_400_000  # a UTC midnight well in the past (so `rebuild` may touch it)
 _SEC_NS = 1_000_000_000
+_PRICE_P = 2
+_SIZE_P = 3
 
 
-def _second(sec: int, price: float | None, volume: float = 1.0) -> SimpleNamespace:
-    """`sec` counts from _DAY0_MS; price None = a second with a book but no trade."""
-    return SimpleNamespace(
-        ts_event=_DAY0_MS * 1_000_000 + sec * _SEC_NS,
-        open_price=price,
-        high_price=None if price is None else price + 0.5,
-        low_price=None if price is None else price - 0.5,
-        close_price=None if price is None else price + 0.1,
-        buy_volume=0.0 if price is None else volume,
-        sell_volume=0.0 if price is None else 0.25,
+def _units(value: float, precision: int) -> int:
+    """Return a decimal literal in units, exactly (`Decimal(str(...))`: never a float product)."""
+    scaled = Decimal(str(value)).scaleb(precision)
+    assert scaled == scaled.to_integral_value(), (value, precision)
+    return int(scaled)
+
+
+def _second(
+    sec: int, price: float | None, volume: float = 1.0, size_precision: int = _SIZE_P
+) -> SecondOHLC:
+    """
+    `sec` counts from _DAY0_MS; price None = a second with a book but no trade. A traded second
+    spans `price - 0.5 .. price + 0.5`, closes at `price + 0.1`, buys `volume` in one trade and
+    sells 0.25 in one; the floats are decoded from the units exactly as the catalog read decodes.
+    """
+    ts_event = _DAY0_MS * 1_000_000 + sec * _SEC_NS
+    if price is None:
+        return SecondOHLC(
+            ts_event, None, None, None, None, 0.0, 0.0, _PRICE_P, size_precision, None, 0, 0, 0, 0
+        )
+    p = _units(price, _PRICE_P)
+    buy, sell = _units(volume, size_precision), _units(0.25, size_precision)
+    o, h, low, c = p, p + 50, p - 50, p + 10
+    return SecondOHLC(
+        ts_event,
+        unit_float(o, _PRICE_P),
+        unit_float(h, _PRICE_P),
+        unit_float(low, _PRICE_P),
+        unit_float(c, _PRICE_P),
+        unit_float(buy, size_precision),
+        unit_float(sell, size_precision),
+        _PRICE_P,
+        size_precision,
+        c,
+        buy,
+        sell,
+        1,
+        1,
     )
 
 
-def _fixture() -> list[SimpleNamespace]:
+def _fixture() -> list[SecondOHLC]:
     """Six hours of seconds: ~5% traded, and a 40-minute hole with no rows at all."""
     rng = random.Random(7)  # noqa: S311 -- a deterministic fixture, not cryptography
     rows = []
     for sec in range(6 * 3600):
         if 7200 <= sec < 9600:
             continue  # collector down
-        rows.append(
-            _second(sec, rng.uniform(90, 110) if rng.random() < 0.05 else None, rng.uniform(0.1, 5))
-        )
+        traded = rng.random() < 0.05
+        price = rng.randint(9_000, 11_000) / 100 if traded else None
+        rows.append(_second(sec, price, rng.randint(10, 500) / 100))
     return rows
 
 
@@ -72,7 +107,7 @@ def _stored(db: sqlite3.Connection, bar: int) -> list[dict]:
     return queries.window(db, _IID, bar, 1 << 62, 10_000)
 
 
-def _check_matches_raw_aggregation(db: sqlite3.Connection, rows: list[SimpleNamespace]) -> None:
+def _check_matches_raw_aggregation(db: sqlite3.Connection, rows: list[SecondOHLC]) -> None:
     for bar in BAR_SECONDS:
         got = _stored(db, bar)
         want = bars_from_rows(rows, bar)
@@ -81,6 +116,9 @@ def _check_matches_raw_aggregation(db: sqlite3.Connection, rows: list[SimpleName
             for k in ("o", "h", "l", "c"):
                 assert g[k] == w[k], (bar, k, g, w)
             assert abs(g["v"] - w["v"]) < 1e-9
+            # The integer columns are exact whatever the flush split: equal, not close.
+            assert {k: g[k] for k in AGGREGATE_KEYS} == {k: w[k] for k in AGGREGATE_KEYS}
+            assert is_valid_candle(g), g  # buy_v + sell_v is v in units
             seconds = sum(
                 1 for r in rows if r.ts_event // 1_000_000 // (bar * 1000) * (bar * 1000) == g["t"]
             )
@@ -139,15 +177,7 @@ def test_rebuild_repairs_a_hole_and_is_idempotent(tmp_path: Path) -> None:
 def test_rebuild_refuses_the_open_day_unless_told(tmp_path: Path) -> None:
     with closing(sqlite_store.connect_rw(str(tmp_path / "c.db"))) as db:
         today_ms = int(time.time() * 1000) // 86_400_000 * 86_400_000
-        now_row = SimpleNamespace(
-            ts_event=today_ms * 1_000_000,
-            open_price=1.0,
-            high_price=1.0,
-            low_price=1.0,
-            close_price=1.0,
-            buy_volume=1.0,
-            sell_volume=0.0,
-        )
+        now_row = _second((today_ms - _DAY0_MS) // 1000, 1.0)
         assert sqlite_store.rebuild(db, _IID, [now_row], today_ms, today_ms + 86_400_000) == 0
         assert (
             sqlite_store.rebuild(
@@ -226,7 +256,8 @@ def test_the_other_per_instrument_reads_keep_the_primary_key(tmp_path: Path) -> 
             assert "candles_by_bar_seconds_t" not in plan, (sql, plan)
 
 
-_PRE_INDEX_SCHEMA = Path(__file__).parent / "fixtures" / "candle_store_schema_pre_index.sql"
+# The Story 24.1 baseline DDL: before DW-195's index and before Story 33.3's columns and tables.
+_PRE_INDEX_SCHEMA = Path(__file__).parent / "fixtures" / "candle_store_schema_pre_33_3.sql"
 _NOW_MS = _DAY0_MS + 100 * DAY_MS
 
 
@@ -284,12 +315,31 @@ def test_pre_index_store_has_no_index(tmp_path: Path) -> None:
         assert _candle_indexes(db) == []
 
 
-def test_pre_index_fixture_is_the_recorded_schema_without_the_index_line() -> None:
-    """The two fixtures cannot drift apart: the old shape is the new one minus DW-195's index."""
-    index_line = "CREATE INDEX IF NOT EXISTS candles_by_bar_seconds_t ON candles(bar_seconds, t);\n"
+def test_pre_index_fixture_is_the_recorded_schema_without_its_later_additions() -> None:
+    """
+    The fixtures cannot drift apart: the old shape is the recorded one minus DW-195's index and
+    minus Story 33.3's aggregate column lines and its two liquidation tables.
+    """
     recorded = (_PRE_INDEX_SCHEMA.parent / "candle_store_schema.sql").read_text()
-    assert index_line in recorded
-    assert _PRE_INDEX_SCHEMA.read_text() == recorded.replace(index_line, "")
+    additions = [
+        "CREATE INDEX IF NOT EXISTS candles_by_bar_seconds_t ON candles(bar_seconds, t);\n",
+        "    buy_v INTEGER, sell_v INTEGER, buy_n INTEGER, sell_n INTEGER, pv INTEGER,\n",
+        "    liq_long_v INTEGER, liq_short_v INTEGER, liq_n INTEGER,\n",
+        "    price_precision INTEGER, size_precision INTEGER,\n",
+        re.search(
+            r"CREATE TABLE IF NOT EXISTS liquidations_applied \(.*?\) WITHOUT ROWID;\n",
+            recorded,
+            re.DOTALL,
+        )[0],
+        re.search(
+            r"CREATE TABLE IF NOT EXISTS liquidation_feed_since \(.*?\n\);\n", recorded, re.DOTALL
+        )[0],
+    ]
+    stripped = recorded
+    for addition in additions:
+        assert addition in stripped
+        stripped = stripped.replace(addition, "")
+    assert _PRE_INDEX_SCHEMA.read_text() == stripped
 
 
 def test_pre_index_store_gains_the_index_on_writer_open_with_rows_intact(tmp_path: Path) -> None:

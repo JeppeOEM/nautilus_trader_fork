@@ -18,14 +18,21 @@ and every trade it dropped, backfilled or could not recover, so `python -m
 verification.conservation` can prove a missing second or trade is explained.
 
 One JSON object per line in `<catalog>/../coverage/<venue lower>.jsonl`
-(`capture.infrastructure.coverage_file`), four kinds:
+(`capture.infrastructure.coverage_file`), five kinds (the fifth, Story 33.1, appended):
 
     {"kind":"seconds","instrument_id":…,"reason":…,"first_s":…,"last_s":…,"count":…}
     {"kind":"trades_dropped","instrument_id":…,"reason":"stale","first_ns":…,"last_ns":…,"count":…}
     {"kind":"trades_backfilled","instrument_id":…,"count":…,"trade_ids":[…]}
     {"kind":"trades_unrecoverable","instrument_id":…,"reason":"depth|fetch_failed","from_ns":…,"to_ns":…}
+    {"kind":"liquidations_unrecoverable","instrument_id":…,"reason":"feed_down|not_running","from_ns":…,"to_ns":…}
 
 A second is `ts_event // 1 s`, the same number the archive's snapshot rows carry.
+
+`liquidations_unrecoverable` is an inclusive `ts_event` window (venue time, ns) of one instrument
+whose liquidations were never received: the liquidation socket was not active (`feed_down`) or no
+process was running (`not_running`). Known limit: there is no venue history endpoint to backfill
+from (Bybit has none), so the window is the record, never a gap to fill. Upgrade path: a Bybit
+liquidation history endpoint, should one appear, read by a backfill like the trades'.
 
 Pure: no I/O, no logging, no clock. The `CaptureService` notes the verdicts, takes the runs at each
 flush, encodes them with `CoverageLine.to_json_line` and appends them through its `ArchiveWriter`.
@@ -163,7 +170,50 @@ class TradesUnrecoverable:
         )
 
 
-CoverageLine = SecondsRun | TradesDropped | TradesBackfilled | TradesUnrecoverable
+# `liquidations_unrecoverable` reasons (Story 33.1).
+FEED_DOWN = "feed_down"
+NOT_RUNNING = "not_running"
+# `WRITE_FAILED` (above): archived liquidations whose catalog write failed, from the first lost
+# row's `ts_event` to the last's.
+LIQUIDATION_REASONS = frozenset({FEED_DOWN, NOT_RUNNING, WRITE_FAILED})
+
+
+@dataclass(frozen=True, slots=True)
+class LiquidationsUnrecoverable:
+    """
+    A `ts_event` window (inclusive, ns) whose liquidations of one instrument were never received.
+
+    Invariant: `reason` is a `LIQUIDATION_REASONS` member and the window is not inverted --
+    construction refuses anything else (`ValueError`), so the line the verifier parses strictly is
+    always well formed.
+    """
+
+    instrument_id: str
+    reason: str
+    from_ns: int
+    to_ns: int
+
+    def __post_init__(self) -> None:
+        if self.reason not in LIQUIDATION_REASONS:
+            raise ValueError(f"not a liquidation coverage reason: {self.reason!r}")
+        if self.from_ns > self.to_ns:
+            raise ValueError(f"inverted liquidation window {self.from_ns} > {self.to_ns}")
+
+    def to_json_line(self) -> str:
+        return _line(
+            {
+                "kind": "liquidations_unrecoverable",
+                "instrument_id": self.instrument_id,
+                "reason": self.reason,
+                "from_ns": self.from_ns,
+                "to_ns": self.to_ns,
+            }
+        )
+
+
+CoverageLine = (
+    SecondsRun | TradesDropped | TradesBackfilled | TradesUnrecoverable | LiquidationsUnrecoverable
+)
 
 
 class SecondCoverage:

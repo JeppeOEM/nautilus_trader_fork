@@ -22,6 +22,13 @@ gap-encoded book, the same layout as the Parquet row -- never floats (`docs/DATA
 Since Story 28.1 the same client also carries capture's per-flush hot-path figures: one pipeline
 of `PUBLISH capture:hotpath <json>` and `SET capture:hotpath:<venue> <json>` (the latest record,
 pull-readable with `redis-cli GET`; `docs/DATA_DICTIONARY.md` §1.25).
+
+Since Story 33.1 it also publishes `liquidations:raw`: one JSON array of `Liquidation.to_dict`
+rows per decoded liquidation frame (integer units, both precisions, the side as `"long"`/`"short"`,
+`docs/DATA_DICTIONARY.md` §1.26), the rows the archive buffer took, never floats.
+
+Since Story 33.4 it also publishes `derivs:raw`: one JSON array per sample tick of
+`kernel.derivs_wire.to_wire` rows (mark, index, funding, open interest; every value exact text).
 """
 
 import json
@@ -30,11 +37,14 @@ import time
 from typing import Any
 
 import redis.asyncio as aioredis
+from kernel.liquidation import Liquidation
 from kernel.second_snapshot import DydxSecondSnapshot
 
 
 CHANNEL = "snapshots:raw"
 HOTPATH_CHANNEL = "capture:hotpath"
+LIQUIDATIONS_CHANNEL = "liquidations:raw"
+DERIVS_CHANNEL = "derivs:raw"
 
 
 def redis_url_from_env() -> str:
@@ -53,6 +63,31 @@ async def publish_snapshot_batch(redis_client: aioredis.Redis, snapshots: list) 
         return
     payload = json.dumps([DydxSecondSnapshot.to_dict(s) for s in snapshots])
     await redis_client.publish(CHANNEL, payload)
+
+
+async def publish_liquidation_batch(redis_client: aioredis.Redis, rows: list[Liquidation]) -> None:
+    """
+    Publish liquidation rows to `liquidations:raw` as one JSON array of `Liquidation.to_dict`.
+
+    An empty batch publishes nothing. A failure raises: the liquidation feed ledgers it at
+    `collector.liquidation_publish` and carries on -- the rows are already in the flush buffer.
+    """
+    if not rows:
+        return
+    payload = json.dumps([Liquidation.to_dict(row) for row in rows])
+    await redis_client.publish(LIQUIDATIONS_CHANNEL, payload)
+
+
+async def publish_derivs_batch(redis_client: aioredis.Redis, rows: list[dict[str, Any]]) -> None:
+    """
+    Publish one tick's `kernel.derivs_wire` rows to `derivs:raw` as one JSON array.
+
+    An empty batch publishes nothing. A failure raises: the `CaptureService` ledgers it at
+    `collector.derivs_publish` with the row count and carries on -- the archive buffer has them.
+    """
+    if not rows:
+        return
+    await redis_client.publish(DERIVS_CHANNEL, json.dumps(rows))
 
 
 def hotpath_key(venue: str) -> str:
@@ -88,6 +123,14 @@ class RedisLiveStream:
         if not snapshots:
             return
         await publish_snapshot_batch(self._redis(), snapshots)
+
+    async def publish_liquidations(self, rows: list[Liquidation]) -> None:
+        """Publish one frame's archived liquidation rows on `liquidations:raw`; raises on failure."""
+        await publish_liquidation_batch(self._redis(), rows)
+
+    async def publish_derivs(self, rows: list[dict[str, Any]]) -> None:
+        """Publish one tick's derivatives rows on `derivs:raw`; raises on failure."""
+        await publish_derivs_batch(self._redis(), rows)
 
     async def publish_hotpath(self, venue: str, report: dict[str, Any]) -> None:
         """

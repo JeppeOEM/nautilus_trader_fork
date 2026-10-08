@@ -118,75 +118,6 @@
         }
       }
     },
-    "/catalog/chart-series/{symbol}": {
-      "get": {
-        "summary": "Catalog Chart Series",
-        "operationId": "catalog_chart_series_catalog_chart_series__symbol__get",
-        "parameters": [
-          {
-            "name": "symbol",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Symbol"
-            }
-          },
-          {
-            "name": "start_ns",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "maximum": 9223371976854775807,
-              "minimum": 0,
-              "title": "Start Ns"
-            }
-          },
-          {
-            "name": "end_ns",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "maximum": 9223371976854775807,
-              "minimum": 0,
-              "title": "End Ns"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "additionalProperties": true
-                    }
-                  },
-                  "title": "Response Catalog Chart Series Catalog Chart Series  Symbol  Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/catalog/snapshots/{iid}": {
       "get": {
         "summary": "Catalog Snapshots",
@@ -378,6 +309,53 @@
       }
     },
     "/api/alerts/{alert_id}": {
+      "put": {
+        "summary": "Update Alert",
+        "operationId": "update_alert_api_alerts__alert_id__put",
+        "parameters": [
+          {
+            "name": "alert_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Alert Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlertUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "summary": "Delete Alert",
         "operationId": "delete_alert_api_alerts__alert_id__delete",
@@ -630,6 +608,52 @@
         }
       }
     },
+    "/api/rankings/filter-presets": {
+      "get": {
+        "summary": "Get Filter Presets",
+        "description": "Return every saved preset; none saved yet is `[]`, a corrupt file a 500.",
+        "operationId": "get_filter_presets_api_rankings_filter_presets_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FilterPresetsResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Put Filter Presets",
+        "description": "Replace the whole preset list with the body's `{\"presets\": [...]}` and return what is stored.\n\nInvalid JSON is a 400; a body that is not a storable preset list a 422 naming the field\n(`presets[1].conditions[0].value: ...`), and nothing is written unless all of it passes. The\nwrite is a full rewrite under `PREFERENCES_LOCK`, published atomically.\n\nKnown limit: whole-list last-write-wins with no version, so two tabs or browsers saving presets\nat once overwrite each other (the later save wins), and the lock is in-process only. Upgrade\npath: a `version` returned by the GET and sent back by the PUT, a 409 on a mismatch.",
+        "operationId": "put_filter_presets_api_rankings_filter_presets_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FilterPresetsResponse"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FilterPresetsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/candles/{instrument_id}": {
       "get": {
         "summary": "Get Candles",
@@ -684,6 +708,331 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/coin/{instrument_id}/funding": {
+      "get": {
+        "summary": "Get Funding",
+        "operationId": "get_funding_api_coin__instrument_id__funding_get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          },
+          {
+            "name": "before_ns",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Before Ns"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 120,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FundingResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/coin/{instrument_id}/open-interest": {
+      "get": {
+        "summary": "Get Open Interest",
+        "operationId": "get_open_interest_api_coin__instrument_id__open_interest_get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          },
+          {
+            "name": "before_ns",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Before Ns"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 120,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "bar_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 60,
+              "title": "Bar Seconds"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenInterestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/coin/{instrument_id}/mark-index": {
+      "get": {
+        "summary": "Get Mark Index",
+        "description": "Mark, index and basis per bucket, at every `bar_seconds`. `basis_ml_bps` is against the candle\nstore's traded close: a stored width's own, a width its buckets tile composed (1W from 1D), and\nnull for a width none tiles (1..59 s, 90 s).",
+        "operationId": "get_mark_index_api_coin__instrument_id__mark_index_get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          },
+          {
+            "name": "before_ns",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Before Ns"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 120,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "bar_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 60,
+              "title": "Bar Seconds"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarkIndexResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/coin/{instrument_id}/liquidations": {
+      "get": {
+        "summary": "Get Liquidations",
+        "operationId": "get_liquidations_api_coin__instrument_id__liquidations_get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          },
+          {
+            "name": "before_ns",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Before Ns"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 120,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiquidationsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/coin/{instrument_id}/liquidation-bars": {
+      "get": {
+        "summary": "Get Liquidation Bars",
+        "description": "Liquidation sums per candle-store bucket. A width the store does not fold is composed from\nthe widest stored one that tiles it (1W from 1D: sums, null when a constituent is missing or\nnull, or the week straddles the feed start); a width none tiles (1..59 s, 90 s) is a 400.\n`notional_units` is summed from the archived rows, null unless the archive holds exactly `n`.",
+        "operationId": "get_liquidation_bars_api_coin__instrument_id__liquidation_bars_get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          },
+          {
+            "name": "before_ns",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Before Ns"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 120,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "bar_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 60,
+              "title": "Bar Seconds"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiquidationBarsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`bar_seconds` is not composable from the candle store's widths"
           },
           "422": {
             "description": "Validation Error",
@@ -759,74 +1108,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/FootprintResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/indicator-series/{instrument_id}": {
-      "get": {
-        "summary": "Get Indicator Series",
-        "operationId": "get_indicator_series_api_indicator_series__instrument_id__get",
-        "parameters": [
-          {
-            "name": "instrument_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Instrument Id"
-            }
-          },
-          {
-            "name": "before_ns",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "title": "Before Ns"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "default": 120,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "bar_seconds",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "default": 60,
-              "title": "Bar Seconds"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/IndicatorSeriesResponse"
                 }
               }
             }
@@ -1050,7 +1331,7 @@
     "/api/coin/{instrument_id}/indicator-values": {
       "get": {
         "summary": "Get Indicator Values",
-        "description": "Bounded candle window (mirrors `candles.py`'s window/limit/bar_seconds contract), then\nper-requested-name `indicator_picker.replay_entry` dispatch, results keyed by\n`indicator_picker.indicator_id(name, params, source)` (AD-F2/AD-F3).\n\nRe-derives its own bounded window server-side rather than accepting client-supplied\ncandles in the request body (Design Notes: DESIGN-01) -- always a bounded *historical*\nreplay of `[start_ns, before_ns)`, mirroring `indicator_series.py`'s own purely-historical\nscroll-back model; the candlestick's live edge has its own sanctioned path (AD-F7) that\nthis route does not duplicate.\n\nA custom indicator whose instrument never opted into raw-delta capture returns `None` for\nevery point (pre-existing custom-indicator behavior, reused unchanged) -- not an\nerror (I/O matrix: \"Values route returns None per-point for an uncaptured custom\nindicator, not an error\").",
+        "description": "Bounded candle window (mirrors `candles.py`'s window/limit/bar_seconds contract), then\nper-requested-name `indicator_picker.replay_entry` dispatch, results keyed by\n`indicator_picker.indicator_id(name, params, source)` (AD-F2/AD-F3).\n\nRe-derives its own bounded window server-side rather than accepting client-supplied\ncandles in the request body (Design Notes: DESIGN-01) -- always a bounded *historical*\nreplay of `[start_ns, before_ns)`, the purely-historical scroll-back model the deleted\nOFI/OBI series route (Story 33.4) had; the candlestick's live edge has its own sanctioned\npath (AD-F7) that this route does not duplicate.\n\nA custom indicator whose instrument never opted into raw-delta capture returns `None` for\nevery point (pre-existing custom-indicator behavior, reused unchanged) -- not an\nerror (I/O matrix: \"Values route returns None per-point for an uncaptured custom\nindicator, not an error\").",
         "operationId": "get_indicator_values_api_coin__instrument_id__indicator_values_get",
         "parameters": [
           {
@@ -1291,6 +1572,59 @@
         }
       }
     },
+    "/api/markets": {
+      "get": {
+        "summary": "Get Markets",
+        "description": "503 when no venue is live -- an empty list would pose as \"no markets\" while the ranking engine\nis down. A malformed `instrument_id` raises `MalformedInstrumentId`, the app's 400 handler.\nRead through `buses` (not an imported name) so tests can swap the bus.",
+        "operationId": "get_markets_api_markets_get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Instrument Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarketsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`instrument_id` has no `.VENUE` suffix"
+          },
+          "503": {
+            "description": "No venue's `markets:live` list received in the last 900 s"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/snapshots/{instrument_id}": {
       "get": {
         "summary": "Get Snapshots",
@@ -1342,6 +1676,52 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/watchlist": {
+      "get": {
+        "summary": "Get Watchlist",
+        "description": "Return the pinned ids; none pinned yet is `[]`, a corrupt file a 500.",
+        "operationId": "get_watchlist_api_watchlist_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchlistResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Put Watchlist",
+        "description": "Replace the whole list with the body's `{\"instruments\": [...]}` and return what is stored.\n\nInvalid JSON is a 400; a body that is not a storable list a 422 naming the entry\n(`instruments[3]: ...`), and nothing is written unless all of it passes. A corrupt stored file\nis a 500 and is left as it is. The write is a full rewrite under `PREFERENCES_LOCK`, published\natomically.\n\nKnown limit: whole-list last-write-wins with no version, so two tabs or browsers pinning at once\noverwrite each other (the later save wins), and the lock is in-process only. Upgrade path: a\n`version` returned by the GET and sent back by the PUT, a 409 on a mismatch.",
+        "operationId": "put_watchlist_api_watchlist_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WatchlistResponse"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchlistResponse"
                 }
               }
             }
@@ -1504,7 +1884,14 @@
             "title": "Instrument Id"
           },
           "level": {
-            "type": "number",
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Level"
           },
           "frequency": {
@@ -1538,12 +1925,69 @@
           "webhook_url": {
             "type": "string",
             "title": "Webhook Url"
+          },
+          "condition": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/LevelCondition"
+                  },
+                  {
+                    "$ref": "#/components/schemas/PctMoveCondition"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ChannelExitCondition"
+                  },
+                  {
+                    "$ref": "#/components/schemas/IndicatorCondition"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TrendlineCrossCondition"
+                  },
+                  {
+                    "$ref": "#/components/schemas/FundingCondition"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OiChangeCondition"
+                  },
+                  {
+                    "$ref": "#/components/schemas/LiquidationNotionalCondition"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ForcedShareCondition"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "kind",
+                  "mapping": {
+                    "channel_exit": "#/components/schemas/ChannelExitCondition",
+                    "forced_share": "#/components/schemas/ForcedShareCondition",
+                    "funding_above": "#/components/schemas/FundingCondition",
+                    "funding_below": "#/components/schemas/FundingCondition",
+                    "indicator": "#/components/schemas/IndicatorCondition",
+                    "liquidation_notional": "#/components/schemas/LiquidationNotionalCondition",
+                    "oi_change": "#/components/schemas/OiChangeCondition",
+                    "pct_move": "#/components/schemas/PctMoveCondition",
+                    "price_above": "#/components/schemas/LevelCondition",
+                    "price_below": "#/components/schemas/LevelCondition",
+                    "price_cross": "#/components/schemas/LevelCondition",
+                    "price_cross_down": "#/components/schemas/LevelCondition",
+                    "price_cross_up": "#/components/schemas/LevelCondition",
+                    "trendline_cross": "#/components/schemas/TrendlineCrossCondition"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Condition"
           }
         },
         "type": "object",
         "required": [
           "instrument_id",
-          "level",
           "frequency",
           "bar_seconds",
           "template",
@@ -1558,7 +2002,14 @@
             "title": "Instrument Id"
           },
           "level": {
-            "type": "number",
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Level"
           },
           "frequency": {
@@ -1602,7 +2053,8 @@
             "enum": [
               "active",
               "triggered",
-              "expired"
+              "expired",
+              "invalid"
             ],
             "title": "Status"
           },
@@ -1620,21 +2072,185 @@
               }
             ],
             "title": "Last Fired Ns"
+          },
+          "condition": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LevelCondition"
+              },
+              {
+                "$ref": "#/components/schemas/PctMoveCondition"
+              },
+              {
+                "$ref": "#/components/schemas/ChannelExitCondition"
+              },
+              {
+                "$ref": "#/components/schemas/IndicatorCondition"
+              },
+              {
+                "$ref": "#/components/schemas/TrendlineCrossCondition"
+              },
+              {
+                "$ref": "#/components/schemas/FundingCondition"
+              },
+              {
+                "$ref": "#/components/schemas/OiChangeCondition"
+              },
+              {
+                "$ref": "#/components/schemas/LiquidationNotionalCondition"
+              },
+              {
+                "$ref": "#/components/schemas/ForcedShareCondition"
+              }
+            ],
+            "title": "Condition",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "channel_exit": "#/components/schemas/ChannelExitCondition",
+                "forced_share": "#/components/schemas/ForcedShareCondition",
+                "funding_above": "#/components/schemas/FundingCondition",
+                "funding_below": "#/components/schemas/FundingCondition",
+                "indicator": "#/components/schemas/IndicatorCondition",
+                "liquidation_notional": "#/components/schemas/LiquidationNotionalCondition",
+                "oi_change": "#/components/schemas/OiChangeCondition",
+                "pct_move": "#/components/schemas/PctMoveCondition",
+                "price_above": "#/components/schemas/LevelCondition",
+                "price_below": "#/components/schemas/LevelCondition",
+                "price_cross": "#/components/schemas/LevelCondition",
+                "price_cross_down": "#/components/schemas/LevelCondition",
+                "price_cross_up": "#/components/schemas/LevelCondition",
+                "trendline_cross": "#/components/schemas/TrendlineCrossCondition"
+              }
+            }
+          },
+          "condition_text": {
+            "type": "string",
+            "title": "Condition Text"
+          },
+          "invalid_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Invalid Reason"
           }
         },
         "type": "object",
         "required": [
           "instrument_id",
-          "level",
           "frequency",
           "bar_seconds",
           "template",
           "webhook_url",
           "id",
           "status",
-          "created_ns"
+          "created_ns",
+          "condition",
+          "condition_text"
         ],
         "title": "AlertResponse"
+      },
+      "AlertUpdate": {
+        "properties": {
+          "condition": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LevelCondition"
+              },
+              {
+                "$ref": "#/components/schemas/PctMoveCondition"
+              },
+              {
+                "$ref": "#/components/schemas/ChannelExitCondition"
+              },
+              {
+                "$ref": "#/components/schemas/IndicatorCondition"
+              },
+              {
+                "$ref": "#/components/schemas/TrendlineCrossCondition"
+              },
+              {
+                "$ref": "#/components/schemas/FundingCondition"
+              },
+              {
+                "$ref": "#/components/schemas/OiChangeCondition"
+              },
+              {
+                "$ref": "#/components/schemas/LiquidationNotionalCondition"
+              },
+              {
+                "$ref": "#/components/schemas/ForcedShareCondition"
+              }
+            ],
+            "title": "Condition",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "channel_exit": "#/components/schemas/ChannelExitCondition",
+                "forced_share": "#/components/schemas/ForcedShareCondition",
+                "funding_above": "#/components/schemas/FundingCondition",
+                "funding_below": "#/components/schemas/FundingCondition",
+                "indicator": "#/components/schemas/IndicatorCondition",
+                "liquidation_notional": "#/components/schemas/LiquidationNotionalCondition",
+                "oi_change": "#/components/schemas/OiChangeCondition",
+                "pct_move": "#/components/schemas/PctMoveCondition",
+                "price_above": "#/components/schemas/LevelCondition",
+                "price_below": "#/components/schemas/LevelCondition",
+                "price_cross": "#/components/schemas/LevelCondition",
+                "price_cross_down": "#/components/schemas/LevelCondition",
+                "price_cross_up": "#/components/schemas/LevelCondition",
+                "trendline_cross": "#/components/schemas/TrendlineCrossCondition"
+              }
+            }
+          },
+          "frequency": {
+            "type": "string",
+            "enum": [
+              "once_per_bar_close",
+              "once_per_bar",
+              "only_once"
+            ],
+            "title": "Frequency"
+          },
+          "expires_at_ns": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At Ns"
+          },
+          "template": {
+            "type": "string",
+            "title": "Template"
+          },
+          "webhook_url": {
+            "type": "string",
+            "title": "Webhook Url"
+          },
+          "rearm": {
+            "type": "boolean",
+            "title": "Rearm",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "condition",
+          "frequency",
+          "template",
+          "webhook_url"
+        ],
+        "title": "AlertUpdate",
+        "description": "`PUT /api/alerts/{id}`: the editable fields (the instrument and bar width are the alert's\nidentity and stay). `rearm` clears a triggered `only_once` alert's `triggered`."
       },
       "ArchiveRun": {
         "properties": {
@@ -1921,6 +2537,116 @@
               }
             ],
             "title": "Partial"
+          },
+          "buy_v": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Buy V"
+          },
+          "sell_v": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sell V"
+          },
+          "buy_n": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Buy N"
+          },
+          "sell_n": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sell N"
+          },
+          "pv": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pv"
+          },
+          "liq_long_v": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Liq Long V"
+          },
+          "liq_short_v": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Liq Short V"
+          },
+          "liq_n": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Liq N"
+          },
+          "price_precision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Precision"
+          },
+          "size_precision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Precision"
           }
         },
         "type": "object",
@@ -1970,6 +2696,31 @@
         ],
         "title": "CandlesResponse"
       },
+      "ChannelExitCondition": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "channel_exit",
+            "title": "Kind"
+          },
+          "upper": {
+            "type": "number",
+            "title": "Upper"
+          },
+          "lower": {
+            "type": "number",
+            "title": "Lower"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "upper",
+          "lower"
+        ],
+        "title": "ChannelExitCondition"
+      },
       "DrawingsResponse": {
         "properties": {
           "items": {
@@ -2018,6 +2769,81 @@
           "services"
         ],
         "title": "ErrorsResponse"
+      },
+      "FilterPresetConditionItem": {
+        "properties": {
+          "field": {
+            "type": "string",
+            "title": "Field"
+          },
+          "op": {
+            "type": "string",
+            "enum": [
+              ">",
+              "<",
+              ">=",
+              "<=",
+              "="
+            ],
+            "title": "Op"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "type": "object",
+        "required": [
+          "field",
+          "op",
+          "value"
+        ],
+        "title": "FilterPresetConditionItem",
+        "description": "One stored condition; its display precision is re-derived by the page on recall."
+      },
+      "FilterPresetItem": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "conditions": {
+            "items": {
+              "$ref": "#/components/schemas/FilterPresetConditionItem"
+            },
+            "type": "array",
+            "title": "Conditions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "conditions"
+        ],
+        "title": "FilterPresetItem"
+      },
+      "FilterPresetsResponse": {
+        "properties": {
+          "presets": {
+            "items": {
+              "$ref": "#/components/schemas/FilterPresetItem"
+            },
+            "type": "array",
+            "title": "Presets"
+          }
+        },
+        "type": "object",
+        "required": [
+          "presets"
+        ],
+        "title": "FilterPresetsResponse"
       },
       "FootprintItem": {
         "properties": {
@@ -2147,6 +2973,139 @@
         ],
         "title": "FootprintRow"
       },
+      "ForcedShareCondition": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "forced_share",
+            "title": "Kind"
+          },
+          "share": {
+            "type": "number",
+            "title": "Share"
+          },
+          "window_s": {
+            "type": "integer",
+            "title": "Window S"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "share",
+          "window_s"
+        ],
+        "title": "ForcedShareCondition"
+      },
+      "FundingCondition": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "funding_above",
+              "funding_below"
+            ],
+            "title": "Kind"
+          },
+          "rate": {
+            "type": "number",
+            "title": "Rate"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "rate"
+        ],
+        "title": "FundingCondition"
+      },
+      "FundingItem": {
+        "properties": {
+          "t": {
+            "type": "integer",
+            "title": "T"
+          },
+          "rate": {
+            "type": "string",
+            "title": "Rate"
+          },
+          "interval": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interval"
+          },
+          "next_funding_ns": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Funding Ns"
+          },
+          "annualised": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annualised"
+          }
+        },
+        "type": "object",
+        "required": [
+          "t",
+          "rate",
+          "interval",
+          "next_funding_ns",
+          "annualised"
+        ],
+        "title": "FundingItem"
+      },
+      "FundingResponse": {
+        "properties": {
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "venue": {
+            "type": "string",
+            "title": "Venue"
+          },
+          "market": {
+            "type": "string",
+            "title": "Market"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/FundingItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "has_more",
+          "venue",
+          "market",
+          "items"
+        ],
+        "title": "FundingResponse"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -2203,15 +3162,123 @@
             "type": "boolean",
             "title": "Source Selectable",
             "default": false
+          },
+          "units": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Units",
+            "default": {}
+          },
+          "outputs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Outputs"
+          },
+          "plot": {
+            "additionalProperties": {
+              "type": "string",
+              "enum": [
+                "line",
+                "steps",
+                "points",
+                "swing"
+              ]
+            },
+            "type": "object",
+            "title": "Plot",
+            "default": {}
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
           }
         },
         "type": "object",
         "required": [
           "params",
           "panel",
-          "category"
+          "category",
+          "outputs"
         ],
         "title": "IndicatorCatalogEntry"
+      },
+      "IndicatorCondition": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "indicator",
+            "title": "Kind"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "params": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "type": "object",
+            "title": "Params"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source",
+            "default": "close"
+          },
+          "output": {
+            "type": "string",
+            "title": "Output"
+          },
+          "op": {
+            "type": "string",
+            "enum": [
+              ">",
+              "<",
+              "crosses_up",
+              "crosses_down"
+            ],
+            "title": "Op"
+          },
+          "value": {
+            "type": "number",
+            "title": "Value"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "name",
+          "params",
+          "output",
+          "op",
+          "value"
+        ],
+        "title": "IndicatorCondition"
       },
       "IndicatorConfigEntry": {
         "properties": {
@@ -2255,94 +3322,6 @@
           "category"
         ],
         "title": "IndicatorConfigEntry"
-      },
-      "IndicatorSeriesPoint": {
-        "properties": {
-          "t": {
-            "type": "integer",
-            "title": "T"
-          },
-          "ofi": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Ofi"
-          },
-          "obi": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Obi"
-          },
-          "microprice": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Microprice"
-          },
-          "spread": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Spread"
-          }
-        },
-        "type": "object",
-        "required": [
-          "t"
-        ],
-        "title": "IndicatorSeriesPoint"
-      },
-      "IndicatorSeriesResponse": {
-        "properties": {
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/IndicatorSeriesPoint"
-            },
-            "type": "array",
-            "title": "Items"
-          },
-          "has_more": {
-            "type": "boolean",
-            "title": "Has More"
-          },
-          "venue": {
-            "type": "string",
-            "title": "Venue"
-          },
-          "market": {
-            "type": "string",
-            "title": "Market"
-          }
-        },
-        "type": "object",
-        "required": [
-          "items",
-          "has_more",
-          "venue",
-          "market"
-        ],
-        "title": "IndicatorSeriesResponse"
       },
       "IndicatorValuesItem": {
         "properties": {
@@ -2410,6 +3389,505 @@
           "market"
         ],
         "title": "IndicatorValuesResponse"
+      },
+      "LevelCondition": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "price_cross",
+              "price_cross_up",
+              "price_cross_down",
+              "price_above",
+              "price_below"
+            ],
+            "title": "Kind"
+          },
+          "level": {
+            "type": "number",
+            "title": "Level"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "level"
+        ],
+        "title": "LevelCondition"
+      },
+      "LiquidationBarItem": {
+        "properties": {
+          "t": {
+            "type": "integer",
+            "title": "T"
+          },
+          "long_v": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Long V"
+          },
+          "short_v": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Short V"
+          },
+          "n": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "N"
+          },
+          "size_precision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Precision"
+          },
+          "notional_units": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notional Units"
+          },
+          "notional_precision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notional Precision"
+          },
+          "long_notional_units": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Long Notional Units"
+          },
+          "short_notional_units": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Short Notional Units"
+          }
+        },
+        "type": "object",
+        "required": [
+          "t"
+        ],
+        "title": "LiquidationBarItem"
+      },
+      "LiquidationBarsResponse": {
+        "properties": {
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "venue": {
+            "type": "string",
+            "title": "Venue"
+          },
+          "market": {
+            "type": "string",
+            "title": "Market"
+          },
+          "price_precision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Precision"
+          },
+          "size_precision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Precision"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/LiquidationBarItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "has_more",
+          "venue",
+          "market",
+          "price_precision",
+          "size_precision",
+          "items"
+        ],
+        "title": "LiquidationBarsResponse"
+      },
+      "LiquidationItem": {
+        "properties": {
+          "side": {
+            "type": "string",
+            "title": "Side"
+          },
+          "size_units": {
+            "type": "integer",
+            "title": "Size Units"
+          },
+          "price_units": {
+            "type": "integer",
+            "title": "Price Units"
+          },
+          "price_precision": {
+            "type": "integer",
+            "title": "Price Precision"
+          },
+          "size_precision": {
+            "type": "integer",
+            "title": "Size Precision"
+          },
+          "venue_event_id": {
+            "type": "string",
+            "title": "Venue Event Id"
+          },
+          "ts_event": {
+            "type": "integer",
+            "title": "Ts Event"
+          },
+          "ts_init": {
+            "type": "integer",
+            "title": "Ts Init"
+          },
+          "price_kind": {
+            "type": "string",
+            "title": "Price Kind"
+          },
+          "notional_units": {
+            "type": "integer",
+            "title": "Notional Units"
+          },
+          "notional_precision": {
+            "type": "integer",
+            "title": "Notional Precision"
+          }
+        },
+        "type": "object",
+        "required": [
+          "side",
+          "size_units",
+          "price_units",
+          "price_precision",
+          "size_precision",
+          "venue_event_id",
+          "ts_event",
+          "ts_init",
+          "price_kind",
+          "notional_units",
+          "notional_precision"
+        ],
+        "title": "LiquidationItem"
+      },
+      "LiquidationNotionalCondition": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "liquidation_notional",
+            "title": "Kind"
+          },
+          "notional": {
+            "type": "number",
+            "title": "Notional"
+          },
+          "window_s": {
+            "type": "integer",
+            "title": "Window S"
+          },
+          "side": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "long",
+                  "short"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Side"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "notional",
+          "window_s"
+        ],
+        "title": "LiquidationNotionalCondition"
+      },
+      "LiquidationsResponse": {
+        "properties": {
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "venue": {
+            "type": "string",
+            "title": "Venue"
+          },
+          "market": {
+            "type": "string",
+            "title": "Market"
+          },
+          "price_precision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Precision"
+          },
+          "size_precision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Precision"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/LiquidationItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "has_more",
+          "venue",
+          "market",
+          "price_precision",
+          "size_precision",
+          "items"
+        ],
+        "title": "LiquidationsResponse"
+      },
+      "MarkIndexItem": {
+        "properties": {
+          "t": {
+            "type": "integer",
+            "title": "T"
+          },
+          "mark": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mark"
+          },
+          "index": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Index"
+          },
+          "basis_mi_bps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Basis Mi Bps"
+          },
+          "basis_ml_bps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Basis Ml Bps"
+          }
+        },
+        "type": "object",
+        "required": [
+          "t"
+        ],
+        "title": "MarkIndexItem"
+      },
+      "MarkIndexResponse": {
+        "properties": {
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "venue": {
+            "type": "string",
+            "title": "Venue"
+          },
+          "market": {
+            "type": "string",
+            "title": "Market"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MarkIndexItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "has_more",
+          "venue",
+          "market",
+          "items"
+        ],
+        "title": "MarkIndexResponse"
+      },
+      "MarketItem": {
+        "properties": {
+          "instrument_id": {
+            "type": "string",
+            "title": "Instrument Id"
+          },
+          "symbol": {
+            "type": "string",
+            "title": "Symbol"
+          },
+          "venue": {
+            "type": "string",
+            "title": "Venue"
+          },
+          "same_asset": {
+            "type": "boolean",
+            "title": "Same Asset"
+          },
+          "market": {
+            "type": "string",
+            "title": "Market"
+          },
+          "volume24h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volume24H"
+          }
+        },
+        "type": "object",
+        "required": [
+          "instrument_id",
+          "symbol",
+          "venue",
+          "same_asset",
+          "market",
+          "volume24h"
+        ],
+        "title": "MarketItem",
+        "description": "One market; `same_asset` is `kernel.venues.same_asset` against the request's id."
+      },
+      "MarketsResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MarketItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "stale_venues": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Stale Venues"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "stale_venues"
+        ],
+        "title": "MarketsResponse",
+        "description": "`items` omit the requested `instrument_id` itself, same-asset markets first, then by venue and\nid. `stale_venues` names each listed venue whose list arrived over 180 s ago."
       },
       "MetricHistoryItem": {
         "properties": {
@@ -2537,6 +4015,204 @@
               }
             ],
             "title": "Volume24H"
+          },
+          "funding_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Funding Rate"
+          },
+          "funding_annualised": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Funding Annualised"
+          },
+          "open_interest": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Open Interest"
+          },
+          "oi_change_1h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oi Change 1H"
+          },
+          "oi_change_24h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oi Change 24H"
+          },
+          "basis_mi_bps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Basis Mi Bps"
+          },
+          "basis_ml_bps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Basis Ml Bps"
+          },
+          "liq_long_1h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Liq Long 1H"
+          },
+          "liq_short_1h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Liq Short 1H"
+          },
+          "liq_notional_1h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Liq Notional 1H"
+          },
+          "liq_ratio_1h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Liq Ratio 1H"
+          },
+          "forced_share_1h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Forced Share 1H"
+          },
+          "relative_volume": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Relative Volume"
+          },
+          "high_24h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "High 24H"
+          },
+          "low_24h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Low 24H"
+          },
+          "range_position_24h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range Position 24H"
+          },
+          "oi_change_1h_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oi Change 1H Pct"
+          },
+          "oi_change_24h_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oi Change 24H Pct"
           }
         },
         "type": "object",
@@ -2561,6 +4237,122 @@
           "items"
         ],
         "title": "MetricsHistoryResponse"
+      },
+      "OiChangeCondition": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "oi_change",
+            "title": "Kind"
+          },
+          "pct": {
+            "type": "number",
+            "title": "Pct"
+          },
+          "window_s": {
+            "type": "integer",
+            "title": "Window S"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "pct",
+          "window_s"
+        ],
+        "title": "OiChangeCondition"
+      },
+      "OpenInterestItem": {
+        "properties": {
+          "t": {
+            "type": "integer",
+            "title": "T"
+          },
+          "oi": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oi"
+          },
+          "oi_change": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oi Change"
+          }
+        },
+        "type": "object",
+        "required": [
+          "t"
+        ],
+        "title": "OpenInterestItem"
+      },
+      "OpenInterestResponse": {
+        "properties": {
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "venue": {
+            "type": "string",
+            "title": "Venue"
+          },
+          "market": {
+            "type": "string",
+            "title": "Market"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/OpenInterestItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "has_more",
+          "venue",
+          "market",
+          "items"
+        ],
+        "title": "OpenInterestResponse"
+      },
+      "PctMoveCondition": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "pct_move",
+            "title": "Kind"
+          },
+          "pct": {
+            "type": "number",
+            "title": "Pct"
+          },
+          "bars": {
+            "type": "integer",
+            "title": "Bars"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "pct",
+          "bars"
+        ],
+        "title": "PctMoveCondition"
       },
       "RankingModeRequest": {
         "properties": {
@@ -2850,6 +4642,26 @@
         ],
         "title": "TechnicalsValuesResponse"
       },
+      "TrendlineCrossCondition": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "trendline_cross",
+            "title": "Kind"
+          },
+          "drawing_id": {
+            "type": "string",
+            "title": "Drawing Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "drawing_id"
+        ],
+        "title": "TrendlineCrossCondition"
+      },
       "ValidationError": {
         "properties": {
           "loc": {
@@ -2889,6 +4701,23 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "WatchlistResponse": {
+        "properties": {
+          "instruments": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Instruments"
+          }
+        },
+        "type": "object",
+        "required": [
+          "instruments"
+        ],
+        "title": "WatchlistResponse",
+        "description": "The pinned instrument ids, in the operator's order."
       }
     }
   }

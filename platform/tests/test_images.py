@@ -365,9 +365,13 @@ def _dynamic_imports(module: str) -> list[str]:
 # nor `_dynamic_imports` can see: the import happens inside `nautilus_trader`. The bots host builds
 # every non-dummy paper strategy this way (Story 27.8), so `research` must ship in its image, and
 # the catalog replay `bots.signal_replay` runs `DummyStrategy` through `BacktestNode` the same way
-# (Story 31.9). `test_every_bots_string_path_is_in_the_table` keeps this table equal to the literals.
+# (Story 31.9) and the host's other strategies through the host's own table (Story 33.14).
+# `test_every_bots_string_path_is_in_the_table` keeps this table equal to the literals.
 _STRING_PATH_IMPORTS: dict[str, tuple[str, ...]] = {
-    "bots.infrastructure.nautilus_host": ("research.strategies.candle_pattern_strategy",),
+    "bots.infrastructure.nautilus_host": (
+        "research.strategies.candle_pattern_strategy",
+        "research.strategies.liquidation_cascade_strategy",
+    ),
     "bots.signal_replay": ("bots.strategies.dummy",),
 }
 _STRING_PATH = re.compile(r"[a-z_][\w.]*:[A-Za-z_]\w*")

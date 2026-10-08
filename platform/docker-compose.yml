@@ -378,6 +378,7 @@ services:
       # importable package (Story 26.3).
       - ./bots/strategies/dummy.py:/app/strategy_source/DummyStrategy.py:ro
       - ./research/strategies/candle_pattern_strategy.py:/app/strategy_source/CandlePatternStrategy.py:ro
+      - ./research/strategies/liquidation_cascade_strategy.py:/app/strategy_source/LiquidationCascadeStrategy.py:ro
     network_mode: host
     logging: *default-logging
 
@@ -428,6 +429,11 @@ services:
       DYDX_TESTNET_WALLET_ADDRESS:
       ERROR_LEDGER_DIR: "/app/errors_dir"
       ERROR_LEDGER_SERVICE: "live-paper"
+      # Opt-in per-bot signal logs (Stories 31.9, 33.14: the dummy and liquidation_cascade bots
+      # write `<dir>/<bot_id>.jsonl`, read by `bots.signal_replay` and `verification.bot_parity`).
+      # Empty (the default) writes none; e.g. `/app/data/live_paper/bot_signals` in `.env` lands
+      # under the `./data/live_paper` mount below.
+      BOT_SIGNAL_LOG_DIR: "${BOT_SIGNAL_LOG_DIR:-}"
     user: "1000:1000"
     volumes:
       # The paper fleet's config (Story 25.3: moved with the code, read by `python3 -m bots`

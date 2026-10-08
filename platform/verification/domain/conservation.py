@@ -29,6 +29,10 @@ Invariants:
 - a trade is `unexplained` only when the reference saw it, the archive does not hold it, and no
   `trades_dropped` range, `trades_unrecoverable` window or widened archive-gap marker covers its
   own venue time; a second is `unexplained` only when it has neither a row nor a `seconds` run.
+
+Story 33.1 appends a fifth kind, `liquidations_unrecoverable` (`LiquidationWindow`): parsed as
+strictly as the others, and explaining no trade and no second -- only the liquidations tool reads
+it (`verification.liquidations`).
 """
 
 import json
@@ -76,7 +80,11 @@ SECONDS = "seconds"
 TRADES_DROPPED = "trades_dropped"
 TRADES_BACKFILLED = "trades_backfilled"
 TRADES_UNRECOVERABLE = "trades_unrecoverable"
+LIQUIDATIONS_UNRECOVERABLE = "liquidations_unrecoverable"
 ARCHIVE_GAP = "archive_gap"
+# Its reasons: the liquidation socket was not active, no collector process was running, or the
+# received rows' catalog write failed.
+LIQUIDATION_REASONS = frozenset({"feed_down", "not_running", "write_failed"})
 
 _COVERAGE_KEYS = MappingProxyType(
     {
@@ -86,6 +94,9 @@ _COVERAGE_KEYS = MappingProxyType(
         ),
         TRADES_BACKFILLED: frozenset({"kind", "instrument_id", "count", "trade_ids"}),
         TRADES_UNRECOVERABLE: frozenset({"kind", "instrument_id", "reason", "from_ns", "to_ns"}),
+        LIQUIDATIONS_UNRECOVERABLE: frozenset(
+            {"kind", "instrument_id", "reason", "from_ns", "to_ns"}
+        ),
     }
 )
 _GAP_MARKER_KEYS = frozenset({"instrument_id", "from_ns", "to_ns", "reason", "count"})
@@ -132,7 +143,17 @@ class Backfilled:
     trade_ids: tuple[str, ...]
 
 
-CoverageEntry = SecondsRun | TradeWindow | Backfilled
+@dataclass(frozen=True)
+class LiquidationWindow:
+    """An inclusive venue-time span `[from_ns, to_ns]` whose liquidations were never received."""
+
+    instrument_id: str
+    reason: str
+    from_ns: int
+    to_ns: int
+
+
+CoverageEntry = SecondsRun | TradeWindow | Backfilled | LiquidationWindow
 
 
 def _int(entry: Mapping[str, Any], key: str, where: str) -> int:
@@ -199,12 +220,21 @@ def _backfilled(entry: Mapping[str, Any], where: str) -> Backfilled:
     return Backfilled(_str(entry, "instrument_id", where), tuple(ids))
 
 
+def _liquidation_window(entry: Mapping[str, Any], where: str) -> LiquidationWindow:
+    first, last = _span(entry, ("from_ns", "to_ns"), where)
+    reason = _str(entry, "reason", where)
+    if reason not in LIQUIDATION_REASONS:
+        raise MalformedLine(f"{where}: unknown liquidation coverage reason {reason!r}")
+    return LiquidationWindow(_str(entry, "instrument_id", where), reason, first, last)
+
+
 _BUILDERS: Mapping[str, Callable[[Mapping[str, Any], str], CoverageEntry]] = MappingProxyType(
     {
         SECONDS: _seconds_run,
         TRADES_DROPPED: _dropped,
         TRADES_BACKFILLED: _backfilled,
         TRADES_UNRECOVERABLE: _unrecoverable,
+        LIQUIDATIONS_UNRECOVERABLE: _liquidation_window,
     }
 )
 

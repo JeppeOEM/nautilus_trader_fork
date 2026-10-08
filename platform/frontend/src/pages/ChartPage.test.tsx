@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render as rtlRender, screen, within } from "@testing-library/react";
 import { CHART_TOKENS } from "../components/chart/chartTheme";
 import type { ReactElement } from "react";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PriceLineSpec } from "../components/chart/LightweightChart";
@@ -29,7 +29,32 @@ const layoutApi = vi.hoisted(() => ({
   reset: vi.fn(),
 }));
 const route = vi.hoisted(() => ({ iid: "BTC-USD-PERP.DYDX" }));
+// Story 33.5: the derivatives routes, one page per route (`items`; `has_more` false), every call
+// recorded; and the two live channels, whose latest ticks and handlers a test drives.
+const derivApi = vi.hoisted(() => ({
+  pages: {} as Record<string, unknown[]>,
+  calls: [] as { route: string; args: unknown[] }[],
+}));
+const liveDerivs = vi.hoisted(() => ({
+  latest: {} as Record<string, unknown>,
+  subscribed: [] as string[],
+  liquidationsSubscribed: [] as string[],
+  onLiquidation: undefined as ((row: unknown) => void) | undefined,
+  onTick: undefined as ((tick: unknown) => void) | undefined,
+}));
+// Story 33.9: `GET /api/markets` for the Compare field's suggestions.
+const marketsApi = vi.hoisted(() => ({ get: vi.fn() }));
+// Story 33.12: the chart watchlist resource (`server` is what GET answers; every PUT recorded) and the
+// `rankings:live` message the rail prices its rows from.
+const watchlistApi = vi.hoisted(() => ({ server: [] as string[], save: vi.fn() }));
+const liveRanks = vi.hoisted(() => ({ latest: null as unknown }));
+vi.mock("../hooks/useLiveChannel", () => ({
+  useLiveChannel: () => ({ latest: liveRanks.latest, connected: liveRanks.latest !== null }),
+}));
 vi.mock("../api/client", () => ({
+  fetchMarkets: (...args: unknown[]) => marketsApi.get(...args),
+  fetchWatchlist: () => Promise.resolve({ instruments: watchlistApi.server }),
+  saveWatchlist: (...args: unknown[]) => watchlistApi.save(...args),
   fetchCoinLayout: (...args: unknown[]) => layoutApi.get(...args),
   saveCoinLayout: (...args: unknown[]) => layoutApi.save(...args),
   saveLayoutAsDefault: (...args: unknown[]) => layoutApi.saveDefault(...args),
@@ -40,6 +65,34 @@ vi.mock("../api/client", () => ({
   saveCoinIndicatorConfig: saveConfigMock,
   // Story 32.8: never reached (useFootprint is mocked below); listed so a stray call fails loudly.
   fetchFootprint: vi.fn(() => Promise.reject(new Error("fetchFootprint is not stubbed in this test"))),
+  ...Object.fromEntries(
+    (
+      [
+        ["fetchFunding", "funding"],
+        ["fetchOpenInterest", "open-interest"],
+        ["fetchMarkIndex", "mark-index"],
+        ["fetchLiquidations", "liquidations"],
+        ["fetchLiquidationBars", "liquidation-bars"],
+      ] as const
+    ).map(([name, route]) => [
+      name,
+      (...args: unknown[]) => {
+        derivApi.calls.push({ route, args });
+        // The liquidations page honours its cursor (the replay tape asks for the rows before a time).
+        const rows = (derivApi.pages[route] ?? []) as { ts_event?: number }[];
+        const items = route === "liquidations" ? rows.filter((r) => (r.ts_event ?? 0) < (args[1] as number)) : rows;
+        return Promise.resolve({ items, has_more: false, venue: "BYBIT", market: "perp" });
+      },
+    ]),
+  ),
+  // The real class's constructor, so a test builds an `HttpError` exactly as the client does.
+  HttpError: class extends Error {
+    status: number;
+    constructor(status: number, message: string) {
+      super(message);
+      this.status = status;
+    }
+  },
   // IndicatorPicker (rendered by ChartPage) fetches the catalog on mount.
   fetchIndicatorCatalog: vi.fn().mockResolvedValue({
     SimpleMovingAverage: { params: {}, panel: "overlay", category: "native", source_selectable: true },
@@ -65,6 +118,9 @@ const hooks = vi.hoisted(() => ({
 // replay tests swap in.
 const mocks = vi.hoisted(() => ({
   candles: [] as unknown[],
+  // Story 33.9: a compare symbol's own candles (absent = `candles`), and the ids whose load failed.
+  candlesByIid: {} as Record<string, unknown[]>,
+  failedIids: [] as string[],
   volume: [] as unknown[],
   venueMarket: null as { venue: string; market: string } | null,
   precision: { price: 2, size: 3 } as { price: number; size: number } | null,
@@ -80,10 +136,11 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../hooks/useCandles", () => ({
   BAR_SECONDS: 60,
-  useCandles: (_iid: string, _chart: unknown, _enabled: boolean, bar: number) => {
+  useCandles: (iid: string, _chart: unknown, _enabled: boolean, bar: number) => {
     hooks.candlesBar.push(bar);
     return {
-      candles: mocks.candles,
+      candles: mocks.candlesByIid[iid] ?? mocks.candles,
+      loadFailed: mocks.failedIids.includes(iid),
       volume: mocks.volume,
       venueMarket: mocks.venueMarket,
       precision: mocks.precision,
@@ -108,6 +165,22 @@ vi.mock("../hooks/useSessionCandles", () => ({
   useSessionCandles: (_iid: string, enabled: boolean, sinceSeconds: number, barSeconds: number) => {
     mocks.sessionArgs = { enabled, sinceSeconds, barSeconds };
     return mocks.session;
+  },
+}));
+
+vi.mock("../hooks/useLiveDerivs", () => ({
+  useLiveDerivs: (iid: string, handlers: { onTick?: (tick: unknown) => void }) => {
+    liveDerivs.subscribed.push(iid);
+    liveDerivs.onTick = iid ? handlers.onTick : undefined;
+    return iid ? liveDerivs.latest : {};
+  },
+}));
+
+vi.mock("../hooks/useLiveLiquidations", () => ({
+  useLiveLiquidations: (iid: string, handlers: { onLiquidation?: (row: unknown) => void }) => {
+    liveDerivs.liquidationsSubscribed.push(iid);
+    liveDerivs.onLiquidation = handlers.onLiquidation;
+    return null;
   },
 }));
 
@@ -149,6 +222,20 @@ vi.mock("../hooks/usePickerIndicatorValues", () => {
   } };
 });
 
+// Story 33.6: the stored-source Anchored VWAP's own values hook (its entries and paging are tested in
+// useStoredAnchoredVwap.test.ts). Records the drawings the page hands it; answers `values`/`errors`
+// by drawing id (stable objects, like the real hook's memo).
+const storedVwap = vi.hoisted(() => ({
+  drawings: [] as unknown[],
+  result: { values: {}, errors: {} } as { values: Record<string, unknown[]>; errors: Record<string, string> },
+}));
+vi.mock("../hooks/useStoredAnchoredVwap", () => ({
+  useStoredAnchoredVwap: (_iid: string, _chart: unknown, drawings: unknown[]) => {
+    storedVwap.drawings = drawings;
+    return storedVwap.result;
+  },
+}));
+
 vi.mock("react-router", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react-router")>();
   return { ...actual, useParams: () => ({ iid: route.iid }) };
@@ -161,7 +248,7 @@ interface ChartStubProps {
   panes?: {
     id: string;
     kind: string;
-    data: { time: number }[];
+    data: { time: number; value?: number; color?: string }[];
     placement?: string;
     group?: string;
     groupLabel?: string;
@@ -173,7 +260,15 @@ interface ChartStubProps {
     upColor?: string;
     downColor?: string;
     configurable?: boolean;
+    format?: (value: number, time: number | null) => string;
+    text?: string;
+    zeroLine?: boolean;
+    plot?: string;
+    markersOnly?: boolean;
   }[];
+  liquidationMarkers?: { id: string; time: number; position: string; price?: number; text?: string }[];
+  patternMarkers?: { id: string; time: number; shape: string; position: string; color: string; tooltip: readonly string[] }[];
+  onBarSpacing?: (spacing: number) => void;
   onLegendAction?: (action: "hide" | "settings" | "remove", group: string) => void;
   initialPaneHeights?: Record<string, number>;
   onPaneHeights?: (heights: Record<string, number>) => void;
@@ -190,11 +285,23 @@ interface ChartStubProps {
   onDrawingSettings?: (id: string) => void;
   onDrawingDelete?: (id: string) => void;
   onDrawingColor?: (id: string, color: string) => void;
-  onPointClick?: (point: { time: number; price: number }) => void;
+  onPointClick?: (point: { time: number; price: number; shift?: boolean }) => void;
+  // Story 33.10
+  placement?: { tool: string; points: { time: number; price: number }[] } | null;
+  magnet?: string;
+  onDrawingDragStart?: (id: string) => void;
+  onDrawingLock?: (id: string, locked: boolean) => void;
+  onDrawingHide?: (id: string) => void;
   measureActive?: boolean;
   onMeasureEnd?: () => void;
   data?: { time: number }[];
+  timeZone?: string;
+  sessionBreaks?: boolean;
+  countdown?: { barSeconds: number; enabled: boolean } | null;
+  lastPrice?: { line: boolean; label: boolean };
+  fullscreen?: boolean;
   liveBar?: unknown;
+  liveVolumeColor?: string;
   markerTime?: number | null;
   followNewest?: boolean;
   anchorMarkerTime?: number | null;
@@ -224,6 +331,10 @@ interface ChartStubProps {
   onProfileEdgeDrag?: (id: string, edge: "start" | "end", time: number) => void;
   onProfileEdgeCommit?: (id: string, edge: "start" | "end", time: number) => void;
   onProfileEdgeCancel?: () => void;
+  chartType?: string;
+  priceScale?: { mode: string; autoScale: boolean; invert: boolean };
+  onPriceScale?: (patch: Record<string, unknown>) => void;
+  scaleModesLocked?: string | null;
 }
 
 const lastChartProps: { current: ChartStubProps | null } = { current: null };
@@ -243,7 +354,7 @@ const render = (ui: ReactElement) =>
   ui.type === MemoryRouter ? rtlRender(ui) : rtlRender(ui, { wrapper: MemoryRouter });
 // Imported after the mocks above so ChartPage picks up the mocked client/hooks/chart.
 const { default: ChartPage } = await import("./ChartPage");
-const { fetchCoinIndicatorConfig } = await import("../api/client");
+const { fetchCoinIndicatorConfig, fetchIndicatorCatalog } = await import("../api/client");
 const { SAVE_DEBOUNCE_MS, SAVE_RETRY_MS } = await import("../hooks/useChartDrawings");
 const { BUILT_IN_LAYOUT } = await import("../lib/chartLayout");
 type ChartLayout = import("../lib/chartLayout").ChartLayout;
@@ -284,6 +395,35 @@ const page = () => (
   </MemoryRouter>
 );
 
+const { TOOL_GROUPS } = await import("../lib/chartTools");
+/** The rail group a tool (by its accessible name) is declared in. */
+function groupOf(name: string): (typeof TOOL_GROUPS)[number] {
+  const group = TOOL_GROUPS.find((g) => g.tools.some((t) => t.ariaLabel === name));
+  if (!group) throw new Error(`no rail group holds ${name}`);
+  return group;
+}
+/** A rail tool's control: its group's button when the group shows it, else its item in the group's
+ * flyout menu (opened here if it is not open yet). */
+function toolControl(name: string): HTMLElement {
+  const button = screen.queryByRole("button", { name });
+  if (button) return button;
+  const item = screen.queryByRole("menuitemradio", { name });
+  if (item) return item;
+  fireEvent.click(screen.getByRole("button", { name: `${groupOf(name).label} tools` }));
+  return screen.getByRole("menuitemradio", { name });
+}
+/** Arms a rail tool the way the operator does: its group's button, or the group's flyout menu. */
+const armTool = (name: string) => fireEvent.click(toolControl(name));
+/** Opens the Volume overlays dialog from the top bar (a no-op while it is open). */
+function openOverlays(): HTMLElement {
+  const open = screen.queryByRole("dialog", { name: "Volume overlays" });
+  if (open) return open;
+  fireEvent.click(screen.getByRole("button", { name: "Volume overlays" }));
+  return screen.getByRole("dialog", { name: "Volume overlays" });
+}
+/** Clicks a control of the Volume overlays dialog by its accessible name, opening the dialog first. */
+const overlayClick = (name: string) => fireEvent.click(within(openOverlays()).getByRole("button", { name }));
+
 beforeEach(() => {
   lastChartProps.current = null;
   picker.values = {};
@@ -297,10 +437,21 @@ beforeEach(() => {
   footprintResult.current = { items: [], precision: null, error: null };
   localStorage.clear();
   mocks.candles = [];
+  mocks.candlesByIid = {};
+  mocks.failedIids = [];
+  marketsApi.get.mockReset().mockResolvedValue({
+    items: [
+      { instrument_id: "BTC-USD-PERP.HYPERLIQUID", symbol: "BTC", venue: "HYPERLIQUID", same_asset: true, market: "perp", volume24h: 2_500_000 },
+    ],
+    stale_venues: [],
+  });
   mocks.volume = [];
   mocks.venueMarket = null;
   mocks.precision = { price: 2, size: 3 };
   drawingsApi.server = [];
+  watchlistApi.server = [];
+  watchlistApi.save.mockReset().mockImplementation((instruments: string[]) => Promise.resolve({ instruments }));
+  liveRanks.latest = null;
   route.iid = IID;
   layoutApi.server = {};
   layoutApi.get.mockReset().mockImplementation((iid: string) =>
@@ -312,6 +463,15 @@ beforeEach(() => {
   drawingsApi.save.mockReset().mockResolvedValue(undefined);
   mocks.liveBar = null;
   mocks.session = { candles: [], volume: [], completeFrom: null, loading: false };
+  derivApi.pages = {};
+  derivApi.calls = [];
+  liveDerivs.latest = {};
+  liveDerivs.subscribed = [];
+  liveDerivs.liquidationsSubscribed = [];
+  liveDerivs.onLiquidation = undefined;
+  liveDerivs.onTick = undefined;
+  storedVwap.drawings = [];
+  storedVwap.result = { values: {}, errors: {} };
 });
 
 afterEach(() => {
@@ -336,9 +496,9 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
 
     expect(screen.getByTestId("chart-stub")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: "Horizontal line tool" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByRole("button", { name: "Horizontal line tool", pressed: true })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    armTool("Horizontal line tool");
 
     expect(screen.getByRole("button", { name: "Horizontal line tool" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "false");
@@ -346,7 +506,7 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
 
   it("places exactly one line from an armed hline's chart click, then disarms (AC #2)", async () => {
     await renderReady(page());
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    armTool("Horizontal line tool");
 
     // act(): the handler's state updates must flush before the assertions read the
     // props the re-render hands the stub.
@@ -365,9 +525,9 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
     expect(lastChartProps.current!.priceLines).toHaveLength(1);
   });
 
-  it("resets an armed tool to cursor on Escape (AC #5)", () => {
-    render(page());
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+  it("resets an armed tool to cursor on Escape (AC #5)", async () => {
+    await renderReady(page());
+    armTool("Horizontal line tool");
 
     fireEvent.keyDown(window, { key: "Escape" });
 
@@ -379,15 +539,15 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
     await renderReady(page());
 
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
-    expect(screen.getByRole("button", { name: "Horizontal line tool" })).toBeDisabled();
+    expect(toolControl("Horizontal line tool")).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: "Candles" }));
-    expect(screen.getByRole("button", { name: "Horizontal line tool" })).toBeEnabled();
+    expect(toolControl("Horizontal line tool")).toBeEnabled();
   });
 
-  it("disarms an armed hline when the chart switches to Lines mode", () => {
-    render(page());
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+  it("disarms an armed hline when the chart switches to Lines mode", async () => {
+    await renderReady(page());
+    armTool("Horizontal line tool");
 
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
 
@@ -397,7 +557,7 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
 
   it("updates the dragged line's price in the priceLines prop (AC #3)", async () => {
     await renderReady(page());
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    armTool("Horizontal line tool");
     act(() => {
       lastChartProps.current!.onPriceClick!(61000.5);
     });
@@ -411,11 +571,11 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
 
   it("gives each placed line its own counter id, and a drag updates only its own spec", async () => {
     await renderReady(page());
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    armTool("Horizontal line tool");
     act(() => {
       lastChartProps.current!.onPriceClick!(61000.5);
     });
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    armTool("Horizontal line tool");
     act(() => {
       lastChartProps.current!.onPriceClick!(62000);
     });
@@ -465,7 +625,13 @@ describe("ChartPage default layout and per-coin persistence", () => {
   });
 
   it("offers a CandlePattern's pattern as a dropdown of the catalog's choices and draws it as a histogram", async () => {
-    const entry = { name: "CandlePattern", params: { pattern: "ENGULFING", trend_bars: 3 }, category: "native" };
+    // Story 33.11: the ±100 pane is the Pane display; markers are the default (tested below).
+    const entry = {
+      name: "CandlePattern",
+      params: { pattern: "ENGULFING", trend_bars: 3 },
+      category: "native",
+      style: { value: { display: "pane" } },
+    };
     vi.mocked(fetchCoinIndicatorConfig).mockResolvedValueOnce([entry]);
     picker.values = { "CandlePattern_pattern=ENGULFING,trend_bars=3.value": [] };
     render(page());
@@ -476,7 +642,10 @@ describe("ChartPage default layout and per-coin persistence", () => {
     expect(lastChartProps.current!.panes!.find((p) => p.id === `${id}.value`)).toMatchObject({
       group: id,
       actionable: true,
+      kind: "Histogram",
+      placement: "pane",
     });
+    expect(lastChartProps.current!.patternMarkers).toEqual([]);
     act(() => lastChartProps.current!.onLegendAction!("settings", id));
     const dialog = screen.getByRole("dialog", { name: "CandlePattern (ENGULFING, 3)" });
     const select = within(dialog).getByLabelText<HTMLSelectElement>(/pattern/);
@@ -494,11 +663,13 @@ describe("ChartPage default layout and per-coin persistence", () => {
     ]);
     const byId = Object.fromEntries((lastChartProps.current?.panes ?? []).map((p) => [p.id, p]));
     expect(byId["CandlePattern_pattern=ENGULFING,trend_bars=3.value"]).toMatchObject({
-      kind: "Histogram",
-      placement: "pane",
       // After Apply the values mock still keys the old params, so no entry owns the series any
       // more: it keeps its own instance group, with no buttons (the real hook refetches under the
-      // new key).
+      // new key). With no entry its display is unknown, so it takes the default (markers): an
+      // invisible legend row, never a pane that would flash in and out.
+      kind: "Line",
+      placement: "overlay",
+      markersOnly: true,
       group: id,
       actionable: false,
     });
@@ -508,7 +679,7 @@ describe("ChartPage default layout and per-coin persistence", () => {
     vi.useFakeTimers();
     try {
       const first = await renderReady(page());
-      fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+      armTool("Horizontal line tool");
       act(() => lastChartProps.current?.onPriceClick?.(123.5));
       // A drag changes the line on every mouse move: still one save once the burst ends.
       act(() => lastChartProps.current?.onPriceLineDrag?.("hline-1", 128));
@@ -531,7 +702,7 @@ describe("ChartPage default layout and per-coin persistence", () => {
       expect(lastChartProps.current?.priceLines).toEqual([expect.objectContaining({ id: "hline-1", price: 130 })]);
 
       // a second placement continues the counter instead of colliding with the restored id
-      fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+      armTool("Horizontal line tool");
       act(() => lastChartProps.current?.onPriceClick?.(99));
       expect(lastChartProps.current?.priceLines?.map((l) => l.id)).toEqual(["hline-1", "hline-2"]);
     } finally {
@@ -541,7 +712,7 @@ describe("ChartPage default layout and per-coin persistence", () => {
 
   it("flushes a save still pending when the chart goes away", async () => {
     const view = await renderReady(page());
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    armTool("Horizontal line tool");
     act(() => lastChartProps.current?.onPriceClick?.(123.5));
     view.unmount();
     expect(drawingsApi.save).toHaveBeenCalledTimes(1);
@@ -554,7 +725,7 @@ describe("ChartPage default layout and per-coin persistence", () => {
       let land: () => void = () => {};
       drawingsApi.save.mockImplementationOnce(() => new Promise<void>((resolve) => (land = resolve)));
       const view = await renderReady(page());
-      fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+      armTool("Horizontal line tool");
       act(() => lastChartProps.current?.onPriceClick?.(123.5));
       await act(async () => {
         vi.advanceTimersByTime(SAVE_DEBOUNCE_MS + 1);
@@ -578,7 +749,7 @@ describe("ChartPage default layout and per-coin persistence", () => {
       let land: () => void = () => {};
       drawingsApi.save.mockImplementationOnce(() => new Promise<void>((resolve) => (land = resolve)));
       await renderReady(page());
-      fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+      armTool("Horizontal line tool");
       act(() => lastChartProps.current?.onPriceClick?.(123.5));
       await act(async () => {
         vi.advanceTimersByTime(SAVE_DEBOUNCE_MS + 1);
@@ -634,7 +805,7 @@ describe("ChartPage default layout and per-coin persistence", () => {
     const view = await renderReady(page());
     expect(screen.getByRole("alert")).toHaveTextContent("Drawings could not be loaded");
     for (const name of ["Trendline tool", "Horizontal line tool", "Fibonacci retracement tool", "Long position tool"]) {
-      expect(screen.getByRole("button", { name })).toBeDisabled();
+      expect(toolControl(name)).toBeDisabled();
     }
     view.unmount();
     expect(drawingsApi.save).not.toHaveBeenCalled();
@@ -669,11 +840,11 @@ describe("ChartPage default layout and per-coin persistence", () => {
     try {
       drawingsApi.server = [{ kind: "hline", id: "hline-1", price: 130 }];
       await renderReady(page());
-      expect(screen.getByRole("button", { name: "Horizontal line tool" })).toBeDisabled();
+      expect(toolControl("Horizontal line tool")).toBeDisabled();
       await act(async () => {
         vi.advanceTimersByTime(SAVE_RETRY_MS + 1);
       });
-      expect(screen.getByRole("button", { name: "Horizontal line tool" })).toBeEnabled();
+      expect(toolControl("Horizontal line tool")).toBeEnabled();
       expect(lastChartProps.current?.priceLines).toEqual([expect.objectContaining({ id: "hline-1", price: 130 })]);
     } finally {
       errors.mockRestore();
@@ -722,21 +893,35 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
       .getAllByRole("button")
       .map((b) => b.getAttribute("aria-label") ?? b.textContent);
     expect(names).toEqual([
+      "BTC-USD-PERP.DYDX", // Story 33.12: the symbol opens the symbol search
       ...["1m", "5m", "15m", "1H", "4H", "1D", "1W"].map((l) => `Timeframe ${l}`),
       "Candles",
       "Lines",
+      "Auto",
+      "Invert",
+      "Compare",
+      "Spread",
       "Indicators",
+      "Volume overlays",
+      "Liquidation tape",
       "Layout",
       "Alert",
       "Fit",
       "Latest",
       "Replay",
+      "Fullscreen",
+      "Watchlist",
+      "Keyboard shortcuts",
+      "Session breaks",
+      "Countdown",
+      "Last price line",
+      "Last price label",
     ]);
     expect(screen.getByRole("link", { name: /Rankings/ })).toHaveAttribute("href", "/");
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("BTC-USD-PERP.DYDX");
   });
 
-  it("orders the left toolbar cursor, crosshair | horizontal line", async () => {
+  it("orders the left toolbar cursor, crosshair | the tool groups, each with its first tool shown", async () => {
     await renderReady(page());
 
     const names = within(screen.getByRole("toolbar", { name: "Chart tools" }))
@@ -746,15 +931,158 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
       "Cursor tool",
       "Crosshair toggle",
       "Trendline tool",
-      "Horizontal line tool",
+      "Lines tools",
       "Fibonacci retracement tool",
+      "Fibonacci tools",
       "Long position tool",
-      "Short position tool",
+      "Projection tools",
+      "Rectangle tool",
+      "Shapes / Annotation tools",
       "Measurement tool",
+      "Measure tools",
+      "Fixed range volume profile tool",
+      "Volume-based tools",
+      // Story 33.10: the drawing actions, after a divider.
+      "Magnet",
+      "Undo",
+      "Redo",
+      "Hide all drawings",
+      "Delete all drawings",
+    ]);
+  });
+
+  it("groups the tools TradingView-style: each group's flyout lists its tools, Long and Short in one", async () => {
+    await renderReady(page());
+    const menuOf = (group: string): string[] => {
+      fireEvent.click(screen.getByRole("button", { name: `${group} tools` }));
+      const items = within(screen.getByRole("menu", { name: group }))
+        .getAllByRole("menuitemradio")
+        .map((b) => b.getAttribute("aria-label")!);
+      fireEvent.click(screen.getByRole("button", { name: `${group} tools` })); // closes it again
+      return items;
+    };
+
+    expect(menuOf("Lines")).toEqual([
+      "Trendline tool",
+      "Ray tool",
+      "Extended line tool",
+      "Horizontal line tool",
+      "Vertical line tool",
+      "Parallel channel tool",
+    ]);
+    expect(menuOf("Fibonacci")).toEqual(["Fibonacci retracement tool", "Fibonacci extension tool"]);
+    expect(menuOf("Projection")).toEqual(["Long position tool", "Short position tool"]);
+    expect(menuOf("Shapes / Annotation")).toEqual(["Rectangle tool", "Text tool", "Arrow tool"]);
+    expect(menuOf("Measure")).toEqual(["Measurement tool", "Price range tool", "Date range tool"]);
+    expect(menuOf("Volume-based")).toEqual([
       "Fixed range volume profile tool",
       "Anchored volume profile tool",
       "Anchored VWAP tool",
     ]);
+    // A one-tool group has no flyout.
+    expect(screen.queryByRole("button", { name: "Cursor tools" })).toBeNull();
+  });
+
+  it("opens a group's flyout as a menu, arms the picked tool and shows it on the group button from then on", async () => {
+    await renderReady(page());
+    const expander = screen.getByRole("button", { name: "Projection tools" });
+    expect(expander).toHaveAttribute("aria-haspopup", "menu");
+    expect(expander).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(expander);
+    expect(expander).toHaveAttribute("aria-expanded", "true");
+    const menu = screen.getByRole("menu", { name: "Projection" });
+    expect(within(menu).getByRole("menuitemradio", { name: "Long position tool" })).toHaveFocus();
+    fireEvent.click(within(menu).getByRole("menuitemradio", { name: "Short position tool" }));
+
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByRole("button", { name: "Short position tool" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByRole("button", { name: "Long position tool" })).toBeNull();
+    act(() => lastChartProps.current!.onPointClick!({ time: 100, price: 100 }));
+    expect(lastChartProps.current!.drawings!.at(-1)).toMatchObject({ kind: "position", side: "short" });
+
+    // Placed: the cursor is back, and the group's button still shows (and re-arms) the Short.
+    expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Short position tool" }));
+    expect(screen.getByRole("button", { name: "Short position tool" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("remembers each group's last-used tool across a timeframe change", async () => {
+    await renderReady(page());
+    armTool("Horizontal line tool");
+    fireEvent.click(screen.getByRole("button", { name: "Timeframe 5m" }));
+
+    expect(screen.getByRole("button", { name: "Horizontal line tool" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Trendline tool" })).toBeNull();
+  });
+
+  it("closes a flyout on Escape (the armed tool stays armed) and on a click outside it", async () => {
+    await renderReady(page());
+    armTool("Fibonacci retracement tool");
+    fireEvent.click(screen.getByRole("button", { name: "Lines tools" }));
+    const item = screen.getByRole("menuitemradio", { name: "Trendline tool" });
+
+    fireEvent.keyDown(item, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByRole("button", { name: "Lines tools" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Fibonacci retracement tool" })).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines tools" }));
+    expect(screen.getByRole("menu", { name: "Lines" })).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByTestId("chart-stub"));
+    expect(screen.queryByRole("menu")).toBeNull();
+
+    // Focus leaving the group by keyboard closes it too.
+    fireEvent.click(screen.getByRole("button", { name: "Lines tools" }));
+    fireEvent.blur(screen.getByRole("menuitemradio", { name: "Trendline tool" }), {
+      relatedTarget: screen.getByRole("button", { name: "Crosshair toggle" }),
+    });
+    expect(screen.queryByRole("menu")).toBeNull();
+    // Esc outside a flyout disarms, as before.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("closes on Escape a flyout whose every item is disabled (focus sits on the menu itself)", async () => {
+    mocks.precision = null;
+    await renderReady(page());
+    fireEvent.click(screen.getByRole("button", { name: "Projection tools" }));
+    const menu = screen.getByRole("menu", { name: "Projection" });
+    expect(menu).toHaveFocus();
+
+    fireEvent.keyDown(menu, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("keeps one flyout open at a time, and arrow keys move through its items", async () => {
+    await renderReady(page());
+    fireEvent.click(screen.getByRole("button", { name: "Lines tools" }));
+    fireEvent.click(screen.getByRole("button", { name: "Volume-based tools" }));
+    expect(screen.getAllByRole("menu")).toHaveLength(1);
+    const menu = screen.getByRole("menu", { name: "Volume-based" });
+
+    fireEvent.keyDown(within(menu).getByRole("menuitemradio", { name: "Fixed range volume profile tool" }), { key: "ArrowDown" });
+    expect(within(menu).getByRole("menuitemradio", { name: "Anchored volume profile tool" })).toHaveFocus();
+    fireEvent.keyDown(within(menu).getByRole("menuitemradio", { name: "Anchored volume profile tool" }), { key: "ArrowUp" });
+    expect(within(menu).getByRole("menuitemradio", { name: "Fixed range volume profile tool" })).toHaveFocus();
+  });
+
+  it("disables a candles-only tool in its flyout in Lines mode, with its title, while the group stays usable", async () => {
+    await renderReady(page());
+    armTool("Horizontal line tool");
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+
+    // The group shows the HLine (disabled), but its flyout still offers the Trend line, which Lines mode allows.
+    expect(screen.getByRole("button", { name: "Horizontal line tool" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Lines tools" }));
+    expect(screen.getByRole("menuitemradio", { name: "Horizontal line tool" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Trendline tool" }));
+    expect(screen.getByRole("button", { name: "Trendline tool" })).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Volume-based tools" }));
+    const avp = screen.getByRole("menuitemradio", { name: "Anchored volume profile tool" });
+    expect(avp).toBeDisabled();
+    expect(avp).toHaveAttribute("title", "Anchored volume profile: click the bar it starts at");
   });
 });
 
@@ -873,7 +1201,7 @@ describe("ChartPage volume toggle (Story 32.2)", () => {
     mocks.candles = bars;
     mocks.volume = bars.map((b) => ({ time: b.time, value: 10 }));
     const totalWith = (): number => {
-      fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+      armTool("Fixed range volume profile tool");
       act(() => {
         lastChartProps.current!.onRangeSelect!({ time: 2, price: 1 }, { time: 4, price: 2 });
       });
@@ -908,7 +1236,7 @@ describe("ChartPage volume toggle (Story 32.2)", () => {
 });
 
 describe("ChartPage trendline tool (Story 18.2)", () => {
-  const arm = () => fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+  const arm = () => armTool("Trendline tool");
   const click = (time: number, price: number) =>
     act(() => {
       lastChartProps.current!.onPointClick!({ time, price });
@@ -965,7 +1293,7 @@ describe("ChartPage trendline tool (Story 18.2)", () => {
     arm();
     click(100, 10);
 
-    fireEvent.click(screen.getByRole("button", { name: "Cursor tool" }));
+    armTool("Cursor tool");
     arm();
     click(200, 20);
     click(300, 30);
@@ -977,14 +1305,14 @@ describe("ChartPage trendline tool (Story 18.2)", () => {
     await renderReady(<ChartPage />);
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
 
-    expect(screen.getByRole("button", { name: "Trendline tool" })).toBeEnabled();
+    expect(toolControl("Trendline tool")).toBeEnabled();
   });
 });
 
 describe("ChartPage measurement tool (Story 18.3)", () => {
   it("arms the measurement tool and disarms it when the drag ends (AC #1/#5)", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Measurement tool" }));
+    armTool("Measurement tool");
     expect(lastChartProps.current!.measureActive).toBe(true);
 
     act(() => {
@@ -997,7 +1325,7 @@ describe("ChartPage measurement tool (Story 18.3)", () => {
 
   it("cancels an armed measurement on Escape", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Measurement tool" }));
+    armTool("Measurement tool");
 
     fireEvent.keyDown(window, { key: "Escape" });
 
@@ -1008,7 +1336,7 @@ describe("ChartPage measurement tool (Story 18.3)", () => {
     render(<ChartPage />);
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
 
-    expect(screen.getByRole("button", { name: "Measurement tool" })).toBeDisabled();
+    expect(toolControl("Measurement tool")).toBeDisabled();
   });
 });
 
@@ -1166,17 +1494,19 @@ describe("ChartPage bar replay (Story 18.4)", () => {
 
     pickBar(120);
 
-    fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+    armTool("Trendline tool");
     pickBar(60);
     pickBar(120);
     expect(lastChartProps.current!.drawings).toHaveLength(1);
   });
 
-  it("is disabled in Lines mode", () => {
+  it("is disabled in Lines mode, saying why (Story 33.12: Replay is a candle-chart feature)", () => {
     render(<ChartPage />);
+    expect(screen.getByRole("button", { name: "Replay" })).toHaveAttribute("title", "Bar Replay (Alt+R)");
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
 
     expect(screen.getByRole("button", { name: "Replay" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Replay" })).toHaveAttribute("title", "Replay is available on candle charts");
   });
 });
 
@@ -1194,7 +1524,7 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
 
   it("arms the FRVP tool, computes the profile for the dragged range once, then disarms (AC #1/#2)", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    armTool("Fixed range volume profile tool");
     expect(lastChartProps.current!.rangeSelectActive).toBe(true);
 
     select(2, 4);
@@ -1209,7 +1539,7 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
 
   it("stays static: new candles/pan never recompute a placed profile (AC #3)", () => {
     const { rerender } = render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    armTool("Fixed range volume profile tool");
     select(2, 4);
     const placed = lastChartProps.current!.volumeProfiles![0].profile;
 
@@ -1222,7 +1552,7 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
 
   it("moves a ghost edge without recomputing, then recomputes once on commit (AC #3)", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    armTool("Fixed range volume profile tool");
     select(2, 4);
     const placed = lastChartProps.current!.volumeProfiles![0].profile;
 
@@ -1237,7 +1567,7 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
 
   it("clears the ghost edge on a cancelled edge drag, leaving the profile as placed (DW-150)", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    armTool("Fixed range volume profile tool");
     select(2, 4);
     const placed = lastChartProps.current!.volumeProfiles![0];
 
@@ -1248,32 +1578,58 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
     expect(lastChartProps.current!.volumeProfiles![0].profile).toBe(placed.profile);
   });
 
-  it("shows the FRVP settings as soon as the tool is armed, with no remove button yet (DW-150)", () => {
+  it("shows the FRVP settings in the Volume overlays dialog as soon as the tool is armed, with no remove button yet (DW-150)", () => {
     render(<ChartPage />);
-    expect(screen.queryByRole("group", { name: "Fixed range volume profile settings" })).toBeNull();
+    expect(within(openOverlays()).queryByRole("group", { name: "Fixed range volume profile settings" })).toBeNull();
+    fireEvent.click(within(openOverlays()).getByRole("button", { name: "Close volume overlays" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    armTool("Fixed range volume profile tool");
 
-    expect(screen.getByRole("group", { name: "Fixed range volume profile settings" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Remove volume profile/ })).toBeNull();
+    const dialog = openOverlays();
+    expect(within(dialog).getByRole("group", { name: "Fixed range volume profile settings" })).toBeInTheDocument();
+    expect(within(dialog).getByText("Drag a range on the chart to place one.")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: /Remove volume profile/ })).toBeNull();
+  });
+
+  it("draws an FRVP from the Volume overlays dialog: it closes and arms the rail's tool", () => {
+    render(<ChartPage />);
+    overlayClick("Draw fixed range volume profile");
+
+    expect(screen.queryByRole("dialog", { name: "Volume overlays" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Fixed range volume profile tool" })).toHaveAttribute("aria-pressed", "true");
+    expect(lastChartProps.current!.rangeSelectActive).toBe(true);
+  });
+
+  it("lists each placed range by its UTC span in the dialog, with one shared settings set", () => {
+    render(<ChartPage />);
+    for (const [a, b] of [[1, 2], [3, 5]]) {
+      armTool("Fixed range volume profile tool");
+      select(a, b);
+    }
+    const dialog = openOverlays();
+    const entry = within(dialog).getByRole("region", { name: "Fixed Range Volume Profile" });
+    expect(within(entry).getByText("1970-01-01 00:00:01 to 1970-01-01 00:00:02 UTC")).toBeInTheDocument();
+    expect(within(entry).getByText("1970-01-01 00:00:03 to 1970-01-01 00:00:05 UTC")).toBeInTheDocument();
+    expect(within(entry).getAllByRole("button", { name: /Remove volume profile/ })).toHaveLength(2);
+    expect(within(entry).getAllByRole("group", { name: "Fixed range volume profile settings" })).toHaveLength(1);
   });
 
   it("supports several profiles, removable independently (AC #4)", () => {
     render(<ChartPage />);
     for (const [a, b] of [[1, 2], [3, 5]]) {
-      fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+      armTool("Fixed range volume profile tool");
       select(a, b);
     }
     expect(lastChartProps.current!.volumeProfiles!.map((p) => p.id)).toEqual(["frvp-1", "frvp-2"]);
 
-    fireEvent.click(screen.getByRole("button", { name: "Remove volume profile frvp-1" }));
+    overlayClick("Remove volume profile frvp-1");
 
     expect(lastChartProps.current!.volumeProfiles!.map((p) => p.id)).toEqual(["frvp-2"]);
   });
 
   it("ignores a range with no candles in it and cancels the armed tool on Escape", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    armTool("Fixed range volume profile tool");
 
     select(50, 60);
     expect(lastChartProps.current!.volumeProfiles).toEqual([]);
@@ -1284,18 +1640,18 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
 
   it("rebuilds placed profiles when the shared settings change (row count)", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    armTool("Fixed range volume profile tool");
     select(1, 5);
     expect(lastChartProps.current!.volumeProfiles![0].profile.rows).toHaveLength(24);
 
-    fireEvent.change(screen.getByLabelText("Row count"), { target: { value: "6" } });
+    fireEvent.change(within(openOverlays()).getByLabelText("Row count"), { target: { value: "6" } });
 
     expect(lastChartProps.current!.volumeProfiles![0].profile.rows).toHaveLength(6);
   });
 
   it("shows only revealed bars during a replay and the full stored profile after it ends", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    armTool("Fixed range volume profile tool");
     select(1, 5);
     expect(lastChartProps.current!.volumeProfiles![0].profile.totalVolume).toBeCloseTo(50);
 
@@ -1311,7 +1667,7 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
     await renderReady(<ChartPage />);
     expect(lastChartProps.current!.profileEdgesEditable).toBe(true);
 
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    armTool("Horizontal line tool");
 
     expect(lastChartProps.current!.profileEdgesEditable).toBe(false);
   });
@@ -1320,7 +1676,7 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
     render(<ChartPage />);
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
 
-    expect(screen.getByRole("button", { name: "Fixed range volume profile tool" })).toBeDisabled();
+    expect(toolControl("Fixed range volume profile tool")).toBeDisabled();
   });
 });
 
@@ -1375,7 +1731,7 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
     attachChart();
     expect(vrvp()).toHaveLength(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    overlayClick("Add visible range volume profile");
 
     expect(vrvp()).toHaveLength(1);
     expect(vrvp()[0].xAnchor).toBe("right");
@@ -1385,7 +1741,7 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
   it("caps its width at a share of the pane, so a narrow pane keeps its candles (DW-151)", () => {
     render(<ChartPage />);
     attachChart();
-    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    overlayClick("Add visible range volume profile");
 
     expect(vrvp()[0]).toMatchObject({ width: 150, maxWidthFraction: 0.3 });
   });
@@ -1393,7 +1749,7 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
   it("recomputes once per animation frame and updates the same entry, never adding one (AC #3, DW-151)", () => {
     render(<ChartPage />);
     attachChart();
-    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    overlayClick("Add visible range volume profile");
     const first = vrvp()[0].profile;
 
     pan({ from: 2, to: 4 }); // unchanged range
@@ -1413,16 +1769,19 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
   it("says it covers the loaded bars only while the view reaches past the oldest bar (DW-151)", () => {
     render(<ChartPage />);
     attachChart();
-    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    overlayClick("Add visible range volume profile");
     expect(screen.queryByText(/Covers loaded bars only/)).toBeNull();
 
     pan({ from: 1, to: 4 }, { from: -12, to: 3 });
     nextFrame();
     expect(screen.getByText(/Covers loaded bars only/)).toBeInTheDocument();
+    // Under the chart too, where it is read with the dialog closed.
+    expect(screen.getByText("Visible Range Volume Profile: covers the loaded bars only")).toBeInTheDocument();
 
     pan({ from: 1, to: 4 }, { from: 0, to: 3 });
     nextFrame();
     expect(screen.queryByText(/Covers loaded bars only/)).toBeNull();
+    expect(screen.queryByText("Visible Range Volume Profile: covers the loaded bars only")).toBeNull();
   });
 
   it("subscribes to the visible range only while active, and shows revealed bars only during a replay", () => {
@@ -1430,7 +1789,7 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
     attachChart();
     expect(handlers).toHaveLength(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    overlayClick("Add visible range volume profile");
     expect(handlers).toHaveLength(1);
     expect(vrvp()[0].profile.totalVolume).toBeCloseTo(30); // bars 2..4
 
@@ -1442,25 +1801,29 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
   it("disables Add while active or outside Candles mode", () => {
     render(<ChartPage />);
     attachChart();
-    const add = () => screen.getByRole("button", { name: "Add visible range volume profile" });
+    const add = () => within(openOverlays()).getByRole("button", { name: "Add visible range volume profile" });
     expect(add()).toBeEnabled();
 
     fireEvent.click(add());
     expect(add()).toBeDisabled();
+    expect(add()).toHaveTextContent("on the chart");
 
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
     expect(screen.getByText("Shown in Candles mode only")).toBeInTheDocument();
+    const svp = within(openOverlays()).getByRole("button", { name: "Add Session Volume Profile" });
+    expect(svp).toBeDisabled();
+    expect(svp).toHaveTextContent("Candles mode only");
   });
 
   it("is a single instance: adding again does not stack, Remove clears it (AC #4)", () => {
     render(<ChartPage />);
     attachChart();
-    const add = () => fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    const add = () => overlayClick("Add visible range volume profile");
     add();
     add();
     expect(vrvp()).toHaveLength(1);
 
-    fireEvent.click(screen.getByRole("button", { name: "Remove visible range volume profile" }));
+    overlayClick("Remove visible range volume profile");
 
     expect(vrvp()).toHaveLength(0);
   });
@@ -1468,14 +1831,163 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
   it("coexists with a placed FRVP and is hidden in Lines mode", () => {
     render(<ChartPage />);
     attachChart();
-    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    overlayClick("Add visible range volume profile");
+    armTool("Fixed range volume profile tool");
     act(() => lastChartProps.current!.onRangeSelect!({ time: 1, price: 1 }, { time: 3, price: 2 }));
     expect(lastChartProps.current!.volumeProfiles!.map((p) => p.id)).toEqual(["frvp-1", "vrvp"]);
 
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
 
     expect(vrvp()).toHaveLength(0);
+  });
+});
+
+describe("ChartPage Volume overlays dialog", () => {
+  const D1 = Date.UTC(2024, 0, 1) / 1000;
+  const times = [D1, D1 + 60, D1 + 86_400, D1 + 86_460];
+  const bar = (t: number, p: number) => ({ time: t, open: p, high: p + 1, low: p, close: p + 1 });
+
+  beforeEach(() => {
+    const candles = times.map((t, i) => bar(t, 10 + i * 10));
+    mocks.candles = candles;
+    mocks.volume = times.map((t) => ({ time: t, value: 5 }));
+    mocks.session = { candles, volume: mocks.volume, completeFrom: null };
+  });
+
+  it("opens from the top bar's Volume overlays button, next to Indicators, with the overlays to add and nothing on", () => {
+    render(page());
+    const topbar = screen.getByRole("toolbar", { name: "Chart controls" });
+    const labels = within(topbar).getAllByRole("button").map((b) => b.textContent);
+    expect(labels.indexOf("Volume overlays")).toBe(labels.indexOf("Indicators") + 1);
+    expect(screen.queryByRole("dialog", { name: "Volume overlays" })).toBeNull();
+
+    fireEvent.click(within(topbar).getByRole("button", { name: "Volume overlays" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Volume overlays" });
+    const adds = within(within(dialog).getByRole("region", { name: "Add a volume overlay" }))
+      .getAllByRole("button")
+      .map((b) => b.getAttribute("aria-label"));
+    expect(adds).toEqual([
+      "Add visible range volume profile",
+      "Draw fixed range volume profile",
+      "Add Session Volume Profile",
+      "Add Session Volume Profile HD",
+      "Add Periodic Volume Profile",
+      "Add Time Price Opportunity (TPO)",
+      "Add Auto Anchored Volume Profile",
+    ]);
+    expect(within(dialog).getByText("Nothing added yet")).toBeInTheDocument();
+  });
+
+  it("adds an overlay into the list below with its settings, applies a setting at once, and removes it", () => {
+    render(page());
+    overlayClick("Add Periodic Volume Profile");
+
+    const dialog = screen.getByRole("dialog", { name: "Volume overlays" });
+    const entry = within(dialog).getByRole("region", { name: "Periodic Volume Profile" });
+    expect(within(dialog).queryByText("Nothing added yet")).toBeNull();
+    expect(within(dialog).getByRole("button", { name: "Add Periodic Volume Profile" })).toBeDisabled();
+    fireEvent.change(within(entry).getByLabelText("Profile period"), { target: { value: "daily" } });
+    expect(lastChartProps.current!.volumeProfiles!.filter((p) => p.id.startsWith("session-")).length).toBeGreaterThan(0);
+    expect(mocks.sessionArgs).toMatchObject({ enabled: true, barSeconds: 60 }); // the daily period's fetch
+
+    fireEvent.click(within(entry).getByRole("button", { name: "Remove session volume profile" }));
+    expect(within(dialog).queryByRole("region", { name: "Periodic Volume Profile" })).toBeNull();
+    expect(lastChartProps.current!.volumeProfiles!.some((p) => p.id.startsWith("session-"))).toBe(false);
+    expect(within(dialog).getByRole("button", { name: "Add Periodic Volume Profile" })).toBeEnabled();
+  });
+
+  it("says a session-type preset replaces the one on, then switches the one slot", () => {
+    render(page());
+    overlayClick("Add Session Volume Profile");
+    const dialog = screen.getByRole("dialog", { name: "Volume overlays" });
+    const tpo = within(dialog).getByRole("button", { name: "Add Time Price Opportunity (TPO)" });
+    expect(tpo).toHaveTextContent("replaces Session Volume Profile");
+    expect(within(dialog).getByRole("button", { name: "Add visible range volume profile" })).not.toHaveTextContent("replaces");
+
+    fireEvent.click(tpo);
+
+    expect(within(dialog).queryByRole("region", { name: "Session Volume Profile" })).toBeNull();
+    expect(within(dialog).getByRole("region", { name: "Time Price Opportunity (TPO)" })).toBeInTheDocument();
+    expect(within(dialog).getAllByRole("group", { name: "Session volume profile settings" })).toHaveLength(1);
+    expect(within(dialog).getByRole("button", { name: "Add Session Volume Profile" })).toHaveTextContent(
+      "replaces Time Price Opportunity (TPO)",
+    );
+  });
+
+  it("keeps VRVP, a session profile and placed FRVPs on together, each with its own entry", () => {
+    render(page());
+    overlayClick("Add visible range volume profile");
+    overlayClick("Add Session Volume Profile HD");
+    armTool("Fixed range volume profile tool");
+    act(() => lastChartProps.current!.onRangeSelect!({ time: times[0] as never, price: 0 }, { time: times[1] as never, price: 0 }));
+
+    const dialog = openOverlays();
+    for (const name of ["Visible Range Volume Profile", "Session Volume Profile HD", "Fixed Range Volume Profile"]) {
+      expect(within(dialog).getByRole("region", { name })).toBeInTheDocument();
+    }
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remove volume profile frvp-1" }));
+    expect(within(dialog).queryByRole("region", { name: "Fixed Range Volume Profile" })).toBeNull();
+    expect(lastChartProps.current!.volumeProfiles!.some((p) => p.id === "frvp-1")).toBe(false);
+  });
+
+  it("disables every Add and the FRVP draw in Lines mode, saying why", () => {
+    render(page());
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    const dialog = openOverlays();
+
+    expect(within(dialog).getByText(/Volume overlays draw in Candles mode only/)).toBeInTheDocument();
+    for (const button of within(within(dialog).getByRole("region", { name: "Add a volume overlay" })).getAllByRole("button")) {
+      expect(button).toBeDisabled();
+      expect(button).toHaveTextContent("Candles mode only");
+    }
+  });
+
+  it("closes from its close button and from Esc (the dialog's own close event), keeping what was added", () => {
+    render(page());
+    overlayClick("Add Session Volume Profile");
+    fireEvent.click(within(openOverlays()).getByRole("button", { name: "Close volume overlays" }));
+    expect(screen.queryByRole("dialog", { name: "Volume overlays" })).toBeNull();
+    expect(lastChartProps.current!.volumeProfiles!.some((p) => p.id.startsWith("session-"))).toBe(true);
+
+    // jsdom has no showModal: Esc's effect on a native modal dialog is its `close` event.
+    fireEvent(openOverlays(), new Event("close"));
+    expect(screen.queryByRole("dialog", { name: "Volume overlays" })).toBeNull();
+  });
+
+  it("keeps the partial-data notices under the chart while the dialog is closed (DW-151/153)", () => {
+    mocks.session = { ...mocks.session, loading: true };
+    render(page());
+    expect(screen.queryByRole("list", { name: "Volume overlay notices" })).toBeNull();
+    overlayClick("Add Session Volume Profile");
+    fireEvent.click(within(openOverlays()).getByRole("button", { name: "Close volume overlays" }));
+
+    const notices = screen.getByRole("list", { name: "Volume overlay notices" });
+    expect(within(notices).getByText("Session Volume Profile: loading session history")).toBeInTheDocument();
+    expect(within(notices).getByText("Session Volume Profile: 2 of 5 sessions drawn")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    expect(screen.queryByRole("list", { name: "Volume overlay notices" })).toBeNull();
+  });
+
+  it("an Esc inside it does not disarm an FRVP tool armed before it opened", () => {
+    render(page());
+    armTool("Fixed range volume profile tool");
+    const dialog = openOverlays();
+
+    fireEvent.keyDown(within(dialog).getByRole("button", { name: "Close volume overlays" }), { key: "Escape" });
+
+    expect(screen.getByRole("button", { name: "Fixed range volume profile tool" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("shows the session status messages in the overlay's entry", () => {
+    mocks.session = { ...mocks.session, loading: true };
+    render(page());
+    overlayClick("Add Session Volume Profile");
+    const entry = within(openOverlays()).getByRole("region", { name: "Session Volume Profile" });
+
+    expect(within(entry).getByRole("status")).toHaveTextContent("Loading session history…");
+    expect(within(entry).getByText(/Showing 2 of 5/)).toBeInTheDocument();
   });
 });
 
@@ -1498,7 +2010,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
     render(<ChartPage />);
     expect(sessions()).toHaveLength(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
 
     expect(sessions().map((s) => s.id)).toEqual([`session-${D1}`, `session-${D2}`, `session-${D3}`]);
     expect(sessions()[1].xAnchor).toEqual({ time: D2, offsetSeconds: 0 });
@@ -1513,11 +2025,11 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
   it("SVP HD is the same component with a higher row count and respondsToZoom (AC #3)", () => {
     render(<ChartPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
     expect(sessions()[0].profile.rows).toHaveLength(24);
     expect(sessions()[0].respondsToZoom).toBe(false);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile HD" }));
+    overlayClick("Add Session Volume Profile HD");
     expect(sessions()).toHaveLength(3); // switched preset, not stacked
     expect(sessions()[0].profile.rows).toHaveLength(120);
     expect(sessions()[0].respondsToZoom).toBe(true);
@@ -1525,10 +2037,10 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
 
   it("keeps the session count and colors when switching presets", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
     fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "2" } });
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile HD" }));
+    overlayClick("Add Session Volume Profile HD");
 
     expect(sessions()).toHaveLength(2);
     expect((screen.getByLabelText("Sessions to render") as HTMLInputElement).value).toBe("2");
@@ -1536,7 +2048,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
 
   it("says so when fewer sessions than requested can be drawn", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
     expect(screen.getByText(/Showing 3 of 5/)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "3" } });
@@ -1546,7 +2058,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
 
   it("limits the rendered sessions with the sessions setting (AC #4)", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
 
     fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "2" } });
 
@@ -1555,14 +2067,14 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
 
   it("can be removed, and is hidden in Lines mode", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
     expect(sessions()).toHaveLength(0);
     expect(screen.getByText("Shown in Candles mode only")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Candles" }));
     expect(sessions()).toHaveLength(3);
-    fireEvent.click(screen.getByRole("button", { name: "Remove session volume profile" }));
+    overlayClick("Remove session volume profile");
     expect(sessions()).toHaveLength(0);
   });
 
@@ -1570,7 +2082,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
     mocks.candles = [bar(D3, 50), bar(D3 + 60, 60)]; // chart only loaded the last day
     render(<ChartPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
 
     expect(sessions().map((s) => s.id)).toEqual([`session-${D3}`]);
   });
@@ -1586,7 +2098,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
     mocks.candles = [bar(D3 + 600, 50), bar(D3 + 660, 60)];
     render(<ChartPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
 
     const [session] = sessions();
     expect(session.xAnchor).toEqual({ time: D3 + 600, offsetSeconds: -600 }); // 10 bars left of it
@@ -1598,7 +2110,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
     layoutApi.server[IID] = layoutOf({ bar_seconds: 86_400 });
     render(page());
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
 
     // D2's newest 1-minute bar is D2 + 60: the session has elapsed to D2 + 120 (the past one ends
     // where its newest bar does; it never stretches to a period end the data does not reach).
@@ -1610,7 +2122,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
   it("shows a loading status while older session history is paged in (DW-153)", () => {
     mocks.session = { ...mocks.session, loading: true };
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
 
     expect(screen.getByRole("status")).toHaveTextContent("Loading session history…");
   });
@@ -1620,7 +2132,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
     try {
       vi.setSystemTime(Date.UTC(2024, 0, 10, 23, 59, 30));
       render(<ChartPage />);
-      fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+      overlayClick("Add Session Volume Profile");
       expect(mocks.sessionArgs.sinceSeconds).toBe(Date.UTC(2024, 0, 6) / 1000); // 5 days: Jan 6..10
 
       await act(async () => {
@@ -1639,7 +2151,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
     try {
       vi.setSystemTime(Date.UTC(2024, 0, 2));
       render(<ChartPage />);
-      fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+      overlayClick("Add Periodic Volume Profile");
       fireEvent.change(screen.getByLabelText("Profile period"), { target: { value: "monthly" } });
       expect(mocks.sessionArgs.sinceSeconds).toBe(Date.UTC(2023, 8, 1) / 1000); // Sep..Jan
       // A browser fires a delay past 2^31 - 1 ms at once; the fake clock would not, so check them.
@@ -1663,7 +2175,7 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
 
   it("anchors the session history to the replay cutoff while replaying (DW-153)", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
     fireEvent.click(screen.getByRole("button", { name: "Replay" }));
 
     act(() => lastChartProps.current!.onPointClick!({ time: D2 + 60, price: 1 }));
@@ -1688,7 +2200,7 @@ describe("ChartPage periodic volume profile (Story 18.9)", () => {
   it("adds a periodic profile (weekly by default) with one profile per period (AC #1/#2)", () => {
     render(<ChartPage />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    overlayClick("Add Periodic Volume Profile");
 
     expect(periods().map((p) => p.id)).toEqual([`session-${MON1}`, `session-${MON2}`]);
     expect(periods().map((p) => p.profile.totalVolume)).toEqual([10, 10]);
@@ -1697,7 +2209,7 @@ describe("ChartPage periodic volume profile (Story 18.9)", () => {
 
   it("regroups when the period dropdown changes, offering only the fixed set", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    overlayClick("Add Periodic Volume Profile");
     const select = screen.getByLabelText("Profile period") as HTMLSelectElement;
     expect([...select.options].map((o) => o.value)).toEqual(["4h", "daily", "weekly", "monthly"]);
     expect([...select.options].map((o) => o.textContent)).toEqual(["4 hours", "Daily", "Weekly", "Monthly"]);
@@ -1709,7 +2221,7 @@ describe("ChartPage periodic volume profile (Story 18.9)", () => {
 
   it("switching the period refetches at that period's bar size and a deeper wanted start", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    overlayClick("Add Periodic Volume Profile");
     const weekly = { ...mocks.sessionArgs };
     expect(weekly).toMatchObject({ enabled: true, barSeconds: 300 });
 
@@ -1721,23 +2233,23 @@ describe("ChartPage periodic volume profile (Story 18.9)", () => {
 
   it("switching PVP -> SVP -> PVP restarts on the preset's default period", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    overlayClick("Add Periodic Volume Profile");
     fireEvent.change(screen.getByLabelText("Profile period"), { target: { value: "monthly" } });
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
     expect(mocks.sessionArgs.barSeconds).toBe(60);
-    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    overlayClick("Add Periodic Volume Profile");
 
     expect((screen.getByLabelText("Profile period") as HTMLSelectElement).value).toBe("weekly");
   });
 
   it("reuses the shared sessions-to-render setting (AC #3), and only PVP shows a period dropdown", () => {
     render(<ChartPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    overlayClick("Add Periodic Volume Profile");
     fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "1" } });
     expect(periods()).toHaveLength(1);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
     expect(screen.queryByLabelText("Profile period")).toBeNull();
     expect(screen.getAllByLabelText("Sessions to render")).toHaveLength(1);
   });
@@ -1761,10 +2273,10 @@ describe("cross-story: drawing tools during replay (Story 18.4 AC #5, verified e
     point(3, 1);
     expect(lastChartProps.current!.data).toHaveLength(3);
 
-    fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+    armTool("Trendline tool");
     point(1, 1);
     point(3, 2);
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    armTool("Horizontal line tool");
     act(() => lastChartProps.current!.onPriceClick!(1.5));
     const drawings = lastChartProps.current!.drawings;
     expect(drawings).toHaveLength(1);
@@ -1780,7 +2292,7 @@ describe("cross-story: drawing tools during replay (Story 18.4 AC #5, verified e
     render(<ChartPage />);
     fireEvent.click(screen.getByRole("button", { name: "Replay" }));
     point(3, 1);
-    fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+    armTool("Trendline tool");
     point(1, 1);
 
     fireEvent.keyDown(window, { key: "Escape" });
@@ -1812,7 +2324,7 @@ describe("ChartPage legend controls (Story 32.3)", () => {
     const cursor = screen.getByRole("button", { name: "Cursor tool" });
     expect(cursor).toHaveAttribute("title", "Select / edit drawings (Esc)");
 
-    fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+    armTool("Trendline tool");
     expect(cursor).toHaveAttribute("aria-pressed", "false");
     act(() => lastChartProps.current!.onPointClick!({ time: 1, price: 1 }));
     act(() => lastChartProps.current!.onPointClick!({ time: 2, price: 2 }));
@@ -1822,13 +2334,15 @@ describe("ChartPage legend controls (Story 32.3)", () => {
     expect(lastChartProps.current).toMatchObject({ drawEditable: true });
   });
 
-  it("has no indicator list, select or Add below the chart, and keeps the div#indicators anchor", async () => {
+  it("has no indicator list, select or Add, and no volume-overlay controls, below the chart", async () => {
     await mountWith([SMA], { [`${SMA_ID}.value`]: [] });
 
     expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Indicators" })).toBeNull();
-    expect(document.querySelector("div#indicators")).not.toBeNull();
-    expect(document.querySelector("div#indicators")?.contains(screen.getByRole("heading", { name: "Chart overlays" }))).toBe(true);
+    // The volume overlays are added and edited in their own dialog (nothing links to the old anchor).
+    expect(screen.queryByRole("button", { name: /^Add / })).toBeNull();
+    expect(screen.queryByRole("group", { name: /volume profile settings/ })).toBeNull();
+    expect(document.querySelector("div#indicators")).toBeNull();
   });
 
   it("titles the legend row per instance: RSI(14) and RSI(21) are two rows, each with its own params", async () => {
@@ -1908,17 +2422,20 @@ describe("ChartPage legend controls (Story 32.3)", () => {
     expect(saveConfigMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", [RSI]);
   });
 
-  it("gives Volume an eye (hide, no save) and an x (the Indicators toggle) but no settings", () => {
+  it("gives Volume an eye (hide, no save), a gear (its colour mode, Story 33.6) and an x (the Indicators toggle)", () => {
     render(page());
-    expect(paneOf("volume")).toMatchObject({ configurable: false, hidden: false });
+    expect(paneOf("volume").configurable).not.toBe(false);
+    expect(paneOf("volume").hidden).toBe(false);
 
     legend("hide", "volume");
     expect(paneOf("volume").hidden).toBe(true);
     legend("hide", "volume");
     expect(paneOf("volume").hidden).toBe(false);
 
-    legend("settings", "volume"); // there is no gear: nothing opens
-    expect(screen.queryByRole("dialog", { name: /Volume/ })).toBeNull();
+    legend("settings", "volume");
+    const dialog = screen.getByRole("dialog", { name: "Volume settings" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog", { name: "Volume settings" })).toBeNull();
 
     legend("remove", "volume");
     expect(lastChartProps.current!.panes!.map((p) => p.id)).toEqual([]);
@@ -2170,9 +2687,6 @@ describe("ChartPage legend controls (Story 32.3)", () => {
 
 describe("ChartPage Fibonacci and position tools (Story 32.5)", () => {
   const drag = (price: number, time: number | null = null, barsSince = (): number | null => null) => ({ price, time, barsSince });
-  const armTool = (name: string): void => {
-    fireEvent.click(screen.getByRole("button", { name }));
-  };
   const drawings = (): ChartStubProps["drawings"] => lastChartProps.current!.drawings;
 
   it("arms the Fibonacci tool for a drag, and Esc cancels it with nothing placed", async () => {
@@ -2263,9 +2777,9 @@ describe("ChartPage Fibonacci and position tools (Story 32.5)", () => {
     mocks.precision = null;
     await renderReady(page());
     for (const name of ["Fibonacci retracement tool", "Long position tool", "Short position tool"]) {
-      expect(screen.getByRole("button", { name })).toBeDisabled();
+      expect(toolControl(name)).toBeDisabled();
     }
-    expect(screen.getByRole("button", { name: "Trendline tool" })).toBeEnabled();
+    expect(toolControl("Trendline tool")).toBeEnabled();
     expect(lastChartProps.current!.precision).toBeNull();
   });
 
@@ -2416,7 +2930,7 @@ describe("ChartPage Fibonacci and position tools (Story 32.5)", () => {
 
 describe("drawing settings and failed saves (Story 32.5 review)", () => {
   const placeLong = (): void => {
-    fireEvent.click(screen.getByRole("button", { name: "Long position tool" }));
+    armTool("Long position tool");
     act(() => lastChartProps.current!.onPointClick!({ time: 100, price: 100 }));
   };
 
@@ -2449,7 +2963,7 @@ describe("drawing settings and failed saves (Story 32.5 review)", () => {
     try {
       drawingsApi.save.mockRejectedValue(Object.assign(new Error("PUT failed: 422"), { status: 422 }));
       await renderReady(page());
-      fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+      armTool("Horizontal line tool");
       act(() => lastChartProps.current?.onPriceClick?.(123.5));
       await act(async () => {
         vi.advanceTimersByTime(SAVE_DEBOUNCE_MS + 1);
@@ -2479,7 +2993,7 @@ describe("drawing settings and failed saves (Story 32.5 review)", () => {
     try {
       drawingsApi.save.mockRejectedValueOnce(Object.assign(new Error("PUT failed: 500"), { status: 500 }));
       await renderReady(page());
-      fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+      armTool("Horizontal line tool");
       act(() => lastChartProps.current?.onPriceClick?.(123.5));
       await act(async () => {
         vi.advanceTimersByTime(SAVE_DEBOUNCE_MS + 1);
@@ -2501,7 +3015,7 @@ describe("drawing settings and failed saves (Story 32.5 review)", () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     drawingsApi.save.mockRejectedValue(new Error("network down"));
     const view = await renderReady(page());
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    armTool("Horizontal line tool");
     act(() => lastChartProps.current?.onPriceClick?.(123.5));
     view.unmount(); // flushes once
     await act(async () => {
@@ -2629,7 +3143,7 @@ describe("ChartPage layout that comes back as it was left (Story 32.6)", () => {
     mocks.candles = bars;
     mocks.volume = bars.map((b) => ({ time: b.time, value: 10 }));
     const first = render(page());
-    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    armTool("Fixed range volume profile tool");
     act(() => lastChartProps.current!.onRangeSelect!({ time: 2, price: 1 }, { time: 4, price: 2 }));
     await flushSave();
 
@@ -2677,7 +3191,9 @@ describe("ChartPage layout that comes back as it was left (Story 32.6)", () => {
     });
     render(page());
 
-    expect(screen.getByRole("button", { name: "Remove visible range volume profile" })).toBeInTheDocument();
+    expect(within(openOverlays()).getByRole("button", { name: "Remove visible range volume profile" })).toBeInTheDocument();
+    expect((screen.getByLabelText("Row count") as HTMLInputElement).value).toBe("48");
+    expect((screen.getByLabelText("Value area percent") as HTMLInputElement).value).toBe("60");
   });
 
   it("restores a saved session profile and saves its period", async () => {
@@ -2709,6 +3225,7 @@ describe("ChartPage layout that comes back as it was left (Story 32.6)", () => {
       },
     });
     render(page());
+    openOverlays();
 
     expect((screen.getByLabelText("Sessions to render") as HTMLInputElement).value).toBe("1");
     expect((screen.getByLabelText("Up volume color") as HTMLInputElement).value).toBe("#112233");
@@ -2723,6 +3240,7 @@ describe("ChartPage layout that comes back as it was left (Story 32.6)", () => {
       volume_profile: { ...BUILT_IN_LAYOUT.volume_profile, kind: "visible", up_color: "#abcdef", show_value_area: false },
     });
     render(page());
+    openOverlays();
 
     expect((screen.getByLabelText("Up volume color") as HTMLInputElement).value).toBe("#abcdef");
     expect(screen.getByLabelText("Show value area")).not.toBeChecked();
@@ -2731,7 +3249,7 @@ describe("ChartPage layout that comes back as it was left (Story 32.6)", () => {
   it("saves the session count, colours and toggles of the saved kind", async () => {
     vi.useFakeTimers();
     render(page());
-    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    overlayClick("Add Session Volume Profile");
     fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "8" } });
     fireEvent.change(screen.getByLabelText("Down volume color"), { target: { value: "#010203" } });
     fireEvent.click(screen.getByLabelText("Show POC"));
@@ -2877,7 +3395,7 @@ describe("ChartPage Anchored VP and Anchored VWAP drawings (Story 32.7)", () => 
   const volumes = (list = bars) => list.map((b) => ({ time: b.time, value: b.time / 100 }));
   const avpProfiles = () => lastChartProps.current!.volumeProfiles!.filter((p) => p.id.startsWith("avp-"));
   const place = (toolName: string, time: number) => {
-    fireEvent.click(screen.getByRole("button", { name: toolName }));
+    armTool(toolName);
     act(() => lastChartProps.current!.onPointClick!({ time, price: 12 }));
   };
 
@@ -3084,7 +3602,7 @@ describe("ChartPage Anchored VP and Anchored VWAP drawings (Story 32.7)", () => 
     expect(lastChartProps.current!.drawings).toEqual([]);
     expect(avpProfiles()).toHaveLength(0);
     expect(lastChartProps.current!.legendExtras).toEqual([]);
-    expect(screen.getByRole("button", { name: "Anchored volume profile tool" })).toBeDisabled();
+    expect(toolControl("Anchored volume profile tool")).toBeDisabled();
   });
 
   it("the settings modal edits the VWAP's source and bands, and the VP's rows and value area", async () => {
@@ -3146,7 +3664,7 @@ describe("ChartPage Auto Anchored profile and TPO (Story 32.7)", () => {
   // Chart bars over two sessions; the highest high is on D1 + 120 and the lowest low on D2 + 60.
   const chartBars = [bar(D1, 10, 12), bar(D1 + 120, 20, 30), bar(D2, 15, 18), bar(D2 + 60, 5, 17)];
   const autoSpec = () => lastChartProps.current!.volumeProfiles!.find((p) => p.id === "auto-anchored");
-  const add = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
+  const add = (name: string) => overlayClick(name);
 
   beforeEach(() => {
     mocks.candles = chartBars;
@@ -3257,6 +3775,7 @@ describe("ChartPage Auto Anchored profile and TPO (Story 32.7)", () => {
     layoutApi.save.mockClear();
 
     render(page());
+    openOverlays();
     expect((screen.getByLabelText("Anchor") as HTMLSelectElement).value).toBe("week");
     expect(mocks.sessionArgs).toMatchObject({ enabled: true, sinceSeconds: Date.UTC(2024, 0, 1) / 1000, barSeconds: 300 });
     await flushSave();
@@ -3334,6 +3853,7 @@ describe("ChartPage Auto Anchored profile and TPO (Story 32.7)", () => {
 
       render(page());
       expect(sessions()[0].tpo!.letters).toBe(true);
+      openOverlays();
       expect((screen.getByLabelText("Initial balance minutes") as HTMLInputElement).value).toBe("90");
       expect(mocks.sessionArgs.barSeconds).toBe(1800);
       await flushSave();
@@ -3356,7 +3876,7 @@ describe("ChartPage Auto Anchored profile and TPO (Story 32.7)", () => {
       layoutApi.server[IID] = { ...layoutOf(), volume_profile: { ...old, kind: "session", session: "daily" } };
       render(page());
 
-      expect(screen.getByText("Session Volume Profile")).toBeInTheDocument();
+      expect(within(openOverlays()).getByRole("region", { name: "Session Volume Profile" })).toBeInTheDocument();
       expect(screen.queryByLabelText("Anchor")).toBeNull();
     });
   });
@@ -3470,7 +3990,8 @@ describe("ChartPage volume footprint (Story 32.8)", () => {
 
     expect(lastFootprintCall().enabled).toBe(false);
     expect(lastChartProps.current!.footprint).toBeNull();
-    expect(within(dialog).getByText("Candles mode only")).toBeInTheDocument();
+    const footprintRow = within(dialog).getByRole("checkbox", { name: /Footprint/ }).closest("label") as HTMLElement;
+    expect(within(footprintRow).getByText("Candles mode only")).toBeInTheDocument();
   });
 
   it("opens its settings from the legend gear; a style-only Apply keeps the row size (no refetch)", () => {
@@ -3515,5 +4036,1482 @@ describe("ChartPage volume footprint (Story 32.8)", () => {
     render(page());
 
     expect(screen.getByText(/Footprint: Data API answered 500/)).toBeInTheDocument();
+  });
+});
+
+describe("ChartPage derivatives panes (Story 33.5)", () => {
+  const NS = 1_000_000_000;
+  const PERP = "BTCUSDT-LINEAR.BYBIT";
+  const ALL_ON: ChartLayout["derivatives"] = {
+    oi: { on: true },
+    funding: { on: true },
+    basis: { on: true },
+    mark_index: { on: true },
+    liquidations: { on: true, measure: "size", markers: true },
+  };
+  const bars = [600, 660, 720].map((time) => ({ time, open: 1, high: 2, low: 1, close: 1 }));
+  const pane = (id: string) => lastChartProps.current!.panes!.find((p) => p.id === id)!;
+  const derivativePanes = () => lastChartProps.current!.panes!.filter((p) => p.id.startsWith("deriv_"));
+  const flush = () => act(async () => {});
+
+  async function renderPerp(derivatives: ChartLayout["derivatives"] = ALL_ON): Promise<void> {
+    route.iid = PERP;
+    layoutApi.server[PERP] = layoutOf({ derivatives: { ...BUILT_IN_LAYOUT.derivatives, ...derivatives } });
+    render(page());
+    for (let i = 0; i < 4; i++) await flush(); // pages land (and the older-page check settles)
+  }
+
+  beforeEach(() => {
+    mocks.candles = bars;
+    mocks.venueMarket = { venue: "BYBIT", market: "perp" };
+    derivApi.pages = {
+      "open-interest": [{ t: 600_000, oi: "120", oi_change: null }, { t: 660_000 }, { t: 720_000, oi: "90", oi_change: "-30" }],
+      funding: [
+        { t: 620 * NS, rate: "0.0001", interval: 28_800, next_funding_ns: null, annualised: 0.1095 },
+        { t: 700 * NS, rate: "-0.0002", interval: 28_800, next_funding_ns: null, annualised: -0.219 },
+      ],
+      "mark-index": [{ t: 600_000, mark: "100.5", index: "100.0", basis_mi_bps: 50, basis_ml_bps: null }],
+      "liquidation-bars": [
+        {
+          t: 600_000,
+          long_v: 1500,
+          short_v: 200,
+          n: 3,
+          size_precision: 3,
+          notional_units: 170_000_000,
+          notional_precision: 5,
+          long_notional_units: 150_000_000,
+          short_notional_units: 20_000_000,
+        },
+      ],
+      liquidations: [],
+    };
+  });
+
+  it("mounts each of the five entries with its pane, kind and placement", async () => {
+    await renderPerp();
+
+    expect(derivativePanes().map((p) => [p.id, p.kind, p.placement ?? "pane", p.group])).toEqual([
+      ["deriv_oi.oi", "Line", "pane", "deriv_oi"],
+      ["deriv_funding.rate", "Histogram", "pane", "deriv_funding"],
+      ["deriv_basis.mark_index", "Line", "pane", "deriv_basis"],
+      ["deriv_basis.mark_last", "Line", "pane", "deriv_basis"],
+      ["deriv_liquidations.long", "Histogram", "pane", "deriv_liquidations"],
+      ["deriv_liquidations.short", "Histogram", "pane", "deriv_liquidations"],
+      ["deriv_mark_index.mark", "Line", "overlay", "deriv_mark_index"],
+      ["deriv_mark_index.index", "Line", "overlay", "deriv_mark_index"],
+    ]);
+    expect(pane("deriv_basis.mark_index").zeroLine).toBe(true);
+    expect(new Set(derivApi.calls.map((c) => c.route))).toEqual(
+      new Set(["open-interest", "funding", "mark-index", "liquidation-bars", "liquidations"]),
+    );
+  });
+
+  it("draws open interest with whitespace for a null bucket, the legend printing the exact text", async () => {
+    await renderPerp();
+
+    expect(pane("deriv_oi.oi").data).toEqual([{ time: 600, value: 120 }, { time: 660 }, { time: 720, value: 90 }]);
+    expect(pane("deriv_oi.oi").format!(90, 720)).toBe("90 · Δ -30");
+    expect(pane("deriv_oi.oi").format!(120, 600)).toBe("120 · Δ —");
+  });
+
+  it("holds funding per bar, up/down coloured, with rate %, annualised and the countdown", async () => {
+    await renderPerp();
+
+    const funding = pane("deriv_funding.rate");
+    // No forming bar here: the hold stops at the newest event's bar (10:01), so 10:02 is whitespace.
+    expect(funding.data).toEqual([{ time: 600, value: 0.0001 }, { time: 660, value: -0.0002 }, { time: 720 }]);
+    expect([funding.upColor, funding.downColor]).toEqual([CHART_TOKENS["--chart-up"], CHART_TOKENS["--chart-down"]]);
+    expect(funding.format!(0.0001, 600)).toBe("rate 0.0100% · ann. 10.95% · next —");
+  });
+
+  it("ticks the funding countdown every second against the latest event's next funding time", async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000, toFake: ["setInterval", "clearInterval", "Date"] });
+    try {
+      const next = (1_800_000_000_000 + (3 * 3600 + 5) * 1000) * 1_000_000;
+      derivApi.pages.funding = [{ t: 620 * NS, rate: "0.0001", interval: 28_800, next_funding_ns: next, annualised: 0.1095 }];
+      await renderPerp();
+      expect(pane("deriv_funding.rate").format!(0.0001, 600)).toContain("next 03:00:05");
+
+      act(() => vi.advanceTimersByTime(1000));
+      expect(pane("deriv_funding.rate").format!(0.0001, 600)).toContain("next 03:00:04");
+      act(() => vi.advanceTimersByTime(4 * 3600 * 1000));
+      expect(pane("deriv_funding.rate").format!(0.0001, 600)).toContain("next 00:00:00");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("draws basis against a zero line and the mark/index overlays with their exact text", async () => {
+    await renderPerp();
+
+    expect(pane("deriv_basis.mark_index").data).toEqual([{ time: 600, value: 50 }]);
+    expect(pane("deriv_basis.mark_last").data).toEqual([{ time: 600 }]);
+    expect(pane("deriv_basis.mark_index").format!(50, 600)).toBe("50.00 bps");
+    expect(pane("deriv_mark_index.index").format!(100, 600)).toBe("100.0");
+  });
+
+  it("mirrors the liquidation bars by size or notional, the legend showing the notional and n", async () => {
+    await renderPerp();
+    expect([pane("deriv_liquidations.long").data, pane("deriv_liquidations.short").data]).toEqual([
+      [{ time: 600, value: -1.5 }],
+      [{ time: 600, value: 0.2 }],
+    ]);
+    expect(pane("deriv_liquidations.short").format!(0.2, 600)).toBe("short 0.200 · notional 1700.00000 · n 3");
+
+    cleanup();
+    await renderPerp({ ...ALL_ON, liquidations: { on: true, measure: "notional", markers: true } });
+    expect(pane("deriv_liquidations.long").data).toEqual([{ time: 600, value: -1500 }]);
+  });
+
+  it("draws the liquidation markers from the rows, and hides them at a narrow bar spacing", async () => {
+    derivApi.pages.liquidations = [
+      {
+        side: "long",
+        size_units: 4,
+        price_units: 1_000_000,
+        price_precision: 1,
+        size_precision: 3,
+        venue_event_id: "a",
+        ts_event: 610 * NS,
+        ts_init: 610 * NS,
+        price_kind: "bankruptcy",
+        notional_units: 4_000_000,
+        notional_precision: 4,
+      },
+    ];
+    await renderPerp();
+    act(() => lastChartProps.current!.onBarSpacing!(12));
+    expect(lastChartProps.current!.liquidationMarkers!.map((m) => [m.id, m.time, m.position, m.price])).toEqual([
+      ["liq:a", 600, "atPriceBottom", 100000],
+    ]);
+
+    act(() => lastChartProps.current!.onBarSpacing!(4));
+    expect(lastChartProps.current!.liquidationMarkers).toEqual([]);
+    expect(pane("deriv_liquidations.long").groupLabel).toContain("markers hidden: zoom in");
+  });
+
+  it("on spot: the group is disabled, nothing is fetched or subscribed and nothing is drawn", async () => {
+    mocks.venueMarket = { venue: "BYBIT", market: "spot" };
+    await renderPerp();
+
+    expect(derivApi.calls).toEqual([]);
+    expect(liveDerivs.subscribed.every((iid) => iid === "")).toBe(true);
+    expect(liveDerivs.liquidationsSubscribed.every((iid) => iid === "")).toBe(true);
+    expect(derivativePanes()).toEqual([]);
+    expect(lastChartProps.current!.liquidationMarkers).toEqual([]);
+    expect(screen.getByRole("button", { name: "Liquidation tape" })).toBeDisabled();
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "Chart controls" })).getByRole("button", { name: "Indicators" }));
+    const group = within(screen.getByRole("dialog", { name: "Indicators" })).getByRole("group", { name: "Derivatives" });
+    expect(within(group).getByText("spot: no derivatives")).toBeInTheDocument();
+    expect(within(group).getAllByRole("checkbox").every((box) => (box as HTMLInputElement).disabled)).toBe(true);
+    expect(within(group).getByRole("checkbox", { name: "Open Interest" })).toBeChecked(); // the saved state is kept
+  });
+
+  it("fetches nothing until the candles reported the market", async () => {
+    mocks.venueMarket = null;
+    await renderPerp();
+    expect(derivApi.calls).toEqual([]);
+    expect(liveDerivs.subscribed.every((iid) => iid === "")).toBe(true);
+  });
+
+  it("cuts every pane, the markers and the tape at the replay time", async () => {
+    mocks.liveBar = { time: 780, open: 1, high: 1, low: 1, close: 1 };
+    derivApi.pages.liquidations = [610, 700].map((t) => ({
+      side: "short",
+      size_units: 1,
+      price_units: 10,
+      price_precision: 1,
+      size_precision: 0,
+      venue_event_id: `e${t}`,
+      ts_event: t * NS,
+      ts_init: t * NS,
+      price_kind: "bankruptcy",
+      notional_units: 10,
+      notional_precision: 1,
+    }));
+    await renderPerp();
+    act(() => lastChartProps.current!.onBarSpacing!(12));
+    fireEvent.click(screen.getByRole("button", { name: "Liquidation tape" }));
+    await flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    act(() => lastChartProps.current!.onPointClick!({ time: 600, price: 1 }));
+    await flush(); // the replay tape's own page
+
+    expect(derivApi.calls.filter((c) => c.route === "liquidations").at(-1)!.args.slice(1)).toEqual([660 * NS, 50]);
+    for (const p of derivativePanes()) expect(p.data.every((d) => d.time <= 600)).toBe(true);
+    expect(pane("deriv_oi.oi").data).toEqual([{ time: 600, value: 120 }]);
+    expect(lastChartProps.current!.liquidationMarkers!.map((m) => m.id)).toEqual(["liq:e610"]);
+    const tape = screen.getByRole("complementary", { name: "Liquidation tape" });
+    expect(within(tape).getAllByRole("row")).toHaveLength(2); // the header and e610
+  });
+
+  it("sets the forming slot from a live tick in it, ignores an older tick, and keeps it until the route serves the bar", async () => {
+    mocks.liveBar = { time: 780, open: 1, high: 1, low: 1, close: 1 };
+    await renderPerp();
+    act(() => liveDerivs.onTick!({ kind: "oi", t: 779 * NS, ts_init: 779 * NS, value: "77" })); // before the slot
+    expect(pane("deriv_oi.oi").data.at(-1)).toEqual({ time: 720, value: 90 });
+
+    act(() => liveDerivs.onTick!({ kind: "oi", t: 810 * NS, ts_init: 810 * NS, value: "95" }));
+    expect(pane("deriv_oi.oi").data.at(-1)).toEqual({ time: 780, value: 95 });
+    expect(pane("deriv_oi.oi").format!(95, 780)).toBe("95 · Δ —");
+
+    // The bar closed (the next one forms) but the archive has not served 780 yet: the live value stays.
+    mocks.liveBar = { time: 840, open: 1, high: 1, low: 1, close: 1 };
+    act(() => lastChartProps.current!.onPaneHeights!({ price: 500 })); // any re-render
+    expect(pane("deriv_oi.oi").data.find((d) => d.time === 780)).toEqual({ time: 780, value: 95 });
+  });
+
+  it("holds a live funding event after its slot closed, until the route has it", async () => {
+    mocks.liveBar = { time: 780, open: 1, high: 1, low: 1, close: 1 };
+    await renderPerp();
+    act(() =>
+      liveDerivs.onTick!({ kind: "funding", t: 790 * NS, ts_init: 790 * NS, value: "0.0003", interval: 28_800, next_funding_ns: null, annualised: 0.3285 }),
+    );
+    expect(pane("deriv_funding.rate").data.at(-1)).toEqual({ time: 780, value: 0.0003 });
+    expect(pane("deriv_funding.rate").format!(0.0003, 780)).toBe("rate 0.0300% · ann. 32.85% · next —");
+  });
+
+  it("does not hand the chart new series data on a countdown tick", async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000, toFake: ["setInterval", "clearInterval", "Date"] });
+    try {
+      await renderPerp();
+      const before = derivativePanes().map((p) => p.data);
+      act(() => vi.advanceTimersByTime(3000));
+      const after = derivativePanes().map((p) => p.data);
+      expect(after.every((data, i) => data === before[i])).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("in Lines mode: the group is disabled with Candles mode only, nothing drawn, the tape button disabled", async () => {
+    await renderPerp();
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    expect(derivativePanes()).toEqual([]);
+    expect(screen.getByRole("button", { name: "Liquidation tape" })).toBeDisabled();
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "Chart controls" })).getByRole("button", { name: "Indicators" }));
+    const group = within(screen.getByRole("dialog", { name: "Indicators" })).getByRole("group", { name: "Derivatives" });
+    expect(within(group).getByText("Candles mode only")).toBeInTheDocument();
+    expect(within(group).getAllByRole("checkbox").every((box) => (box as HTMLInputElement).disabled)).toBe(true);
+  });
+
+  it("disables the tape until the instrument's market is known", async () => {
+    mocks.venueMarket = null;
+    await renderPerp();
+    expect(screen.getByRole("button", { name: "Liquidation tape" })).toBeDisabled();
+  });
+
+  it("persists the on/off state, the style and the pane height in the coin's layout", async () => {
+    await renderPerp({ ...BUILT_IN_LAYOUT.derivatives });
+    expect(derivativePanes()).toEqual([]);
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "Chart controls" })).getByRole("button", { name: "Indicators" }));
+    const group = within(screen.getByRole("dialog", { name: "Indicators" })).getByRole("group", { name: "Derivatives" });
+    fireEvent.click(within(group).getByRole("checkbox", { name: "Open Interest" }));
+    await flush();
+    expect(pane("deriv_oi.oi")).toBeDefined();
+
+    act(() => lastChartProps.current!.onLegendAction!("settings", "deriv_oi"));
+    const settings = screen.getByRole("dialog", { name: "Open Interest" });
+    fireEvent.change(within(settings).getByLabelText("oi colour"), { target: { value: "#123456" } });
+    fireEvent.click(within(settings).getByRole("button", { name: "Apply" }));
+    await flush();
+    expect(pane("deriv_oi.oi").color).toBe("#123456");
+    act(() => lastChartProps.current!.onPaneHeights!({ price: 400, deriv_oi: 140 }));
+
+    cleanup(); // flushes the pending save
+    const saved = lastSaved(PERP);
+    expect(saved.derivatives.oi).toEqual({ on: true, style: { oi: { color: "#123456" } } });
+    expect(saved.pane_heights).toEqual({ price: 400, deriv_oi: 140 });
+
+    layoutApi.server[PERP] = saved;
+    render(page());
+    for (let i = 0; i < 4; i++) await flush();
+    expect(pane("deriv_oi.oi").color).toBe("#123456");
+    expect(lastChartProps.current!.initialPaneHeights).toEqual({ price: 400, deriv_oi: 140 });
+  });
+
+  it("turns an entry off from the legend's x, and changes the liquidation measure in its settings", async () => {
+    await renderPerp();
+    act(() => lastChartProps.current!.onLegendAction!("remove", "deriv_oi"));
+    expect(derivativePanes().some((p) => p.group === "deriv_oi")).toBe(false);
+
+    act(() => lastChartProps.current!.onLegendAction!("settings", "deriv_liquidations"));
+    const settings = screen.getByRole("dialog", { name: "Liquidations" });
+    fireEvent.change(within(settings).getByDisplayValue("size"), { target: { value: "notional" } });
+    fireEvent.click(within(settings).getByRole("button", { name: "Apply" }));
+    await flush();
+    expect(pane("deriv_liquidations.long").data).toEqual([{ time: 600, value: -1500 }]);
+    cleanup();
+    expect(lastSaved(PERP).derivatives.liquidations).toMatchObject({ on: true, measure: "notional", markers: true });
+    expect(lastSaved(PERP).derivatives.oi.on).toBe(false);
+  });
+
+  it("toggles the Liquidation tape, which says when the instrument has no feed", async () => {
+    await renderPerp();
+    const toggle = screen.getByRole("button", { name: "Liquidation tape" });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByRole("complementary", { name: "Liquidation tape" })).toBeNull();
+
+    fireEvent.click(toggle);
+    await flush();
+
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("complementary", { name: "Liquidation tape" })).toHaveTextContent(
+      "no liquidation feed for this instrument",
+    );
+  });
+
+  it("shows a live liquidation on the tape", async () => {
+    await renderPerp();
+    fireEvent.click(screen.getByRole("button", { name: "Liquidation tape" }));
+    await flush();
+    act(() =>
+      liveDerivs.onLiquidation!({
+        instrument_id: PERP,
+        side: "long",
+        size_units: 41,
+        price_units: 8_513_850,
+        price_precision: 2,
+        size_precision: 3,
+        venue_event_id: "live-1",
+        ts_event: 650 * NS,
+        ts_init: 650 * NS,
+        notional_units: 349_067_850,
+        notional_precision: 5,
+      }),
+    );
+    const tape = screen.getByRole("complementary", { name: "Liquidation tape" });
+    expect(within(tape).getByText("85138.50")).toBeInTheDocument();
+    expect(within(tape).getByText("3490.67850")).toBeInTheDocument();
+  });
+});
+
+describe("ChartPage order-flow indicators (Story 33.6)", () => {
+  const paneOf = (id: string) => lastChartProps.current!.panes!.find((p) => p.id === id)!;
+  const legendAction = (action: "hide" | "settings" | "remove", group: string) =>
+    act(() => lastChartProps.current!.onLegendAction!(action, group));
+  let baseCatalog: Awaited<ReturnType<typeof fetchIndicatorCatalog>>;
+
+  beforeEach(async () => {
+    baseCatalog = await fetchIndicatorCatalog();
+    vi.mocked(fetchIndicatorCatalog).mockResolvedValue({
+      ...baseCatalog,
+      VolumeDelta: { params: {}, panel: "histogram", category: "custom", units: { value: "size" }, outputs: ["value"] },
+      TradeCount: { params: { split: false }, panel: "histogram", category: "custom", units: { value: "count", buys: "count", sells: "count" }, outputs: ["value", "buys", "sells"] },
+      StoredVWAP: { params: { mode: "session" }, panel: "overlay", category: "custom", units: { value: "price" }, outputs: ["value"] },
+      ForcedShare: { params: {}, panel: "histogram", category: "custom", units: { value: "ratio" }, outputs: ["value"] },
+    });
+  });
+  afterEach(() => {
+    vi.mocked(fetchIndicatorCatalog).mockResolvedValue(baseCatalog);
+  });
+
+  async function mountWith(entries: object[], values: Record<string, never[]>): Promise<void> {
+    vi.mocked(fetchCoinIndicatorConfig).mockResolvedValueOnce(entries as never);
+    picker.values = values;
+    render(page());
+    await act(async () => {}); // catalog + saved config
+  }
+
+  describe("unit-formatted legends", () => {
+    it("prints each output in its catalog unit at the instrument's precision", async () => {
+      await mountWith(
+        [
+          { name: "VolumeDelta", params: {}, category: "custom" },
+          { name: "TradeCount", params: { split: true }, category: "custom" },
+          { name: "StoredVWAP", params: { mode: "bar" }, category: "custom" },
+          { name: "ForcedShare", params: {}, category: "custom" },
+        ],
+        {
+          "VolumeDelta.value": [],
+          "TradeCount_split=True.buys": [],
+          "TradeCount_split=True.sells": [],
+          "StoredVWAP_mode=bar.value": [],
+          "ForcedShare.value": [],
+        },
+      );
+
+      // precision { price: 2, size: 3 }
+      expect(paneOf("VolumeDelta.value").format!(4, null)).toBe("4.000");
+      expect(paneOf("TradeCount_split=True.buys").format!(7, null)).toBe("7");
+      expect(paneOf("TradeCount_split=True.sells").format!(-3, null)).toBe("-3");
+      expect(paneOf("StoredVWAP_mode=bar.value").format!(1000.05, null)).toBe("1000.05");
+      expect(paneOf("ForcedShare.value").format!(1.25, null)).toBe("125.00%");
+    });
+
+    it("leaves a native entry, and every entry while the precision is unknown, on the default readout", async () => {
+      mocks.precision = null;
+      await mountWith(
+        [
+          { name: "VolumeDelta", params: {}, category: "custom" },
+          { name: "RelativeStrengthIndex", params: { period: 14 }, category: "native" },
+        ],
+        { "VolumeDelta.value": [], "RelativeStrengthIndex_period=14.value": [] },
+      );
+
+      expect(paneOf("VolumeDelta.value").format).toBeUndefined();
+      expect(paneOf("RelativeStrengthIndex_period=14.value").format).toBeUndefined();
+    });
+  });
+
+  describe("the stored Anchored VWAP", () => {
+    const bar = (t: number) => ({ time: t, open: 10, high: 12, low: 9, close: 11 });
+    const STORED = { kind: "anchored_vwap", id: "anchored_vwap-1", time: 200, source: "stored", bands: true, band_color: "#b26a00" };
+    const vwapSpec = () =>
+      lastChartProps.current!.drawings!.find((d) => d.kind === "anchored_vwap")! as unknown as {
+        bands: boolean;
+        points: { time: number; vwap: number; breakBefore?: boolean }[];
+      };
+
+    beforeEach(() => {
+      mocks.candles = [bar(100), bar(200), bar(300), bar(400)];
+      mocks.volume = [100, 200, 300, 400].map((time) => ({ time, value: 1 }));
+    });
+
+    it("hands its own values hook the drawings, and draws the server's values with no bands", async () => {
+      drawingsApi.server = [STORED];
+      storedVwap.result = {
+        values: { "anchored_vwap-1": [{ time: 100 }, { time: 200, value: 12.5 }, { time: 300 }, { time: 400, value: 13.25 }] },
+        errors: {},
+      };
+      await renderReady(page());
+
+      expect(storedVwap.drawings).toEqual([STORED]);
+      // Never a picker pane: the picker's values hook saw no AnchoredStoredVWAP entry.
+      expect(lastChartProps.current!.panes!.some((p) => p.id.startsWith("AnchoredStoredVWAP"))).toBe(false);
+      expect(vwapSpec().bands).toBe(false);
+      expect(vwapSpec().points.map((p) => [p.time, p.vwap, p.breakBefore === true])).toEqual([
+        [200, 12.5, false],
+        [400, 13.25, true],
+      ]);
+      const legend = lastChartProps.current!.legendExtras![0];
+      expect(legend.label).toBe("AVWAP (stored)");
+      expect(legend.format(legend.value!)).toBe("13.25");
+    });
+
+    it("shows the entry's replay error in the drawing's legend row", async () => {
+      drawingsApi.server = [STORED];
+      // Values from a page that did load are not drawn beside the error: a partial line.
+      storedVwap.result = { values: { "anchored_vwap-1": [{ time: 200, value: 12.5 }] }, errors: { "anchored_vwap-1": "no exact stored sum from the anchor 1970-01-01T00:03:20Z: the candle store's first 60 s bar is 1970-01-01T01:00:00Z" } };
+      await renderReady(page());
+
+      const legend = lastChartProps.current!.legendExtras![0] as { text?: string; value: number | null };
+      expect(legend.text).toBe("failed: no exact stored sum from the anchor 1970-01-01T00:03:20Z: the candle store's first 60 s bar is 1970-01-01T01:00:00Z");
+      expect(legend.value).toBeNull();
+      expect(vwapSpec().points).toEqual([]);
+    });
+
+    it("is offered in the drawing's settings, which turn its bands off with a note, and is saved", async () => {
+      vi.useFakeTimers();
+      try {
+        drawingsApi.server = [{ ...STORED, source: "hlc3", bands: true }];
+        await renderReady(page());
+        act(() => lastChartProps.current!.onDrawingSettings!("anchored_vwap-1"));
+        const dialog = screen.getByRole("dialog", { name: "Anchored VWAP settings" });
+        const source = within(dialog).getByLabelText<HTMLSelectElement>("Source");
+        expect(Array.from(source.options).map((o) => o.value)).toEqual(["hlc3", "close", "ohlc4", "stored"]);
+
+        fireEvent.change(source, { target: { value: "stored" } });
+        expect(within(dialog).getByLabelText("Bands on")).toBeDisabled();
+        expect(within(dialog).getByText(/bands need per-trade prices/)).toBeInTheDocument();
+        fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+        await act(async () => {
+          vi.advanceTimersByTime(SAVE_DEBOUNCE_MS + 1);
+        });
+
+        const saved = drawingsApi.save.mock.calls.at(-1)![1] as Record<string, unknown>[];
+        expect(saved[0]).toMatchObject({ id: "anchored_vwap-1", source: "stored" });
+        expect(storedVwap.drawings).toEqual([expect.objectContaining({ id: "anchored_vwap-1", source: "stored" })]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe("the Volume colour", () => {
+    const volumePoints = [
+      { time: 100, value: 10, o: 1, c: 2, buy_v: 3, sell_v: 7 },
+      { time: 200, value: 4, o: 2, c: 1, buy_v: null, sell_v: null },
+    ];
+    const colours = () => paneOf("volume").data.map((d) => d.color);
+
+    beforeEach(() => {
+      mocks.candles = [
+        { time: 100, open: 1, high: 2, low: 1, close: 2 },
+        { time: 200, open: 2, high: 2, low: 1, close: 1 },
+      ];
+      mocks.volume = volumePoints;
+    });
+
+    it("colours by direction by default, the forming bar included", () => {
+      mocks.liveBar = { time: 300, open: 1, high: 2, low: 1, close: 0.5, volume: 5, buy_v: 4, sell_v: 1 };
+      render(page());
+
+      expect(colours()).toEqual([CHART_TOKENS["--chart-up"], CHART_TOKENS["--chart-down"]]);
+      expect(paneOf("volume").data[0]).toEqual({ time: 100, value: 10, color: CHART_TOKENS["--chart-up"] });
+      expect(lastChartProps.current!.liveVolumeColor).toBe(CHART_TOKENS["--chart-down"]);
+    });
+
+    it("colours by delta from the saved layout: the sign, shaded by one-sidedness; unknown flow neutral", () => {
+      layoutApi.server[IID] = layoutOf({ volume_color_by: "delta" });
+      mocks.liveBar = { time: 300, open: 1, high: 2, low: 1, close: 0.5, volume: 5, buy_v: 4, sell_v: 1 };
+      render(page());
+
+      // 3 vs 7: down at 0.4; null flow: the pane's own colour.
+      expect(colours()).toEqual(["rgba(239, 83, 80, 0.4)", paneOf("volume").color]);
+      // The forming bar: 4 vs 1, up at 0.6, though its candle closed down.
+      expect(lastChartProps.current!.liveVolumeColor).toBe("rgba(37, 163, 153, 0.6)");
+    });
+
+    it("the Volume gear sets the mode, repaints and saves it in the layout", () => {
+      render(page());
+      legendAction("settings", "volume");
+      const dialog = screen.getByRole("dialog", { name: "Volume settings" });
+      const select = within(dialog).getByLabelText<HTMLSelectElement>("Colour by");
+      expect(select.value).toBe("direction");
+
+      fireEvent.change(select, { target: { value: "delta" } });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+      expect(screen.queryByRole("dialog", { name: "Volume settings" })).toBeNull();
+      expect(colours()[0]).toBe("rgba(239, 83, 80, 0.4)");
+      cleanup(); // flushes the pending save
+      expect(lastSaved().volume_color_by).toBe("delta");
+    });
+  });
+});
+
+// Story 33.9: the chart type, the price scale and compare symbols, as the page feeds them to the chart
+// and saves them in the coin's layout.
+describe("chart type, price scale and compare (Story 33.9)", () => {
+  const OTHER = "BTC-USD-PERP.HYPERLIQUID";
+  const bar = (time: number, close: number) => ({ time, open: close, high: close, low: close, close });
+  const comparePane = (iid = OTHER) => lastChartProps.current!.panes!.find((p) => p.id === `compare:${iid}`);
+  const spreadPane = () => lastChartProps.current!.panes!.find((p) => p.id === "compare-spread");
+  // Story 33.12: the Compare button opens the symbol search in compare mode; Enter adds the highlighted
+  // market, or the typed id when none matches. A refused id keeps the search open with the reason.
+  const compareField = () => screen.queryByRole("searchbox", { name: "Search a market to compare" });
+  async function addCompare(text: string): Promise<void> {
+    if (!compareField()) fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+    await act(async () => {});
+    fireEvent.change(compareField()!, { target: { value: text } });
+    fireEvent.keyDown(compareField()!, { key: "Enter" });
+  }
+
+  it("feeds the chart type and the scale settings to the chart and saves them per coin", async () => {
+    vi.useFakeTimers();
+    render(page());
+    expect(lastChartProps.current!.chartType).toBe("candles");
+    expect(lastChartProps.current!.priceScale).toEqual({ mode: "normal", autoScale: true, invert: false });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Chart type" }), { target: { value: "heikin_ashi" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Price scale" }), { target: { value: "log" } });
+    fireEvent.click(screen.getByRole("button", { name: "Auto" }));
+    fireEvent.click(screen.getByRole("button", { name: "Invert" }));
+    await flushSave();
+
+    expect(lastChartProps.current!.chartType).toBe("heikin_ashi");
+    expect(lastChartProps.current!.priceScale).toEqual({ mode: "log", autoScale: false, invert: true });
+    expect(screen.getByRole("button", { name: "Auto" })).toHaveAttribute("aria-pressed", "false");
+    expect(lastSaved()).toMatchObject({
+      chart_type: "heikin_ashi",
+      price_scale: { mode: "log", auto_scale: false, invert: true },
+    });
+  });
+
+  it("persists a change the chart reports (the scale menu, a double-click restoring auto)", async () => {
+    vi.useFakeTimers();
+    layoutApi.server[IID] = layoutOf({ price_scale: { mode: "normal", auto_scale: false, invert: false } });
+    render(page());
+
+    act(() => lastChartProps.current!.onPriceScale!({ auto_scale: true }));
+    act(() => lastChartProps.current!.onPriceScale!({ mode: "indexed" }));
+    await flushSave();
+
+    expect(lastSaved().price_scale).toEqual({ mode: "indexed", auto_scale: true, invert: false });
+  });
+
+  it("restores the saved type and scale", () => {
+    layoutApi.server[IID] = layoutOf({ chart_type: "area", price_scale: { mode: "percent", auto_scale: true, invert: true } });
+    render(page());
+
+    expect(screen.getByRole("combobox", { name: "Chart type" })).toHaveValue("area");
+    expect(lastChartProps.current!.priceScale).toEqual({ mode: "percent", autoScale: true, invert: true });
+  });
+
+  it("adds a compare as a coloured overlay aligned on the main bars, with gaps, and saves it", async () => {
+    vi.useFakeTimers();
+    mocks.candles = [bar(60, 100), { time: 120 }, bar(180, 102)];
+    mocks.candlesByIid[OTHER] = [bar(60, 50), bar(120, 51), { time: 180 }, bar(240, 53)];
+    render(page());
+    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+    await act(async () => {});
+    expect(marketsApi.get).toHaveBeenCalledWith(IID);
+    expect(within(screen.getByRole("listbox", { name: "Markets" })).getByRole("option")).toHaveTextContent(
+      `BTC ${OTHER}HYPERLIQUID · perp · 24h 2.50M`,
+    );
+
+    await addCompare(`  ${OTHER} `);
+    await flushSave();
+
+    const pane = comparePane()!;
+    expect(pane).toMatchObject({ kind: "Line", placement: "overlay", group: `compare:${OTHER}`, groupLabel: OTHER });
+    expect(pane.color).toBe(CHART_TOKENS["--chart-compare-1"]);
+    expect(pane.data).toEqual([{ time: 60, value: 50 }, { time: 120 }, { time: 180 }]);
+    expect(pane.format!(50.5, 60)).toBe("50.50");
+    expect(lastSaved().compare).toEqual({ symbols: [OTHER], spread: false });
+  });
+
+  it("forces the percent scale while a compare is drawn, keeping the stored mode for when it goes", async () => {
+    vi.useFakeTimers();
+    layoutApi.server[IID] = layoutOf({ price_scale: { mode: "log", auto_scale: true, invert: false } });
+    render(page());
+
+    await addCompare(OTHER);
+    expect(lastChartProps.current!.priceScale!.mode).toBe("percent");
+    expect(lastChartProps.current!.scaleModesLocked).toMatch(/percent scale/);
+    expect(screen.getByRole("option", { name: "Log" })).toBeDisabled();
+    await flushSave();
+    expect(lastSaved().price_scale.mode).toBe("log");
+
+    act(() => lastChartProps.current!.onLegendAction!("remove", `compare:${OTHER}`));
+    await flushSave();
+    expect(comparePane()).toBeUndefined();
+    expect(lastChartProps.current!.priceScale!.mode).toBe("log");
+    expect(lastChartProps.current!.scaleModesLocked).toBeNull();
+    expect(lastSaved().compare.symbols).toEqual([]);
+  });
+
+  it("keeps Indexed to 100 as the compare scale when it is the stored mode", async () => {
+    layoutApi.server[IID] = layoutOf({ price_scale: { mode: "indexed", auto_scale: true, invert: false }, compare: { symbols: [OTHER], spread: false } });
+    render(page());
+
+    expect(lastChartProps.current!.priceScale!.mode).toBe("indexed");
+  });
+
+  it("refuses the chart's own id, a duplicate, a fourth symbol and text without a venue, saving nothing", async () => {
+    vi.useFakeTimers();
+    layoutApi.server[IID] = layoutOf({ compare: { symbols: ["A.BYBIT", "B.BYBIT"], spread: false } });
+    render(page());
+
+    for (const [text, reason] of [
+      [IID, "own instrument"],
+      ["A.BYBIT", "already compared"],
+      ["NOVENUE", ".VENUE suffix"],
+    ] as const) {
+      await addCompare(text);
+      expect(screen.getByRole("alert")).toHaveTextContent(reason);
+    }
+    await addCompare("C.BYBIT");
+    await addCompare("D.BYBIT");
+    expect(screen.getByRole("alert")).toHaveTextContent("At most 3");
+    await flushSave();
+    expect(lastSaved().compare.symbols).toEqual(["A.BYBIT", "B.BYBIT", "C.BYBIT"]);
+  });
+
+  it("still accepts free text when the market list fails, saying so inline", async () => {
+    marketsApi.get.mockRejectedValue(new Error("down"));
+    render(page());
+
+    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+    await act(async () => {});
+    expect(screen.getByRole("status")).toHaveTextContent("could not be loaded; type an instrument id.");
+
+    await addCompare(OTHER);
+    expect(comparePane()).toBeDefined();
+  });
+
+  it("keeps a compare whose load failed as a removable row reading no data", () => {
+    mocks.failedIids = [OTHER];
+    layoutApi.server[IID] = layoutOf({ compare: { symbols: [OTHER], spread: false } });
+    render(page());
+
+    expect(comparePane()).toMatchObject({ text: "no data", data: [] });
+  });
+
+  it("offers Spread for exactly one compare: a bps pane with a zero line, gaps where either side has none", async () => {
+    vi.useFakeTimers();
+    mocks.candles = [bar(60, 101), bar(120, 102), { time: 180 }];
+    mocks.candlesByIid[OTHER] = [bar(60, 100), { time: 120 }, bar(180, 100)];
+    render(page());
+    expect(screen.getByRole("button", { name: "Spread" })).toBeDisabled();
+
+    await addCompare(OTHER);
+    fireEvent.click(screen.getByRole("button", { name: "Spread" }));
+    await flushSave();
+
+    const pane = spreadPane()!;
+    expect(pane).toMatchObject({ placement: "pane", zeroLine: true });
+    expect(pane.data[0].value).toBeCloseTo(100, 9);
+    expect(pane.data.slice(1)).toEqual([{ time: 120 }, { time: 180 }]);
+    expect(lastSaved().compare.spread).toBe(true);
+
+    await addCompare("ETHUSDT-LINEAR.BYBIT");
+    expect(screen.getByRole("button", { name: "Spread" })).toBeDisabled();
+    expect(spreadPane()).toBeUndefined();
+    await flushSave();
+    expect(lastSaved().compare.spread).toBe(true); // kept as stored
+
+    act(() => lastChartProps.current!.onLegendAction!("remove", "compare:ETHUSDT-LINEAR.BYBIT"));
+    act(() => lastChartProps.current!.onLegendAction!("remove", "compare-spread"));
+    await flushSave();
+    expect(spreadPane()).toBeUndefined();
+    expect(lastSaved().compare).toEqual({ symbols: [OTHER], spread: false });
+  });
+
+  it("adds a compare once for a double Enter queued before a re-render", async () => {
+    vi.useFakeTimers();
+    render(page());
+    fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+    await act(async () => {});
+    const field = compareField()!;
+    fireEvent.change(field, { target: { value: OTHER } });
+
+    act(() => {
+      field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); // the search still holds the render that had no compare
+    });
+    await flushSave();
+
+    expect(lastSaved().compare.symbols).toEqual([OTHER]);
+  });
+
+  it("forgets a removed compare's hidden flag, so re-adding it draws it shown", async () => {
+    layoutApi.server[IID] = layoutOf({ compare: { symbols: [OTHER], spread: false } });
+    render(page());
+    act(() => lastChartProps.current!.onLegendAction!("hide", `compare:${OTHER}`));
+    expect(comparePane()!.hidden).toBe(true);
+
+    act(() => lastChartProps.current!.onLegendAction!("remove", `compare:${OTHER}`));
+    expect(comparePane()).toBeUndefined();
+    await addCompare(OTHER);
+
+    expect(comparePane()!.hidden).toBe(false);
+  });
+
+  it("hides a compare line in place from its legend eye, without changing the layout", () => {
+    layoutApi.server[IID] = layoutOf({ compare: { symbols: [OTHER], spread: false } });
+    render(page());
+
+    act(() => lastChartProps.current!.onLegendAction!("hide", `compare:${OTHER}`));
+
+    expect(comparePane()!.hidden).toBe(true);
+  });
+
+  it("disables the chart type and Compare in Lines mode and draws no compare, keeping them stored", async () => {
+    vi.useFakeTimers();
+    layoutApi.server[IID] = layoutOf({ chart_type: "bars", compare: { symbols: [OTHER], spread: false } });
+    render(page());
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    await flushSave();
+
+    expect(screen.getByRole("combobox", { name: "Chart type" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Compare" })).toBeDisabled();
+    expect(comparePane()).toBeUndefined();
+    expect(lastChartProps.current!.priceScale!.mode).toBe("normal");
+    expect(screen.getByRole("combobox", { name: "Price scale" })).toBeEnabled();
+    expect(lastSaved()).toMatchObject({ chart_type: "bars", compare: { symbols: [OTHER] } });
+  });
+});
+
+describe("ChartPage drawing tools II (Story 33.10)", () => {
+  const click = (time: number, price: number) =>
+    act(() => {
+      lastChartProps.current!.onPointClick!({ time, price });
+    });
+  const drawings = () => lastChartProps.current!.drawings!;
+  const undoKey = (shift = false) => fireEvent.keyDown(window, { key: "z", ctrlKey: true, shiftKey: shift });
+
+  it("places a ray in two clicks, showing the first point as a placement, then disarms", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Ray tool");
+    click(100, 10);
+    expect(lastChartProps.current!.placement).toEqual({ tool: "ray", points: [{ time: 100, price: 10 }] });
+    click(100, 10); // on the first point: ignored, still armed
+    expect(drawings()).toEqual([]);
+    click(200, 20.004);
+    expect(drawings()).toEqual([
+      {
+        kind: "ray",
+        id: "ray-1",
+        anchors: [
+          { time: 100, price: 10 },
+          { time: 200, price: 20 },
+        ],
+        color: CHART_TOKENS["--chart-drawing"],
+      },
+    ]);
+    expect(lastChartProps.current!.placement).toBeNull();
+    expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("places a parallel channel in three clicks, its offset from the third", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Parallel channel tool");
+    click(100, 100);
+    click(200, 110);
+    expect(drawings()).toEqual([]);
+    click(150, 99);
+    expect(drawings()).toEqual([expect.objectContaining({ kind: "channel", id: "channel-1", offset: -6 })]);
+  });
+
+  it("opens the text dialog on placing a text note", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Text tool");
+    click(100, 100);
+    expect(drawings()).toEqual([expect.objectContaining({ kind: "text", text: "Text" })]);
+    expect(screen.getByRole("dialog", { name: "Text settings" })).toBeInTheDocument();
+  });
+
+  it("discards the placement's points on Escape", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Fibonacci extension tool");
+    click(100, 100);
+    click(200, 110);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(lastChartProps.current!.placement).toBeNull();
+    armTool("Fibonacci extension tool");
+    click(300, 105);
+    expect(lastChartProps.current!.placement?.points).toEqual([{ time: 300, price: 105 }]);
+  });
+
+  it("undoes and redoes by keyboard and from the rail, but not while typing in a field", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Vertical line tool");
+    click(100, 1);
+    armTool("Vertical line tool");
+    click(200, 1);
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1", "vline-2"]);
+
+    undoKey();
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
+    undoKey();
+    expect(drawings()).toEqual([]);
+    undoKey(); // nothing left: a no-op
+    expect(drawings()).toEqual([]);
+    undoKey(true);
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
+    fireEvent.click(screen.getByRole("button", { name: "Redo" }));
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1", "vline-2"]);
+    expect(screen.getByRole("button", { name: "Redo" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
+
+    const field = screen.getAllByRole("combobox")[0];
+    fireEvent.keyDown(field, { key: "z", ctrlKey: true });
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
+  });
+
+  it("makes one drag gesture one undo step", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Horizontal line tool");
+    act(() => lastChartProps.current!.onPriceClick!(100));
+    act(() => lastChartProps.current!.onDrawingDragStart!("hline-1"));
+    for (const price of [101, 102, 103]) act(() => lastChartProps.current!.onPriceLineDrag!("hline-1", price));
+    expect(lastChartProps.current!.priceLines![0].price).toBe(103);
+    undoKey();
+    expect(lastChartProps.current!.priceLines![0].price).toBe(100);
+  });
+
+  it("deletes every drawing only once the confirm naming the count is accepted, undoably", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Vertical line tool");
+    click(100, 1);
+    armTool("Horizontal line tool");
+    act(() => lastChartProps.current!.onPriceClick!(100));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Delete all drawings" }));
+      expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Delete all 2 drawings of BTC-USD-PERP.DYDX?"));
+      expect(drawings()).toHaveLength(1);
+      expect(lastChartProps.current!.priceLines).toHaveLength(1);
+
+      confirm.mockReturnValue(true);
+      fireEvent.click(screen.getByRole("button", { name: "Delete all drawings" }));
+      expect(drawings()).toEqual([]);
+      expect(lastChartProps.current!.priceLines).toEqual([]);
+      expect(screen.getByRole("button", { name: "Delete all drawings" })).toBeDisabled();
+      undoKey();
+      expect(drawings()).toHaveLength(1);
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
+  it("hides every drawing and turns the drawing tools off, persisted in the layout", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Vertical line tool");
+    click(100, 1);
+    armTool("Ray tool");
+    fireEvent.click(screen.getByRole("button", { name: "Hide all drawings" }));
+    expect(screen.getByRole("button", { name: "Hide all drawings" })).toHaveAttribute("aria-pressed", "true");
+    expect(drawings()).toEqual([]);
+    expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true"); // disarmed
+    expect(toolControl("Ray tool")).toBeDisabled();
+    cleanup(); // flushes the pending layout save
+    expect(lastSaved().drawings_hidden).toBe(true);
+
+    layoutApi.server[IID] = layoutOf({ drawings_hidden: true });
+    drawingsApi.server = [{ kind: "vline", id: "vline-1", time: 100 }];
+    await renderReady(<ChartPage />);
+    expect(drawings()).toEqual([]);
+    expect(toolControl("Trendline tool")).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Hide all drawings" }));
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
+    expect(toolControl("Trendline tool")).toBeEnabled();
+  });
+
+  it("locks and hides a drawing from its menu, and Show hidden brings every hidden one back", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Vertical line tool");
+    click(100, 1);
+    act(() => lastChartProps.current!.onDrawingLock!("vline-1", true));
+    expect(drawings()[0]).toMatchObject({ id: "vline-1", locked: true });
+    act(() => lastChartProps.current!.onDrawingLock!("vline-1", false));
+    expect(drawings()[0]).toEqual({ kind: "vline", id: "vline-1", time: 100, color: CHART_TOKENS["--chart-drawing"] });
+
+    act(() => lastChartProps.current!.onDrawingHide!("vline-1"));
+    expect(drawings()).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: "Show hidden (1)" }));
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
+    expect(screen.queryByRole("button", { name: /Show hidden/ })).toBeNull();
+  });
+
+  it("redoes with Ctrl+Y, and ignores undo/redo keys mid-placement or under Hide all", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Vertical line tool");
+    click(100, 1);
+    undoKey();
+    expect(drawings()).toEqual([]);
+    fireEvent.keyDown(window, { key: "y", ctrlKey: true });
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
+
+    armTool("Ray tool");
+    click(100, 10); // a placement in progress
+    undoKey();
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
+    expect(screen.getByRole("button", { name: "Undo" })).toBeDisabled();
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide all drawings" }));
+    undoKey();
+    fireEvent.click(screen.getByRole("button", { name: "Hide all drawings" }));
+    expect(drawings().map((d) => d.id)).toEqual(["vline-1"]);
+  });
+
+  it("turns Show hidden and Delete all off under Hide all, saying why", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Vertical line tool");
+    click(100, 1);
+    armTool("Vertical line tool");
+    click(200, 1);
+    act(() => lastChartProps.current!.onDrawingHide!("vline-1"));
+    fireEvent.click(screen.getByRole("button", { name: "Hide all drawings" }));
+    for (const name of ["Show hidden (1)", "Delete all drawings"]) {
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+      expect(screen.getByRole("button", { name })).toHaveAttribute("title", "Drawings are hidden (Hide all): show them first");
+    }
+  });
+
+  it("asks the stored-VWAP hook only for the drawings on screen", async () => {
+    drawingsApi.server = [
+      { kind: "anchored_vwap", id: "anchored_vwap-1", time: 100, source: "stored", bands: false, band_color: "#000000" },
+      { kind: "anchored_vwap", id: "anchored_vwap-2", time: 100, source: "stored", bands: false, band_color: "#000000", hidden: true },
+    ];
+    await renderReady(<ChartPage />);
+    expect((storedVwap.drawings as { id: string }[]).map((d) => d.id)).toEqual(["anchored_vwap-1"]);
+    fireEvent.click(screen.getByRole("button", { name: "Hide all drawings" }));
+    expect(storedVwap.drawings).toEqual([]);
+  });
+
+  it("ignores a channel's B on A's bar (a vertical A-B), the tool staying armed", async () => {
+    await renderReady(<ChartPage />);
+    armTool("Parallel channel tool");
+    click(100, 100);
+    click(100, 120);
+    expect(lastChartProps.current!.placement?.points).toEqual([{ time: 100, price: 100 }]);
+    click(200, 110);
+    click(150, 105.001); // no width on the grid: ignored too
+    expect(drawings()).toEqual([]);
+    click(150, 99);
+    expect(drawings()).toEqual([expect.objectContaining({ kind: "channel", offset: -6 })]);
+  });
+
+  it("cycles the magnet off, weak, strong and hands it to the chart", async () => {
+    await renderReady(<ChartPage />);
+    const magnet = screen.getByRole("button", { name: "Magnet" });
+    expect(lastChartProps.current!.magnet).toBe("off");
+    fireEvent.click(magnet);
+    expect(lastChartProps.current!.magnet).toBe("weak");
+    expect(magnet).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(magnet);
+    fireEvent.click(magnet);
+    expect(lastChartProps.current!.magnet).toBe("off");
+  });
+});
+
+describe("ChartPage candle-pattern markers and catalog plot hints (Story 33.11)", () => {
+  const paneOf = (id: string) => lastChartProps.current!.panes!.find((p) => p.id === id)!;
+  const legendAction = (action: "hide" | "settings" | "remove", group: string) =>
+    act(() => lastChartProps.current!.onLegendAction!(action, group));
+  const ENGULFING = { name: "CandlePattern", params: { pattern: "ENGULFING", trend_bars: 3 }, category: "native" };
+  const ENGULFING_ID = "CandlePattern_pattern=ENGULFING,trend_bars=3";
+  // A bullish hit at 60, a bearish one at 120, a gap at 180, no pattern at 240, bullish again at 300.
+  const HITS = [
+    { time: 60, value: 100 },
+    { time: 120, value: -100 },
+    { time: 180 },
+    { time: 240, value: 0 },
+    { time: 300, value: 100 },
+  ];
+  const placed = () => (lastChartProps.current!.patternMarkers ?? []).map((m) => [m.time, m.shape, m.position]);
+  let baseCatalog: Awaited<ReturnType<typeof fetchIndicatorCatalog>>;
+
+  beforeEach(async () => {
+    baseCatalog = await fetchIndicatorCatalog();
+    vi.mocked(fetchIndicatorCatalog).mockResolvedValue({
+      ...baseCatalog,
+      ZigZag: {
+        params: { deviation_pct: 5 },
+        panel: "overlay",
+        category: "custom",
+        plot: { value: "swing" },
+        note: "repaints last leg",
+        outputs: ["value"],
+      },
+    });
+  });
+  afterEach(() => {
+    vi.mocked(fetchIndicatorCatalog).mockResolvedValue(baseCatalog);
+  });
+
+  async function mountWith(entries: object[], values: Record<string, unknown[]>): Promise<void> {
+    vi.mocked(fetchCoinIndicatorConfig).mockResolvedValueOnce(entries as never);
+    picker.values = values as Record<string, never[]>;
+    render(page());
+    await act(async () => {}); // catalog + saved config
+  }
+
+  it("draws bullish hits as arrows below the bar and bearish ones above, by default", async () => {
+    await mountWith([ENGULFING], { [`${ENGULFING_ID}.value`]: HITS });
+
+    expect(placed()).toEqual([
+      [60, "arrowUp", "belowBar"],
+      [120, "arrowDown", "aboveBar"],
+      [300, "arrowUp", "belowBar"],
+    ]);
+    const markers = lastChartProps.current!.patternMarkers!;
+    expect(markers[0]).toMatchObject({ id: `pat:${ENGULFING_ID}:60`, tooltip: ["Engulfing", "bullish"], color: CHART_TOKENS["--chart-up"] });
+    expect(markers[1]).toMatchObject({ tooltip: ["Engulfing", "bearish"], color: CHART_TOKENS["--chart-down"] });
+    // The legend row stays, on an invisible overlay that never scales the price axis.
+    const spec = paneOf(`${ENGULFING_ID}.value`);
+    expect(spec).toMatchObject({ kind: "Line", placement: "overlay", markersOnly: true, actionable: true });
+    expect(spec.format!(100, 60)).toBe("Engulfing");
+    expect(spec.format!(0, 240)).toBe("—");
+  });
+
+  it("draws a non-directional pattern's hit as a neutral circle above the bar", async () => {
+    const doji = { name: "CandlePattern", params: { pattern: "DOJI", trend_bars: 3 }, category: "native" };
+    await mountWith([doji], { "CandlePattern_pattern=DOJI,trend_bars=3.value": [{ time: 60, value: 100 }] });
+
+    expect(placed()).toEqual([[60, "circle", "aboveBar"]]);
+    expect(lastChartProps.current!.patternMarkers![0].tooltip).toEqual(["Doji", "neutral"]);
+  });
+
+  it("names a stale series' hits by the pattern its id carries, not the catalog default", async () => {
+    // No saved entry owns these HAMMER values any more; the catalog's default pattern is ENGULFING.
+    await mountWith([], { "CandlePattern_pattern=HAMMER,trend_bars=3.value": HITS });
+
+    const spec = paneOf("CandlePattern_pattern=HAMMER,trend_bars=3.value");
+    expect(spec).toMatchObject({ markersOnly: true, actionable: false });
+    expect(spec.format!(100, 60)).toBe("Hammer");
+  });
+
+  it("removes the markers while the eye hides the entry, keeping its legend row", async () => {
+    await mountWith([ENGULFING], { [`${ENGULFING_ID}.value`]: HITS });
+
+    legendAction("hide", ENGULFING_ID);
+    await act(async () => {});
+
+    expect(lastChartProps.current!.patternMarkers).toEqual([]);
+    expect(paneOf(`${ENGULFING_ID}.value`)).toMatchObject({ hidden: true, markersOnly: true });
+  });
+
+  it("switches to the ±100 pane from the settings' Display select, a style key and never a param", async () => {
+    await mountWith([ENGULFING], { [`${ENGULFING_ID}.value`]: HITS });
+
+    legendAction("settings", ENGULFING_ID);
+    const dialog = screen.getByRole("dialog", { name: "CandlePattern (ENGULFING, 3)" });
+    const display = within(dialog).getByLabelText<HTMLSelectElement>(/Display/);
+    expect(display.value).toBe("markers");
+    fireEvent.change(display, { target: { value: "pane" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await act(async () => {});
+
+    expect(saveConfigMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", [
+      expect.objectContaining({ ...ENGULFING, style: { value: { display: "pane" } } }),
+    ]);
+    expect(paneOf(`${ENGULFING_ID}.value`)).toMatchObject({ kind: "Histogram", placement: "pane" });
+    expect(paneOf(`${ENGULFING_ID}.value`).markersOnly).toBeUndefined();
+    expect(lastChartProps.current!.patternMarkers).toEqual([]);
+  });
+
+  it("draws no marker after the Bar Replay cursor", async () => {
+    mocks.candles = [60, 120, 180, 240, 300].map((time) => ({ time, open: 1, high: 2, low: 1, close: 1 }));
+    await mountWith([ENGULFING], { [`${ENGULFING_ID}.value`]: HITS });
+    expect(placed()).toHaveLength(3);
+
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    act(() => lastChartProps.current!.onPointClick!({ time: 120, price: 1 }));
+
+    expect(placed().map(([time]) => time)).toEqual([60, 120]);
+  });
+
+  it("carries a ZigZag's swing plot and its catalog note onto the legend title", async () => {
+    const zigzag = { name: "ZigZag", params: { deviation_pct: 5 }, category: "custom" };
+    await mountWith([zigzag], { "ZigZag_deviation_pct=5.value": [{ time: 60, value: 110 }, { time: 120 }] });
+
+    expect(paneOf("ZigZag_deviation_pct=5.value")).toMatchObject({
+      plot: "swing",
+      placement: "overlay",
+      groupLabel: "ZigZag (5) · repaints last leg",
+    });
+  });
+});
+
+describe("symbol search, watchlist, shortcuts and chart settings (Story 33.12)", () => {
+  const ETH = "ETHUSDT-LINEAR.BYBIT";
+  const HL = "BTC-USD-PERP.HYPERLIQUID";
+  const SPOT = "BTCUSDT-SPOT.BYBIT";
+  const markets = [
+    { instrument_id: IID, symbol: "BTC", venue: "DYDX", same_asset: false, market: "perp", volume24h: 1_000_000 },
+    { instrument_id: HL, symbol: "BTC", venue: "HYPERLIQUID", same_asset: true, market: "perp", volume24h: 2_500_000 },
+    { instrument_id: ETH, symbol: "ETH", venue: "BYBIT", same_asset: false, market: "perp", volume24h: null },
+    { instrument_id: SPOT, symbol: "BTC", venue: "BYBIT", same_asset: false, market: "spot", volume24h: null },
+  ];
+  const press = (init: KeyboardEventInit) => fireEvent.keyDown(window, init);
+  const searchField = () => screen.getByRole("searchbox", { name: "Search markets" });
+  const rows = () =>
+    within(screen.getByRole("listbox", { name: "Markets" }))
+      .queryAllByRole("option")
+      .map((o) => o.textContent ?? "");
+
+  function LocationProbe() {
+    return <output aria-label="location">{useLocation().pathname}</output>;
+  }
+  const routed = () => (
+    <MemoryRouter initialEntries={[`/chart/${IID}`]}>
+      <Routes>
+        <Route
+          path="/chart/:iid"
+          element={
+            <>
+              <ChartPage />
+              <LocationProbe />
+            </>
+          }
+        />
+      </Routes>
+    </MemoryRouter>
+  );
+
+  it("opens the search from the symbol, / and Ctrl+K, listing every market with venue, market and 24 h volume", async () => {
+    marketsApi.get.mockResolvedValue({ items: markets, stale_venues: [] });
+    render(page());
+
+    fireEvent.click(screen.getByRole("button", { name: IID }));
+    await act(async () => {});
+    expect(marketsApi.get).toHaveBeenLastCalledWith(undefined);
+    expect(rows()).toHaveLength(4);
+    expect(rows()[1]).toContain("HYPERLIQUID · perp · 24h 2.50M");
+    expect(rows()[2]).toContain("24h —"); // no volume is never 0
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Symbol search" })).getByRole("button", { name: "Close" }));
+
+    press({ key: "/", code: "Slash" });
+    expect(screen.getByRole("dialog", { name: "Symbol search" })).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Symbol search" })).getByRole("button", { name: "Close" }));
+    press({ key: "k", code: "KeyK", ctrlKey: true });
+    expect(screen.getByRole("dialog", { name: "Symbol search" })).toBeInTheDocument();
+  });
+
+  it("filters by every token over symbol, venue and id in the server's order, and Enter opens the highlighted chart", async () => {
+    marketsApi.get.mockResolvedValue({ items: markets, stale_venues: [] });
+    render(routed());
+    press({ key: "/", code: "Slash" });
+    await act(async () => {});
+
+    fireEvent.change(searchField(), { target: { value: "btc by" } });
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toContain(SPOT);
+    fireEvent.change(searchField(), { target: { value: "BTC" } });
+    expect(rows().map((r) => r.includes(HL))).toEqual([false, true, false]);
+    fireEvent.keyDown(searchField(), { key: "ArrowDown" });
+    fireEvent.keyDown(searchField(), { key: "Enter" });
+
+    expect(screen.getByLabelText("location")).toHaveTextContent(`/chart/${HL}`);
+  });
+
+  it("says so when nothing matches, and Enter then does nothing", async () => {
+    marketsApi.get.mockResolvedValue({ items: markets, stale_venues: [] });
+    render(routed());
+    press({ key: "/", code: "Slash" });
+    await act(async () => {});
+
+    fireEvent.change(searchField(), { target: { value: "doge" } });
+    fireEvent.keyDown(searchField(), { key: "Enter" });
+
+    expect(screen.getByText("No market matches")).toBeInTheDocument();
+    expect(screen.getByLabelText("location")).toHaveTextContent(`/chart/${IID}`);
+  });
+
+  it("reports a market list that is down inline, without a crash", async () => {
+    const { HttpError } = await import("../api/client");
+    const unavailable = new HttpError(503, "no venue market list is live");
+    marketsApi.get.mockRejectedValue(unavailable);
+    render(page());
+    press({ key: "/", code: "Slash" });
+    await act(async () => {});
+
+    expect(within(screen.getByRole("dialog", { name: "Symbol search" })).getByRole("status")).toHaveTextContent(
+      "No venue's market list is live.",
+    );
+  });
+
+  it("opens the compare search with Alt+C in Candles mode only, by the physical key", async () => {
+    render(page());
+    press({ key: "ç", code: "KeyC", altKey: true });
+    expect(screen.getByRole("dialog", { name: "Compare symbol" })).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Compare symbol" })).getByRole("button", { name: "Close" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    press({ key: "ç", code: "KeyC", altKey: true });
+    expect(screen.queryByRole("dialog", { name: "Compare symbol" })).toBeNull();
+  });
+
+  it("arms the drawing tools from Alt+T / Alt+F / Alt+V / Alt+H, never a candles-only tool in Lines mode", async () => {
+    await renderReady(page());
+    press({ key: "†", code: "KeyT", altKey: true });
+    expect(screen.getByRole("button", { name: "Trendline tool" })).toHaveAttribute("aria-pressed", "true");
+    press({ key: "ƒ", code: "KeyF", altKey: true });
+    expect(lastChartProps.current!.fibActive).toBe(true);
+    press({ key: "√", code: "KeyV", altKey: true });
+    expect(screen.getByRole("button", { name: "Vertical line tool" })).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    press({ key: "˙", code: "KeyH", altKey: true });
+    expect(screen.queryByRole("button", { name: "Horizontal line tool", pressed: true })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Candles" }));
+    press({ key: "˙", code: "KeyH", altKey: true });
+    expect(screen.getByRole("button", { name: "Horizontal line tool" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("starts and exits a replay with Alt+R", () => {
+    mocks.candles = [1, 2].map((t) => ({ time: t, open: 1, high: 1, low: 1, close: 1 }));
+    render(page());
+    press({ key: "®", code: "KeyR", altKey: true });
+    expect(screen.getByRole("status")).toHaveTextContent("Click a candle to start the replay");
+    press({ key: "®", code: "KeyR", altKey: true });
+    expect(screen.queryByRole("group", { name: "Replay controls" })).toBeNull();
+  });
+
+  it("ignores Alt+R in Lines mode, where Replay is disabled", () => {
+    mocks.candles = [1, 2].map((t) => ({ time: t, open: 1, high: 1, low: 1, close: 1 }));
+    render(page());
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    press({ key: "®", code: "KeyR", altKey: true });
+    expect(screen.queryByRole("group", { name: "Replay controls" })).toBeNull();
+    expect(lastChartProps.current!.markerTime ?? null).toBeNull();
+    expect(screen.getByRole("button", { name: "Replay" })).toBeDisabled();
+  });
+
+  it("toggles the log scale with Shift+L, but not while a compare forces the percent scale", async () => {
+    vi.useFakeTimers();
+    render(page());
+    press({ key: "L", code: "KeyL", shiftKey: true });
+    expect(lastChartProps.current!.priceScale!.mode).toBe("log");
+    await flushSave();
+    expect(lastSaved().price_scale.mode).toBe("log");
+    press({ key: "L", code: "KeyL", shiftKey: true });
+    expect(lastChartProps.current!.priceScale!.mode).toBe("normal");
+
+    cleanup();
+    layoutApi.server[IID] = layoutOf({ compare: { symbols: [HL], spread: false } });
+    render(page());
+    press({ key: "L", code: "KeyL", shiftKey: true });
+    expect(lastChartProps.current!.priceScale!.mode).toBe("percent");
+    expect(screen.getByRole("combobox", { name: "Price scale" })).toHaveValue("percent");
+  });
+
+  it("switches timeframe from typed keys and Enter, showing the buffer; an unknown one changes nothing", () => {
+    vi.useFakeTimers();
+    render(page());
+    press({ key: "4", code: "Digit4" });
+    press({ key: "h", code: "KeyH" });
+    expect(screen.getByRole("status", { name: "Typed timeframe" })).toHaveTextContent("4h");
+    press({ key: "Enter", code: "Enter" });
+    expect(hooks.candlesBar.at(-1)).toBe(14400);
+    expect(screen.queryByRole("status", { name: "Typed timeframe" })).toBeNull();
+
+    for (const key of ["d", "Enter"]) press({ key, code: key === "d" ? "KeyD" : "Enter" });
+    expect(hooks.candlesBar.at(-1)).toBe(86400);
+    for (const key of ["7", "Enter"]) press({ key, code: key === "7" ? "Digit7" : "Enter" });
+    expect(hooks.candlesBar.at(-1)).toBe(86400);
+  });
+
+  it("drops a typed timeframe after 3 s idle and on Esc, and ignores digits in Lines mode", () => {
+    vi.useFakeTimers();
+    render(page());
+    press({ key: "1", code: "Digit1" });
+    act(() => vi.advanceTimersByTime(3001));
+    expect(screen.queryByRole("status", { name: "Typed timeframe" })).toBeNull();
+    press({ key: "1", code: "Digit1" });
+    press({ key: "Escape", code: "Escape" });
+    expect(screen.queryByRole("status", { name: "Typed timeframe" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    press({ key: "5", code: "Digit5" });
+    expect(screen.queryByRole("status", { name: "Typed timeframe" })).toBeNull();
+  });
+
+  it("clears a typed timeframe on the switch to Lines, and Enter there changes nothing", () => {
+    render(page());
+    const before = hooks.candlesBar.at(-1);
+    press({ key: "4", code: "Digit4" });
+    press({ key: "h", code: "KeyH" });
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    expect(screen.queryByRole("status", { name: "Typed timeframe" })).toBeNull();
+    press({ key: "Enter", code: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "Candles" }));
+    press({ key: "Enter", code: "Enter" });
+    expect(hooks.candlesBar.at(-1)).toBe(before);
+  });
+
+  it("does nothing while the operator types in a field or a dialog is open", () => {
+    render(page());
+    const zone = screen.getByRole("combobox", { name: "Time zone" });
+    fireEvent.keyDown(zone, { key: "/", code: "Slash" });
+    fireEvent.keyDown(zone, { key: "L", code: "KeyL", shiftKey: true });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(lastChartProps.current!.priceScale!.mode).toBe("normal");
+
+    press({ key: "?", code: "Slash", shiftKey: true });
+    expect(screen.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeInTheDocument();
+    press({ key: "L", code: "KeyL", shiftKey: true });
+    press({ key: "1", code: "Digit1" });
+    expect(lastChartProps.current!.priceScale!.mode).toBe("normal");
+    expect(screen.queryByRole("status", { name: "Typed timeframe" })).toBeNull();
+  });
+
+  it("lists exactly the shortcut table on the ? sheet", async () => {
+    const { SHORTCUTS } = await import("../lib/shortcuts");
+    render(page());
+    press({ key: "?", code: "Slash", shiftKey: true });
+
+    const sheet = screen.getByRole("dialog", { name: "Keyboard shortcuts" });
+    const listed = within(sheet)
+      .getAllByRole("row")
+      .map((r) => [within(r).getByRole("rowheader").textContent, within(r).getByRole("cell").textContent]);
+    expect(listed).toEqual(SHORTCUTS.map((row) => [row.keys, row.does]));
+  });
+
+  it("saves every new setting in the coin's layout and restores it on reload", async () => {
+    vi.useFakeTimers();
+    render(page());
+    expect(lastChartProps.current!).toMatchObject({
+      timeZone: "utc",
+      sessionBreaks: false,
+      countdown: { barSeconds: 60, enabled: true },
+      lastPrice: { line: true, label: true },
+      fullscreen: false,
+    });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Time zone" }), { target: { value: "local" } });
+    for (const name of ["Session breaks", "Countdown", "Last price line"]) fireEvent.click(screen.getByRole("button", { name }));
+    await flushSave();
+    const saved = lastSaved();
+    expect(saved).toMatchObject({ time_zone: "local", session_breaks: true, bar_countdown: false, last_price: { line: false, label: true } });
+    expect(saved).not.toHaveProperty("fullscreen");
+
+    cleanup();
+    layoutApi.server[IID] = saved;
+    render(page());
+    expect(lastChartProps.current!).toMatchObject({
+      timeZone: "local",
+      sessionBreaks: true,
+      countdown: { enabled: false },
+      lastPrice: { line: false, label: true },
+    });
+    expect(screen.getByRole("combobox", { name: "Time zone" })).toHaveValue("local");
+  });
+
+  it("hands the chart identical bar times in every time zone (formatting only)", () => {
+    mocks.candles = [60, 120].map((t) => ({ time: t, open: 1, high: 1, low: 1, close: 1 }));
+    render(page());
+    const utc = lastChartProps.current!.data;
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Time zone" }), { target: { value: "local" } });
+
+    expect(lastChartProps.current!.timeZone).toBe("local");
+    expect(lastChartProps.current!.data).toBe(utc);
+    expect(lastChartProps.current!.data!.map((d) => d.time)).toEqual([60, 120]);
+  });
+
+  it("hides the countdown in Lines mode and during a replay", () => {
+    mocks.candles = [1, 2].map((t) => ({ time: t, open: 1, high: 1, low: 1, close: 1 }));
+    render(page());
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    act(() => lastChartProps.current!.onPointClick!({ time: 1, price: 1 }));
+    expect(lastChartProps.current!.countdown!.enabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Exit" }));
+    expect(lastChartProps.current!.countdown!.enabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    expect(lastChartProps.current!.countdown!.enabled).toBe(false);
+  });
+
+  it("pins and unpins the chart on the server-side watchlist rail, priced from rankings:live, — where unranked", async () => {
+    watchlistApi.server = [HL, SPOT];
+    liveRanks.latest = {
+      mode: "volume",
+      updated_at: Date.now() * 1_000_000,
+      stale_instrument_ids: [],
+      ranks: [{ instrument_id: HL, symbol: "BTC", venue: "HYPERLIQUID", price: 61234.5, pct_24h: -1.234 }],
+    };
+    render(page());
+    fireEvent.click(screen.getByRole("button", { name: "Watchlist" }));
+    await act(async () => {});
+
+    const rail = screen.getByRole("complementary", { name: "Watchlist" });
+    const links = within(rail).getAllByRole("link");
+    expect(links.map((l) => l.textContent)).toEqual([`BTCHYPERLIQUID61234.5000-1.23%`, `${SPOT}———`]);
+    expect(links[0]).toHaveAttribute("href", `/chart/${HL}`);
+
+    fireEvent.click(within(rail).getByRole("button", { name: "Pin this chart" }));
+    await act(async () => {});
+    expect(watchlistApi.save).toHaveBeenLastCalledWith([HL, SPOT, IID]);
+    fireEvent.click(within(rail).getByRole("button", { name: `Unpin ${HL}` }));
+    await act(async () => {});
+    expect(watchlistApi.save).toHaveBeenLastCalledWith([SPOT, IID]);
+    expect(localStorage.length).toBe(0);
+  });
+
+  it("shows a refused watchlist save inline and the server's list again", async () => {
+    watchlistApi.server = [HL];
+    watchlistApi.save.mockRejectedValue(new Error("PUT /api/watchlist failed: 422"));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(page());
+    fireEvent.click(screen.getByRole("button", { name: "Watchlist" }));
+    await act(async () => {});
+
+    fireEvent.click(screen.getByRole("button", { name: "Pin this chart" }));
+    await act(async () => {});
+
+    const rail = screen.getByRole("complementary", { name: "Watchlist" });
+    expect(within(rail).getByRole("alert")).toHaveTextContent("Watchlist could not be saved: PUT /api/watchlist failed: 422");
+    expect(within(rail).getAllByRole("link")).toHaveLength(1);
+    expect(errors).toHaveBeenCalled();
+    errors.mockRestore();
   });
 });

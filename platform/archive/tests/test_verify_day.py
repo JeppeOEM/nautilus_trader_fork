@@ -15,7 +15,8 @@
 """
 The `verify_day` step (Story 31.11) with a fake tool runner -- the tools have their own tests and
 are never run here: the reference-data gate, every tool's command line, the reduction to a day
-verdict, the ledger, the timeouts and crashes that must never exit 1, and the result file.
+verdict, the ledger, the timeouts and crashes that must never exit 1, and the result file -- and
+the liquidations report (Story 33.1), kept beside the verdict on both paths, never in it.
 """
 
 import datetime as dt
@@ -47,8 +48,32 @@ def _instrument(iid: str, failing: int = 0) -> dict[str, Any]:
     return {"instrument_id": iid, "passed": failing == 0, "failing": failing}
 
 
+def _liquidations_body() -> dict[str, Any]:
+    """Return the liquidations tool's `--json` shape: a share, never a verdict (Story 33.1)."""
+    btc = {"instrument_id": _BTC, "total": 4, "matched": 3, "share": 0.75, "unmatched_count": 1}
+    btc |= {"unmatched_ids": ["1:Buy:0.010:60000.10"], "unrecoverable_seconds": 12}
+    head = {"venue": "BYBIT", "day": _DAY, "applicable": True, "coverage_present": True}
+    totals = {"total": 4, "matched": 3, "share": 0.75, "unrecoverable_seconds": 12}
+    return {**head, **totals, "instruments": [btc]}
+
+
+_LIQUIDATIONS = {
+    "report": "reported",
+    "applicable": True,
+    "coverage_present": True,
+    "total": 4,
+    "matched": 3,
+    "share": 0.75,
+    "unrecoverable_seconds": 12,
+    "instruments": {_BTC: {"total": 4, "matched": 3, "unmatched": 1, "unrecoverable_seconds": 12}},
+}
+_CHILDREN = [*TOOLS, "liquidations"]
+
+
 def _body(tool: str, eth_failing: int = 0) -> dict[str, Any]:
     """Build a report in `tool`'s own `--json` shape (restated: archive imports no tool)."""
+    if tool == "liquidations":
+        return _liquidations_body()
     passed = eth_failing == 0
     if tool == "catalog":
         parity = [{"instrument_id": _BTC, "failing": 0}, {"instrument_id": _ETH, "failing": 0}]
@@ -121,12 +146,15 @@ def test_without_reference_data_nothing_runs_and_nothing_is_ledgered(
     else:
         environ = _env(tmp_path)  # DYDX: recorders run, but none for this venue
     runner = _Runner()
-    code, result = _run(tmp_path, environ, runner, "DYDX" if case == "dydx" else "BYBIT")
+    venue = "DYDX" if case == "dydx" else "BYBIT"
+    code, result = _run(tmp_path, environ, runner, venue)
     assert code == 0
     assert result["verification"] == "no reference data"
-    assert (result["venue"], result["day"]) == ("DYDX" if case == "dydx" else "BYBIT", _DAY)
+    assert (result["venue"], result["day"]) == (venue, _DAY)
     assert result["reason"]
-    assert runner.argv == {}
+    # Only the liquidations report, which needs no recorder, and only for a venue with the feed.
+    assert list(runner.argv) == (["liquidations"] if venue == "BYBIT" else [])
+    assert result.get("liquidations") == (_LIQUIDATIONS if venue == "BYBIT" else None)
     assert error_ledger.counts() == {}
 
 
@@ -137,7 +165,9 @@ def test_every_tool_runs_in_order_with_its_own_arguments(tmp_path: Path) -> None
     runner = _Runner()
     root = str(tmp_path / "verify_data")
     _run(tmp_path, _env(tmp_path), runner)
-    assert list(runner.argv) == list(TOOLS)
+    assert list(runner.argv) == _CHILDREN
+    liquidations = runner.argv.pop("liquidations")
+    assert liquidations[3:] == ["--venue", "BYBIT", "--day", _DAY, "--json", "--catalog", "/c"]
     common = ["--venue", "BYBIT", "--day", _DAY, "--json", "--catalog", "/c", "--raw-dir", root]
     for tool, argv in runner.argv.items():
         assert argv[:3] == [sys.executable, "-m", f"verification.{tool}"]
@@ -151,9 +181,10 @@ def test_every_tool_runs_in_order_with_its_own_arguments(tmp_path: Path) -> None
         "catalog": ["--candles", "/cd", "--scratch-dir", f"{root}/scratch/verify_day"],
         "candles": ["--candles", "/cd", "--data-api", _API],
     }
-    assert runner.timeouts == [TOOL_TIMEOUT_S] * len(TOOLS)
+    assert runner.timeouts == [TOOL_TIMEOUT_S] * len(_CHILDREN)
     shipped = tomllib.loads((Path(__file__).parents[1] / "config.toml").read_text())
-    assert len(TOOLS) * TOOL_TIMEOUT_S < shipped["step_timeout_minutes"] * 60  # the step's budget
+    # The step's budget holds every child at its own timeout, the liquidations one included.
+    assert len(_CHILDREN) * TOOL_TIMEOUT_S < shipped["step_timeout_minutes"] * 60
 
 
 def test_without_a_data_api_the_candles_run_is_provisional_and_never_verified(
@@ -174,9 +205,10 @@ def test_without_a_data_api_the_candles_run_is_provisional_and_never_verified(
 def test_all_passing_is_verified_with_one_verdict_per_type(tmp_path: Path) -> None:
     code, result = _run(tmp_path, _env(tmp_path), _Runner())
     assert code == 0
-    assert set(result) == {"venue", "day", "verification", "checked_at", "types"}
+    assert set(result) == {"venue", "day", "verification", "checked_at", "types", "liquidations"}
     assert (result["verification"], result["checked_at"]) == ("verified", "2026-09-30T03:10:05Z")
     assert set(result["types"]) == set(TOOLS)
+    assert result["liquidations"] == _LIQUIDATIONS
     assert {t["verdict"] for t in result["types"].values()} == {"pass"}
     assert result["types"]["book"]["instruments"][_ETH] == {"passed": True, "failing": 0}
     assert error_ledger.counts() == {}
@@ -203,7 +235,7 @@ def test_a_reports_dir_keeps_every_tool_report_unreduced(tmp_path: Path) -> None
     argv += ["--result-file", str(tmp_path / "r.json"), "--reports-dir", str(reports)]
     runner = _Runner({"book": (1, json.dumps(failing))})
     assert main(argv, runner, lambda: _NOW, _env(tmp_path)) == 2
-    assert sorted(p.stem for p in reports.iterdir()) == sorted(TOOLS)
+    assert sorted(p.stem for p in reports.iterdir()) == sorted(_CHILDREN)
     assert json.loads((reports / "book.json").read_text()) == failing
 
 
@@ -221,7 +253,7 @@ def test_a_child_without_a_report_is_refused_and_ledgered(tmp_path: Path) -> Non
     assert result["types"]["trades"]["verdict"] == "refused"
     assert result["types"]["trades"]["reason"] == "no JSON report (exit 1)"
     assert error_ledger.counts() == {SITE: 1}
-    assert list(runner.argv) == list(TOOLS)  # one refusal never stops the others
+    assert list(runner.argv) == _CHILDREN  # one refusal never stops the others
 
 
 def test_a_child_killed_at_its_timeout_is_refused(tmp_path: Path) -> None:
@@ -307,3 +339,37 @@ def test_the_subprocess_runner_captures_stdout_and_kills_at_the_timeout() -> Non
     assert subprocess_runner([sys.executable, "-c", "print('{}')"], 30.0) == (0, "{}\n")
     code, stdout = subprocess_runner([sys.executable, "-c", "import time; time.sleep(30)"], 0.5)
     assert (code, stdout) == (TIMED_OUT, "")
+
+
+# --- the liquidations report (Story 33.1) ----------------------------------------------------------
+
+
+def test_a_low_matched_share_never_changes_the_verdict(tmp_path: Path) -> None:
+    body = {**_liquidations_body(), "matched": 0, "share": 0.0}
+    code, result = _run(tmp_path, _env(tmp_path), _Runner({"liquidations": (0, json.dumps(body))}))
+    assert (code, result["verification"]) == (0, "verified")
+    assert result["liquidations"]["share"] == 0.0
+    assert "liquidations" not in result["types"]
+
+
+def test_a_refused_liquidations_child_is_ledgered_and_never_changes_the_exit(
+    tmp_path: Path,
+) -> None:
+    code, result = _run(tmp_path, {}, _Runner({"liquidations": (1, "")}))
+    assert code == 0  # no reference data: still exit 0
+    assert result["liquidations"] == {"report": "refused", "reason": "no JSON report (exit 1)"}
+    assert error_ledger.counts() == {SITE: 1}
+    assert "liquidations: refused" in error_ledger.last_details()[SITE]
+
+
+def test_a_malformed_liquidations_report_is_refused(tmp_path: Path) -> None:
+    body = {**_liquidations_body(), "share": 1.5}
+    _, result = _run(tmp_path, {}, _Runner({"liquidations": (0, json.dumps(body))}))
+    assert result["liquidations"]["report"] == "refused"
+    assert "share is not a fraction" in result["liquidations"]["reason"]
+
+
+def test_a_missing_coverage_record_reads_unknown_not_zero_unrecoverable(tmp_path: Path) -> None:
+    body = {**_liquidations_body(), "coverage_present": False, "unrecoverable_seconds": 0}
+    _, result = _run(tmp_path, {}, _Runner({"liquidations": (0, json.dumps(body))}))
+    assert result["liquidations"]["coverage_present"] is False

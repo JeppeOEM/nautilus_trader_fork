@@ -24,8 +24,11 @@ Moved verbatim from the catalog-stats module and `data_api/routes/paging.py` (St
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from candles.application import queries
+from kernel.catalog_files import liquidation_feed_since_ns
 from kernel.clocks import READ_SPAN_MARGIN_NS
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.venues import venue_of
 
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -55,6 +58,29 @@ def instrument_precision(catalog_path: str, instrument_id: str) -> InstrumentPre
         raise NoInstrumentDefinition(f"{instrument_id}: no instrument definition in the catalog")
     latest = max(found, key=lambda i: i.ts_init)
     return InstrumentPrecision(latest.price_precision, latest.size_precision)
+
+
+def liquidation_feed_start(catalog_path: str, candles_dir: str, instrument_id: str) -> int | None:
+    """
+    Return the liquidation feed start an archive-side fold of `instrument_id` is bounded by (the
+    one feed-start rule, `docs/DATA_DICTIONARY.md` §2.15): the candle store's persisted
+    `liquidation_feed_since` row (one indexed SELECT, `queries.liquidation_feed_since`), else --
+    only when the store has no row or no file -- the archive's first liquidation
+    (`kernel.catalog_files.liquidation_feed_since_ns`, a file-name walk plus one column read). The
+    caller lowers it to its own rows (`candles.domain.fold.archive_liquidations`). None: no start
+    known, every bucket's `liq_*` null.
+
+    Known limit: the store's start is the earliest liquidation the live sink or a rebuild has
+    applied; an archive holding older ones no rebuild has reached yet (history archived before the
+    store existed) is not consulted while the store has a row, so that span reads null -- unknown,
+    never a false 0 -- until `candles.rebuild` of it lowers the stored start. Upgrade path: the
+    operator's full-history rebuild (DEPLOY_CHECKLIST 33-3), after which the two agree.
+    """
+    with queries.open_store(candles_dir, venue_of(instrument_id)) as db:
+        stored = None if db is None else queries.liquidation_feed_since(db, instrument_id)
+    if stored is not None:
+        return stored
+    return liquidation_feed_since_ns(catalog_path, instrument_id)
 
 
 def query_second_snapshots(

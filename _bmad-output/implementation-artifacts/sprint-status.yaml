@@ -1,5 +1,5 @@
 # generated: 2026-07-01
-# last_updated: 2026-09-30 (Epic 32 chart honesty and cleanup added, runs on branch epic-32) (Epic 23 done: 23.2 kernel shared kernel + 23.3 durable error ledger merged from stalled bmad-loop story branches, superseding their earlier ready-for-dev status)
+# last_updated: 2026-10-05 (Epic 33 liquidations, derivatives, order flow, alerts and TradingView parity added; 33.5+ after epic-32 merges) (Epic 32 chart honesty and cleanup added 2026-09-30, runs on branch epic-32) (Epic 23 done: 23.2 kernel shared kernel + 23.3 durable error ledger merged from stalled bmad-loop story branches, superseding their earlier ready-for-dev status)
 # project: nautilus_trader_fork
 # project_key: NOKEY
 # tracking_system: file-system
@@ -368,7 +368,7 @@ development_status:
   28-2-capture-python-overhead-removed-baseline-lowered: done
   epic-28-retrospective: optional
 
-  epic-32: backlog
+  epic-32: done
   32-1-every-gap-drawn-to-its-real-length-in-a-distinct-colour-on-every-chart: done
   32-2-panes-grow-the-page-and-volume-is-an-indicators-menu-entry-with-a-toggle: done
   32-3-legend-is-the-indicator-control-surface-larger-type-gear-settings-remove-in-place: done
@@ -378,6 +378,23 @@ development_status:
   32-7-remaining-tradingview-profiles-auto-anchored-anchored-vp-anchored-vwap-and-tpo: done
   32-8-volume-footprint-bars-from-the-raw-trade-archive-toggled-from-the-indicators-menu: done  # operator decision 2026-10-05: undeferred, runs after 32-7
   epic-32-retrospective: optional
+
+  epic-33: done
+  33-1-bybit-liquidations-captured-over-a-second-socket-into-one-shared-liquidation-type: done
+  33-2-hyperliquid-liquidations-wire-investigation-first-then-the-feed-that-holds: done
+  33-3-per-bar-order-flow-and-liquidation-aggregates-in-the-candle-store-folded-once: done
+  33-4-derivatives-and-liquidations-read-models-api-and-live-channel: done
+  33-14-liquidation-cascade-bot-shorts-into-a-long-liquidation-cascade-backtested-and-paper-run: done  # added 2026-10-05 (operator); runs after 33-4, before the deferred frontend stories
+  33-5-chart-panes-for-open-interest-funding-basis-and-liquidations-and-mark-index-overlay: done  # operator decision 2026-10-05: epic-32 merged into epic-33, released
+  33-6-order-flow-indicators-from-the-stored-per-bar-aggregates: done  # operator decision 2026-10-05: epic-32 merged into epic-33, released
+  33-7-rankings-sorts-every-column-derivatives-flow-and-range-columns-saved-filter-presets: done  # operator decision 2026-10-05: epic-32 merged into epic-33, released
+  33-8-alert-conditions-beyond-a-price-cross-and-an-alerts-page-that-creates-and-edits: done  # operator decision 2026-10-05: epic-32 merged into epic-33, released
+  33-9-price-scale-modes-chart-types-and-a-compare-symbol-on-the-percent-scale: done  # operator decision 2026-10-05: epic-32 merged into epic-33, released
+  33-10-drawing-tools-two-ray-vline-rectangle-channel-text-arrow-magnet-undo-lock: done  # operator decision 2026-10-05: epic-32 merged into epic-33, released
+  33-11-missing-indicators-candle-pattern-markers-and-dead-code-removed: done  # operator decision 2026-10-05: epic-32 merged into epic-33, released
+  33-12-symbol-search-watchlist-fullscreen-shortcuts-time-zone-countdown: done  # operator decision 2026-10-05: epic-32 merged into epic-33, released
+  33-13-liquidation-and-forced-flow-research-and-the-strategy-filter: done  # operator decision 2026-10-05: epic-32 merged into epic-33, released
+  epic-33-retrospective: optional
 
 action_items:
   - epic: 1

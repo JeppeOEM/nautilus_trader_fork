@@ -21,7 +21,6 @@ gap-marker rules are the only thing that changes what is drawn.
 from pathlib import Path
 
 import pytest
-from kernel.indicators import OFI_GAP_NS
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.tests.snapshot_factory import make_snapshot
 from observability import error_ledger
@@ -101,23 +100,6 @@ def test_an_undefined_microprice_is_null_never_the_mid() -> None:
     (row,) = price_series_rows([zero_tops])
 
     assert (row["mid"], row["micro"]) == (100.5, None)
-
-
-def test_the_replay_clears_the_previous_ofi_book_after_a_gap() -> None:
-    """
-    Story 31.3: a `ts_event` step over `OFI_GAP_NS` clears OFI's previous book before the next
-    update, so the post-gap book is a baseline -- no contribution diffed across the gap.
-    """
-    bar = 60
-    before = _snapshot(_BASE_NS, [100.0], [101.0])
-    after_gap = _snapshot(_BASE_NS + OFI_GAP_NS + 1, [90.0], [91.0])  # a big move across the gap
-    same_book = _snapshot(_BASE_NS + OFI_GAP_NS + 2_000_000_001, [90.0], [91.0])
-
-    gapped = chart_series.replay_bucket_samples([before, after_gap], bar)
-    continued = chart_series.replay_bucket_samples([before, after_gap, same_book], bar)
-
-    assert [row["ofi"] for row in gapped.values()] == [None]  # still only a baseline
-    assert [row["ofi"] for row in continued.values()] == [0.0]  # unchanged book: no flow
 
 
 def test_a_touched_second_is_priced_too() -> None:
@@ -296,10 +278,10 @@ def test_the_archive_window_is_whole_buckets_within_the_cap(bar_seconds: int, li
 def test_a_window_end_rounds_up_to_the_bucket_boundary_and_keeps_a_boundary() -> None:
     monday_ns = 4 * 86_400 * 1_000_000_000  # 1970-01-05, a 1W bucket start
     week_ns = 7 * 86_400 * 1_000_000_000
-    assert chart_series._bucket_end_ns(monday_ns, 604_800) == monday_ns
-    assert chart_series._bucket_end_ns(monday_ns + 1, 604_800) == monday_ns + week_ns
-    assert chart_series._bucket_end_ns(monday_ns - 1, 604_800) == monday_ns
-    assert chart_series._bucket_end_ns(2700_000_000_001, 2700) == 5400_000_000_000
+    assert chart_series.bucket_end_ns(monday_ns, 604_800) == monday_ns
+    assert chart_series.bucket_end_ns(monday_ns + 1, 604_800) == monday_ns + week_ns
+    assert chart_series.bucket_end_ns(monday_ns - 1, 604_800) == monday_ns
+    assert chart_series.bucket_end_ns(2700_000_000_001, 2700) == 5400_000_000_000
 
 
 def test_the_custom_indicator_replay_window_is_capped_at_the_query_span(
@@ -327,30 +309,17 @@ def test_the_custom_indicator_replay_window_is_capped_at_the_query_span(
     monkeypatch.setattr(indicator_picker, "values_by_time", capture)
 
     chart_series.indicator_values_page(
-        _IID, 0, 500, 604_800, [], catalog_path="", candles_dir="", recent_rows=lambda *a: []
+        _IID,
+        0,
+        500,
+        604_800,
+        [],
+        catalog_path="",
+        candles_dir="",
+        recent_rows=lambda *a: [],
+        recent_liquidations=lambda *a: [],
     )
 
     (window,) = seen
     assert window.end_ms == 500 * week_ms
     assert window.end_ms - window.start_ms == chart_series.MAX_QUERY_SPAN_SECONDS * 1000
-
-
-def test_compute_chart_series_spread_is_the_kernel_spread(tmp_path: Path) -> None:
-    """Review P3: the one-tick spread at 8.578755 is 1e-06 exactly, not the cancelled difference."""
-    catalog_path = str(tmp_path / "catalog")
-    row = make_snapshot(
-        instrument_id=InstrumentId.from_str(_IID),
-        bid_prices=["8.578755"],
-        bid_sizes=[1],
-        ask_prices=["8.578756"],
-        ask_sizes=[1],
-        ts_event=_BASE_NS,
-        price_precision=6,
-        size_precision=0,
-    )
-    ParquetDataCatalog(catalog_path).write_data([row])
-
-    series = chart_series.compute_chart_series(catalog_path, _IID, _BASE_NS - 1, _BASE_NS + 1)
-
-    assert row.ask_prices[0] - row.bid_prices[0] != 1e-06  # the cancellation
-    assert [p["value"] for p in series["spread"]] == [1e-06]

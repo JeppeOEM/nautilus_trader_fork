@@ -29,6 +29,11 @@ and `candles` entries, one per instrument and type) and candles instruments (who
 `failing == 0`, the candles domain's own per-instrument rule). A day is `verified` only when every
 tool of `TOOLS` has a `pass`. Standard library only, no I/O: the tools are reached through their
 command lines by `archive.verify_day`, never imported.
+
+The liquidations self-check (Story 33.1) is deliberately *not* a tool of `TOOLS`: it states a
+matched share, never a pass, and a venue without a liquidation feed would otherwise never be
+`verified`. `summarise_liquidations` reduces its report to the summary `verify_day` keeps beside
+the verdict (result key `liquidations`), for the venues of `LIQUIDATION_VENUES` only.
 """
 
 import json
@@ -47,6 +52,13 @@ REFUSED = "refused"
 
 VERIFIED = "verified"
 FINDINGS = "findings"
+
+# The venues with a liquidation feed, whose day `verify_day` also reports (never judges).
+# Hyperliquid is absent: it has no feed, Story 33.2 having refuted both public-data hypotheses
+# (`docs/DATA_DICTIONARY.md` §1.26).
+LIQUIDATION_VENUES = ("BYBIT",)
+# The summary's `report` when the tool printed a report it could read.
+REPORTED = "reported"
 
 # The candles tool's `served` value when the data_api's bars were compared (`--no-served` omits it).
 SERVED_CHECKED = "checked"
@@ -234,3 +246,57 @@ def day_verdict(types: Iterable[TypeVerdict], checked_at: str) -> dict[str, Any]
         "checked_at": checked_at,
         "types": {tool: verdict.to_json() for tool, verdict in by_tool.items()},
     }
+
+
+def _share(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float) or not 0 <= value <= 1:
+        raise MalformedReport(f"share is not a fraction: {value!r}")
+    return float(value)
+
+
+def _liquidation_instruments(body: Mapping[str, Any]) -> dict[str, dict[str, int]]:
+    instruments: dict[str, dict[str, int]] = {}
+    for entry in _entries(body, "instruments"):
+        iid = _iid(entry)
+        if iid in instruments:
+            raise MalformedReport(f"instrument {iid} reported twice")
+        instruments[iid] = {
+            "total": _count(entry.get("total"), f"{iid} total"),
+            "matched": _count(entry.get("matched"), f"{iid} matched"),
+            "unmatched": _count(entry.get("unmatched_count"), f"{iid} unmatched_count"),
+            "unrecoverable_seconds": _count(
+                entry.get("unrecoverable_seconds"), f"{iid} unrecoverable_seconds"
+            ),
+        }
+    return instruments
+
+
+def summarise_liquidations(
+    exit_code: int, body: Mapping[str, Any] | None, reason: str = ""
+) -> dict[str, Any]:
+    """
+    Reduce one liquidations report to the summary `verify_day` keeps under `liquidations`:
+    `report` `reported` with `coverage_present` and the counts the report states (the share as it states it, never
+    recomputed), or `refused` with why there is none. Never a verdict: nothing here passes or
+    fails a day.
+    """
+    if body is None:
+        return {"report": REFUSED, "reason": reason or f"no JSON report (exit {exit_code})"}
+    try:
+        return {
+            "report": REPORTED,
+            "applicable": _flag(body.get("applicable"), "applicable"),
+            # Without the coverage record `unrecoverable_seconds` 0 means unknown, never none.
+            "coverage_present": _flag(body.get("coverage_present"), "coverage_present"),
+            "total": _count(body.get("total"), "total"),
+            "matched": _count(body.get("matched"), "matched"),
+            "share": _share(body.get("share")),
+            "unrecoverable_seconds": _count(
+                body.get("unrecoverable_seconds"), "unrecoverable_seconds"
+            ),
+            "instruments": _liquidation_instruments(body),
+        }
+    except MalformedReport as exc:
+        return {"report": REFUSED, "reason": f"malformed report (exit {exit_code}): {exc}"}

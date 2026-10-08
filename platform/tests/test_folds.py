@@ -200,6 +200,17 @@ class Roller:
         return out
 """
 
+# The shape of DW-192's admitted per-bucket sampler (`views.chart_series.replay_bucket_samples`,
+# deleted by Story 33.11): it buckets its rows but keeps one sample per bucket, folding no OHLC.
+_BUCKET_SAMPLER = """
+def sample(rows, bar):
+    buckets = {}
+    for r in rows:
+        t = bucket_start_ms(r.ts // 1_000_000, bar)
+        buckets[t] = {"t": t, "ofi": r.ofi, "spread": r.ask - r.bid}
+    return buckets
+"""
+
 _CLAMP = """
 def clamp(x, lo, hi):
     return {"value": max(lo, min(x, hi))}
@@ -218,13 +229,6 @@ def test_a_max_and_min_without_a_bar_record_is_not_a_fold() -> None:
     assert _folds_in(_CLAMP, "synthetic") == set()
 
 
-def test_indicator_bucket_sampling_is_not_a_fold() -> None:
-    """
-    DW-192's admission: `views.chart_series.replay_bucket_samples` keeps one indicator sample per
-    bucket (served by `data_api/routes/indicator_series.py`); it buckets but folds no OHLC.
-    """
-    path = python_modules()["views.chart_series"]
-    tree = ast.parse(path.read_text())
-    functions = dict(_functions(tree))
-    assert "replay_bucket_samples" in functions
-    assert not _is_fold(functions["replay_bucket_samples"])
+def test_a_per_bucket_sampler_is_not_a_fold() -> None:
+    """DW-192's admission, kept as a self-test now that the sampler itself is deleted."""
+    assert _folds_in(_BUCKET_SAMPLER, "synthetic") == set()

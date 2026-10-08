@@ -34,6 +34,7 @@ import tomllib
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from typing import Literal
 
 from fastapi import APIRouter
 from fastapi import HTTPException
@@ -92,6 +93,16 @@ class IndicatorCatalogEntry(BaseModel):
     choices: dict[str, list[str]] = {}
     # True only for a native indicator fed exactly the close: the legend's Source select (32.3).
     source_selectable: bool = False
+    # Output -> `price`/`size`/`size_mean`/`count`/`ratio` (`indicator_picker.INDICATOR_UNITS`, Story 33.6): the
+    # legend formats that output at the instrument's precision; `{}` (every native entry) = generic.
+    units: dict[str, str] = {}
+    # Every output name the entry's replay can return (Story 33.8): the alert form's output select.
+    outputs: list[str]
+    # Output -> how it is drawn (`indicator_picker.PlotStyle`, Story 33.11); an absent output is a
+    # line: `steps` (pivot levels), `points` (Parabolic SAR), `swing` (ZigZag's joined pivots).
+    plot: dict[str, Literal["line", "steps", "points", "swing"]] = {}
+    # A short legend note after the entry's title (Story 33.11: ZigZag's "repaints last leg").
+    note: str | None = None
 
 
 @router.get("/api/indicators/catalog")
@@ -325,7 +336,7 @@ class IndicatorValuesItem(BaseModel):
     t: int
     # Keyed by f"{indicator_id(name, params, source)}.{output_attr}" -- a gap-marker row (AD-F6) is
     # represented as an item with an empty `values` dict, the same "row present, no data"
-    # shape candles.py/indicator_series.py use for their own gap markers.
+    # shape candles.py uses for its own gap markers.
     values: dict[str, float | None] = {}
 
 
@@ -375,9 +386,9 @@ def get_indicator_values(
 
     Re-derives its own bounded window server-side rather than accepting client-supplied
     candles in the request body (Design Notes: DESIGN-01) -- always a bounded *historical*
-    replay of `[start_ns, before_ns)`, mirroring `indicator_series.py`'s own purely-historical
-    scroll-back model; the candlestick's live edge has its own sanctioned path (AD-F7) that
-    this route does not duplicate.
+    replay of `[start_ns, before_ns)`, the purely-historical scroll-back model the deleted
+    OFI/OBI series route (Story 33.4) had; the candlestick's live edge has its own sanctioned
+    path (AD-F7) that this route does not duplicate.
 
     A custom indicator whose instrument never opted into raw-delta capture returns `None` for
     every point (pre-existing custom-indicator behavior, reused unchanged) -- not an
@@ -399,6 +410,7 @@ def get_indicator_values(
             catalog_path=_candles.CATALOG_PATH,
             candles_dir=_candles.CANDLES_DB_DIR,
             recent_rows=buses.live_candle_bus.recent_rows,
+            recent_liquidations=buses.live_candle_bus.recent_liquidations,
         )
     except chart_series.ImpossibleCandle as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

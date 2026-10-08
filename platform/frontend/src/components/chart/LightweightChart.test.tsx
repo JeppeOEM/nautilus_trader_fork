@@ -31,17 +31,27 @@ import {
 import { GapPrimitive } from "./primitives/GapPrimitive";
 import { MeasurementPrimitive } from "./primitives/MeasurementPrimitive";
 import { FootprintPrimitive, type FootprintRenderSpec } from "./primitives/FootprintPrimitive";
+import type { MarkerSpec } from "./LiquidationMarkers";
+import type { ChartType } from "../../lib/chartTypes";
+import type { ChartTool } from "../../lib/chartTools";
+import { ChannelPrimitive } from "./primitives/ChannelPrimitive";
+import { SessionBreaksPrimitive } from "./primitives/SessionBreaksPrimitive";
+import { CountdownPrimitive } from "./primitives/CountdownPrimitive";
+import { formatChartTime, tickMarkFormatter } from "../../lib/time";
 
 const addSeriesMock = vi.fn();
 const seriesUpdateMock = vi.fn();
 const applyOptionsMock = vi.fn();
 const removeMock = vi.fn();
 const removeSeriesMock = vi.fn();
+const setSeriesOrderMock = vi.fn();
 const setDataMock = vi.fn();
 const createChartMock = vi.fn();
 const addPaneMock = vi.fn();
 const removePaneMock = vi.fn();
 const getVisibleLogicalRangeMock = vi.fn();
+// Story 33.9: the visible time range, the Baseline's left edge (null: nothing laid out).
+const getVisibleRangeMock = vi.fn();
 const setVisibleLogicalRangeMock = vi.fn();
 // Story 18.1: the chart's click/crosshair subscriptions and the main series'
 // price-line API surface -- module-level shared mocks (same convention as setDataMock
@@ -70,6 +80,16 @@ const scrollToRealTimeMock = vi.fn();
 // Story 32.6: the visible-range subscription, shared so a test can fire the handler.
 const subscribeRangeMock = vi.fn();
 const unsubscribeRangeMock = vi.fn();
+// Story 33.5: the series-markers plugin (one per candle series) and the time scale's bar spacing.
+const setMarkersMock = vi.fn();
+const detachMarkersMock = vi.fn();
+const createSeriesMarkersMock = vi.fn();
+let barSpacingPx = 6;
+// Story 33.9: the right price scale's options round-trip (what the component applied, and the
+// library's own auto-scale flag a drag of the scale turns off).
+const RIGHT_SCALE_PX = 60;
+const rightScaleApplyMock = vi.fn();
+let rightScaleState: Record<string, unknown> = {};
 
 // One shared counter so each chart.addPane() call gets its own, stable, ever-increasing
 // index -- mirrors the real library's paneIndex() behaviour closely enough for the
@@ -139,6 +159,7 @@ function makeSeriesMock(initial: Record<string, unknown> | undefined) {
     options: vi.fn(() => ({ ...state })),
     createPriceLine: createPriceLineMock,
     removePriceLine: removePriceLineMock,
+    setSeriesOrder: setSeriesOrderMock,
     priceToCoordinate: priceToCoordinateMock,
     coordinateToPrice: coordinateToPriceMock,
     attachPrimitive: (p: unknown) => (p instanceof GapPrimitive ? gapAttachMock(p, series) : attachPrimitiveMock(p)),
@@ -168,8 +189,14 @@ vi.mock("lightweight-charts", () => ({
   CandlestickSeries: "CandlestickSeries-sentinel",
   LineSeries: "LineSeries-sentinel",
   HistogramSeries: "HistogramSeries-sentinel",
+  BarSeries: "BarSeries-sentinel",
+  AreaSeries: "AreaSeries-sentinel",
+  BaselineSeries: "BaselineSeries-sentinel",
+  PriceScaleMode: { Normal: 0, Logarithmic: 1, Percentage: 2, IndexedTo100: 3 },
   LineStyle: { Solid: 0, Dotted: 1, Dashed: 2 },
+  LineType: { Simple: 0, WithSteps: 1, Curved: 2 },
   createChart: (...args: unknown[]) => createChartMock(...args),
+  createSeriesMarkers: (...args: unknown[]) => createSeriesMarkersMock(...args),
 }));
 
 const { default: LightweightChart, INDICATOR_PANE_PX, PRICE_PANE_PX, VOLUME_PANE_PX, VISIBLE_BARS_DEBOUNCE_MS } = await import("./LightweightChart");
@@ -209,6 +236,7 @@ function makePriceLineSpec(id: string, overrides: Partial<PriceLineSpec> = {}): 
 type ChartTestProps = {
   priceLines?: PriceLineSpec[];
   mode?: ChartMode;
+  chartType?: ChartType;
   onPriceClick?: (price: number) => void;
   onPriceLineDrag?: (id: string, price: number) => void;
   drawings?: DrawingSpec[];
@@ -236,6 +264,7 @@ type ChartTestProps = {
   precision?: { price: number; size: number } | null;
   onDrawingDrag?: (id: string, handle: string, point: DragPoint) => void;
   onDrawingSettings?: (id: string) => void;
+  onDrawingAlert?: (condition: { kind: string } & Record<string, unknown>) => void;
   fibActive?: boolean;
   onFibPlace?: (a: { time: Time; price: number }, b: { time: Time; price: number }) => void;
   panes?: IndicatorPaneSpec[];
@@ -243,6 +272,12 @@ type ChartTestProps = {
   onPaneHeights?: (heights: Record<string, number>) => void;
   initialVisibleBars?: number;
   onVisibleBars?: (bars: number) => void;
+  // Story 33.10
+  magnet?: "off" | "weak" | "strong";
+  placement?: { tool: ChartTool; points: { time: number; price: number }[] } | null;
+  onDrawingDragStart?: (id: string) => void;
+  onDrawingLock?: (id: string, locked: boolean) => void;
+  onDrawingHide?: (id: string) => void;
 };
 
 function chartElement(props: ChartTestProps) {
@@ -262,9 +297,11 @@ beforeEach(() => {
   applyOptionsMock.mockReset();
   removeMock.mockReset();
   removeSeriesMock.mockReset();
+  setSeriesOrderMock.mockReset();
   addPaneMock.mockReset().mockImplementation(() => makePaneMock());
   removePaneMock.mockReset();
   getVisibleLogicalRangeMock.mockReset().mockReturnValue({ from: 10, to: 50 });
+  getVisibleRangeMock.mockReset().mockReturnValue(null);
   setVisibleLogicalRangeMock.mockReset();
   subscribeClickMock.mockReset();
   unsubscribeClickMock.mockReset();
@@ -300,11 +337,22 @@ beforeEach(() => {
     unsubscribeClick: unsubscribeClickMock,
     subscribeCrosshairMove: subscribeCrosshairMoveMock,
     unsubscribeCrosshairMove: unsubscribeCrosshairMoveMock,
-    priceScale: () => ({ width: () => leftScaleWidthPx }),
+    priceScale: (id: string) =>
+      id === "right"
+        ? {
+            width: () => RIGHT_SCALE_PX,
+            applyOptions: (opts: Record<string, unknown>) => {
+              rightScaleApplyMock(opts);
+              Object.assign(rightScaleState, opts);
+            },
+            options: () => ({ ...rightScaleState }),
+          }
+        : { width: () => leftScaleWidthPx },
     timeScale: () => ({
       height: timeScaleHeightMock,
       width: () => PLOT_WIDTH_PX,
       getVisibleLogicalRange: getVisibleLogicalRangeMock,
+      getVisibleRange: getVisibleRangeMock,
       setVisibleLogicalRange: setVisibleLogicalRangeMock,
       coordinateToTime: coordinateToTimeMock,
       timeToCoordinate: timeToCoordinateMock,
@@ -314,8 +362,15 @@ beforeEach(() => {
       scrollToRealTime: scrollToRealTimeMock,
       subscribeVisibleLogicalRangeChange: subscribeRangeMock,
       unsubscribeVisibleLogicalRangeChange: unsubscribeRangeMock,
+      options: () => ({ barSpacing: barSpacingPx }),
     }),
   }));
+  setMarkersMock.mockReset();
+  detachMarkersMock.mockReset();
+  createSeriesMarkersMock.mockReset().mockImplementation(() => ({ setMarkers: setMarkersMock, detach: detachMarkersMock }));
+  barSpacingPx = 6;
+  rightScaleApplyMock.mockReset();
+  rightScaleState = { autoScale: true };
 });
 
 afterEach(() => {
@@ -1030,7 +1085,13 @@ describe("drawings registry (Story 18.2)", () => {
 
     rerender(chartElement({ drawings: [moved] }));
 
-    expect(updateSpy).toHaveBeenCalledWith(moved.anchors, "#123456");
+    expect(updateSpy).toHaveBeenCalledWith(moved.anchors, "#123456", {
+      extend: "none",
+      arrow: false,
+      lineWidth: 1,
+      lineStyle: undefined,
+      locked: false,
+    });
     expect(attachPrimitiveMock).toHaveBeenCalledTimes(1);
   });
 
@@ -1040,6 +1101,22 @@ describe("drawings registry (Story 18.2)", () => {
     rerender(chartElement({ drawings, mode: "lines" }));
 
     expect(attachPrimitiveMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the drawings attached once when the chart type changes in Lines mode (Story 33.9)", () => {
+    const drawings = [makeTrendlineSpec("trendline-1")];
+    const { rerender } = render(chartElement({ drawings, mode: "lines" }));
+    const added = addSeriesMock.mock.calls.length;
+    const removed = removeSeriesMock.mock.calls.length;
+    const attached = attachPrimitiveMock.mock.calls.length;
+
+    rerender(chartElement({ drawings, mode: "lines", chartType: "line" }));
+
+    // No host series exists to swap: nothing is removed, added, detached or attached beside the live one.
+    expect(addSeriesMock).toHaveBeenCalledTimes(added);
+    expect(removeSeriesMock).toHaveBeenCalledTimes(removed);
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(attached);
+    expect(detachPrimitiveMock).not.toHaveBeenCalled();
   });
 
   it("reports a click as a {time, price} point, falling back to coordinateToTime (AC #2)", () => {
@@ -2284,7 +2361,7 @@ describe("Fibonacci and position drawings (Story 32.5)", () => {
     expect(onPointClick).not.toHaveBeenCalled(); // the click that ends a drag places nothing
   });
 
-  it("offers Settings... in the menu for a Fibonacci and a position, not for a trendline or a horizontal line", () => {
+  it("offers Settings... in the menu of every kind (Story 33.10: the line form for a trendline and a horizontal line)", () => {
     const onDrawingSettings = vi.fn();
     const hit = (x: number, y: number) => {
       const click = subscribeClickMock.mock.calls.at(-1)![0];
@@ -2307,11 +2384,63 @@ describe("Fibonacci and position drawings (Story 32.5)", () => {
     expect(onDrawingSettings).toHaveBeenCalledWith("fib-1");
 
     hit(200, 510); // the trendline
-    expect(screen.getByRole("menu")).toBeInTheDocument();
-    expect(screen.queryByText("Settings…")).toBeNull();
+    fireEvent.click(screen.getByText("Settings…"));
+    expect(onDrawingSettings).toHaveBeenLastCalledWith("trendline-1");
 
     hit(500, 700); // the horizontal line
-    expect(screen.queryByText("Settings…")).toBeNull();
+    fireEvent.click(screen.getByText("Settings…"));
+    expect(onDrawingSettings).toHaveBeenLastCalledWith("hline-1");
+  });
+
+  it("offers Add alert… on a horizontal line (a price cross at its price) and a trendline, not a Fibonacci", () => {
+    const onDrawingAlert = vi.fn();
+    const hit = (x: number, y: number) => {
+      const click = subscribeClickMock.mock.calls.at(-1)![0];
+      act(() => click({ point: { x, y }, sourceEvent: { clientX: 5, clientY: 5 } }));
+    };
+    render(
+      chartElement({
+        drawings: [fibSpec(), makeTrendlineSpec("trendline-1", { anchors: [{ time: 100, price: 500 }, { time: 300, price: 520 }] })],
+        priceLines: [makePriceLineSpec("hline-1", { price: 700 })],
+        data: bars,
+        drawEditable: true,
+        onDrawingAlert,
+        onDrawingColor: () => {},
+      }),
+    );
+    for (const call of attachPrimitiveMock.mock.calls) attachGeometry(call[0]);
+
+    hit(500, 700); // the horizontal line
+    fireEvent.click(screen.getByText("Add alert…"));
+    expect(onDrawingAlert).toHaveBeenLastCalledWith({ kind: "price_cross", level: 700 });
+    expect(screen.queryByRole("menu")).toBeNull(); // the entry closes the menu
+
+    hit(200, 510); // the trendline
+    fireEvent.click(screen.getByText("Add alert…"));
+    expect(onDrawingAlert).toHaveBeenLastCalledWith({ kind: "trendline_cross", drawing_id: "trendline-1" });
+
+    hit(200, 95); // the fib
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    expect(screen.queryByText("Add alert…")).toBeNull();
+  });
+
+  it("opens the drawing menu on a right-click over a drawing in Cursor mode only", () => {
+    pricePaneMock.getHeight.mockReturnValue(1000);
+    const onDrawingAlert = vi.fn();
+    const { container, rerender } = render(
+      chartElement({ priceLines: [makePriceLineSpec("hline-1", { price: 700 })], data: bars, drawEditable: true, onDrawingAlert }),
+    );
+    const plot = container.firstElementChild!;
+    expect(fireEvent.contextMenu(plot, { clientX: 500, clientY: 300 })).toBe(true); // off any drawing: the browser's menu
+    expect(screen.queryByRole("menu")).toBeNull();
+
+    expect(fireEvent.contextMenu(plot, { clientX: 500, clientY: 700 })).toBe(false); // on the line: prevented
+    fireEvent.click(screen.getByText("Add alert…"));
+    expect(onDrawingAlert).toHaveBeenCalledWith({ kind: "price_cross", level: 700 });
+
+    rerender(chartElement({ priceLines: [makePriceLineSpec("hline-1", { price: 700 })], data: bars, drawEditable: false, onDrawingAlert }));
+    expect(fireEvent.contextMenu(plot, { clientX: 500, clientY: 700 })).toBe(true); // a tool is armed: untouched
+    expect(screen.queryByRole("menu")).toBeNull();
   });
 
   it("snaps a drawing placed after the newest loaded bar back to that bar", () => {
@@ -2697,5 +2826,972 @@ describe("the volume footprint (Story 32.8)", () => {
 
     rerender(<LightweightChart data={[]} onChartApi={() => {}} footprint={null} onLegendAction={onLegendAction} />);
     expect(paneEl.querySelector('.chart-legend-row[data-group="footprint"]')).toBeNull();
+  });
+});
+
+describe("derivatives support (Story 33.5)", () => {
+  const pricePane = (): HTMLElement => {
+    const paneEl = document.createElement("div");
+    document.body.appendChild(paneEl);
+    const base = createChartMock.getMockImplementation()!;
+    createChartMock.mockImplementation((...args: unknown[]) => ({
+      ...base(...args),
+      panes: () => [{ ...pricePaneMock, getHTMLElement: () => paneEl }],
+    }));
+    return paneEl;
+  };
+  const markers: MarkerSpec[] = [
+    {
+      id: "liq:a",
+      time: 60 as Time,
+      shape: "circle",
+      color: "#a00",
+      position: "atPriceBottom",
+      price: 100,
+      size: 1,
+      tooltip: ["long liquidated", "size 0.004"],
+    },
+  ];
+
+  it("hands the legend the spec's format, with the slot's time, and its fixed text", () => {
+    const paneEl = pricePane();
+    const format = vi.fn((value: number, time: number | null) => `${value}@${time}`);
+    const { rerender } = render(
+      <LightweightChart
+        data={[]}
+        onChartApi={() => {}}
+        panes={[makePaneSpec("mark", { placement: "overlay", groupLabel: "Mark", data: [{ time: 60 as Time, value: 7 }], format })]}
+      />,
+    );
+    expect(paneEl.querySelector(".chart-legend-row")?.textContent).toBe("Mark7@60");
+    const legendHandler = subscribeCrosshairMoveMock.mock.calls.at(-1)![0];
+    const series = addSeriesMock.mock.results.at(-1)!.value;
+    act(() => legendHandler({ time: 60, seriesData: new Map([[series, { time: 60, value: 7 }]]) }));
+    expect(format).toHaveBeenLastCalledWith(7, 60);
+
+    rerender(
+      <LightweightChart
+        data={[]}
+        onChartApi={() => {}}
+        panes={[makePaneSpec("mark", { placement: "overlay", groupLabel: "Mark", data: [], text: "load failed" })]}
+      />,
+    );
+    expect(paneEl.querySelector(".chart-legend-row")?.textContent).toBe("Markload failed");
+  });
+
+  it("draws a dashed zero line on a spec that asks for one, and removes it when it no longer does", () => {
+    const spec = makePaneSpec("basis", { zeroLine: true });
+    const { rerender } = render(<LightweightChart data={[]} onChartApi={() => {}} panes={[spec]} />);
+    expect(createPriceLineMock).toHaveBeenCalledWith(expect.objectContaining({ price: 0, lineStyle: 2, axisLabelVisible: false }));
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} panes={[{ ...spec, zeroLine: false }]} />);
+    expect(removePriceLineMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates one markers plugin on the candle series, sets, clears and detaches it", () => {
+    const { rerender, unmount } = render(<LightweightChart data={[]} onChartApi={() => {}} />);
+    expect(createSeriesMarkersMock).not.toHaveBeenCalled();
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} liquidationMarkers={markers} />);
+    expect(createSeriesMarkersMock).toHaveBeenCalledTimes(1);
+    const [host, initial] = createSeriesMarkersMock.mock.calls[0] as [unknown, unknown[]];
+    expect(host).toBe(addSeriesMock.mock.results[0].value);
+    expect(initial).toEqual([{ id: "liq:a", time: 60, shape: "circle", color: "#a00", position: "atPriceBottom", price: 100, size: 1 }]);
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} liquidationMarkers={[]} />);
+    expect(setMarkersMock).toHaveBeenLastCalledWith([]);
+    expect(createSeriesMarkersMock).toHaveBeenCalledTimes(1);
+
+    unmount();
+    expect(detachMarkersMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a hovered marker's tooltip lines and hides them off the marker", () => {
+    render(<LightweightChart data={[]} onChartApi={() => {}} liquidationMarkers={markers} />);
+    const handler = subscribeCrosshairMoveMock.mock.calls.at(-1)![0];
+
+    act(() => handler({ time: 60, point: { x: 10, y: 20 }, seriesData: new Map(), hoveredObjectId: "liq:a" }));
+    expect(screen.getByRole("tooltip")).toHaveTextContent("long liquidatedsize 0.004");
+
+    act(() => handler({ time: 60, point: { x: 10, y: 20 }, seriesData: new Map() }));
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("reports the bar spacing on mount and after a zoom", () => {
+    const onBarSpacing = vi.fn();
+    barSpacingPx = 8;
+    render(<LightweightChart data={[]} onChartApi={() => {}} onBarSpacing={onBarSpacing} />);
+    expect(onBarSpacing).toHaveBeenLastCalledWith(8);
+
+    barSpacingPx = 3;
+    for (const [handler] of subscribeRangeMock.mock.calls) act(() => handler({ from: 0, to: 10 }));
+    expect(onBarSpacing).toHaveBeenLastCalledWith(3);
+  });
+});
+
+// Story 33.9: chart types, the right price scale and compare overlays.
+describe("chart types, price scale and compare (Story 33.9)", () => {
+  const candle = (time: number, open: number, high: number, low: number, close: number) => ({
+    time: time as Time,
+    open,
+    high,
+    low,
+    close,
+  });
+  // Hand-computed HA: bar0 (10.5, 12, 9, 10.5), bar1 (10.5, 13, 10, 11.5).
+  const DATA = [candle(60, 10, 12, 9, 11), candle(120, 11, 13, 10, 12)];
+  const HA = [
+    { time: 60, open: 10.5, high: 12, low: 9, close: 10.5 },
+    { time: 120, open: 10.5, high: 13, low: 10, close: 11.5 },
+  ];
+  type SeriesWithOwnData = ReturnType<typeof makeSeriesMock> & { setData: ReturnType<typeof vi.fn> };
+  // Each series records its own setData, so the main series' rows can be told from an overlay's.
+  const ownSetData = (): void => {
+    addSeriesMock.mockImplementation((_definition: unknown, options?: Record<string, unknown>) => ({
+      ...makeSeriesMock(options),
+      setData: vi.fn(),
+    }));
+  };
+  const seriesAdded = (n: number): SeriesWithOwnData => addSeriesMock.mock.results[n].value as SeriesWithOwnData;
+  const element = (props: Record<string, unknown>) => (
+    <LightweightChart data={DATA} onChartApi={() => {}} {...props} />
+  );
+
+  it.each([
+    ["candles", "CandlestickSeries-sentinel"],
+    ["hollow", "CandlestickSeries-sentinel"],
+    ["heikin_ashi", "CandlestickSeries-sentinel"],
+    ["bars", "BarSeries-sentinel"],
+    ["line", "LineSeries-sentinel"],
+    ["area", "AreaSeries-sentinel"],
+    ["baseline", "BaselineSeries-sentinel"],
+  ])("draws %s with the %s definition and token colours", (chartType, definition) => {
+    render(element({ chartType }));
+
+    expect(addSeriesMock).toHaveBeenCalledTimes(1);
+    const [added, options] = addSeriesMock.mock.calls[0] as [string, Record<string, string>];
+    expect(added).toBe(definition);
+    // A line colour is a token's hex; a fill under a line is that token at an alpha (`chartVarAlpha`).
+    for (const value of Object.values(options)) expect(value).toMatch(/^(#[0-9a-f]{6}|rgba\(\d{1,3}, \d{1,3}, \d{1,3}, [\d.]+\))$/);
+  });
+
+  it("feeds each type its rows: OHLC, close lines, hollow colours", () => {
+    ownSetData();
+    const { rerender } = render(element({ chartType: "line" }));
+    expect(seriesAdded(0).setData).toHaveBeenLastCalledWith([
+      { time: 60, value: 11 },
+      { time: 120, value: 12 },
+    ]);
+
+    rerender(element({ chartType: "bars" }));
+    expect(seriesAdded(1).setData).toHaveBeenLastCalledWith(DATA);
+
+    rerender(element({ chartType: "hollow" }));
+    expect(seriesAdded(2).setData).toHaveBeenLastCalledWith([
+      expect.objectContaining({ color: "transparent", borderColor: CHART_TOKENS["--chart-up"] }),
+      expect.objectContaining({ color: "transparent", borderColor: CHART_TOKENS["--chart-up"] }),
+    ]);
+  });
+
+  it("replaces the main series on a type switch and keeps the view; a same-definition switch keeps the series", () => {
+    getVisibleLogicalRangeMock.mockReturnValue({ from: -5, to: 1.5 });
+    const { rerender } = render(element({ chartType: "candles" }));
+    setVisibleLogicalRangeMock.mockReset();
+
+    rerender(element({ chartType: "heikin_ashi" }));
+    expect(removeSeriesMock).not.toHaveBeenCalled();
+
+    rerender(element({ chartType: "line" }));
+    expect(removeSeriesMock).toHaveBeenCalledTimes(1);
+    expect(addSeriesMock).toHaveBeenLastCalledWith("LineSeries-sentinel", { color: CHART_TOKENS["--chart-line"] });
+    expect(setVisibleLogicalRangeMock).toHaveBeenCalledWith({ from: -5, to: 1.5 });
+    expect(fitContentMock).not.toHaveBeenCalled();
+  });
+
+  it("puts a swapped-in main series back first on the pane, under the overlays and owning the scale's format", () => {
+    const overlay = makePaneSpec("sma", { placement: "overlay", group: "sma" });
+    const { rerender } = render(element({ chartType: "candles", panes: [overlay] }));
+    setSeriesOrderMock.mockReset();
+
+    rerender(element({ chartType: "line", panes: [overlay] }));
+
+    expect(setSeriesOrderMock).toHaveBeenCalledTimes(1);
+    expect(setSeriesOrderMock).toHaveBeenCalledWith(0);
+  });
+
+  it("re-attaches price lines and drawings on the new series after a type switch", () => {
+    const priceLines = [makePriceLineSpec("hline-1", { price: 11 })];
+    const drawings: DrawingSpec[] = [
+      {
+        id: "t1",
+        kind: "trendline",
+        anchors: [
+          { time: 60, price: 10 },
+          { time: 120, price: 12 },
+        ],
+        color: "#123456",
+      },
+    ];
+    const { rerender } = render(element({ chartType: "candles", priceLines, drawings }));
+    rerender(element({ chartType: "area", priceLines, drawings }));
+
+    expect(createPriceLineMock).toHaveBeenCalledTimes(2);
+    expect(attachPrimitiveMock.mock.calls.filter(([p]) => p instanceof TrendlinePrimitive)).toHaveLength(2);
+  });
+
+  it("keeps Heikin Ashi to the main series: overlays, price lines, clicks and the forming volume stay real", () => {
+    ownSetData();
+    const onPointClick = vi.fn();
+    const sma = makePaneSpec("sma", { placement: "overlay", data: [{ time: 60 as Time, value: 11 }] });
+    const live = { time: 180 as Time, open: 12, high: 14, low: 11, close: 13, volume: 7 };
+    render(
+      element({
+        chartType: "heikin_ashi",
+        panes: [sma, makePaneSpec("volume", { kind: "Histogram", data: [{ time: 60 as Time, value: 1 }] })],
+        priceLines: [makePriceLineSpec("hline-1", { price: 11 })],
+        onPointClick,
+        liveBar: live,
+      }),
+    );
+
+    expect(seriesAdded(0).setData).toHaveBeenLastCalledWith(HA);
+    expect(seriesAdded(1).setData).toHaveBeenLastCalledWith(sma.data);
+    expect(createPriceLineMock).toHaveBeenCalledWith(expect.objectContaining({ price: 11 }));
+    // The forming HA bar chains on the last closed HA bar: open (10.5+11.5)/2 = 11, close 50/4 = 12.5.
+    expect(seriesUpdateMock).toHaveBeenCalledWith({ time: 180, open: 11, high: 14, low: 11, close: 12.5 });
+    expect(seriesUpdateMock).toHaveBeenCalledWith({ time: 180, value: 7 });
+    coordinateToPriceMock.mockReturnValue(11.25);
+    subscribeClickMock.mock.calls[0][0]({ point: { x: 5, y: 40 }, time: 60 });
+    expect(onPointClick).toHaveBeenCalledWith({ time: 60, price: 11.25 });
+  });
+
+  it("names Heikin Ashi as derived in a read-only legend row, only while it is the type", () => {
+    const paneEl = document.createElement("div");
+    document.body.appendChild(paneEl);
+    const base = createChartMock.getMockImplementation()!;
+    createChartMock.mockImplementation((...args: unknown[]) => ({
+      ...base(...args),
+      panes: () => [{ ...pricePaneMock, getHTMLElement: () => paneEl }],
+    }));
+    const { rerender } = render(element({ chartType: "heikin_ashi" }));
+    const row = paneEl.querySelector('.chart-legend-row[data-group="heikin-ashi"]');
+    expect(row?.textContent).toBe("Heikin Ashi (derived)display only");
+    expect(row?.querySelector("button")).toBeNull();
+
+    rerender(element({ chartType: "candles" }));
+    expect(paneEl.querySelector('.chart-legend-row[data-group="heikin-ashi"]')).toBeNull();
+    paneEl.remove();
+  });
+
+  it("re-applies the Baseline's base value at the first visible bar's close, found by time", () => {
+    getVisibleRangeMock.mockReturnValue({ from: 60, to: 120 });
+    render(element({ chartType: "baseline" }));
+    const series = seriesAdded(0);
+    expect(series.applyOptions).toHaveBeenLastCalledWith({ baseValue: { type: "price", price: 11 } });
+
+    // Another series' extra time (90) on the shared scale: the logical index no longer maps to the
+    // data index, but the left edge's time still finds the bar at 120.
+    getVisibleRangeMock.mockReturnValue({ from: 90, to: 120 });
+    for (const [handler] of subscribeRangeMock.mock.calls) act(() => handler({ from: 1, to: 2 }));
+    expect(series.applyOptions).toHaveBeenLastCalledWith({ baseValue: { type: "price", price: 12 } });
+  });
+
+  it("keeps a type switch's view pending while the data is empty, and restores it when bars arrive", () => {
+    getVisibleLogicalRangeMock.mockReturnValue({ from: -5, to: 1.5 });
+    const { rerender } = render(element({ chartType: "candles" }));
+    setVisibleLogicalRangeMock.mockReset();
+
+    rerender(element({ chartType: "line", data: [] }));
+    getVisibleLogicalRangeMock.mockReturnValue({ from: 0, to: 0 }); // the empty series' own range
+    rerender(element({ chartType: "area", data: [] }));
+    expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled();
+
+    rerender(element({ chartType: "area" }));
+    expect(setVisibleLogicalRangeMock).toHaveBeenCalledTimes(1);
+    expect(setVisibleLogicalRangeMock).toHaveBeenCalledWith({ from: -5, to: 1.5 });
+  });
+
+  it.each([
+    ["normal", 0],
+    ["log", 1],
+    ["percent", 2],
+    ["indexed", 3],
+  ])("applies the %s mode, auto and invert to the right price scale", (mode, libraryMode) => {
+    const { rerender } = render(element({ priceScale: { mode, autoScale: true, invert: false } }));
+    expect(rightScaleApplyMock).toHaveBeenLastCalledWith({ mode: libraryMode, autoScale: true, invertScale: false });
+
+    rerender(element({ priceScale: { mode, autoScale: false, invert: true } }));
+    expect(rightScaleApplyMock).toHaveBeenLastCalledWith({ mode: libraryMode, autoScale: false, invertScale: true });
+  });
+
+  it("opens the scale menu on a right-click on the scale strip, and closes it on Esc and an outside press", () => {
+    pricePaneMock.getHeight.mockReturnValue(LAID_OUT_PANE_PX);
+    const onPriceScale = vi.fn();
+    const { container } = render(element({ onPriceScale, scaleModesLocked: "A compare draws on the percent scale" }));
+    const host = container.firstElementChild!;
+
+    expect(fireEvent.contextMenu(host, { clientX: 500, clientY: 100 })).toBe(true); // the plot: not ours
+    expect(screen.queryByRole("menu", { name: "Price scale" })).toBeNull();
+    expect(fireEvent.contextMenu(host, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 })).toBe(false);
+    expect(screen.getByRole("menuitemradio", { name: "Log" })).toBeDisabled();
+    expect(screen.getByRole("menuitemradio", { name: "Normal" })).toHaveAttribute("title", "A compare draws on the percent scale");
+
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Indexed to 100" }));
+    expect(onPriceScale).toHaveBeenLastCalledWith({ mode: "indexed" });
+    expect(screen.queryByRole("menu", { name: "Price scale" })).toBeNull();
+
+    fireEvent.contextMenu(host, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 });
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Invert scale" }));
+    expect(onPriceScale).toHaveBeenLastCalledWith({ invert: true });
+
+    fireEvent.contextMenu(host, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 });
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("menu", { name: "Price scale" })).toBeNull();
+    fireEvent.contextMenu(host, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 });
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole("menu", { name: "Price scale" })).toBeNull();
+  });
+
+  it("leaves the browser's menu on the scale strip when no onPriceScale is given", () => {
+    pricePaneMock.getHeight.mockReturnValue(LAID_OUT_PANE_PX);
+    const { container } = render(element({}));
+
+    expect(fireEvent.contextMenu(container.firstElementChild!, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 })).toBe(true);
+    expect(screen.queryByRole("menu", { name: "Price scale" })).toBeNull();
+  });
+
+  it("hit-tests the right scale strip after a visible left price scale", () => {
+    pricePaneMock.getHeight.mockReturnValue(LAID_OUT_PANE_PX);
+    leftScaleWidthPx = 40;
+    const { container } = render(element({ onPriceScale: vi.fn() }));
+    const host = container.firstElementChild!;
+
+    // Past the plot's width but still on the plot: the strip starts at 40 + PLOT_WIDTH_PX.
+    expect(fireEvent.contextMenu(host, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 })).toBe(true);
+    expect(screen.queryByRole("menu", { name: "Price scale" })).toBeNull();
+    expect(fireEvent.contextMenu(host, { clientX: 40 + PLOT_WIDTH_PX + RIGHT_SCALE_PX + 1, clientY: 100 })).toBe(true);
+    expect(fireEvent.contextMenu(host, { clientX: 40 + PLOT_WIDTH_PX + 1, clientY: 100 })).toBe(false);
+    expect(screen.getByRole("menu", { name: "Price scale" })).toBeInTheDocument();
+  });
+
+  it("keeps the scale menu inside the viewport", () => {
+    pricePaneMock.getHeight.mockReturnValue(LAID_OUT_PANE_PX);
+    const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(150);
+    try {
+      const { container } = render(element({ onPriceScale: vi.fn() }));
+      const host = container.firstElementChild!;
+      const nearBottom = window.innerHeight - 20;
+      vi.spyOn(host, "getBoundingClientRect").mockReturnValue({ left: 0, top: nearBottom - 100 } as DOMRect);
+
+      fireEvent.contextMenu(host, { clientX: PLOT_WIDTH_PX + 10, clientY: nearBottom });
+
+      expect(screen.getByRole("menu", { name: "Price scale" }).style.top).toBe(`${window.innerHeight - 150}px`);
+    } finally {
+      height.mockRestore();
+    }
+  });
+
+  it("reports auto back on for a double-click on the scale, and off for a drag the library ended without it", () => {
+    pricePaneMock.getHeight.mockReturnValue(LAID_OUT_PANE_PX);
+    const onPriceScale = vi.fn();
+    const { container } = render(element({ onPriceScale }));
+    const host = container.firstElementChild!;
+
+    fireEvent.pointerDown(host, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 });
+    rightScaleState.autoScale = false; // the library's own scale drag
+    fireEvent.pointerUp(window);
+    expect(onPriceScale).toHaveBeenLastCalledWith({ auto_scale: false });
+
+    // A drag the browser cancels ended the library's drag all the same.
+    rightScaleState.autoScale = true;
+    onPriceScale.mockClear();
+    fireEvent.pointerDown(host, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 });
+    rightScaleState.autoScale = false;
+    fireEvent.pointerCancel(window);
+    expect(onPriceScale).toHaveBeenCalledTimes(1);
+    expect(onPriceScale).toHaveBeenLastCalledWith({ auto_scale: false });
+
+    fireEvent.doubleClick(host, { clientX: 500, clientY: 100 });
+    expect(onPriceScale).toHaveBeenCalledTimes(1); // the plot is not the scale
+    fireEvent.doubleClick(host, { clientX: PLOT_WIDTH_PX + 10, clientY: 100 });
+    expect(onPriceScale).toHaveBeenLastCalledWith({ auto_scale: true });
+  });
+
+  it("draws a compare overlay as a Line on the price pane, its whitespace kept", () => {
+    ownSetData();
+    const aligned = [{ time: 60 as Time, value: 50 }, { time: 120 as Time }];
+    render(
+      element({
+        panes: [makePaneSpec("compare:BTC-USD-PERP.HYPERLIQUID", { placement: "overlay", group: "compare:BTC-USD-PERP.HYPERLIQUID", data: aligned })],
+      }),
+    );
+
+    expect(addSeriesMock).toHaveBeenLastCalledWith("LineSeries-sentinel", expect.objectContaining({ color: "#123456" }), 0);
+    expect(addPaneMock).not.toHaveBeenCalled();
+    expect(seriesAdded(1).setData).toHaveBeenLastCalledWith(aligned);
+  });
+});
+
+describe("drawing tools II (Story 33.10)", () => {
+  // Bars every 10 s from 0: on the mock chart a time's x is the time itself and a logical index's x
+  // is ten times it, so bar i sits at x = 10 i either way; a price's y is the price.
+  const bars = Array.from({ length: 31 }, (_, i) => ({ time: (i * 10) as Time, open: 100, high: 110, low: 90, close: 105 }));
+  const lastClick = () => subscribeClickMock.mock.calls.at(-1)![0] as (param: unknown) => void;
+
+  function attachGeometry(primitive: { attached: (p: never) => void; updateAllViews: () => void }): void {
+    primitive.attached({
+      chart: { timeScale: () => ({ timeToCoordinate: (t: number) => t, logicalToCoordinate: (i: number) => i * 10 }) },
+      series: { priceToCoordinate: (p: number) => p },
+      requestUpdate: vi.fn(),
+    } as never);
+    primitive.updateAllViews();
+  }
+
+  it("snaps a click to the real bar's high with the weak magnet, and leaves it raw when off or far", () => {
+    const onPointClick = vi.fn();
+    const onPriceClick = vi.fn();
+    const { rerender } = render(chartElement({ data: bars, magnet: "weak", onPointClick, onPriceClick }));
+    act(() => lastClick()({ point: { x: 100, y: 116 }, time: 100 })); // 6 px above the high (110)
+    expect(onPointClick).toHaveBeenLastCalledWith({ time: 100, price: 110 });
+    expect(onPriceClick).toHaveBeenLastCalledWith(110);
+    act(() => lastClick()({ point: { x: 100, y: 130 }, time: 100 })); // 20 px away: raw
+    expect(onPointClick).toHaveBeenLastCalledWith({ time: 100, price: 130 });
+
+    rerender(chartElement({ data: bars, magnet: "strong", onPointClick, onPriceClick }));
+    act(() => lastClick()({ point: { x: 100, y: 130 }, time: 100 }));
+    expect(onPointClick).toHaveBeenLastCalledWith({ time: 100, price: 110 });
+
+    rerender(chartElement({ data: bars, magnet: "off", onPointClick, onPriceClick }));
+    act(() => lastClick()({ point: { x: 100, y: 116 }, time: 100 }));
+    expect(onPointClick).toHaveBeenLastCalledWith({ time: 100, price: 116 });
+  });
+
+  it("does not snap in Lines mode (no OHLC there)", () => {
+    const onPointClick = vi.fn();
+    render(chartElement({ data: bars, mode: "lines", magnet: "strong", onPointClick }));
+    act(() => lastClick()({ point: { x: 100, y: 116 }, time: 100 }));
+    expect(onPointClick).toHaveBeenLastCalledWith({ time: 100, price: 116 });
+  });
+
+  it("leaves a click's price raw past the newest bar, where no bar of its own is under it", () => {
+    const onPointClick = vi.fn();
+    const onPriceClick = vi.fn();
+    render(chartElement({ data: bars, magnet: "strong", onPointClick, onPriceClick }));
+    act(() => lastClick()({ point: { x: 400, y: 116 }, time: 400 })); // the newest bar is 300
+    expect(onPointClick).toHaveBeenLastCalledWith({ time: 400, price: 116 });
+    expect(onPriceClick).toHaveBeenLastCalledWith(116);
+  });
+
+  it("constrains a line tool's second click to 0/45/90 degrees with Shift, flagged on the point", () => {
+    const onPointClick = vi.fn();
+    render(chartElement({ data: bars, onPointClick, placement: { tool: "ray", points: [{ time: 100, price: 100 }] } }));
+    act(() => lastClick()({ point: { x: 200, y: 130 }, time: 200, sourceEvent: { shiftKey: true, clientX: 0, clientY: 0 } }));
+    expect(onPointClick).toHaveBeenLastCalledWith({ time: 200, price: 100, shift: true });
+  });
+
+  it("keeps the unconstrained point when Shift's constrained point falls past the loaded bars", () => {
+    const onPointClick = vi.fn();
+    render(chartElement({ data: bars, onPointClick, placement: { tool: "ray", points: [{ time: 100, price: 100 }] } }));
+    // Snapped horizontal, the point would sit at x 500 (logical 50), past the newest bar (logical 30).
+    act(() => lastClick()({ point: { x: 500, y: 130 }, time: 300, sourceEvent: { shiftKey: true, clientX: 0, clientY: 0 } }));
+    expect(onPointClick).toHaveBeenLastCalledWith({ time: 300, price: 130 });
+  });
+
+  it("leaves a dragged point's price raw past the newest bar (no bar under the pointer), snapping inside", () => {
+    const onDrawingDrag = vi.fn();
+    const { container } = render(
+      chartElement({ drawings: [makeTrendlineSpec("trendline-1")], data: bars, drawEditable: true, onDrawingDrag, magnet: "strong" }),
+    );
+    attachGeometry(attachPrimitiveMock.mock.calls[0][0]);
+    const crosshair = subscribeCrosshairMoveMock.mock.calls[0][0];
+    crosshair({ point: { x: 200, y: 21 }, paneIndex: 0 }); // anchor B (200, 20)
+    fireEvent.mouseDown(container.firstElementChild!);
+    crosshair({ point: { x: 100, y: 116 }, paneIndex: 0, logical: 10 }); // over bar 10: the high
+    crosshair({ point: { x: 400, y: 116 }, paneIndex: 0, logical: 40 }); // past the newest bar (30)
+    fireEvent.mouseUp(window);
+    const reported = onDrawingDrag.mock.calls.map((c) => [(c[2] as DragPoint).time, (c[2] as DragPoint).price]);
+    expect(reported).toEqual([
+      [100, 110],
+      [300, 116],
+    ]);
+  });
+
+  it("previews a placement that just gained a point at once, from where the pointer last was", () => {
+    const first = { tool: "channel" as const, points: [{ time: 100, price: 100 }] };
+    const { rerender } = render(chartElement({ data: bars, placement: first }));
+    act(() => subscribeCrosshairMoveMock.mock.calls.at(-1)![0]({ point: { x: 200, y: 110 }, time: 200 }));
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(1);
+
+    rerender(chartElement({ data: bars, placement: { ...first, points: [...first.points, { time: 200, price: 110 }] } }));
+    // No pointer move since the click: the new preview is drawn anyway.
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(2);
+    expect(attachPrimitiveMock.mock.calls[1][0]).toBeInstanceOf(ChannelPrimitive);
+  });
+
+  it("does not attach a hidden drawing", () => {
+    render(chartElement({ data: bars, drawings: [makeTrendlineSpec("trendline-1", { hidden: true })] }));
+    expect(attachPrimitiveMock).not.toHaveBeenCalled();
+  });
+
+  it("ignores a grab of a locked drawing's handle, but a click opens its menu with Unlock", () => {
+    const onDrawingDrag = vi.fn();
+    const onDrawingDragStart = vi.fn();
+    const onDrawingLock = vi.fn();
+    const spec = makeTrendlineSpec("trendline-1", { locked: true });
+    const { container } = render(
+      chartElement({ drawings: [spec], data: bars, drawEditable: true, onDrawingDrag, onDrawingDragStart, onDrawingLock }),
+    );
+    attachGeometry(attachPrimitiveMock.mock.calls[0][0]);
+    const crosshair = subscribeCrosshairMoveMock.mock.calls[0][0];
+    crosshair({ point: { x: 200, y: 21 }, paneIndex: 0 }); // on anchor B (200, 20)
+    fireEvent.mouseDown(container.firstElementChild!);
+    crosshair({ point: { x: 250, y: 30 }, paneIndex: 0, logical: 25 });
+    fireEvent.mouseUp(window);
+    expect(onDrawingDrag).not.toHaveBeenCalled();
+    expect(onDrawingDragStart).not.toHaveBeenCalled();
+
+    act(() => lastClick()({ point: { x: 200, y: 21 }, sourceEvent: { clientX: 5, clientY: 5 } }));
+    fireEvent.click(screen.getByText("Unlock"));
+    expect(onDrawingLock).toHaveBeenCalledWith("trendline-1", false);
+  });
+
+  it("reports a grab as a drag start, and offers Lock and Hide in the menu", () => {
+    const onDrawingDragStart = vi.fn();
+    const onDrawingLock = vi.fn();
+    const onDrawingHide = vi.fn();
+    const { container } = render(
+      chartElement({
+        drawings: [makeTrendlineSpec("trendline-1")],
+        data: bars,
+        drawEditable: true,
+        onDrawingDrag: vi.fn(),
+        onDrawingDragStart,
+        onDrawingLock,
+        onDrawingHide,
+      }),
+    );
+    attachGeometry(attachPrimitiveMock.mock.calls[0][0]);
+    subscribeCrosshairMoveMock.mock.calls[0][0]({ point: { x: 200, y: 21 }, paneIndex: 0 });
+    fireEvent.mouseDown(container.firstElementChild!);
+    fireEvent.mouseUp(window);
+    expect(onDrawingDragStart).toHaveBeenCalledWith("trendline-1");
+
+    act(() => lastClick()({ point: { x: 150, y: 15 }, sourceEvent: { clientX: 5, clientY: 5 } }));
+    fireEvent.click(screen.getByText("Lock"));
+    expect(onDrawingLock).toHaveBeenCalledWith("trendline-1", true);
+    act(() => lastClick()({ point: { x: 150, y: 15 }, sourceEvent: { clientX: 5, clientY: 5 } }));
+    fireEvent.click(screen.getByText("Hide"));
+    expect(onDrawingHide).toHaveBeenCalledWith("trendline-1");
+  });
+
+  it("previews a 3-point tool's drawing to the pointer, and removes it when the placement ends", () => {
+    const placement = {
+      tool: "channel" as const,
+      points: [
+        { time: 100, price: 100 },
+        { time: 200, price: 110 },
+      ],
+    };
+    const { rerender } = render(chartElement({ data: bars, placement }));
+    expect(attachPrimitiveMock).not.toHaveBeenCalled(); // nothing until the pointer moves
+    const move = subscribeCrosshairMoveMock.mock.calls.at(-1)![0];
+    act(() => move({ point: { x: 150, y: 99 }, time: 150 }));
+    const preview = attachPrimitiveMock.mock.calls[0][0] as ChannelPrimitive;
+    expect(preview).toBeInstanceOf(ChannelPrimitive);
+    attachGeometry(preview as never);
+    // The A-B line is at 105 at t 150: the pointer at 99 makes the parallel 6 below it.
+    expect(preview.screen()?.a2).toEqual({ x: 100, y: 94 });
+
+    rerender(chartElement({ data: bars, placement: null }));
+    expect(detachPrimitiveMock).toHaveBeenCalledWith(preview);
+  });
+});
+
+// Story 33.11: the catalog's plot hints, the markers-only legend host and the candle-pattern markers.
+describe("plot hints, markers-only series and pattern markers (Story 33.11)", () => {
+  const optionsOf = (n: number): Record<string, unknown> => addSeriesMock.mock.calls[n][1] as Record<string, unknown>;
+  const valued = (time: number, value: number) => ({ time: time as Time, value });
+  const blank = (time: number) => ({ time: time as Time });
+
+  it("draws a steps output as a stepped line and a points output as dots with no line", () => {
+    render(
+      <LightweightChart
+        data={[]}
+        onChartApi={() => {}}
+        panes={[
+          makePaneSpec("pp", { placement: "overlay", plot: "steps" }),
+          makePaneSpec("sar", { placement: "overlay", plot: "points" }),
+        ]}
+      />,
+    );
+    expect(optionsOf(1)).toMatchObject({ lineType: 1 });
+    expect(optionsOf(2)).toMatchObject({ lineVisible: false, pointMarkersVisible: true });
+    expect(optionsOf(2)).not.toHaveProperty("lineType");
+  });
+
+  it("drops a swing output's whitespace so one line joins its points, and keeps it for a plain line", () => {
+    const data = [valued(60, 110), blank(120), blank(180), valued(240, 104.4)];
+    render(<LightweightChart data={[]} onChartApi={() => {}} panes={[makePaneSpec("zz", { placement: "overlay", plot: "swing", data })]} />);
+    expect(setDataMock).toHaveBeenLastCalledWith([valued(60, 110), valued(240, 104.4)]);
+
+    cleanup();
+    setDataMock.mockReset();
+    render(<LightweightChart data={[]} onChartApi={() => {}} panes={[makePaneSpec("sma", { placement: "overlay", data })]} />);
+    expect(setDataMock).toHaveBeenLastCalledWith(data);
+  });
+
+  it("hosts a markers-only spec on an invisible overlay with its own scale that never autoscales", () => {
+    render(
+      <LightweightChart
+        data={[]}
+        onChartApi={() => {}}
+        panes={[makePaneSpec("pat.value", { placement: "overlay", markersOnly: true, data: [valued(60, 100)] })]}
+      />,
+    );
+    expect(addPaneMock).not.toHaveBeenCalled();
+    expect(addSeriesMock.mock.calls[1][2]).toBe(0);
+    const options = optionsOf(1);
+    expect(options).toMatchObject({
+      lineVisible: false,
+      pointMarkersVisible: false,
+      crosshairMarkerVisible: false,
+      lastValueVisible: false,
+      priceLineVisible: false,
+      priceScaleId: "markers:pat.value",
+    });
+    expect((options.autoscaleInfoProvider as () => unknown)()).toBeNull();
+  });
+
+  it("re-creates a series whose shape changed: markers-only to its own pane and back", () => {
+    const markersSpec = makePaneSpec("pat.value", { group: "pat", placement: "overlay", markersOnly: true });
+    const paneSpec = makePaneSpec("pat.value", { group: "pat", kind: "Histogram", placement: "pane" });
+    const { rerender } = render(<LightweightChart data={[]} onChartApi={() => {}} panes={[markersSpec]} />);
+    expect(addSeriesMock).toHaveBeenCalledTimes(2);
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} panes={[paneSpec]} />);
+    expect(removeSeriesMock).toHaveBeenCalledTimes(1);
+    expect(addPaneMock).toHaveBeenCalledTimes(1);
+    expect(addSeriesMock).toHaveBeenLastCalledWith("HistogramSeries-sentinel", expect.any(Object), 1);
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} panes={[markersSpec]} />);
+    expect(removePaneMock).toHaveBeenCalledTimes(1);
+    expect(addSeriesMock).toHaveBeenLastCalledWith("LineSeries-sentinel", expect.objectContaining({ priceScaleId: "markers:pat.value" }), 0);
+  });
+
+  const liq: MarkerSpec = {
+    id: "liq:a",
+    time: 120 as Time,
+    shape: "circle",
+    color: "#a00",
+    position: "atPriceBottom",
+    price: 100,
+    tooltip: ["long liquidated"],
+  };
+  const pat: MarkerSpec = {
+    id: "pat:CandlePattern_x:60",
+    time: 60 as Time,
+    shape: "arrowDown",
+    color: "#0a0",
+    position: "aboveBar",
+    tooltip: ["Evening star", "bearish"],
+  };
+
+  it("merges pattern and liquidation markers into the one plugin, sorted by time", () => {
+    const { rerender, unmount } = render(<LightweightChart data={[]} onChartApi={() => {}} liquidationMarkers={[liq]} patternMarkers={[pat]} />);
+    expect(createSeriesMarkersMock).toHaveBeenCalledTimes(1);
+    const [, initial] = createSeriesMarkersMock.mock.calls[0] as [unknown, { id: string }[]];
+    expect(initial.map((m) => m.id)).toEqual(["pat:CandlePattern_x:60", "liq:a"]);
+    expect(initial[0]).not.toHaveProperty("tooltip");
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} liquidationMarkers={[liq]} patternMarkers={[]} />);
+    expect(setMarkersMock).toHaveBeenLastCalledWith([expect.objectContaining({ id: "liq:a" })]);
+    expect(createSeriesMarkersMock).toHaveBeenCalledTimes(1);
+
+    unmount();
+    expect(detachMarkersMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a hovered pattern marker's tooltip", () => {
+    render(<LightweightChart data={[]} onChartApi={() => {}} liquidationMarkers={[liq]} patternMarkers={[pat]} />);
+    const handler = subscribeCrosshairMoveMock.mock.calls.at(-1)![0];
+    act(() => handler({ time: 60, point: { x: 10, y: 20 }, seriesData: new Map(), hoveredObjectId: "pat:CandlePattern_x:60" }));
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Evening starbearish");
+  });
+});
+
+describe("time zone, session breaks, countdown, last price and fullscreen (Story 33.12)", () => {
+  const HOUR = 3600;
+  const DAY = 86_400;
+  // Hourly bars from 22:00 to 02:00 UTC across one midnight; the last one closed below its open.
+  const bars = [22, 23, 24, 25, 26].map((h, i) => ({
+    time: (h * HOUR) as Time,
+    open: 100,
+    high: 101,
+    low: 99,
+    close: i === 4 ? 99.5 : 100.5,
+  }));
+  const mainSeries = () => {
+    const index = addSeriesMock.mock.calls.findIndex((c) => c[0] === "CandlestickSeries-sentinel");
+    return addSeriesMock.mock.results[index].value as ReturnType<typeof makeSeriesMock>;
+  };
+  const attached = <T,>(type: new (...args: never[]) => T): T[] =>
+    attachPrimitiveMock.mock.calls.map((c) => c[0]).filter((p): p is T => p instanceof type);
+  const localization = () =>
+    applyOptionsMock.mock.calls
+      .map((c) => c[0] as { localization?: { timeFormatter: (t: number) => string }; timeScale?: { tickMarkFormatter: unknown } })
+      .filter((o) => o.localization !== undefined)
+      .at(-1);
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("prints times in the chosen zone through lib/time.ts and never re-sends the bars for it", () => {
+    const { rerender } = render(chartElement({ data: bars }));
+    expect(localization()!.localization!.timeFormatter(bars[0].time as number)).toBe(formatChartTime(22 * HOUR, "utc"));
+    const setDataCalls = setDataMock.mock.calls.length;
+
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} timeZone="local" />);
+    const applied = localization()!;
+    expect(applied.localization!.timeFormatter(22 * HOUR)).toBe(formatChartTime(22 * HOUR, "local"));
+    const tick = applied.timeScale!.tickMarkFormatter as ReturnType<typeof tickMarkFormatter>;
+    expect(tick(23 * HOUR, 3)).toBe(tickMarkFormatter("local")(23 * HOUR, 3));
+    // Formatting only: the zone change hands the series no data at all.
+    expect(setDataMock.mock.calls.length).toBe(setDataCalls);
+  });
+
+  it("applies the last-price line and label switches, the line in the last bar's direction colour", () => {
+    const { rerender } = render(chartElement({ data: bars }));
+    expect(mainSeries().options()).toMatchObject({ priceLineVisible: true, lastValueVisible: true, priceLineColor: CHART_TOKENS["--chart-down"] });
+
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} lastPrice={{ line: false, label: true }} />);
+    expect(mainSeries().options()).toMatchObject({ priceLineVisible: false, lastValueVisible: true });
+
+    const up = [...bars.slice(0, 4), { ...bars[4], close: 100.5 }];
+    rerender(<LightweightChart data={up} onChartApi={() => {}} lastPrice={{ line: true, label: false }} />);
+    expect(mainSeries().options()).toMatchObject({ priceLineVisible: true, lastValueVisible: false, priceLineColor: CHART_TOKENS["--chart-up"] });
+  });
+
+  it("draws a session break at the first bar of each UTC day, none at daily bars, and removes it when turned off", () => {
+    const { rerender } = render(chartElement({ data: bars }));
+    expect(attached(SessionBreaksPrimitive)).toHaveLength(0);
+
+    // The breaks read their own bar size, never the countdown's: no countdown is passed at all.
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} sessionBreaks barSeconds={HOUR} />);
+    const [primitive] = attached(SessionBreaksPrimitive);
+    expect((primitive as unknown as { times: readonly number[] }).times).toEqual([DAY]);
+
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} sessionBreaks barSeconds={DAY} countdown={{ barSeconds: HOUR, enabled: true }} />);
+    expect((primitive as unknown as { times: readonly number[] }).times).toEqual([]);
+
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} barSeconds={HOUR} />);
+    expect(detachPrimitiveMock).toHaveBeenCalledWith(primitive);
+  });
+
+  it("breaks at a new UTC day's first bar arriving on the live feed, without a history refetch", () => {
+    const sameDay = bars.slice(0, 2); // 22:00 and 23:00, both on day 0
+    const { rerender } = render(<LightweightChart data={sameDay} onChartApi={() => {}} sessionBreaks barSeconds={HOUR} />);
+    const [primitive] = attached(SessionBreaksPrimitive);
+    expect((primitive as unknown as { times: readonly number[] }).times).toEqual([]);
+
+    const live = { time: DAY as Time, open: 100, high: 101, low: 99, close: 100, volume: 1 };
+    rerender(<LightweightChart data={sameDay} onChartApi={() => {}} sessionBreaks barSeconds={HOUR} liveBar={live} />);
+    expect((primitive as unknown as { times: readonly number[] }).times).toEqual([DAY]);
+  });
+
+  it("prints a daily or weekly bar's crosshair time as its UTC date, intraday bars and Lines seconds in the zone", () => {
+    const { rerender } = render(<LightweightChart data={bars} onChartApi={() => {}} timeZone="local" barSeconds={DAY} />);
+    expect(localization()!.localization!.timeFormatter(DAY)).toBe("1970-01-02");
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} timeZone="local" barSeconds={HOUR} />);
+    expect(localization()!.localization!.timeFormatter(DAY)).toBe(formatChartTime(DAY, "local"));
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} timeZone="local" barSeconds={DAY} mode="lines" />);
+    expect(localization()!.localization!.timeFormatter(DAY)).toBe(formatChartTime(DAY, "local"));
+  });
+
+  it("colours the last-price line and places the countdown by the drawn Heikin Ashi bar, not the real one", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime((26 * HOUR + 15 * 60) * 1000);
+    // The real last bar closes up (100 -> 100.5); its Heikin Ashi bar opens at the previous HA body's
+    // middle and closes at the bar's OHLC mean, below that open: drawn down.
+    const rising = [
+      { time: (24 * HOUR) as Time, open: 110, high: 111, low: 109, close: 110 },
+      { time: (25 * HOUR) as Time, open: 100, high: 101, low: 99, close: 100.5 },
+    ];
+    render(<LightweightChart data={rising} onChartApi={() => {}} chartType="heikin_ashi" countdown={{ barSeconds: HOUR, enabled: true }} />);
+    const series = addSeriesMock.mock.results.at(-1)!.value as ReturnType<typeof makeSeriesMock>;
+    expect(series.options()).toMatchObject({ priceLineColor: CHART_TOKENS["--chart-down"] });
+
+    const [primitive] = attached(CountdownPrimitive);
+    const asked: number[] = [];
+    const priceToCoordinate = (p: number) => {
+      asked.push(p);
+      return p;
+    };
+    primitive.attached({ series: { priceToCoordinate }, requestUpdate: () => {} } as never);
+    primitive.updateAllViews();
+    expect(asked.at(-1)).toBe((100 + 101 + 99 + 100.5) / 4); // the HA close, not the real 100.5
+  });
+
+  it("counts down to the forming bar's close under the last price, by the viewer's clock, in Candles mode only", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime((26 * HOUR + 15 * 60) * 1000); // 15 min into the 02:00 bar
+    const countdown = { barSeconds: HOUR, enabled: true };
+    render(<LightweightChart data={bars} onChartApi={() => {}} countdown={countdown} />);
+    const [primitive] = attached(CountdownPrimitive);
+    primitive.attached({ series: { priceToCoordinate: (p: number) => p }, requestUpdate: () => {} } as never);
+    primitive.updateAllViews();
+    expect(primitive.shown()?.text).toBe("45:00");
+
+    act(() => vi.advanceTimersByTime(1000));
+    primitive.updateAllViews();
+    expect(primitive.shown()?.text).toBe("44:59");
+    cleanup();
+    attachPrimitiveMock.mockReset();
+
+    render(<LightweightChart data={bars} onChartApi={() => {}} mode="lines" countdown={countdown} />);
+    expect(attached(CountdownPrimitive)).toHaveLength(0);
+  });
+
+  describe("fullscreen fit", () => {
+    const STAGE_PX = 900;
+    let host: HTMLElement;
+    beforeEach(() => {
+      host = document.body;
+      Object.defineProperty(host, "clientHeight", { configurable: true, get: () => STAGE_PX });
+    });
+    afterEach(() => {
+      delete (host as { clientHeight?: number }).clientHeight;
+      delete (document as { fullscreenElement?: Element | null }).fullscreenElement;
+    });
+    const setFullscreenElement = (element: Element | null) =>
+      Object.defineProperty(document, "fullscreenElement", { configurable: true, get: () => element });
+    const volumeOnly = [makePaneSpec("volume", { kind: "Histogram" })];
+    const el = (fullscreen: boolean, onPaneHeights = vi.fn()) => (
+      <LightweightChart data={bars} onChartApi={() => {}} panes={volumeOnly} fullscreen={fullscreen} onPaneHeights={onPaneHeights} />
+    );
+
+    it("scales every pane to fit the stage on entry, keeping their relative heights, and restores them on exit", () => {
+      const onPaneHeights = vi.fn();
+      const { rerender } = render(el(false, onPaneHeights));
+      pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX);
+      addedPane(0).getHeight.mockReturnValue(VOLUME_PANE_PX);
+
+      setFullscreenElement(host);
+      rerender(el(true, onPaneHeights));
+      // 900 px of stage less one separator and the time axis, split 500 : 120.
+      const scale = (STAGE_PX - 1 - TIME_AXIS_PX) / (PRICE_PANE_PX + VOLUME_PANE_PX);
+      const price = Math.floor(PRICE_PANE_PX * scale);
+      const volume = Math.floor(VOLUME_PANE_PX * scale);
+      expect(pricePaneMock.setStretchFactor).toHaveBeenLastCalledWith(price);
+      expect(addedPane(0).setStretchFactor).toHaveBeenLastCalledWith(volume);
+      expect(lastChartHeight()).toBe(price + volume + 1 + TIME_AXIS_PX);
+      expect(lastChartHeight()).toBeLessThanOrEqual(STAGE_PX);
+      expect(price / volume).toBeCloseTo(PRICE_PANE_PX / VOLUME_PANE_PX, 1);
+
+      setFullscreenElement(null);
+      rerender(el(false, onPaneHeights));
+      expect(pricePaneMock.setStretchFactor).toHaveBeenLastCalledWith(PRICE_PANE_PX);
+      expect(addedPane(0).setStretchFactor).toHaveBeenLastCalledWith(VOLUME_PANE_PX);
+      expect(lastChartHeight()).toBe(PRICE_PANE_PX + VOLUME_PANE_PX + 1 + TIME_AXIS_PX);
+      // View state only: neither transition is reported as a layout change.
+      expect(onPaneHeights).not.toHaveBeenCalled();
+    });
+
+    it("saves a divider drag made in fullscreen at the stored scale, never the scaled heights", () => {
+      const onPaneHeights = vi.fn();
+      const { rerender, container } = render(el(false, onPaneHeights));
+      pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX);
+      addedPane(0).getHeight.mockReturnValue(VOLUME_PANE_PX);
+      setFullscreenElement(host);
+      rerender(el(true, onPaneHeights));
+      const scale = (STAGE_PX - 1 - TIME_AXIS_PX) / (PRICE_PANE_PX + VOLUME_PANE_PX);
+      pricePaneMock.getHeight.mockReturnValue(Math.floor(PRICE_PANE_PX * scale));
+      addedPane(0).getHeight.mockReturnValue(Math.floor(VOLUME_PANE_PX * scale));
+
+      fireEvent.pointerDown(container.firstElementChild as HTMLElement);
+      pricePaneMock.getHeight.mockReturnValue(600);
+      addedPane(0).getHeight.mockReturnValue(270);
+      fireEvent.pointerUp(window);
+
+      expect(onPaneHeights).toHaveBeenCalledTimes(1);
+      expect(onPaneHeights).toHaveBeenCalledWith({ price: Math.round(600 / scale), volume: Math.round(270 / scale) });
+      setFullscreenElement(null);
+      rerender(el(false, onPaneHeights));
+      expect(pricePaneMock.setStretchFactor).toHaveBeenLastCalledWith(Math.round(600 / scale));
+    });
+
+    it("keeps a pane the fullscreen drag did not resize at its stored height exactly, never re-rounded", () => {
+      const onPaneHeights = vi.fn();
+      const { rerender, container } = render(el(false, onPaneHeights));
+      pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX);
+      addedPane(0).getHeight.mockReturnValue(VOLUME_PANE_PX);
+      // A stage where floor-then-round does move the volume pane (400 px: 71.8 shown as 71, back as 119).
+      const stagePx = 400;
+      Object.defineProperty(host, "clientHeight", { configurable: true, get: () => stagePx });
+      setFullscreenElement(host);
+      rerender(el(true, onPaneHeights));
+      const scale = (stagePx - 1 - TIME_AXIS_PX) / (PRICE_PANE_PX + VOLUME_PANE_PX);
+      const volumeShown = Math.floor(VOLUME_PANE_PX * scale);
+      pricePaneMock.getHeight.mockReturnValue(Math.floor(PRICE_PANE_PX * scale));
+      addedPane(0).getHeight.mockReturnValue(volumeShown);
+
+      fireEvent.pointerDown(container.firstElementChild as HTMLElement);
+      pricePaneMock.getHeight.mockReturnValue(600);
+      fireEvent.pointerUp(window);
+
+      expect(Math.round(volumeShown / scale)).not.toBe(VOLUME_PANE_PX); // what re-rounding would save
+      expect(onPaneHeights).toHaveBeenCalledWith({ price: Math.round(600 / scale), volume: VOLUME_PANE_PX });
+    });
+
+    it("never lays the panes out taller than a tiny stage's budget when the 1 px floor lifts several", () => {
+      const panes = [makePaneSpec("volume", { kind: "Histogram" }), makePaneSpec("a"), makePaneSpec("b")];
+      const { rerender } = render(<LightweightChart data={bars} onChartApi={() => {}} panes={panes} fullscreen={false} />);
+      pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX);
+      [VOLUME_PANE_PX, INDICATOR_PANE_PX, INDICATOR_PANE_PX].forEach((px, i) => addedPane(i).getHeight.mockReturnValue(px));
+      const panesPx = 4;
+      Object.defineProperty(host, "clientHeight", { configurable: true, get: () => panesPx + 3 + TIME_AXIS_PX });
+      setFullscreenElement(host);
+      rerender(<LightweightChart data={bars} onChartApi={() => {}} panes={panes} fullscreen />);
+
+      const shown = [pricePaneMock, addedPane(0), addedPane(1), addedPane(2)].map((pane) => pane.setStretchFactor.mock.lastCall?.[0] as number);
+      expect(shown.every((px) => px >= 1)).toBe(true);
+      expect(shown.reduce((sum, px) => sum + px, 0)).toBe(panesPx);
+    });
+
+    it("watches the fullscreen element for viewport resizes while fullscreen only", () => {
+      const observed: Element[] = [];
+      const unobserved: Element[] = [];
+      const Original = globalThis.ResizeObserver;
+      globalThis.ResizeObserver = class {
+        observe(target: Element): void {
+          observed.push(target);
+        }
+        unobserve(target: Element): void {
+          unobserved.push(target);
+        }
+        disconnect(): void {}
+      };
+      try {
+        const { rerender } = render(el(false));
+        setFullscreenElement(host);
+        rerender(el(true));
+        expect(observed).toContain(host);
+        setFullscreenElement(null);
+        rerender(el(false));
+        expect(unobserved).toEqual([host]);
+      } finally {
+        globalThis.ResizeObserver = Original;
+      }
+    });
+  });
+
+  it("re-applies the container's width on entering and on leaving fullscreen", () => {
+    const widthCalls = () => applyOptionsMock.mock.calls.filter((c) => Object.keys(c[0] as object).join() === "width").length;
+    const { rerender } = render(chartElement({ data: bars }));
+    const before = widthCalls();
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} fullscreen />);
+    expect(widthCalls()).toBe(before + 1);
+    rerender(<LightweightChart data={bars} onChartApi={() => {}} fullscreen={false} />);
+    expect(widthCalls()).toBe(before + 2);
   });
 });

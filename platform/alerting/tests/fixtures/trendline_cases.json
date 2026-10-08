@@ -1,0 +1,59 @@
+{
+  "description": "Story 33.8: the trendline price at a time, shared by alerting/domain/geometry.py's trendline_price_at and frontend/src/lib/drawings.ts's trendlinePriceAt. Anchor times and t are UTC seconds. Every expected value is hand-computed and exact in IEEE doubles; null is a vertical line.",
+  "cases": [
+    {
+      "name": "between the anchors",
+      "anchors": [{"time": 1000, "price": 100}, {"time": 2000, "price": 200}],
+      "t": 1500,
+      "expected": 150
+    },
+    {
+      "name": "on the first anchor",
+      "anchors": [{"time": 1000, "price": 100}, {"time": 2000, "price": 200}],
+      "t": 1000,
+      "expected": 100
+    },
+    {
+      "name": "extrapolated past the second anchor",
+      "anchors": [{"time": 1000, "price": 100}, {"time": 2000, "price": 200}],
+      "t": 3000,
+      "expected": 300
+    },
+    {
+      "name": "extrapolated before the first anchor",
+      "anchors": [{"time": 1000, "price": 100}, {"time": 2000, "price": 200}],
+      "t": 500,
+      "expected": 50
+    },
+    {
+      "name": "a falling line",
+      "anchors": [{"time": 0, "price": 64000}, {"time": 3600, "price": 63000}],
+      "t": 7200,
+      "expected": 62000
+    },
+    {
+      "name": "anchors stored right to left",
+      "anchors": [{"time": 2000, "price": 200}, {"time": 1000, "price": 100}],
+      "t": 3000,
+      "expected": 300
+    },
+    {
+      "name": "a flat line",
+      "anchors": [{"time": 100, "price": 0.5}, {"time": 900, "price": 0.5}],
+      "t": 5000,
+      "expected": 0.5
+    },
+    {
+      "name": "fractional prices",
+      "anchors": [{"time": 0, "price": 1.5}, {"time": 4, "price": 2.5}],
+      "t": 2,
+      "expected": 2
+    },
+    {
+      "name": "vertical: equal anchor times",
+      "anchors": [{"time": 1000, "price": 100}, {"time": 1000, "price": 200}],
+      "t": 1000,
+      "expected": null
+    }
+  ]
+}

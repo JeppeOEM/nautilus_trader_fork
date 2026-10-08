@@ -23,19 +23,19 @@ indicator_series,indicators}.py`, bodies verbatim unless noted):
   what the store does not cover, and fails loud on an impossible candle (`ImpossibleCandle`).
 - **Lines mode** -- `price_series_rows`/`snapshot_series_page`: bid/ask/mid/microprice/CVD-weighted
   price per archived second.
-- **Indicator panes** -- `indicator_series_page` (OFI/OBI/microprice/spread per bar) and
-  `indicator_values_page` (the picker's configured indicators, dispatched through
-  `views.indicator_picker`).
-- **Book features and footprint** -- the L2 feature extraction (`depth_profile` over an `OrderBook`,
-  returning the kernel's `DepthProfile` (Story 27.3 moved the type and the snapshot -> depth
-  derivation, `snapshot_depth`, to `kernel.indicators`), `book_imbalance`,
-  `CancellationTracker`, ...), `compute_chart_series` and `build_footprint`.
+- **Indicator panes** -- `indicator_values_page` (the picker's configured indicators, dispatched
+  through `views.indicator_picker`). Story 33.11 deleted `replay_bucket_samples`, the per-bar
+  OFI/OBI/microprice/spread replay whose only callers were tests.
+- **Cancellation pressure** -- `CancellationTracker`, the picker's cancel-pressure replay input.
+  Story 33.4 deleted the rest of the old book-feature and resting-order footprint code, which no
+  page drew any more (its `liquidity_distance`, moved to `kernel.indicators`, was deleted there in
+  Story 33.11 with no caller either).
 - **Volume footprint** -- `footprint_page` (Story 32.8): the raw trade archive's executed trades in
   integer price rows per closed bar of the same `candle_page`, historical bars only.
 
 Two rendering rules, and nothing else, change what is drawn: `with_gap_markers` (one
 `{"t": earlier + k * bar_ms}` row per missing bar wherever two kept bars are more than a bar
-apart, shared by candles, indicator series and indicator values so panes on one time axis break in
+apart, shared by candles, indicator values and the derivatives pages so panes on one time axis break in
 the same place) and the Lines-mode gap run (one all-`None` row per missing second where two seconds
 are more than `SNAPSHOT_GAP_THRESHOLD_MS` apart -- DATA-01's honest break). Both place their rows
 with `_gap_times`, so a hole takes as many chart slots as it has missing intervals, capped at
@@ -58,33 +58,27 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from candles.application import queries
-from candles.domain.candle import Candle
 from candles.domain.candle import is_valid_candle
+from candles.domain.fold import BAR_SECONDS
 from candles.domain.fold import bucket_start_ms
 from kernel import catalog_files
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import NS_PER_S
-from kernel.indicators import OFI_GAP_NS
-from kernel.indicators import DepthProfile
-from kernel.indicators import MultiLevelOBI
-from kernel.indicators import MultiLevelOFI
 from kernel.indicators import microprice as calc_microprice
 from kernel.indicators import mid_price as calc_mid_price
-from kernel.indicators import snapshot_depth
-from kernel.indicators import spread as calc_spread
+from kernel.liquidation import Liquidation
+from kernel.liquidation import has_liquidation_feed
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import SecondOHLC
 from kernel.venues import venue_of
 from observability import error_ledger
 
-from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.enums import BookAction
-from nautilus_trader.model.enums import BookType
 from nautilus_trader.model.enums import OrderSide
-from nautilus_trader.model.identifiers import InstrumentId
 from views.catalog_reads import fetch_page
 from views.catalog_reads import has_older_data
+from views.catalog_reads import liquidation_feed_start
 from views.catalog_reads import query_second_snapshots
 
 
@@ -93,161 +87,10 @@ if TYPE_CHECKING:  # the runtime import is deferred: indicator_picker imports th
 
 
 # =============================================================================================
-# Book features (was the book-features module)
-#
-# L2 order book feature extraction for dYdX.
-#
-# NOTE on what dYdX L2 can and cannot tell you:
-#   - dYdX sends aggregated price-level data (order_id=0 for every BookOrder).
-#   - Each BookLevel has exactly one synthetic BookOrder = the total size at that price.
-#   - Queue composition (how many individual orders make up a level) is NOT available.
-#   - Large single-order presence within a level is NOT available.
-#   - Both require L3/MBO data which dYdX does not expose publicly.
-#
-# What IS available and implemented here:
-#   - Depth profile levels 1-10 (sizes and prices on both sides)
-#   - Book imbalance per level and aggregate across levels 1-10
-#   - Volume-weighted price distance to liquidity (how far 80% of depth sits)
-#   - Cancellation rate at best levels (tracked via delta ADD/DELETE actions)
+# Cancellation rate tracker (what remains of the book-features module: Story 33.4 deleted its
+# caller-less depth-profile, book-imbalance, feature and top-of-book series functions). Read by
+# `views.indicator_picker`'s cancel-pressure replay.
 # =============================================================================================
-
-
-def top_of_book_series(
-    deltas: list[OrderBookDelta],
-    instrument_id: InstrumentId,
-) -> Iterator[tuple[int, float, float, float, float]]:
-    """
-    Yield (ts_event, bid_price, bid_size, ask_price, ask_size) after each delta.
-
-    Skips crossed/touched states (bid >= ask): dYdX's venue feed can transiently
-    cross mid-replay (validator ack delays -- see collector.py's crossed-book
-    resync watchdog), and yielding that state here would feed a negative spread
-    straight into OFI/microprice. Mirrors the guard in collector._second_loop.
-
-    This is not the reader-side re-validation AD-3 bans (and Story 24.2 removed from the chart
-    pages): the input is raw `OrderBookDelta`s, which no capture gate has seen, so this replay
-    *is* the gate for its own research/backtest output, applying the same rule the collector's.
-    """
-    book = OrderBook(instrument_id, book_type=BookType.L2_MBP)
-    for delta in sorted(deltas, key=lambda d: d.ts_init):
-        book.apply_delta(delta)
-        bid_price = book.best_bid_price()
-        ask_price = book.best_ask_price()
-        if bid_price is None or ask_price is None:
-            continue
-        if bid_price.as_double() >= ask_price.as_double():
-            continue
-        yield (
-            delta.ts_event,
-            bid_price.as_double(),
-            book.best_bid_size().as_double(),
-            ask_price.as_double(),
-            book.best_ask_size().as_double(),
-        )
-
-
-# ---------------------------------------------------------------------------
-# Depth snapshot
-# ---------------------------------------------------------------------------
-
-
-def depth_profile(book: OrderBook, levels: int = 10) -> DepthProfile | None:
-    """
-    Extract size and price at the top `levels` levels on each side.
-
-    Returns None if either side has no quotes (book not yet initialised).
-    """
-    bids = book.bids()
-    asks = book.asks()
-    if not bids or not asks:
-        return None
-
-    bid_prices = [lv.price.as_double() for lv in bids[:levels]]
-    bid_sizes = [lv.size() for lv in bids[:levels]]
-    ask_prices = [lv.price.as_double() for lv in asks[:levels]]
-    ask_sizes = [lv.size() for lv in asks[:levels]]
-
-    return DepthProfile(bid_prices, bid_sizes, ask_prices, ask_sizes)
-
-
-# ---------------------------------------------------------------------------
-# Book imbalance
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class BookImbalance:
-    """
-    Bid-to-total imbalance at each level and aggregated.
-
-    Value of 1.0 = all depth on the bid side. 0.5 = balanced. 0.0 = all ask.
-    """
-
-    per_level: list[float]  # one entry per level; index 0 = best
-    aggregate: float  # imbalance across all levels combined
-
-
-def book_imbalance(profile: DepthProfile) -> BookImbalance:
-    per = []
-    for b, a in zip(profile.bid_sizes, profile.ask_sizes, strict=False):
-        total = b + a
-        per.append(b / total if total > 0 else 0.5)
-
-    total_bid = sum(profile.bid_sizes)
-    total_ask = sum(profile.ask_sizes)
-    total = total_bid + total_ask
-    agg = total_bid / total if total > 0 else 0.5
-
-    return BookImbalance(per_level=per, aggregate=agg)
-
-
-# ---------------------------------------------------------------------------
-# Volume-weighted price distance to liquidity
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class LiquidityDistance:
-    """
-    How far from the best price the meaningful liquidity sits.
-
-    `distance_to_pct` is the price distance (in ticks / absolute price units)
-    you must travel from the best to capture `pct_threshold` fraction of the
-    available depth on that side.
-
-    A small distance means support/resistance is close and dense.
-    A large distance means there's a vacuum — price can move fast and far.
-    """
-
-    bid_distance: float  # price distance to capture pct_threshold of bid depth
-    ask_distance: float
-
-
-def liquidity_distance(
-    profile: DepthProfile,
-    pct_threshold: float = 0.8,
-) -> LiquidityDistance:
-    def _dist(best_price: float, prices: list[float], sizes: list[float]) -> float:
-        total = sum(sizes)
-        if total == 0:
-            return 0.0
-        target = total * pct_threshold
-        cumulative = 0.0
-        for price, size in zip(prices, sizes, strict=False):
-            cumulative += size
-            if cumulative >= target:
-                return abs(price - best_price)
-        # All levels consumed and still below threshold — return distance to deepest level
-        return abs(prices[-1] - best_price) if prices else 0.0
-
-    bid_dist = _dist(profile.bid_prices[0], profile.bid_prices, profile.bid_sizes)
-    ask_dist = _dist(profile.ask_prices[0], profile.ask_prices, profile.ask_sizes)
-    return LiquidityDistance(bid_distance=bid_dist, ask_distance=ask_dist)
-
-
-# ---------------------------------------------------------------------------
-# Cancellation rate tracker
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -320,235 +163,9 @@ class CancellationTracker:
         )
 
 
-# ---------------------------------------------------------------------------
-# Convenience: compute all features in one call
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class BookFeatures:
-    depth: DepthProfile
-    imbalance: BookImbalance
-    liquidity: LiquidityDistance
-    # None when the caller has no cancellation tracker to report (Story 10.3 -- callers that
-    # only need depth/imbalance/liquidity no longer have to maintain a tracker just to satisfy
-    # this field).
-    cancel: CancelRate | None
-
-
-def compute_features(
-    book: OrderBook,
-    cancel_tracker: CancellationTracker | None = None,
-    levels: int = 10,
-    liquidity_pct: float = 0.8,
-) -> BookFeatures | None:
-    profile = depth_profile(book, levels)
-    if profile is None:
-        return None
-    return BookFeatures(
-        depth=profile,
-        imbalance=book_imbalance(profile),
-        liquidity=liquidity_distance(profile, liquidity_pct),
-        cancel=cancel_tracker.rate() if cancel_tracker is not None else None,
-    )
-
-
 # =============================================================================================
-# Footprint (was the footprint module)
-#
-# Footprint chart cells: per-candle, per-price-band order-book flow.
-#
-# For each candle, the candle's own [low, high] range is split into
-# `bands_per_candle` horizontal bands. Each band accumulates the gross resting
-# size added and removed on the bid side and ask side during that candle's
-# time window, from order_book_deltas.
-#
-# This is *resting-order* flow, not executed trade volume. dYdX's deltas are L2
-# market-by-price with no order IDs (every `BookOrder.order_id` is 0), so a
-# level shrinking looks identical whether it was canceled or filled by a trade
-# -- there's no way to tell those apart from deltas alone. "Removed" means
-# "gross resting-size decrease," not a confirmed cancel. Gross added/removed
-# are tracked separately (not just net) so a churning level (e.g. +100/-40)
-# doesn't look identical to a quiet one (+60/0) when both net to +60.
-#
-# Known limit: bands are sized relative to each candle's own high-low range, so
-# adjacent candles' bands don't line up at the same absolute price (a textbook
-# footprint chart usually fixes one global price step instead, so rows align
-# across the whole chart). Switch `bands_per_candle` for a shared `price_step`
-# if cross-candle price alignment turns out to matter.
-# =============================================================================================
-
-
-@dataclass
-class FootprintCell:
-    ts_open: int
-    price_low: float
-    price_high: float
-    bid_added: float = 0.0
-    bid_removed: float = 0.0
-    ask_added: float = 0.0
-    ask_removed: float = 0.0
-
-    @property
-    def bid_net(self) -> float:
-        return self.bid_added - self.bid_removed
-
-    @property
-    def ask_net(self) -> float:
-        return self.ask_added - self.ask_removed
-
-
-def build_footprint(
-    deltas: list[OrderBookDelta],
-    candles: list[Candle],
-    period_seconds: int,
-    bands_per_candle: int = 4,
-) -> list[FootprintCell]:
-    candle_by_bucket = {
-        bucket_start_ms(candle.ts_open // 1_000_000, period_seconds): candle for candle in candles
-    }
-    cells: dict[tuple[int, int], FootprintCell] = {}
-
-    bid_levels: dict[float, float] = {}
-    ask_levels: dict[float, float] = {}
-
-    for delta in sorted(deltas, key=lambda d: d.ts_init):
-        if delta.action == BookAction.CLEAR:
-            bid_levels.clear()
-            ask_levels.clear()
-            continue
-
-        levels = bid_levels if delta.order.side == OrderSide.BUY else ask_levels
-        price = delta.order.price.as_double()
-        prev = levels.get(price, 0.0)
-
-        if delta.action == BookAction.DELETE:
-            new = 0.0
-            levels.pop(price, None)
-        else:  # ADD or UPDATE: order.size is the absolute new resting size
-            new = delta.order.size.as_double()
-            levels[price] = new
-
-        change = new - prev
-        if change == 0.0:
-            continue
-
-        candle = candle_by_bucket.get(bucket_start_ms(delta.ts_event // 1_000_000, period_seconds))
-        if candle is None or candle.high == candle.low:
-            continue
-        if not (candle.low <= price <= candle.high):
-            continue
-
-        band_height = (candle.high - candle.low) / bands_per_candle
-        band_index = int((price - candle.low) / band_height)
-        band_index = min(band_index, bands_per_candle - 1)
-        price_low = candle.low + band_index * band_height
-        cell_key = (candle.ts_open, band_index)
-        cell = cells.setdefault(
-            cell_key,
-            FootprintCell(
-                ts_open=candle.ts_open, price_low=price_low, price_high=price_low + band_height
-            ),
-        )
-
-        is_bid = delta.order.side == OrderSide.BUY
-        if change > 0.0:
-            if is_bid:
-                cell.bid_added += change
-            else:
-                cell.ask_added += change
-        else:
-            if is_bid:
-                cell.bid_removed += -change
-            else:
-                cell.ask_removed += -change
-
-    return sorted(cells.values(), key=lambda cell: (cell.ts_open, cell.price_low))
-
-
-# =============================================================================================
-# Per-snapshot book feature series (was the chart-data module)
-#
-# Reads DydxSecondSnapshot records from the catalog for a time range, computing
-# book imbalance and depth at every 1-second snapshot. The result is a dict of
-# named series ready for Plotly (see dashboard._render_chart_page).
-#
-# Snapshot-based, not raw-delta-based (platform/CLAUDE.md's "Signal Architecture:
-# 1s-Based, Not Event-Driven" / SIGNAL-01): OrderBookDeltas are only persisted
-# per-instrument when dYdX's `store_order_book_deltas` is opted in
-# (default off), so replaying raw deltas here would silently return empty
-# series for every instrument in the live catalog.
-#
-# The reader never re-validates the gate (spine AD-D11, Story 24.2): a crossed second is fed
-# through like any other (its spread is negative, as written), and an empty-top second is
-# ledgered and raised (`EmptyTopOfBook`), exactly as in `price_series_rows`.
-# =============================================================================================
-
-_LEVELS = 10
-
-
-def compute_chart_series(
-    catalog_path: str,
-    instrument_id: str,
-    start_ns: int,
-    end_ns: int,
-) -> dict[str, list[dict]]:
-    """
-    Read 1s book snapshots for the time window and return per-snapshot series.
-
-    Returns a dict keyed by series name, each value a list of
-    {"time": <unix_seconds_float>, "value": <float>} dicts. The price pane
-    itself is rendered client-side (candlestick/line/tick widget, see
-    dashboard._render_chart_page) from /data/coin/{id}/candles|ticks, not from
-    this series.
-
-    Raises `EmptyTopOfBook` for a second with an empty side (see `_require_top`).
-    """
-    # ts_event window (venue-timed rows are sampled after their ts_event, story 22.12).
-    snapshots = query_second_snapshots(catalog_path, instrument_id, start_ns, end_ns)
-
-    series: dict[str, list[dict]] = {
-        "microprice": [],
-        "spread": [],
-        "imbalance": [],
-        "mid_imbalance": [],
-        "bid_depth": [],
-        "ask_depth": [],
-    }
-
-    for s in sorted(snapshots, key=lambda s: s.ts_event):
-        _require_top(s)
-        t = s.ts_event / 1e9
-
-        book_sides = s.as_floats()
-        micro_value = calc_microprice(book_sides)
-        if micro_value is not None:
-            series["microprice"].append({"time": t, "value": micro_value})
-
-        # `kernel.indicators.spread`, the one spread (SSOT-01): rounded at the row's precision, so a
-        # one-tick spread is not the ~1e-9-off float difference of two decoded prices (D-88).
-        series["spread"].append({"time": t, "value": calc_spread(book_sides)})
-
-        profile = snapshot_depth(book_sides, _LEVELS)
-        if profile is None:  # unreachable: `_require_top` raised on an empty side
-            raise EmptyTopOfBook(f"snapshot without a top of book at ts_event={s.ts_event}")
-        imbalance = book_imbalance(profile)
-        series["imbalance"].append({"time": t, "value": imbalance.aggregate})
-        series["bid_depth"].append({"time": t, "value": profile.total_bid_depth()})
-        series["ask_depth"].append({"time": t, "value": profile.total_ask_depth()})
-        # mid-layer: average of levels 2-3. per_level is zip(bid_sizes, ask_sizes) --
-        # its length is min(bid, ask) level count, which can differ from profile.levels
-        # (bid count alone) on a thin/illiquid side, so guard on per_level itself.
-        if len(imbalance.per_level) >= 3:
-            mid = (imbalance.per_level[1] + imbalance.per_level[2]) / 2
-            series["mid_imbalance"].append({"time": t, "value": mid})
-
-    return series
-
-
-# =============================================================================================
-# The bar-spaced gap marker (was three copies: routes/candles.py, indicator_series.py,
-# indicators.py)
+# The bar-spaced gap marker (was three copies: routes/candles.py, the deleted
+# indicator_series.py, indicators.py)
 # =============================================================================================
 
 
@@ -779,6 +396,8 @@ _MIN_CANDLE_WINDOW_SECONDS = 3600
 
 # The live tail the collector has not flushed to the catalog yet (`LiveCandleBus.recent_rows`).
 RecentRows = Callable[[str, int, int], list[SecondOHLC]]
+# Its liquidation twin (`LiveCandleBus.recent_liquidations`, Story 33.3).
+RecentLiquidations = Callable[[str, int, int], list[Liquidation]]
 
 
 class ImpossibleCandle(Exception):
@@ -805,6 +424,25 @@ def _catalog_plus_recent(
     return rows + [r for r in tail if r.ts_event not in have]
 
 
+def liquidations_plus_recent(
+    catalog_path: str,
+    recent_liquidations: RecentLiquidations,
+    instrument_id: str,
+    start_ns: int,
+    end_ns: int,
+) -> list[Liquidation]:
+    """
+    Return the archived liquidations of the window plus the live tail the collector has not
+    flushed yet, each venue event once (`venue_event_id`, D-150): the archive's copy wins, a tail row the
+    archive already holds is not added again.
+    """
+    rows = catalog_files.query_liquidations(catalog_path, instrument_id, start_ns, end_ns)
+    have = {row.venue_event_id for row in rows}
+    tail = recent_liquidations(instrument_id, start_ns, end_ns)
+    fresh = {row.venue_event_id: row for row in tail if row.venue_event_id not in have}
+    return rows + list(fresh.values())
+
+
 def _candle_window_span_ns(limit: int, bar_seconds: int) -> int:
     """
     Return the archive query window's span: `limit * bar_seconds * _CANDLE_WINDOW_MULTIPLIER` (at
@@ -825,7 +463,23 @@ def _candle_window_span_ns(limit: int, bar_seconds: int) -> int:
     return max(1, span_seconds // bar_seconds) * bar_seconds * 1_000_000_000
 
 
-def _bucket_end_ns(ts_ns: int, bar_seconds: int) -> int:
+def stored_bar(bar_seconds: int) -> int | None:
+    """
+    Return the widest candle-store width (`candles.domain.fold.BAR_SECONDS`) whose buckets tile a
+    `bar_seconds` bucket exactly -- it divides the width and the width's anchor (`bucket_start_ms`:
+    1W starts on a Monday) lies on its boundaries, so every wide bucket is a whole set of stored
+    ones (1W from 1D, 10m from 5m) -- or None when none does (1..59 s, 90 s). A stored width is
+    its own. The one rule (SSOT-02) of every reader composing a width from stored bars:
+    `views.derivatives` and the CVD `all` anchor (`views.indicator_picker`).
+    """
+    anchor_ms = bucket_start_ms(0, bar_seconds)
+    for width in sorted(BAR_SECONDS, reverse=True):
+        if bar_seconds % width == 0 and anchor_ms % (width * 1000) == 0:
+            return width
+    return None
+
+
+def bucket_end_ns(ts_ns: int, bar_seconds: int) -> int:
     """
     `ts_ns` rounded up to a bucket boundary (itself when it is one), by the one bucket rule
     (`candles.domain.fold.bucket_start_ms`: a 1W bucket starts on Monday).
@@ -852,11 +506,20 @@ def _parquet_page(
     limit: int,
     bar_seconds: int,
     catalog_path: str,
+    candles_dir: str,
     recent_rows: RecentRows,
+    recent_liquidations: RecentLiquidations,
 ) -> tuple[list[dict], bool]:
     """
     One page straight from the Parquet archive (slow: reads a window of tiny files). Serves
-    history the candle store does not hold (older than its first day, or pruned).
+    history the candle store does not hold (older than its first day, or pruned). An instrument
+    with a liquidation feed folds the window's archived liquidations plus the live tail
+    (`liquidations_plus_recent`), bounded by the feed's start: the candle store's persisted start,
+    else the archive's first liquidation (`views.catalog_reads.liquidation_feed_start`), lowered
+    to the earliest row folded, so a live-tail
+    row older than the archive moves the bound instead of failing the page. A bar starting before
+    that start, or straddling it, or every bar when no start is known, gets null `liq_*`, never 0
+    (audit D-160). One without the feed gets null `liq_*` columns throughout (Story 33.3).
 
     Every query window -- the first and each gap jump -- starts on a bucket boundary (Story 31.8):
     its end is rounded up to a bucket boundary and its span is whole buckets, so no served bar is
@@ -868,6 +531,11 @@ def _parquet_page(
     """
     before_ms = before_ns // 1_000_000
     rows_fn = partial(_catalog_plus_recent, catalog_path, recent_rows)
+    liquidations_fn = None
+    since_ns = None
+    if has_liquidation_feed(instrument_id):
+        since_ns = liquidation_feed_start(catalog_path, candles_dir, instrument_id)
+        liquidations_fn = partial(liquidations_plus_recent, catalog_path, recent_liquidations)
 
     def fetch(start_ns: int, end_ns: int) -> list[dict]:
         # The readers' windows are inclusive; a row stamped exactly at `end_ns` opens the next
@@ -881,6 +549,8 @@ def _parquet_page(
                 min(end_ns, before_ns) - 1,
                 bar_seconds,
                 snapshot_rows_fn=rows_fn,
+                liquidation_rows_fn=liquidations_fn,
+                liquidations_since_ns=since_ns,
             )
             if c["t"] < before_ms and _checked(instrument_id, bar_seconds, c)
         ]
@@ -889,7 +559,7 @@ def _parquet_page(
         catalog_path, instrument_id, on_foreign=error_ledger.record
     )
     span_ns = _candle_window_span_ns(limit, bar_seconds)
-    align = partial(_bucket_end_ns, bar_seconds=bar_seconds)
+    align = partial(bucket_end_ns, bar_seconds=bar_seconds)
     kept = fetch_page(fetch, ranges, before_ns, span_ns, align_end=align)[-limit:]
     return kept, bool(kept) and has_older_data(ranges, kept[0]["t"] * 1_000_000)
 
@@ -931,6 +601,7 @@ def candle_page(
     catalog_path: str,
     candles_dir: str,
     recent_rows: RecentRows,
+    recent_liquidations: RecentLiquidations,
 ) -> tuple[list[dict], bool]:
     """
     Return the one candle source for the chart, its indicator panes and anything else that must agree
@@ -953,107 +624,16 @@ def candle_page(
         return kept, True  # older archive history exists beyond this full page
     older_before_ns = kept[0]["t"] * 1_000_000 if kept else before_ns
     older, has_more = _parquet_page(
-        instrument_id, older_before_ns, limit - len(kept), bar_seconds, catalog_path, recent_rows
+        instrument_id,
+        older_before_ns,
+        limit - len(kept),
+        bar_seconds,
+        catalog_path,
+        candles_dir,
+        recent_rows,
+        recent_liquidations,
     )
     return older + kept, has_more
-
-
-# =============================================================================================
-# Indicator series: OFI/OBI/microprice/spread per bar (was data_api/routes/indicator_series.py)
-#
-# SSOT-02 governs *live* rolling OFI/OBI (ranking_engine is the sole owner) -- it does not apply
-# here: this is a bounded, deterministic *historical* replay for one request's own fixed time
-# window, the same sanctioned category as `views.indicator_picker`'s request-scoped
-# `_ofi_replay`/`_cancel_pressure_replay`, not a second live computer of the published metric.
-# =============================================================================================
-
-_INDICATOR_SERIES_WINDOW_MULTIPLIER = 3
-
-
-def _indicator_series_window_start_ns(before_ns: int, limit: int, bar_seconds: int) -> int:
-    span_seconds = min(
-        limit * bar_seconds * _INDICATOR_SERIES_WINDOW_MULTIPLIER, MAX_QUERY_SPAN_SECONDS
-    )
-    return before_ns - span_seconds * 1_000_000_000
-
-
-def replay_bucket_samples(
-    snapshots: Sequence[DydxSecondSnapshot], bar_seconds: int
-) -> dict[int, dict]:
-    """
-    Replay `MultiLevelOFI`/`MultiLevelOBI` in chronological order over every queried
-    snapshot, and compute stateless `microprice`/`spread` per snapshot -- keeping the
-    last-computed value per `bar_seconds`-wide bucket (`candles.domain.fold.bucket_start_ms`, the
-    one bucket rule: a 1W pane starts on Monday like its candles), same bucket-sampling technique
-    `indicator_picker`'s `_ofi_bucket_samples` uses, adapted from delta-driven to snapshot-driven
-    input.
-
-    A `ts_event` step over `kernel.indicators.OFI_GAP_NS` clears OFI's previous book first
-    (`clear_prev_state`), so a post-gap book is never diffed against the pre-gap one -- the one
-    gap rule every OFI replay shares (Story 31.3). A page's OFI/OBI replay starts fresh at that
-    page's own window start -- it cannot carry state across pages, since pages are fetched
-    independently and out of full-history order (same explicit per-page-reset scope choice the CVD
-    replay already documents). OFI's first snapshot in this window only seeds its `_prev_*` state
-    and yields no value -- only record `ofi` once `.initialized` is True.
-
-    A second with an empty side is not an error here: its microprice/spread are honestly `None`
-    (`kernel.indicators` returns no value without a top), pinned by
-    `data_api/tests/test_indicator_series.py`'s thin-book test -- nothing is skipped or invented.
-    Known limit (§2.3): `MultiLevelOBI` keeps its previous value on a second whose top-10 sizes
-    total zero, so that bucket shows the last defined OBI; upgrade path: publish None there.
-    """
-    ofi = MultiLevelOFI(levels=10, window=50)
-    obi = MultiLevelOBI(levels=10)
-    buckets: dict[int, dict] = {}
-    last_ts: int | None = None
-
-    for snapshot in sorted(snapshots, key=lambda s: s.ts_event):
-        if last_ts is not None and snapshot.ts_event - last_ts > OFI_GAP_NS:
-            ofi.clear_prev_state()
-        last_ts = snapshot.ts_event
-        ofi.update_raw(
-            snapshot.bid_prices,
-            snapshot.bid_sizes,
-            snapshot.ask_prices,
-            snapshot.ask_sizes,
-        )
-        obi.update_raw(snapshot.bid_sizes, snapshot.ask_sizes)
-        snapshot_dict = snapshot.as_floats()
-        bucket = bucket_start_ms(snapshot.ts_event // 1_000_000, bar_seconds)
-        buckets[bucket] = {
-            "t": bucket,
-            "ofi": ofi.value if ofi.initialized else None,
-            "obi": obi.value if obi.initialized else None,
-            "microprice": calc_microprice(snapshot_dict),
-            "spread": calc_spread(snapshot_dict),
-        }
-
-    return buckets
-
-
-def indicator_series_page(
-    catalog_path: str, instrument_id: str, before_ns: int, limit: int, bar_seconds: int
-) -> tuple[list[dict], bool]:
-    """
-    One indicator-series page: `(rows oldest-first with gap rows, has_more)` of
-    `{t, ofi, obi, microprice, spread}` for the `limit` bars before `before_ns`.
-    """
-    before_ms = before_ns // 1_000_000
-
-    def fetch(start_ns: int, end_ns: int) -> list[dict]:
-        snapshots = query_second_snapshots(catalog_path, instrument_id, start_ns, end_ns)
-        buckets = replay_bucket_samples(snapshots, bar_seconds)
-        return [p for _, p in sorted(buckets.items()) if p["t"] < before_ms]
-
-    ranges = catalog_files.data_file_ranges(
-        catalog_path, instrument_id, on_foreign=error_ledger.record
-    )
-    span_ns = before_ns - _indicator_series_window_start_ns(before_ns, limit, bar_seconds)
-    kept = fetch_page(fetch, ranges, before_ns, span_ns)[-limit:]
-    if not kept:
-        return [], False
-    has_more = has_older_data(ranges, kept[0]["t"] * 1_000_000)
-    return with_gap_markers(kept, bar_seconds), has_more
 
 
 # =============================================================================================
@@ -1072,6 +652,7 @@ def indicator_values_page(
     catalog_path: str,
     candles_dir: str,
     recent_rows: RecentRows,
+    recent_liquidations: RecentLiquidations,
 ) -> tuple[list[dict], bool, dict[str, str]]:
     """
     `(rows with gap rows, has_more, errors)`: every requested indicator replayed over the same
@@ -1098,6 +679,7 @@ def indicator_values_page(
             catalog_path=catalog_path,
             candles_dir=candles_dir,
             recent_rows=recent_rows,
+            recent_liquidations=recent_liquidations,
         )
     except ImpossibleCandle:
         raise
@@ -1109,14 +691,18 @@ def indicator_values_page(
     window = indicator_picker.ReplayWindow(
         instrument_id=instrument_id,
         bar_seconds=bar_seconds,
-        # MEM-01: the custom replays read raw seconds/deltas over this window, so it is capped at
+        # MEM-01: the raw-delta replays read raw deltas over this window, so it is capped at
         # `MAX_QUERY_SPAN_SECONDS` back from the end (500 1W bars would be ~10 years). A bar before
         # the cap has no input read, so its custom value is None -- a gap, never a fabricated one.
-        # Known limit: at 1D only the last 7 bars, and at 1W only the last bar, carry a custom value
-        # (CVD, cancel pressure, delta OFI); upgrade path: a stored per-bar aggregate of these
-        # inputs (like the candle store), read instead of replaying raw rows.
+        # Known limit: at 1D only the last 7 bars, and at 1W only the last bar, carry a cancel
+        # pressure or delta OFI value; upgrade path: a stored per-bar aggregate of these inputs
+        # (like the candle store's order flow), read instead of replaying raw rows. CVD and Story
+        # 33.6's order-flow entries read the bars' own stored aggregates (Story 33.3), so every bar
+        # of every width carries them; `DepthWithinBps` applies this same cap inside its replay,
+        # since the Technicals' window is not capped.
         start_ms=max(kept[0]["t"], end_ms - MAX_QUERY_SPAN_SECONDS * 1000),
         end_ms=end_ms,
+        candles_dir=candles_dir,
     )
     by_time, errors = indicator_picker.values_by_time(kept, entries, window)
     rows = [{"t": t, "values": values} for t, values in sorted(by_time.items())]
@@ -1126,8 +712,8 @@ def indicator_values_page(
 # =============================================================================================
 # Volume footprint: the raw trade archive bucketed per closed bar (Story 32.8)
 #
-# Not `build_footprint` above (resting order-book size changes): this one is executed trades,
-# read as integer units from the `TradeTick` archive (`kernel.catalog_files.query_trade_columns`)
+# Executed trades (the resting-order-flow footprint it replaced was deleted in Story
+# 33.4), read as integer units from the `TradeTick` archive (`kernel.catalog_files.query_trade_columns`)
 # and bucketed into integer price rows over the chart's own `candle_page` bars, so its bar
 # boundaries, gaps and timeframe are the candles' own (no second bucket rule).
 #
@@ -1262,7 +848,7 @@ def footprint_bar(
     )
 
 
-def _day_slices(start_ns: int, end_ns: int) -> Iterator[tuple[int, int]]:
+def day_slices(start_ns: int, end_ns: int) -> Iterator[tuple[int, int]]:
     """Split `[start_ns, end_ns)` at UTC midnights (MEM-01: one instrument-day read at a time)."""
     lo = start_ns
     while lo < end_ns:
@@ -1349,6 +935,7 @@ def footprint_page(
     catalog_path: str,
     candles_dir: str,
     recent_rows: RecentRows,
+    recent_liquidations: RecentLiquidations,
     price_precision: int,
     size_precision: int,
     now_ns: int,
@@ -1380,6 +967,7 @@ def footprint_page(
         catalog_path=catalog_path,
         candles_dir=candles_dir,
         recent_rows=recent_rows,
+        recent_liquidations=recent_liquidations,
     )
     starts_ms, trimmed = _settled_bars(candles, bar_seconds, end_ns)
     if len(starts_ms) > limit:
@@ -1390,7 +978,7 @@ def footprint_page(
     starts_ns = np.asarray(starts_ms, dtype=np.int64) * 1_000_000
     acc: list[_Levels] = [{} for _ in starts_ms]
     precision = (price_precision, size_precision)
-    for lo, hi in _day_slices(int(starts_ns[0]), int(starts_ns[-1]) + bar_ns):
+    for lo, hi in day_slices(int(starts_ns[0]), int(starts_ns[-1]) + bar_ns):
         columns = _read_trades(instrument_id, catalog_path, lo, hi, precision)
         _fold_slice(columns, starts_ns, bar_ns, acc)
     bars = [

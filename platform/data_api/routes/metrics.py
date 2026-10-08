@@ -67,6 +67,24 @@ class MetricHistoryItem(BaseModel):
     spread: float | None = None
     rank: float | None = None
     volume24h: float | None = None
+    funding_rate: float | None = None
+    funding_annualised: float | None = None
+    open_interest: float | None = None
+    oi_change_1h: float | None = None
+    oi_change_24h: float | None = None
+    basis_mi_bps: float | None = None
+    basis_ml_bps: float | None = None
+    liq_long_1h: float | None = None
+    liq_short_1h: float | None = None
+    liq_notional_1h: float | None = None
+    liq_ratio_1h: float | None = None
+    forced_share_1h: float | None = None
+    relative_volume: float | None = None
+    high_24h: float | None = None
+    low_24h: float | None = None
+    range_position_24h: float | None = None
+    oi_change_1h_pct: float | None = None
+    oi_change_24h_pct: float | None = None
 
 
 class MetricsHistoryResponse(BaseModel):

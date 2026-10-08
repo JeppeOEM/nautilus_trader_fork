@@ -16,6 +16,7 @@ Story 32.6: `GET`/`PUT /api/coin/{instrument_id}/layout` and the default-templat
 real `views.preferences` writers against temp files, no mocking.
 """
 
+import copy
 import tomllib
 from pathlib import Path
 
@@ -45,6 +46,16 @@ _LAYOUT_KEYS = {
     "visible_bars",
     "volume_profile",
     "footprint",  # optional on the wire, always served (Story 32.8)
+    "derivatives",  # likewise (Story 33.5)
+    "volume_color_by",  # likewise (Story 33.6)
+    "chart_type",  # likewise (Story 33.9)
+    "price_scale",
+    "compare",
+    "drawings_hidden",  # likewise (Story 33.10)
+    "time_zone",  # likewise (Story 33.12)
+    "session_breaks",
+    "bar_countdown",
+    "last_price",
 }
 
 
@@ -131,6 +142,143 @@ def test_put_with_a_bad_mode_is_a_422_naming_it_and_writes_nothing(
     assert response.status_code == 422
     assert "mode" in response.json()["detail"]
     assert not (tmp_path / "chart_layouts.toml").exists()
+
+
+_SCALE = {"mode": "normal", "auto_scale": True, "invert": False}
+_ONE_COMPARE = {"symbols": ["BTC-USD-PERP.HYPERLIQUID"], "spread": False}
+
+
+_HL_BTC = "BTC-USD-PERP.HYPERLIQUID"
+
+
+@pytest.mark.parametrize(
+    ("over", "key", "reason"),
+    [
+        ({"chart_type": "renko"}, "chart_type", None),
+        ({"price_scale": {**_SCALE, "mode": "x"}}, "price_scale.mode", None),
+        ({"price_scale": None}, "price_scale", "must be an object"),
+        ({"compare": None}, "compare", "must be an object"),
+        (
+            {"compare": {"symbols": ["A.X", "B.X", "C.X", "D.X"], "spread": False}},
+            "compare.symbols",
+            None,
+        ),
+        # Two valid identical ids: the duplicate rule itself, not a per-symbol rejection.
+        (
+            {"compare": {"symbols": [_HL_BTC, _HL_BTC], "spread": False}},
+            "compare.symbols",
+            "must not repeat an instrument id",
+        ),
+        ({"compare": {**_ONE_COMPARE, "colour": "red"}}, "compare.colour", None),
+        (
+            {"compare": {"symbols": [_IID], "spread": False}},
+            "compare.symbols",
+            "must not contain the coin's own instrument id",
+        ),
+    ],
+)
+def test_put_with_a_bad_story_33_9_key_is_a_422_naming_it(
+    client: TestClient, tmp_path: Path, over: dict[str, object], key: str, reason: str | None
+) -> None:
+    response = client.put(f"/api/coin/{_IID}/layout", json={"layout": _layout(**over)})
+    assert response.status_code == 422
+    named, _, said = response.json()["detail"].partition(": ")
+    assert named == key
+    if reason is not None:
+        assert said == reason
+    assert not (tmp_path / "chart_layouts.toml").exists()
+
+
+def test_the_default_template_keeps_a_compare_of_any_coin(client: TestClient) -> None:
+    """Only a coin's own PUT refuses its own id; a template saved here may compare another coin."""
+    other = "ETH-USD-PERP.DYDX"
+    _put(client, _IID, _layout(compare={"symbols": [other], "spread": False}))
+    response = client.post(f"/api/coin/{_IID}/layout/save-as-default")
+    assert response.status_code == 200
+    assert response.json()["default"]["compare"]["symbols"] == [other]
+
+
+def test_a_seed_or_reset_drops_the_coins_own_id_from_the_template_compare(
+    client: TestClient,
+) -> None:
+    """
+    A template comparing the coin itself seeds and resets that coin without it, never storing a
+    layout the coin's own PUT refuses; the template keeps the id.
+    """
+    _put(client, _IID, _layout(compare={"symbols": [_ETH], "spread": True}))
+    assert client.post(f"/api/coin/{_IID}/layout/save-as-default").status_code == 200
+
+    seeded = client.get(f"/api/coin/{_ETH}/layout").json()
+    assert seeded["seeded"] is True
+    assert seeded["layout"]["compare"] == {"symbols": [], "spread": True}
+    reset = client.post(f"/api/coin/{_ETH}/layout/reset-to-default").json()["layout"]
+    assert reset["compare"] == {"symbols": [], "spread": True}
+
+    stored = preferences.load_chart_layouts(Path(settings.CHART_LAYOUTS_PATH))
+    assert stored.layouts[_ETH]["compare"]["symbols"] == []
+    assert stored.default is not None
+    assert stored.default["compare"]["symbols"] == [_ETH]
+
+
+def test_put_round_trips_chart_type_scale_and_compare(client: TestClient) -> None:
+    layout = _layout(
+        chart_type="baseline", price_scale={**_SCALE, "mode": "log"}, compare=_ONE_COMPARE
+    )
+    _put(client, _IID, layout)
+    body = client.get(f"/api/coin/{_IID}/layout").json()["layout"]
+    assert (body["chart_type"], body["price_scale"], body["compare"]) == (
+        "baseline",
+        {**_SCALE, "mode": "log"},
+        _ONE_COMPARE,
+    )
+
+
+def test_put_with_a_bad_volume_color_by_is_a_422_naming_it(client: TestClient) -> None:
+    """Story 33.6: the optional key takes `direction` or `delta` only."""
+    layout = _layout(volume_color_by="rainbow")
+    response = client.put(f"/api/coin/{_IID}/layout", json={"layout": layout})
+    assert response.status_code == 422
+    assert "volume_color_by" in response.json()["detail"]
+    saved = client.put(
+        f"/api/coin/{_IID}/layout", json={"layout": _layout(volume_color_by="delta")}
+    )
+    assert saved.json()["layout"]["volume_color_by"] == "delta"
+
+
+def test_put_with_a_bad_drawings_hidden_is_a_422_naming_it(client: TestClient) -> None:
+    """Story 33.10: the optional hide-all flag is a boolean; it round-trips through the PUT."""
+    response = client.put(f"/api/coin/{_IID}/layout", json={"layout": _layout(drawings_hidden=1)})
+    assert response.status_code == 422
+    assert "drawings_hidden" in response.json()["detail"]
+    saved = client.put(f"/api/coin/{_IID}/layout", json={"layout": _layout(drawings_hidden=True)})
+    assert saved.json()["layout"]["drawings_hidden"] is True
+
+
+def test_hide_all_never_travels_through_the_default_template(client: TestClient) -> None:
+    """
+    Story 33.10: Hide all is one coin's view of its own drawings. Save as default stores it off, a
+    coin opened for the first time starts with it off, and a reset keeps the coin's own value.
+    """
+    _put(client, _IID, _layout(drawings_hidden=True, bar_seconds=300))
+    default = client.post(f"/api/coin/{_IID}/layout/save-as-default").json()["default"]
+    assert (default["drawings_hidden"], default["bar_seconds"]) == (False, 300)
+    assert client.get(f"/api/coin/{_ETH}/layout").json()["layout"]["drawings_hidden"] is False
+    reset = client.post(f"/api/coin/{_IID}/layout/reset-to-default").json()["layout"]
+    assert (reset["drawings_hidden"], reset["bar_seconds"]) == (True, 300)
+
+
+def test_a_hand_edited_template_with_hide_all_on_seeds_and_resets_with_it_off(
+    client: TestClient,
+) -> None:
+    path = Path(settings.CHART_LAYOUTS_PATH)
+    layouts = preferences.ChartLayouts(default=_layout(drawings_hidden=True))
+    preferences.save_chart_layouts(layouts, path)
+
+    assert client.get(f"/api/coin/{_ETH}/layout").json()["layout"]["drawings_hidden"] is False
+    reset = client.post(f"/api/coin/{_ETH}/layout/reset-to-default").json()["layout"]
+    assert reset["drawings_hidden"] is False
+    stored = preferences.load_chart_layouts(path)
+    assert stored.layouts[_ETH]["drawings_hidden"] is False
 
 
 def test_put_with_a_missing_body_key_or_bad_json(client: TestClient) -> None:
@@ -298,6 +446,37 @@ def test_put_without_a_footprint_serves_footprint_off(client: TestClient) -> Non
     assert response.json()["layout"]["footprint"]["on"] is False
 
 
+def test_put_with_a_bad_derivatives_flag_is_a_422_naming_it(client: TestClient) -> None:
+    derivatives = copy.deepcopy(preferences.DERIVATIVES_DEFAULTS)
+    derivatives["oi"]["on"] = "yes"
+    response = client.put(
+        f"/api/coin/{_IID}/layout", json={"layout": _layout(derivatives=derivatives)}
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"].startswith("derivatives.oi.on:")
+
+
+def test_put_roundtrips_derivatives_settings_and_their_pane_heights(client: TestClient) -> None:
+    derivatives = copy.deepcopy(preferences.DERIVATIVES_DEFAULTS)
+    derivatives["oi"] = {"on": True, "style": {"oi": {"color": "#26a69a", "line_width": 2}}}
+    derivatives["liquidations"] = {"on": True, "measure": "notional", "markers": False}
+    layout = _layout(derivatives=derivatives, pane_heights={"price": 400, "deriv_oi": 140})
+    client.put(f"/api/coin/{_IID}/layout", json={"layout": layout})
+    served = client.get(f"/api/coin/{_IID}/layout").json()["layout"]
+    assert (served["derivatives"], served["pane_heights"]) == (
+        derivatives,
+        {"price": 400, "deriv_oi": 140},
+    )
+
+
+def test_put_without_derivatives_serves_every_entry_off(client: TestClient) -> None:
+    layout = _layout()
+    del layout["derivatives"]
+    client.put(f"/api/coin/{_IID}/layout", json={"layout": layout})
+    served = client.get(f"/api/coin/{_IID}/layout").json()["layout"]
+    assert served["derivatives"] == preferences.DERIVATIVES_DEFAULTS
+
+
 def test_put_roundtrips_footprint_settings(client: TestClient) -> None:
     footprint = {
         "on": True,
@@ -309,3 +488,52 @@ def test_put_roundtrips_footprint_settings(client: TestClient) -> None:
     }
     client.put(f"/api/coin/{_IID}/layout", json={"layout": _layout(footprint=footprint)})
     assert client.get(f"/api/coin/{_IID}/layout").json()["layout"]["footprint"] == footprint
+
+
+# -- Story 33.12: time zone, session breaks, countdown and last price ------------------------------
+
+
+def test_put_roundtrips_the_story_33_12_settings(client: TestClient) -> None:
+    settings_33_12 = {
+        "time_zone": "exchange",
+        "session_breaks": True,
+        "bar_countdown": False,
+        "last_price": {"line": False, "label": True},
+    }
+    saved = client.put(f"/api/coin/{_IID}/layout", json={"layout": _layout(**settings_33_12)})
+    assert saved.status_code == 200
+    served = client.get(f"/api/coin/{_IID}/layout").json()["layout"]
+    assert {key: served[key] for key in settings_33_12} == settings_33_12
+
+
+@pytest.mark.parametrize(
+    ("over", "key"),
+    [
+        ({"time_zone": "Europe/Copenhagen"}, "time_zone"),
+        ({"session_breaks": "on"}, "session_breaks"),
+        ({"bar_countdown": None}, "bar_countdown"),
+        ({"last_price": {"line": True}}, "last_price.label"),
+        ({"last_price": {"line": True, "label": True, "color": "#fff"}}, "last_price.color"),
+    ],
+)
+def test_put_with_a_bad_story_33_12_setting_is_a_422_naming_it(
+    client: TestClient, tmp_path: Path, over: dict[str, object], key: str
+) -> None:
+    response = client.put(f"/api/coin/{_IID}/layout", json={"layout": _layout(**over)})
+    assert response.status_code == 422
+    assert response.json()["detail"].startswith(f"{key}:")
+    assert not (tmp_path / "chart_layouts.toml").exists()
+
+
+def test_put_without_the_story_33_12_settings_serves_their_defaults(client: TestClient) -> None:
+    layout = _layout()
+    for key in ("time_zone", "session_breaks", "bar_countdown", "last_price"):
+        del layout[key]
+    client.put(f"/api/coin/{_IID}/layout", json={"layout": layout})
+    served = client.get(f"/api/coin/{_IID}/layout").json()["layout"]
+    assert (
+        served["time_zone"],
+        served["session_breaks"],
+        served["bar_countdown"],
+        served["last_price"],
+    ) == ("utc", False, True, {"line": True, "label": True})

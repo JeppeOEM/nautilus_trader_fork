@@ -6,7 +6,7 @@ import type { IndicatorConfigEntry, IndicatorValuesItem } from "../api/schema";
 import { gapRun } from "../lib/gaps";
 import { DEFAULT_SOURCE } from "../lib/indicatorId";
 
-// Mirrors useCandles.ts/useIndicatorSeries.ts's own constants exactly -- co-paging (AD-F3)
+// Mirrors useCandles.ts's own constants exactly -- co-paging (AD-F3)
 // depends on every chart-history hook sharing the identical before_ns/limit/bar_seconds
 // tuple, not just a similarly-shaped one.
 const INITIAL_LIMIT = 120;
@@ -54,7 +54,7 @@ function toSeriesByKey(items: IndicatorValuesItem[]): Record<string, PickerDatum
  * Resets and re-fetches from scratch whenever `entries` changes (add/remove/param-apply)
  * -- each picker change is a materially different request (AD-F2/AD-F3: no unbounded/
  * stitched-across-requests state). Anchors its initial fetch to `Date.now()` (mirrors
- * useCandles/useIndicatorSeries), so a newly-added indicator backfills its own visible
+ * useCandles), so a newly-added indicator backfills its own visible
  * history via the normal scroll-back trigger, not a full page reload (Design Notes).
  */
 export function usePickerIndicatorValues(
@@ -102,7 +102,7 @@ export function usePickerIndicatorValues(
           earliestMsRef.current = response.items[0].t;
           hasMoreOlderRef.current = response.has_more;
           if (prepend && itemsRef.current.length > 0) {
-            // Same page-boundary seam run as useCandles'/useIndicatorSeries' own loadPage --
+            // Same page-boundary seam run as useCandles' own loadPage --
             // a real collection gap can straddle exactly the page cursor, which each page's
             // own gap rows can't see: one empty-values item per missing bar (Story 32.1).
             // The wire is ms; the run is built in chart seconds so every seam shares one helper.
@@ -138,7 +138,7 @@ export function usePickerIndicatorValues(
     earliestMsRef.current = null;
     setSeriesByKey({});
     // Anchor to the chart's currently visible right edge, not Date.now() -- unlike
-    // useCandles/useIndicatorSeries (whose one-time initial load always coincides with
+    // useCandles (whose one-time initial load always coincides with
     // the chart's live-edge starting view), this reset can fire mid-session while the
     // user has already scrolled back. Anchoring to "now" would load a window the current
     // viewport can't see at all, leaving the newly-added pane blank until an unrelated

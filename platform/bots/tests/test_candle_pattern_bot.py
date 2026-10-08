@@ -94,14 +94,24 @@ def test_a_bad_strategy_config_fails_the_build_naming_the_bot() -> None:
         build_node(_fleet({"short_patterns": ["HAMMER"]}), _REDIS_URL)
 
 
+# A strategy whose config has a required choice, or which trades only some instruments, names
+# the least a bot must give it (Story 33.14: the cascade bot needs a stop and the liquidation
+# feed); every other string-path strategy builds from the host's keys alone.
+_MINIMAL: dict[str, tuple[str, dict[str, Any]]] = {
+    "liquidation_cascade": ("BTCUSDT-LINEAR.BYBIT", {"stop_pct": 0.004}),
+}
+
+
 @pytest.mark.parametrize("name", [name for name, paths in STRATEGIES.items() if paths is not None])
 def test_every_string_path_strategy_builds_from_the_keys_the_host_passes(name: str) -> None:
     """Redis-free, through the host's own build: its keys suffice and the heartbeat field exists."""
+    instrument_id, params = _MINIMAL.get(name, ("BTC-USD-PERP.DYDX", {}))
     bot = BotConfig(
         bot_id="bot-x",
-        instrument_id="BTC-USD-PERP.DYDX",
+        instrument_id=instrument_id,
         trade_size=Decimal("0.001"),
         strategy=name,
+        params=params,
     )
     strategy = _strategy_for(bot)
     assert strategy.config.order_id_tag == "bot-x"

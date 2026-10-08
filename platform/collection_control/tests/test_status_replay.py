@@ -49,6 +49,7 @@ _APPENDED_KEYS = (
     "min_liquidity_usd",
     "last_apply",
     "last_refusal",  # Story 29.5
+    "liquidations",  # Story 33.1
 )
 
 
@@ -149,6 +150,7 @@ def test_the_aggregate_only_appends_keys_after_the_recorded_bytes(tmp_path: Path
         "min_liquidity_usd": _MIN_USD,
         "last_apply": None,  # the fixture's state marks ids applied without an `apply`
         "last_refusal": None,  # no command refused since the collector started
+        "liquidations": None,  # the fixture's capture has no liquidation feed
     }
 
 
@@ -186,7 +188,33 @@ def test_an_uncapped_plan_publishes_without_markets_before_its_first_apply(tmp_p
         "min_liquidity_usd": None,
         "last_apply": None,
         "last_refusal": None,
+        "liquidations": None,  # a client without the liquidation feed (Story 33.1)
     }
+
+
+class _LiquidationClient:
+    """A client with the liquidation feed (Story 33.1's optional capability), reconnecting."""
+
+    def liquidation_state(self) -> str:
+        return "reconnecting"
+
+
+def test_the_liquidation_feed_state_is_the_aggregates_last_key(tmp_path: Path) -> None:
+    """Story 33.1: capture's `liquidation_state()` reaches the aggregate as its last key."""
+    plan = _flat_plan(("BTCUSDT-LINEAR.BYBIT",))
+    capture = CaptureService(
+        CoreConfig(environment="mainnet", catalog_path=str(tmp_path)),
+        lambda _on_data, _ledger: _LiquidationClient(),
+        venue=plan.venue,
+        plan=plan.collected,
+        archive=ParquetArchiveWriter(str(tmp_path)),
+        live_stream=None,
+    )
+    bus = _Bus()
+    asyncio.run(StatusPublisher(capture, bus, None, accepts_commands=True).publish(plan))
+    aggregate = json.loads(bus.published[-1][1])
+    assert list(aggregate)[-1] == "liquidations"
+    assert aggregate["liquidations"] == "reconnecting"
 
 
 def test_a_threshold_without_markets_is_a_wiring_error(tmp_path: Path) -> None:

@@ -53,6 +53,15 @@ describe("compare", () => {
     expect(compare(1234500.1, num("=", 1234000, p))).toBe(false);
   });
 
+  it("matches = on a percent-shown fraction despite the division's float noise (scale 0.01)", () => {
+    // 0.0007 / 0.01 is 0.06999999999999999 in float; the cell shows 0.0700 (Funding).
+    expect(compare(0.0007, num("=", 0.0007, { scale: 0.01, decimals: 4 }))).toBe(true);
+    // 0.29 / 0.01 is 28.999999999999996; the cell shows 29 (24h range).
+    expect(compare(0.29, num("=", 0.29, { scale: 0.01, decimals: 0 }))).toBe(true);
+    // Still no rounding of the typed value: a finer typed value never matches `=`.
+    expect(compare(0.29, num("=", 0.2904, { scale: 0.01, decimals: 0 }))).toBe(false);
+  });
+
   it("matches a Technicals output at 4 decimals", () => {
     expect(compare(29.99996, num("=", 30, { decimals: 4 }))).toBe(true);
   });

@@ -36,6 +36,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import date
+from datetime import timedelta
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
@@ -50,13 +51,19 @@ import pyarrow as pa
 import pytest
 from candles.application.rebuild import rebuild_instrument
 from fastapi.testclient import TestClient
+from kernel.liquidation import LiquidatedSide
+from kernel.liquidation import Liquidation
 from kernel.tests.snapshot_factory import make_snapshot
 from observability import error_ledger
 
+from nautilus_trader.model.currencies import BTC
+from nautilus_trader.model.currencies import USDT
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.identifiers import Symbol
 from nautilus_trader.model.identifiers import TradeId
+from nautilus_trader.model.instruments import CryptoPerpetual
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -104,6 +111,7 @@ from verification.domain.conservation import ReferenceTrade
 from verification.domain.reference_signals import RefCandle
 from verification.domain.reference_signals import fold_candles
 from verification.domain.trade_check import TradeColumns
+from verification.infrastructure.liquidation_reader import LiquidationCatalog
 from verification.infrastructure.raw_store import channel_file
 from verification.infrastructure.raw_store import encode_line
 from verification.infrastructure.raw_store import hour_of
@@ -197,6 +205,27 @@ def _tick(trade: _Trade) -> TradeTick:
     )
 
 
+def _definition() -> CryptoPerpetual:
+    """
+    Return the definition the served route labels its prices with (Story 32.5: no definition, a
+    404 naming the id): precisions 2 and 3, as the rows are written.
+    """
+    return CryptoPerpetual(
+        instrument_id=InstrumentId.from_str(_BTC),
+        raw_symbol=Symbol("BTCUSDT"),
+        base_currency=BTC,
+        quote_currency=USDT,
+        settlement_currency=USDT,
+        is_inverse=False,
+        price_precision=2,
+        price_increment=Price.from_str("0.01"),
+        size_precision=3,
+        size_increment=Quantity.from_str("0.001"),
+        ts_event=0,
+        ts_init=0,
+    )
+
+
 def _write_catalog(catalog: Path, day: date, trades: list[_Trade]) -> None:
     """Rows for seconds 0..179 after 10:00 of `day`, each traded one carrying its trade's fold."""
     by_second = {t.ts_ns // _NS: t for t in trades}
@@ -204,6 +233,13 @@ def _write_catalog(catalog: Path, day: date, trades: list[_Trade]) -> None:
     writer = ParquetDataCatalog(str(catalog))
     writer.write_data([_tick(t) for t in trades])
     writer.write_data([_snapshot(s0 + k, by_second.get(s0 + k)) for k in range(_ROWS)])
+
+
+def _liquidation(day: date, k: int, key: str, side: LiquidatedSide, size: str) -> Liquidation:
+    """Return an archived liquidation `k` s after 10:00 of `day` (bankruptcy price 84000.00)."""
+    ts_ns = (_s0(day) + k) * _NS + 400 * _MS
+    iid = InstrumentId.from_str(_BTC)
+    return Liquidation.from_wire_text(iid, side, size, "84000.00", (2, 3), key, ts_ns, ts_ns)
 
 
 # --- the recorder's raw lines ---------------------------------------------------------------------
@@ -316,12 +352,14 @@ class _Scenario:
     uncovered: frozenset[int] = frozenset()
     other_day: date | None = None
     duplicated: tuple[int, ...] = ()  # offsets from 10:00 whose row the catalog holds twice
+    liquidations: tuple[Liquidation, ...] = ()  # archived before the store is rebuilt
 
 
 def _write_day(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: _Scenario) -> Path:
     """Write the scenario, build the store with the real rebuild; return the catalog root."""
     raw, catalog = tmp_path / "verify", tmp_path / "catalog"
     trades = _day_trades(scenario.day)
+    ParquetDataCatalog(str(catalog)).write_data([_definition()])  # once: the route needs it
     _write_catalog(catalog, scenario.day, trades)
     by_second = {t.ts_ns // _NS: t for t in trades}
     copies = [_s0(scenario.day) + k for k in scenario.duplicated]
@@ -329,6 +367,8 @@ def _write_day(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: _Scena
         ParquetDataCatalog(str(catalog)).write_data(
             [_snapshot(second, by_second.get(second))], skip_disjoint_check=True
         )
+    if scenario.liquidations:
+        ParquetDataCatalog(str(catalog)).write_data(list(scenario.liquidations))
     first, last = _d0(scenario.day), _d0(scenario.day) + _DAY_S * _NS - 1
     if scenario.other_day is not None:
         _write_catalog(catalog, scenario.other_day, _day_trades(scenario.other_day, "85000.00"))
@@ -485,6 +525,91 @@ def test_an_altered_stored_bar_fails_the_catalog_fold_and_the_served_bar(
     assert _width(report, 60)["catalog"][DIFFERENT] == 1
     assert _width(report, 60)["served"][SERVED_DIFFERS] == 1
     assert _width(report, 300)["failing"] == 0  # only the altered width fails
+
+
+def test_a_day_with_liquidations_proves_the_order_flow_and_liquidation_columns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """
+    Story 33.3: the rebuilt store and the served bars carry section 2.15's columns, and both equal
+    the oracle's own fold -- a long and a short liquidation in minute 0 and one in the untraded
+    minute 2 (stored, and never served: a bar with no trade is not a bar). The feed starts at
+    09:59:00.400 ("prior"): that minute, the 09:00 hour and the day straddle it and are null on
+    both sides (review loop 2), its liquidation counted nowhere; 10:00 onward is known.
+    """
+    scenario = _Scenario(
+        liquidations=(
+            _liquidation(_DAY, -60, "prior", LiquidatedSide.LONG, "0.001"),
+            _liquidation(_DAY, 5, "a", LiquidatedSide.LONG, "0.041"),
+            _liquidation(_DAY, 6, "b", LiquidatedSide.SHORT, "0.500"),
+            _liquidation(_DAY, 125, "c", LiquidatedSide.LONG, "0.007"),
+        )
+    )
+    status, report = _run(tmp_path, monkeypatch, capsys, scenario)
+    assert (status, report["passed"]) == (0, True)
+    db = sqlite3.connect(tmp_path / "candles" / "candles_bybit.db")
+    stored = db.execute(
+        "SELECT liq_long_v, liq_short_v, liq_n FROM candles WHERE bar_seconds = 60 ORDER BY t"
+    ).fetchall()
+    db.close()
+    assert stored == [(41, 500, 2), (0, 0, 0), (7, 0, 1)]
+
+
+def test_a_day_archived_before_the_liquidation_feed_is_null_and_the_oracle_agrees(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """
+    The feed's first archived liquidation is the day after the judged one: the full-history
+    rebuild stores the judged day's `liq_*` null (unknown, never 0), the served bars carry null,
+    and the oracle -- deriving the same bound from its own raw read -- agrees, every count 0.
+    """
+    later = _DAY + timedelta(days=1)
+    scenario = _Scenario(
+        liquidations=(_liquidation(later, 5, "first", LiquidatedSide.LONG, "0.041"),)
+    )
+    status, report = _run(tmp_path, monkeypatch, capsys, scenario)
+    assert (status, report["passed"]) == (0, True)
+    db = sqlite3.connect(tmp_path / "candles" / "candles_bybit.db")
+    stored = db.execute(
+        "SELECT DISTINCT liq_long_v, liq_short_v, liq_n FROM candles WHERE t < ?",
+        (_d0(later) // 1_000_000,),
+    ).fetchall()
+    db.close()
+    assert stored == [(None, None, None)]
+
+
+def _tamper_buy_v(query: Mapping[str, int], page: dict[str, Any]) -> dict[str, Any]:
+    if query["bar_seconds"] == 300 and page["items"]:
+        page["items"][-1]["buy_v"] += 1
+    return page
+
+
+def test_a_served_buy_v_off_by_one_unit_is_served_differs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status, report = _run(tmp_path, monkeypatch, capsys, rewrite=_tamper_buy_v)
+    assert status == 1
+    assert _width(report, 300)["served"][SERVED_DIFFERS] == 1
+    assert _width(report, 60)["failing"] == 0
+
+
+def test_a_stored_pv_off_by_one_unit_fails_the_catalog_fold_and_the_served_bar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_day(tmp_path, monkeypatch, _Scenario())
+    db = sqlite3.connect(tmp_path / "candles" / "candles_bybit.db")
+    db.execute(
+        "UPDATE candles SET pv = pv + 1 WHERE bar_seconds = 60 AND t = ?", (_minute_ms(_DAY, 0),)
+    )
+    db.commit()
+    db.close()
+    argv = ["--venue", "BYBIT", "--day", _DAY.isoformat(), "--data-api", "http://testserver"]
+    status, report = _main(
+        argv, _d0(_DAY) + 2 * _DAY_S * _NS, _route(tmp_path, monkeypatch), capsys
+    )
+    assert status == 1
+    assert _width(report, 60)["catalog"][DIFFERENT] == 1
+    assert _width(report, 60)["served"][SERVED_DIFFERS] == 1
 
 
 def _drop_partial(query: Mapping[str, int], page: dict[str, Any]) -> dict[str, Any]:
@@ -990,7 +1115,8 @@ def test_judge_reference_classes() -> None:
     assert _judge(_prepared({1000: extra}, Causes(none, gap))) == REF_EXPLAINED
     assert _judge(_prepared({1000: None})) == REF_DIFFERENT  # off grid: never a pass
     counts_only = TradeColumns(8400010, 8400010, 8400010, 8400010, 10, 0, 2, 0)
-    assert _judge(_prepared({1000: counts_only})) == EXACT  # counts are not in a bar
+    # Story 33.3: a bar carries the trade counts (`buy_n`), so a count difference is one too.
+    assert _judge(_prepared({1000: counts_only})) == REF_DIFFERENT
 
 
 def test_a_duplicated_traded_row_is_ref_different_not_a_doubled_reference() -> None:
@@ -1191,3 +1317,24 @@ def test_parse_page_ignores_gap_rows_and_keeps_an_absent_partial_as_none() -> No
 
     assert page.bars == (ServedBar(2, 1.0, 2.0, 1.0, 2.0, 3.0, None),)
     assert page.has_more is False
+
+
+def test_the_oracle_reads_an_instruments_liquidations_once_per_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """
+    A closed week (judged ten days later): the day fold and the seven week-day folds all slice one
+    read of the week [Monday 09-28, Monday 10-05), never eight reads of the archive.
+    """
+    scenario = _Scenario(liquidations=(_liquidation(_DAY, 5, "a", LiquidatedSide.LONG, "0.041"),))
+    calls: list[tuple[str, int, int]] = []
+    real = LiquidationCatalog.liquidations
+
+    def counted(self: LiquidationCatalog, iid: str, start_ns: int, end_ns: int) -> list:
+        calls.append((iid, start_ns, end_ns))
+        return real(self, iid, start_ns, end_ns)
+
+    monkeypatch.setattr(LiquidationCatalog, "liquidations", counted)
+    _run(tmp_path, monkeypatch, capsys, scenario, now_ns=_d0(_DAY) + 10 * _DAY_S * _NS)
+    monday = _d0(_DAY) - _DAY_S * _NS
+    assert calls == [(_BTC, monday, monday + 7 * _DAY_S * _NS)]

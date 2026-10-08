@@ -1422,6 +1422,539 @@ now answers 404 for an instrument with no definition in the catalog and carries 
       that browser's `localStorage` on the first load) and survives a reload in another browser,
       and `GET /api/candles/<a collected id>` carries both precision fields.
 
+### 33-1-bybit-liquidations-captured-over-a-second-socket-into-one-shared-liquidation-type (commit: this story's)
+
+The Bybit collector opens a second, generic WebSocket to the public linear stream for
+`allLiquidation.{symbol}` of every collected LINEAR id (`capture/venues/bybit/liquidations.py`),
+archives the rows to `data/custom_liquidation/<iid>/`, publishes them on the new Redis channel
+`liquidations:raw`, appends `liquidations` (`connected`/`reconnecting`/`down`) as the last key of
+the Bybit `collector:status` aggregate and writes `liquidations_unrecoverable` lines to
+`data/coverage/bybit.jsonl` (per id; one short line per id at every start, from its subscribe to
+Bybit's ack, is expected) (`docs/DATA_DICTIONARY.md` §1.26). The nightly `verify_day` also runs
+`verification.liquidations` for BYBIT and keeps its summary under `liquidations` in
+`archive:status` `verification_days`. No config key, env var, compose service or bind mount
+changed; the coverage record's existing mount already carries the new kind.
+
+- [ ] On the VPS, pull this commit and rebuild/restart the Bybit collector and the archive service:
+      `cd ~/nautilus_trader_fork/platform && make up` (or `docker compose up -d --build
+      bybit_collector archive`).
+- [ ] Within a minute, confirm the Bybit aggregate on `collector:status` ends in
+      `"liquidations": "connected"`: `redis-cli SUBSCRIBE collector:status` and wait for the next
+      publish (or restart `bot_tui` to see the fresh one), and that `docker compose logs
+      bybit_collector | grep "liquidation socket"` shows `None -> connected`.
+- [ ] Check the ledger shows no `collector.liquidation_feed`, `collector.liquidation_publish` or
+      `collector.unencodable` line since the restart (`GET /api/errors`, or
+      `platform/data/errors/bybit_collector.jsonl`); a `collector.unencodable` naming a liquidation
+      is a precision finer than the definition and is a DATA-04 finding, not noise.
+- [ ] After the first liquidation (minutes on any active hour), confirm rows arrive:
+      `redis-cli SUBSCRIBE liquidations:raw` shows a JSON array of rows with integer
+      `price_units`/`size_units`, and `ls data/catalog/data/custom_liquidation/` lists the ids
+      after the next flush (60 s).
+- [ ] After the next nightly run, confirm `archive:status` `verification_days.BYBIT.<day>` carries
+      a `liquidations` object and that the day's `verification` did not change because of it. It
+      holds `report` (`reported`, or `refused` with a `reason`), `applicable`, `coverage_present`
+      (`false` means the unrecoverable seconds are unknown, not 0), the day's `total`, `matched`,
+      `share` and `unrecoverable_seconds`, and per instrument only counts (`total`, `matched`,
+      `unmatched`, `unrecoverable_seconds`) -- no unmatched ids. The full report (the first 20
+      unmatched ids per instrument) comes from a by-hand run: `python3 -m archive.verify_day ...
+      --reports-dir DIR` writes `DIR/liquidations.json`, or run `python3 -m
+      verification.liquidations --venue BYBIT --day <day> --json --catalog <catalog>` directly.
+
+### 33-3-per-bar-order-flow-and-liquidation-aggregates-in-the-candle-store-folded-once (commit: this story's)
+
+The candle store gains ten nullable INTEGER columns (`buy_v`, `sell_v`, `buy_n`, `sell_n`, `pv`,
+`liq_long_v`, `liq_short_v`, `liq_n`, `price_precision`, `size_precision`) and the
+`liquidations_applied` and `liquidation_feed_since` tables (`docs/DATA_DICTIONARY.md` §2.15). Each collector migrates its own
+`candles_<venue>.db` in place when it opens it (`ALTER TABLE ... ADD COLUMN`): every existing row
+reads **null** in the new columns (unknown, never 0) until its day is rebuilt. New seconds fill
+them live; the open day's pre-deploy part is filled by that day's nightly `candles.rebuild --day D`
+(after midnight); older days only by a full rebuild. The data_api serves the new keys on
+`/api/candles` and `/ws/live` (null where not filled) and the CVD indicator gains an `anchor`
+param; `verification.candles`/`catalog` fail a day whose stored bars are still null. No config key,
+env var, compose service or bind mount changed.
+
+- [ ] On the VPS, pull this commit and rebuild/restart the collectors, the archive and the data_api:
+      `cd ~/nautilus_trader_fork/platform && make up` (or `docker compose up -d --build
+      bybit_collector hyperliquid_collector archive data_api`). Restart the collectors before (or
+      together with) the data_api: a data_api reading a not-yet-migrated file serves the new keys
+      as null, which is correct, but the collectors are what migrate.
+- [ ] Confirm the migration ran: `sqlite3 data/candles/candles_bybit.db "PRAGMA table_info(candles)"`
+      lists the ten columns after `seconds_observed`, and `.tables` shows `liquidations_applied` and
+      `liquidation_feed_since` (same for `candles_hyperliquid.db`). After the Bybit collector's
+      start `SELECT * FROM liquidation_feed_since` holds each Bybit linear id whose last day had a
+      liquidation (its startup catch-up records the start); until a row exists for an id, its live
+      bars' `liq_*` stay null, never 0 (audit D-160). Check the ledger shows no `collector.candle_store` line
+      since the restart (`GET /api/errors`); a `CandleOverflowError` there is a DATA-02 finding.
+- [ ] Fill the history: once the collectors run the new code, rebuild every closed day of each
+      venue (the open day is left to the nightly; one writer per instrument-day, so `--workers 1`
+      as the nightly runs it):
+      `docker compose exec archive python3 -m candles.rebuild --catalog /app/catalog --db /app/candles_dir/candles_bybit.db --venue BYBIT --workers 1`
+      then the same with `candles_hyperliquid.db` and `--venue HYPERLIQUID` (dYdX only if its
+      store is still served: `make up-dydx` deployments).
+- [ ] Verify: `sqlite3 data/candles/candles_bybit.db "SELECT COUNT(*) FROM candles WHERE buy_v IS
+      NULL AND seconds_observed > 0 AND t < strftime('%s','now','start of day') * 1000"` is 0 (and
+      for `candles_hyperliquid.db`); Bybit linear bars carry `liq_n` (0 or more) only where the
+      bar **starts at or after** that id's feed start (`SELECT since_ns FROM
+      liquidation_feed_since WHERE instrument_id = '<id>'`, which after the rebuild equals the
+      `MIN(ts_event)` of its `data/custom_liquidation/<id>/` files or an earlier live one) and
+      `liq_n IS NULL` on every bar starting before it -- the bar straddling it null at every width,
+      1m to 1D alike: `SELECT bar_seconds, COUNT(*) FROM candles WHERE instrument_id = '<id>' AND
+      t * 1000000 < <since_ns> AND liq_n IS NOT NULL GROUP BY bar_seconds` returns no row --
+      history archived before the Story 33.1 feed is unknown, never 0 (audit D-160) -- and every
+      Hyperliquid and spot bar `liq_n IS NULL`; `curl -s "localhost:9100/api/candles/BTCUSDT-LINEAR.BYBIT?before_ns=$(date +%s%N)&limit=3"`
+      shows the ten keys after `partial`; and the next nightly's `verify_day` keeps `candles` and
+      `catalog` at 0 failing for the rebuilt days.
+
+### 33-4-derivatives-and-liquidations-read-models-api-and-live-channel (commit: this story's)
+
+Every collector publishes a new Redis channel, `derivs:raw`: one JSON array per sample tick of its
+mark, index, funding and open-interest rows, values as exact text (`docs/DATA_DICTIONARY.md`
+§1.27); nothing is published for a tick without rows, so a spot-only collector stays silent. The
+data_api gains five routes, `/api/coin/{id}/funding|open-interest|mark-index|liquidations|liquidation-bars`
+(§2.16), and the `/ws/live` channels `derivs:{id}` and `liquidations:{id}`; `/catalog/chart-series`
+and `/api/indicator-series` are gone (no page called them). The ranking subscribes to `derivs:raw`
+and `liquidations:raw`, backfills 25 h of open interest and 1 h of liquidations once per
+instrument, and appends 17 keys to every `rankings:live` row (§3.3). `metrics.db` gains 16
+nullable REAL columns, added in place by the ranking's own `_migrate` on its first connection: no
+manual migration, and every pre-deploy row reads null in them, never 0. No config key, env var,
+compose service or bind mount changed.
+
+- [ ] On the VPS, pull this commit and rebuild/restart the collectors, the data_api and the
+      ranking: `cd ~/nautilus_trader_fork/platform && make up` (or `docker compose up -d --build
+      bybit_collector hyperliquid_collector data_api ranking_engine`; add `collector` only on a
+      `make up-dydx` deployment).
+- [ ] Confirm the live push: `redis-cli SUBSCRIBE derivs:raw` shows about one message per second
+      per collector (Bybit and Hyperliquid), each a JSON array of rows like
+      `{"instrument_id":"BTCUSDT-LINEAR.BYBIT","kind":"mark","t":...,"ts_init":...,"value":"..."}`
+      with `value` a quoted string, and `kind` `funding` rows carrying `interval` (seconds, e.g.
+      28800) and `next_funding_ns`. An `oi` row shows up for Bybit only every open-interest poll
+      (300 s).
+- [ ] Curl the five routes for a Bybit linear id and a spot id (`N=$(date +%s%N)`):
+      `for r in funding open-interest mark-index liquidations liquidation-bars; do curl -s
+      "localhost:9100/api/coin/BTCUSDT-LINEAR.BYBIT/$r?before_ns=$N&limit=3" | head -c 600; echo; done`
+      returns `200` pages with `"market":"perp"`, funding `rate` and `oi`/`mark`/`index` as
+      strings, `t` in ns on `funding`/`liquidations` and in ms on the bucketed routes, and
+      `price_kind":"bankruptcy"` on every liquidation. The same loop with `BTCUSDT-SPOT.BYBIT`
+      returns `{"has_more":false,"venue":"BYBIT","market":"spot",...,"items":[]}` on every route,
+      never a 404. On the collected Hyperliquid perp (`SOL-USD-PERP.HYPERLIQUID`) `liquidation-bars` rows carry
+      `null` `long_v`/`short_v`/`n`/`notional_units`, never 0.
+- [ ] Confirm the metrics migration ran: `sqlite3 data/metrics/metrics.db "PRAGMA
+      table_info(snapshots)"` lists `funding_rate` .. `range_position_24h` (16 columns) after
+      `volume24h`; a minute after the restart `sqlite3 data/metrics/metrics.db "SELECT
+      instrument_id, funding_rate, open_interest, oi_change_1h, relative_volume FROM snapshots
+      ORDER BY ts DESC LIMIT 5"` shows values for Bybit linear ids (`oi_change_1h` stays null for
+      the first hour, `relative_volume` until 2 h of traded seconds exist, spot ids null throughout).
+- [ ] Confirm the ranking rows: `curl -s localhost:9100/api/rankings | python3 -c "import json,sys;
+      r=json.load(sys.stdin)['items'][0]; print({k: r.get(k) for k in ('funding_rate','open_interest',
+      'basis_mi_bps','liq_long_1h','relative_volume','high_24h','rank')})"` prints the new keys
+      (null where the inputs are missing), with `rank` still the row's last key.
+- [ ] Check the ledger shows no `collector.derivs_publish`, `derivatives.read`,
+      `live_derivs.parse`, `live_candles.liquidation_listener`, `ranking_engine.derivs_entry`,
+      `ranking_engine.liquidation_entry` or `ranking_engine.derivs_backfill` line since the restart
+      (`GET /api/errors`, or `platform/data/errors/*.jsonl`); any one is a DATA-07 finding to
+      explain, not noise.
+- [ ] Optional, in the browser's devtools console on the web UI:
+      `w=new WebSocket(`ws://${location.host}/ws/live`);w.onmessage=e=>{const m=JSON.parse(e.data);if(m.channel?.startsWith('derivs:'))console.log(m)};w.onopen=()=>w.send(JSON.stringify({subscribe:'derivs:BTCUSDT-LINEAR.BYBIT'}))`
+      logs `derivs:BTCUSDT-LINEAR.BYBIT` frames about once a second, and only that id's.
+
+### 33-5-chart-panes-for-open-interest-funding-basis-and-liquidations-and-mark-index-overlay (commit: this story's)
+
+The chart gains a pinned **Derivatives** group (Open Interest, Funding, Basis and Liquidations
+panes, the Mark / Index overlay, liquidation markers) and a **Liquidation tape**; the History page
+gains OI, Funding and Liquidations 1h tiles. Backend, added fields only: `/liquidations` items gain
+`notional_units`/`notional_precision`, `/liquidation-bars` rows gain
+`long_notional_units`/`short_notional_units`, `derivs:{iid}` frames gain `annualised` (funding) and
+`basis_mi_bps` (mark/index), `liquidations:{iid}` frames gain `notional_units`/`notional_precision`,
+and `chart_layouts.toml` accepts an optional `[<id>.derivatives]` table (absent = every entry
+off; no file is rewritten). Only the `data_api` image changes (it carries the frontend build); no
+config key, env var, compose service, bind mount or migration.
+
+- [ ] On the VPS, pull this commit and rebuild/restart the data_api:
+      `cd ~/nautilus_trader_fork/platform && docker compose up -d --build data_api`.
+- [ ] Curl the added fields (`N=$(date +%s%N)`):
+      `curl -s "localhost:9100/api/coin/BTCUSDT-LINEAR.BYBIT/liquidation-bars?before_ns=$N&limit=3" | head -c 800`
+      shows `long_notional_units` and `short_notional_units` on every row (null exactly where
+      `notional_units` is), and
+      `curl -s "localhost:9100/api/coin/BTCUSDT-LINEAR.BYBIT/liquidations?before_ns=$N&limit=3" | head -c 800`
+      shows `notional_units` and `notional_precision` on every item.
+- [ ] In the browser, open the BTCUSDT linear chart, Indicators -> Derivatives, tick all five:
+      four panes appear under the chart (Open Interest, Funding, Basis, Liquidations) and two lines
+      on the price pane (mark, index); the Funding legend shows `rate`, `ann.` and a `next`
+      countdown that ticks every second; a liquidation shows as a circle on the price pane (zoom in
+      if the legend says `markers hidden: zoom in`) whose hover tooltip ends with `bankruptcy`.
+      Scroll back: the panes page back with the candles, with whitespace (never a joined line)
+      where the archive has a hole.
+- [ ] Reload the page: the five entries come back on, with any pane height you dragged
+      (`grep -A12 'BTCUSDT-LINEAR.BYBIT".derivatives' data/preferences/chart_layouts.toml` shows the
+      table). Open `BTCUSDT-SPOT.BYBIT`: the Derivatives group is disabled with `spot: no
+      derivatives`, the Liquidation tape button is disabled, and the browser's network tab shows no
+      request to the derivatives routes.
+- [ ] Toggle **Liquidation tape** in the top bar on the linear chart: the panel lists the newest
+      liquidations; on `SOL-USD-PERP.HYPERLIQUID` it reads `no liquidation feed for this instrument`.
+- [ ] Check the ledger shows no `derivatives.read` or `live_derivs.parse` line since the restart and
+      the ErrorBar no `useDerivativePages`/`useLiquidationEvents` console error: any one is a DATA-07
+      finding to explain, not noise.
+
+### 33-6-order-flow-indicators-from-the-stored-per-bar-aggregates (commit: this story's)
+
+The indicator picker gains seven order-flow entries read from the candle store's per-bar aggregates
+(`VolumeDelta`, `OrganicDelta`, `ForcedShare`, `TradeCount`, `AverageTradeSize`, `StoredVWAP`,
+`DepthWithinBps`), the Anchored VWAP drawing a `stored` source, the Volume pane a `colour by`
+setting, and CVD's `session` anchor is seeded from the store instead of restarting at the page
+(audit D-186). Backend, added fields only: every `GET /api/indicators/catalog` entry gains `units`,
+`chart_drawings.toml` accepts `source = "stored"` on an `anchored_vwap` item, and
+`chart_layouts.toml` an optional `volume_color_by` key (absent = `direction`; no file is
+rewritten). Only the `data_api` image changes (it carries the frontend build); no config key, env
+var, compose service, bind mount or migration.
+
+- [ ] On the VPS, pull this commit and rebuild/restart the data_api:
+      `cd ~/nautilus_trader_fork/platform && docker compose up -d --build data_api`.
+- [ ] Curl the catalog: `curl -s localhost:9100/api/indicators/catalog | python3 -c 'import json,sys; c=json.load(sys.stdin); print({k: c[k]["units"] for k in ("VolumeDelta","StoredVWAP","TradeCount","DepthWithinBps","CumulativeVolumeDelta")}, "AnchoredStoredVWAP" in c)'`
+      prints `{'VolumeDelta': {'value': 'size'}, 'StoredVWAP': {'value': 'price'}, 'TradeCount':
+      {'value': 'count', 'buys': 'count', 'sells': 'count'}, 'DepthWithinBps': {'bid': 'size',
+      'ask': 'size'}, 'CumulativeVolumeDelta': {'value': 'size'}} False` (the `False`: the
+      anchored entry is unlisted).
+- [ ] Curl one value page (`N=$(date +%s%N)`):
+      `curl -s "localhost:9100/api/coin/BTCUSDT-LINEAR.BYBIT/indicator-values?before_ns=$N&limit=3&bar_seconds=60&entries=%5B%7B%22name%22%3A%22StoredVWAP%22%2C%22params%22%3A%7B%22mode%22%3A%22session%22%7D%7D%2C%7B%22name%22%3A%22CumulativeVolumeDelta%22%2C%22params%22%3A%7B%22anchor%22%3A%22session%22%7D%7D%5D" | head -c 1200`
+      shows `errors: {}` and a number (not null) on each of the three rows for both series: the
+      1m store covers today's midnight, so both session prefixes are covered.
+- [ ] In the browser, on the BTCUSDT linear chart at 1m, 1h and 1D, add each of the seven entries
+      from Indicators: each draws on every loaded bar (Depth only on the last 7 days) and its
+      legend prints at the instrument's precision (VWAP at the price's decimals, sizes at the
+      size's, Forced share as a percentage). On `BTCUSDT-SPOT.BYBIT`, Organic delta and Forced
+      share are empty (no liquidation feed), never 0.
+- [ ] CVD with `anchor: session` on 1m: scroll back half a day and back again -- the level at a
+      given bar does not change with the scroll position (D-186's fix).
+- [ ] Add an Anchored VWAP drawing, set its source to `stored` (bands disabled), reload: the
+      source persists (`grep -B2 -A8 anchored_vwap data/preferences/chart_drawings.toml` shows
+      `source = "stored"`) and the line starts at the anchor bar. Set the Volume pane's gear ->
+      `colour by: delta`, reload: it persists (`volume_color_by = "delta"` in
+      `data/preferences/chart_layouts.toml`).
+- [ ] The Technicals tab offers the seven entries but not `AnchoredStoredVWAP`; a `VolumeDelta`
+      column fills for every ranked coin.
+- [ ] If a `DepthWithinBps` Technicals column is ever added at 1D/1W, watch the data_api's CPU and
+      memory (`docker stats --no-stream`) across two 90 s refreshes: each ranked coin reads up to 7
+      daily snapshot files' book columns per refresh (audit D-189's cost note).
+- [ ] Check the ledger shows no new `technicals.values` line since the restart and the ErrorBar no
+      console error: any one is a DATA-07 finding to explain, not noise.
+
+### 33-7-rankings-sorts-every-column-derivatives-flow-and-range-columns-saved-filter-presets (commit: this story's)
+
+The Rankings page gains ten columns (OI, OI Δ1h %, OI Δ24h %, Funding, Basis, Liq 1h, Liq L/S,
+Forced %, Rel vol, 24h range), a sort on every Performance header kept in the browser, and named
+filter presets saved server-side in `data/preferences/screener_filter_presets.toml` (no new mount:
+the preferences directory is already mounted). `ranking` publishes two added keys,
+`oi_change_1h_pct`/`oi_change_24h_pct` (appended after every existing one, AD-D12), and
+`metrics.db` gains the matching two nullable columns, added in place by `_migrate` on the ranking
+engine's first write -- no manual migration. The History page tiles `forced_share_1h` and
+`relative_volume`. No config key, env var or compose service changes.
+
+- [ ] On the VPS, pull this commit and rebuild/restart the two services:
+      `cd ~/nautilus_trader_fork/platform && docker compose up -d --build ranking_engine data_api`.
+- [ ] After one slow loop (60 s), check the published keys:
+      `curl -s localhost:9100/api/rankings | python3 -c 'import json,sys; r=json.load(sys.stdin)["items"]; print([(x["instrument_id"], x.get("oi_change_1h_pct"), x.get("oi_change_24h_pct")) for x in r[:5]])'`
+      prints both keys on every row: a number on a perp whose open interest reaches back 1 h
+      (24 h for the second), `None` on spot and on a perp with a shorter series.
+- [ ] Check the migration ran: `sqlite3 data/metrics/metrics.db "PRAGMA table_info(snapshots)" | tail -2`
+      lists `oi_change_1h_pct` and `oi_change_24h_pct` (REAL), and
+      `curl -s "localhost:9100/api/metrics/history/BTCUSDT-LINEAR.BYBIT?days=1" | python3 -c 'import json,sys; i=json.load(sys.stdin)["items"]; print(i[0].get("oi_change_1h_pct"), i[-1].get("oi_change_1h_pct"))'`
+      prints `None` for a row written before the deploy and a number for a row after it (once the
+      series reaches back 1 h).
+- [ ] Curl the presets route: `curl -s localhost:9100/api/rankings/filter-presets` prints
+      `{"presets":[]}` before any save; a malformed PUT
+      `curl -s -X PUT -H 'content-type: application/json' -d '{"presets":[{"name":"x","conditions":[{"field":"f","op":"!=","value":1}]}]}' localhost:9100/api/rankings/filter-presets`
+      prints a 422 detail starting `presets[0].conditions[0].op`, and no
+      `data/preferences/screener_filter_presets.toml` was written by it.
+- [ ] In the browser, on Rankings: the ten columns render after Vol24h; a Bybit spot row reads `—`
+      in OI, both OI Δ %, Funding, Basis, Liq 1h, Liq L/S and Forced % (Rel vol and 24h range
+      filled); a Hyperliquid row reads `—` in Liq 1h, Liq L/S and Forced %. Hover a Funding cell:
+      `annualised …% · next payment in HH:MM:SS`, counting down.
+- [ ] Click a Performance header three times: ascending, descending, rank order, with empty cells
+      last both ways. Sort Funding descending and reload: the sort is restored.
+- [ ] Add `Funding (fraction/interval) > 0.0001`, type a preset name, Save; open the page in a
+      second browser (or a private window): the preset is listed, and picking it applies the same
+      condition with its name as a chip; `cat data/preferences/screener_filter_presets.toml` shows
+      `v = 1` and the preset. Delete it from the page.
+- [ ] Open one coin's History page (`/history/BTCUSDT-LINEAR.BYBIT`): the Forced share 1h and
+      Relative volume tiles draw after the liquidation tile once the series has values.
+
+### 33-8-alert-conditions-beyond-a-price-cross-and-an-alerts-page-that-creates-and-edits (commit: this story's)
+
+An alert gains a `condition` table with 14 kinds (price crosses/above/below, % move, channel exit,
+indicator, trendline cross, funding, OI change, liquidation notional, forced share), appended to
+`alerts.toml` (AD-D12): an alert stored before this story reads as a `price_cross` at its `level`
+and the next save writes its `[alerts.condition]` table. `PUT /api/alerts/{id}` edits an alert; the
+Alerts page creates and edits; the engine also observes `LiveDerivsBus`. Only `data_api` changes
+(the frontend is built into its image). No config key, env var, mount or compose service changes.
+
+- [ ] Back up the alerts file first: `cp platform/data_api/alerts.toml ~/alerts.toml.pre-33-8`.
+- [ ] On the VPS, pull this commit and rebuild/restart the one service:
+      `cd ~/nautilus_trader_fork/platform && docker compose up -d --build data_api`.
+- [ ] Check the existing file loaded: `docker compose logs data_api | grep -c "is not a valid alert"`
+      prints `0` (a bad stored alert refuses start naming `alerts[i]`), and
+      `curl -s localhost:9100/api/alerts | python3 -c 'import json,sys; print([(a["id"], a["condition"], a["status"]) for a in json.load(sys.stdin)])'`
+      lists every alert the operator had, each with `{"kind": "price_cross", "level": <its level>}`
+      and its old status.
+- [ ] Edit one alert over the API (pick an `id` from the list above):
+      `curl -s -X PUT -H 'content-type: application/json' -d '{"condition":{"kind":"price_above","level":100000},"frequency":"once_per_bar","expires_at_ns":null,"template":"{{ticker}} {{condition}} at {{value}}","webhook_url":"","rearm":false}' localhost:9100/api/alerts/<id>`
+      returns the alert with `"condition_text":"close > 100000 on <bar>s bars"`;
+      the same PUT to `localhost:9100/api/alerts/nope` is `{"detail":"alert not found"}`, and with
+      `"condition":{"kind":"pct_move","pct":0,"bars":2}` a 422 whose detail starts `condition.pct`.
+      `cat platform/data_api/alerts.toml` shows the edited `[alerts.condition]`. Restore the
+      original condition with a second PUT (or recreate the alert) afterwards.
+- [ ] In the browser, on Alerts: create an `indicator` alert (RSI > 70 on 1H) without opening a
+      chart; the row shows its condition text and `active`. Edit it to `crosses up`; the row
+      updates. On a chart, right-click a horizontal line in Cursor mode: the drawing menu offers
+      "Add alert…", prefilled with a price cross at the line's price. Delete the test alerts.
+- [ ] After an hour, `curl -s localhost:9100/api/errors` shows no `alerting.engine.invalid`,
+      `alerting.engine.input` or `live_derivs.observer` site (an `alerting.engine.invalid` row is
+      expected only for an alert whose drawing or indicator was deleted, and that alert lists as
+      `invalid` with its reason).
+
+### 33-9-price-scale-modes-chart-types-and-a-compare-symbol-on-the-percent-scale (commit: this story's)
+
+The chart gains a price-scale mode (Normal, Log, Percent, Indexed to 100, Auto, Invert), seven chart
+types (Candles, Hollow, Bars, Line, Area, Baseline, Heikin Ashi) and up to three compare symbols on
+the percent scale with an optional Spread pane. `data_api` gains `GET /api/markets` (a new
+`markets:live` subscriber, `views/markets_bus.py`) and three optional layout keys, `chart_type`,
+`price_scale` and `compare`. Only `data_api` changes (the frontend is built into its image). No
+config key, env var, mount or compose service changes, and `chart_layouts.toml` needs no migration:
+a layout saved before this story loads with the defaults (`candles`, normal scale, no compares).
+
+- [ ] On the VPS, pull this commit and rebuild/restart the one service:
+      `cd ~/nautilus_trader_fork/platform && docker compose up -d --build data_api`.
+- [ ] Smoke-check the markets list:
+      `curl -s 'localhost:9100/api/markets?instrument_id=BTCUSDT-LINEAR.BYBIT' | python3 -c 'import json,sys; b=json.load(sys.stdin); print(b.get("detail") or (b["stale_venues"], b["items"][:3]))'`
+      prints `([], [...])` with the Hyperliquid `BTC-USD-PERP.HYPERLIQUID` row first and
+      `"same_asset": true`. Within a minute of a `ranking_engine` restart it prints the 503's
+      `No venue's market list is live` instead, which is expected: the list appears after the
+      engine's first 60 s volume cycle. `curl -s -o /dev/null -w '%{http_code}' 'localhost:9100/api/markets?instrument_id=BTCUSDT'`
+      prints `400`.
+- [ ] Check the stored layouts still load: `curl -s localhost:9100/api/coin/BTCUSDT-LINEAR.BYBIT/layout | python3 -c 'import json,sys; l=json.load(sys.stdin)["layout"]; print(l["chart_type"], l["price_scale"], l["compare"])'`
+      prints `candles {'mode': 'normal', 'auto_scale': True, 'invert': False} {'symbols': [], 'spread': False}`
+      for a coin saved before this story.
+- [ ] In the browser, on a Bybit BTC chart: pick Log, then Heikin Ashi (the legend reads
+      `Heikin Ashi (derived)`), add the compare `BTC-USD-PERP.HYPERLIQUID` (the scale switches to
+      Percent), turn Spread on (a bps pane), reload: all of it is restored. Remove the compare from
+      its legend row: the scale returns to Log. Reset the type and scale afterwards.
+- [ ] After an hour, `curl -s localhost:9100/api/errors` shows no `views.markets` site.
+
+### 33-10-drawing-tools-two-ray-vline-rectangle-channel-text-arrow-magnet-undo-lock (commit: this story's)
+
+The chart gains ten drawing kinds (ray, extended line, vertical line, parallel channel, Fibonacci
+extension, rectangle, text, arrow, price range, date range), a magnet, Shift angle snapping,
+undo/redo, per-drawing lock and hide, Hide all and Delete all. `chart_drawings.toml` gains the ten
+kinds and the optional `locked`/`hidden`/`line_width`/`line_style` keys, `chart_layouts.toml` the
+optional `drawings_hidden`. Only `data_api` changes (the validator, and the frontend built into its
+image). No config key, env var, mount or compose service changes, and neither file needs a
+migration: a file saved before this story loads unchanged.
+
+- [ ] On the VPS, pull this commit and rebuild/restart the one service:
+      `cd ~/nautilus_trader_fork/platform && docker compose up -d --build data_api`.
+- [ ] Check the stored drawings and layouts still load:
+      `curl -s localhost:9100/api/coin/BTCUSDT-LINEAR.BYBIT/drawings | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["items"]))'`
+      prints the coin's drawing count (no 4xx/5xx), and
+      `curl -s localhost:9100/api/coin/BTCUSDT-LINEAR.BYBIT/layout | python3 -c 'import json,sys; print(json.load(sys.stdin)["layout"]["drawings_hidden"])'`
+      prints `False` for a coin saved before this story.
+- [ ] In the browser, on a Bybit BTC chart, place one of each new tool from the rail: Ray, Ext,
+      VLine, Chan (three clicks), FibExt (three clicks), Rect, Text (type a note in its dialog),
+      Arrow, PRange and DRange. Reload: all ten are restored with their handles in Cursor mode.
+- [ ] Lock one (its menu then offers Unlock and it no longer drags), Hide one (the rail shows
+      `Show hidden (1)`; click it to bring it back), turn Hide all on and reload (the drawings stay
+      hidden and the drawing tools are off; turn it off again), and press Ctrl+Z / Ctrl+Shift+Z
+      after an edit (the drawing steps back and forward). Delete the test drawings (Del all, then
+      confirm).
+- [ ] After an hour, `curl -s localhost:9100/api/errors` shows no new `data_api` drawings or layout
+      error site, and the browser's error bar shows no `drawings.unknown_kind`.
+
+### 33-11-missing-indicators-candle-pattern-markers-and-dead-code-removed (commit: this story's)
+
+The picker gains nine indicators from the new `kernel/ta.py` (Supertrend, Parabolic SAR, ADX,
+Williams %R, Pivot Points, MFI, CMF, Awesome Oscillator, ZigZag), `GET /api/indicators/catalog`
+gains two keys per entry (`plot`, `note`), and a `CandlePattern` entry draws as markers on the
+candles by default (its Style section's Display select switches back to the pane; a view-only
+`style.value.display` key in `chart_indicators.toml`). Caller-less code was deleted
+(`liquidity_distance`, `replay_bucket_samples`, `resetErrorLog`). Only `data_api` changes (the
+picker, the catalog route and the frontend built into its image); `research` gains six
+`IndicatorSignalStrategy` signals, which reach the bots only through a fleet config that names
+them. No config key, env var, mount or compose service changes, and nothing is migrated: a saved
+indicator list loads unchanged, and a `CandlePattern` saved before this story draws as markers.
+
+- [ ] On the VPS, pull this commit and rebuild/restart the one service:
+      `cd ~/nautilus_trader_fork/platform && docker compose up -d --build data_api`.
+- [ ] Smoke-check the catalog:
+      `curl -s localhost:9100/api/indicators/catalog | python3 -c 'import json,sys; c=json.load(sys.stdin); print([n for n in ("Supertrend","ParabolicSAR","AverageDirectionalIndex","WilliamsPercentR","PivotPoints","MoneyFlowIndex","ChaikinMoneyFlow","AwesomeOscillator","ZigZag") if n not in c], c["ZigZag"]["plot"], c["ZigZag"]["note"], c["ParabolicSAR"]["plot"])'`
+      prints `[] {'value': 'swing'} repaints last leg {'value': 'points'}`.
+- [ ] In the browser, on a Bybit BTC 1h chart, add each of the nine from the picker with its
+      defaults: Supertrend, Parabolic SAR (dots), Pivot Points (stepped levels) and ZigZag (a line
+      through the swing points, legend title ending `· repaints last leg`) draw on the price pane,
+      the other five in their own panes; open one gear and change a param (the series redraws).
+      On a 1W chart, a Pivot Points entry with session `D` shows its legend error
+      `pivot session D is narrower than the 604800 s bar` while the other entries still draw.
+      Remove the test entries.
+- [ ] Add a `CandlePattern` (e.g. `ENGULFING`): its hits show as arrows on the candles (a `DOJI`
+      entry as circles) with the pattern's name on hover, and the price axis does not move; set its
+      Style > Display to Pane: the ±100 pane returns; hide it with the eye: the markers go. Remove
+      it afterwards.
+- [ ] After an hour, `curl -s localhost:9100/api/errors` shows no new `data_api` indicator site, and
+      the browser's error bar is empty.
+
+### 33-12-symbol-search-watchlist-fullscreen-shortcuts-time-zone-countdown (commit: this story's)
+
+The chart page gains a symbol search (Ctrl+K, `/` or the symbol button, also the Compare picker), a
+watchlist rail saved server-side in `data/preferences/chart_watchlist.toml` (`GET`/`PUT
+/api/watchlist`; no new mount: the preferences directory is already mounted, and the file is created
+on the first PUT), a fullscreen chart, keyboard shortcuts (`?` lists them), and four optional
+`chart_layouts.toml` keys (`time_zone`, `session_breaks`, `bar_countdown`, `last_price`).
+`GET /api/markets` items gain `market` and `volume24h` (added fields). Only `data_api` changes (the
+routes, the validator, and the frontend built into its image). No config key, env var, mount or
+compose service changes, and nothing is migrated: a layout saved before this story loads with the
+defaults (`utc`, no session breaks, countdown on, last-price line and label on).
+
+- [ ] On the VPS, pull this commit and rebuild/restart the one service (the frontend is built into
+      its image): `cd ~/nautilus_trader_fork/platform && docker compose up -d --build data_api`.
+- [ ] Curl the watchlist route: `curl -s localhost:9100/api/watchlist` prints `{"instruments":[]}`
+      before any pin; a malformed PUT
+      `curl -s -X PUT -H 'content-type: application/json' -d '{"instruments":["BTCUSDT"]}' localhost:9100/api/watchlist`
+      prints a 422 detail starting `instruments[0]`, and no `data/preferences/chart_watchlist.toml`
+      was written by it.
+      Then a valid round trip:
+      `curl -s -X PUT -H 'content-type: application/json' -d '{"instruments":["BTCUSDT-LINEAR.BYBIT"]}' localhost:9100/api/watchlist`
+      prints `{"instruments":["BTCUSDT-LINEAR.BYBIT"]}`, the GET prints the same, and
+      `cat data/preferences/chart_watchlist.toml` shows `v = 1` and the id; restore an empty list
+      with the same PUT and `{"instruments":[]}`.
+- [ ] Check the markets list and an old layout:
+      `curl -s localhost:9100/api/markets | python3 -c 'import json,sys; print([(i["instrument_id"], i["market"], i["volume24h"]) for i in json.load(sys.stdin)["items"][:4]])'`
+      prints each id with `perp`/`spot` and a volume (`None` for an id the rankings do not list), and
+      `curl -s localhost:9100/api/coin/BTCUSDT-LINEAR.BYBIT/layout | python3 -c 'import json,sys; l=json.load(sys.stdin)["layout"]; print(l["time_zone"], l["session_breaks"], l["bar_countdown"], l["last_price"])'`
+      prints `utc False True {'line': True, 'label': True}` for a coin saved before this story.
+- [ ] In the browser, on a Bybit BTC chart: Ctrl+K opens the search (venue, market and 24 h volume
+      per row; Enter navigates); pin the coin to the watchlist, then open the page in a second
+      browser (or a private window): the same pin shows with a live price and 24 h %;
+      `cat data/preferences/chart_watchlist.toml` shows `v = 1` and the id. Unpin it.
+- [ ] In Lines mode the Replay button is disabled with the tooltip "Replay is available on candle
+      charts", and Alt+R does nothing (Replay is a candle-chart feature, operator 2026-10-07).
+- [ ] Shift+F enters fullscreen with the top bar, tool rail, every open pane and the tape inside,
+      the panes scaled to fit the screen with their relative heights (no scrolling to reach the
+      time axis); resize the window and they refit; Esc leaves it with the old pane heights back,
+      and a reload does not restore it nor any scaled height. Set the time zone to Local, turn session
+      breaks on at 1h and the last-price line off, reload: all three are restored, and the bar
+      times on the axis moved by the local offset while the candles did not move.
+- [ ] After an hour, `curl -s localhost:9100/api/errors` shows no new `data_api` watchlist,
+      `views.markets` or layout site, and the browser's error bar is empty.
+
+### 33-13-liquidation-and-forced-flow-research-and-the-strategy-filter (commit: this story's)
+
+Research code only: the liquidations frame (`CatalogFrames.liquidations`), the liquidation study
+behind the new notebook `research/notebooks/09_liquidations`, `OFIStrategy`'s
+`forced_flow_filter`/`liquidation_cascade_mode` and the `seconds_liquidations` backtest kind. No
+service, schema, stored file, Redis channel, env var or compose key changes; no bot runs the new
+OFI modes. The research context ships in the `collector` and `live-paper` images, so the new code
+reaches the VPS with the next image rebuild and needs nothing else there.
+
+- [ ] Nothing to run beyond the next `make redeploy-all` (or any rebuild of the `collector` /
+      `live-paper` images): confirm afterwards that `live-paper`'s `liquidation_cascade` bot (if a
+      fleet holds one) still starts and logs its first cycle -- its notional rule moved into
+      `liquidation_cascade_strategy.definition_units` unchanged.
+
+### 33-14-liquidation-cascade-bot-shorts-into-a-long-liquidation-cascade-backtested-and-paper-run (commit: this story's)
+
+A new paper strategy, `liquidation_cascade` (`research/strategies/liquidation_cascade_strategy.py`,
+`bots/README.md`), trades Bybit LINEAR liquidation cascades. A fleet holding one gets a second data
+client in the `live-paper` node, `LIQUIDATIONS`, which subscribes the Bybit collector's
+`liquidations:raw` on the bots' own `REDIS_URL`; a fleet without one is unchanged (no new client,
+no new subscription). `live-paper` gains one env var, `BOT_SIGNAL_LOG_DIR` (empty by default: no
+signal log, as before), and `bot_tui` one read-only source mount. Nothing is migrated. Paper only:
+an exec bot still always runs the dummy strategy.
+
+- [ ] Check the feed covers the bot's instrument: `cd ~/nautilus_trader_fork/platform && grep -A1
+      '^instruments' capture/venues/bybit/config.toml` lists `BTCUSDT-LINEAR.BYBIT` (and no
+      `exclude` line names it). The collector publishes liquidations of its own instruments only, so
+      a cascade bot on an uncollected id would never see one -- and read as a quiet market.
+- [ ] On the VPS, add one cascade bot to `platform/bots/config.toml`: uncomment the commented
+      `[[bots]]` block at its end (`cascade-btc-01` on `BTCUSDT-LINEAR.BYBIT`, `strategy =
+      "liquidation_cascade"`, its `[bots.params]`), adjusting the params if wanted; a
+      non-Bybit-LINEAR id is refused at start, naming the bot. Keep or add `[venues.BYBIT]` for its
+      pool.
+- [ ] Decide on the signal log first: `BOT_SIGNAL_LOG_DIR` is process-wide, so it turns on the log
+      of **every** paper bot of the fleet, not only the cascade bot's. A `dummy` bot writes ~86 MB
+      per bot-day, unrotated (the repo's `bots/config.toml` holds 40 dYdX dummy bots: ~3.4 GB a
+      day), the cascade bot ~25-30 MB a day. Check `df -h ~/nautilus_trader_fork/platform/data`
+      first; either keep it on only for the parity window below (a few hours, then unset it and run
+      `make up-live-paper` again) or plan the pruning of `data/live_paper/bot_signals/*.jsonl`. To
+      turn it on: `cd ~/nautilus_trader_fork/platform && mkdir -p data/live_paper/bot_signals &&
+      sudo chown 1000:1000 data/live_paper/bot_signals` (the container runs as uid 1000), then set
+      `BOT_SIGNAL_LOG_DIR=/app/data/live_paper/bot_signals` in `platform/.env` (it lands under
+      `./data/live_paper`, already mounted).
+- [ ] Record the deploy time, then rebuild and restart the paper node (`make up-live-paper` builds
+      the image itself: no separate `docker compose build live-paper` first): `cd
+      ~/nautilus_trader_fork/platform && date -u +%s%N > /tmp/cascade_deploy_ns && make
+      up-live-paper`. Rebuild the TUI image for the `v` key's new source mount with `docker compose
+      --profile tui build bot_tui` -- not `make tui`, which also runs the TUI interactively. The
+      `bybit_collector` must be running: it is the feed.
+- [ ] Check the start: `docker logs dydx-live-paper 2>&1 | grep -E "LIQUIDATIONS|liquidations:raw"`
+      shows the `LIQUIDATIONS` data client registered and connected and `Subscribed
+      liquidations:raw`. Then the ledger lines since this deploy only (older lines are earlier
+      runs'), which must print nothing: any `bots.liquidation_feed.connection`/`.entry`/`.subscribe`
+      or `research.liquidation_cascade.unscalable_row` line is a DATA-07 finding, not noise.
+      ```bash
+      awk -v s="$(cat /tmp/cascade_deploy_ns)" -F'"ts_ns":' \
+        '{split($2, a, ","); if (a[1] + 0 > s + 0) print}' data/errors/live-paper.jsonl \
+        | grep -E 'bots\.liquidation_feed|research\.liquidation'
+      ```
+- [ ] Check `bots:status`: `docker exec dydx-redis redis-cli SUBSCRIBE bots:status` shows
+      `cascade-btc-01` with `strategy` `LiquidationCascadeStrategy`, running and not `data_stale`
+      (its quotes keep it fresh; a dropped liquidation feed, or a half-open one that answers no PING
+      within 60 s, makes it read stale 30 s later, never a quiet market), and the `bot_tui` `v` key
+      shows its source. For the first `baseline_s` (default 1 h) after this and every later start
+      the detector warms up: every record's decision is `not_ready` and no entry is taken.
+      Expected, not a fault.
+- [ ] Know what this check cannot see: a stopped or crashed `bybit_collector` with Redis up leaves
+      `liquidations:raw` silent, which the bot reads as a quiet market (it stays fresh and never
+      enters). The alarm is the collector's own: `docker ps --filter name=bybit-collector` (Up, not
+      Restarting), its Dozzle log, its `process_start` lines in `data/errors/bybit_collector.jsonl`,
+      and `liquidations_unrecoverable` windows in `data/coverage/bybit.jsonl` (bot_tui's collector
+      pane marks it stale only after an hour without `collector:status`).
+- [ ] Check the signal log (if turned on): `grep '"kind":"start"'
+      data/live_paper/bot_signals/cascade-btc-01.jsonl | tail -1` is this run's `start` record, with
+      `"strategy":"liquidation_cascade"` and every config field; `grep '"kind":"tick"'
+      data/live_paper/bot_signals/cascade-btc-01.jsonl | tail -3` shows `ts_ns` on whole seconds
+      (ending in `000000000`; `liquidation` records carry the row's receipt time instead, and a
+      `venue_event_id`, whenever `docker exec dydx-redis redis-cli SUBSCRIBE liquidations:raw` shows
+      a `BTCUSDT-LINEAR.BYBIT` row).
+- [ ] After a few hours, run the parity check on the VPS from `~/nautilus_trader_fork/platform`
+      (the bots image has no `verification` package and the collector images no `bots`, so the
+      replay runs in the `live-paper` image and the comparator in the `archive` one; on a box with
+      this repo's Python environment, the dev box as in 31-9, the same two module commands run from
+      `platform/` directly). Take a copy of the cascade bot's log alone: `bots.signal_replay
+      --strategy liquidation_cascade` replays only cascade bots, and `verification.bot_parity
+      --venue BYBIT` judges every Bybit log of its live directory, so a Bybit dummy bot's log beside
+      it would be refused for want of a replay (to judge those too, replay without `--strategy`).
+      ```bash
+      rm -rf /tmp/replay /tmp/live-cascade && mkdir /tmp/replay /tmp/live-cascade
+      cp data/live_paper/bot_signals/cascade-btc-01.jsonl /tmp/live-cascade/
+      sudo chown -R 1000:1000 /tmp/replay /tmp/live-cascade
+      sleep 180  # the collector's 60 s flush past the copied log's last record
+      docker compose --profile live-paper run --rm --no-deps \
+        -v "$PWD/data/catalog:/app/catalog:ro" -v /tmp/live-cascade:/app/live:ro \
+        -v /tmp/replay:/app/replay live-paper \
+        python3 -m bots.signal_replay --config bots/config.toml --catalog /app/catalog \
+        --live-log /app/live --out /app/replay --strategy liquidation_cascade
+      docker compose run --rm --no-deps -v "$PWD/data/coverage:/app/coverage:ro" \
+        -v /tmp/live-cascade:/app/live:ro -v /tmp/replay:/app/replay:ro archive \
+        python3 -m verification.bot_parity --venue BYBIT --catalog /app/catalog \
+        --live-dir /app/live --replay-dir /app/replay
+      ```
+      Exit 0 is nothing `unexplained`. Record here the `late_arrival` and `quote_cadence` counts
+      (both explained: a row the bridge delivered after the 1 s timer passed it, and a decision over
+      agreeing indicators that the replay's one quote a second cannot reproduce) and any
+      `live_only`/`replay_only` liquidation (a row the bridge missed while down, audit D-174/D-176).
+- [ ] Rollback, if wanted: comment the `[[bots]]` block out again, remove `BOT_SIGNAL_LOG_DIR` from
+      `platform/.env` (unless the dummy logs are wanted), and `make up-live-paper`; the node then
+      gets no `LIQUIDATIONS` client. Archive or remove
+      `data/live_paper/bot_signals/cascade-btc-01.jsonl` (a later bot of the same id would append
+      its segments to it).
+
 ### DW-182 archive-gap markers decode under the strict reader (Story 23.2; commit: 3f8328d048)
 
 Story 23.2 made `kernel.archive_markers.decode` refuse an inverted span (`from_ns > to_ns`), and the

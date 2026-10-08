@@ -29,6 +29,7 @@ from types import MappingProxyType
 from typing import Protocol
 
 import pandas as pd
+from kernel.liquidation import has_liquidation_feed
 from kernel.venues import venue_of
 
 from nautilus_trader.core.datetime import dt_to_unix_nanos
@@ -40,6 +41,12 @@ from research.domain.trades import TradeLedger
 
 # `bars:<step>-<aggregation>`, a Nautilus bar spec without the price type (`bars:1-MINUTE`).
 _BARS_DATA = re.compile(r"bars:[1-9][0-9]*-(MILLISECOND|SECOND|MINUTE|HOUR|DAY|WEEK|MONTH)")
+# The tick data kinds (`RunSpec.data`), besides `bars:<spec>`. `seconds_liquidations` (Story
+# 33.13) is `seconds` plus the archived liquidation rows, for a snapshot strategy that also reads
+# the forced flow (`OFIStrategy`'s `forced_flow_filter` and `liquidation_cascade_mode`).
+DATA_KINDS = ("seconds", "trades", "liquidations", "seconds_liquidations")
+# The kinds that stream the archived `Liquidation` rows: their ids need a liquidation feed.
+LIQUIDATION_KINDS = ("liquidations", "seconds_liquidations")
 # Keys the runner sets on every strategy config itself.
 RESERVED_PARAMS = frozenset({"instrument_id", "order_id_tag", "bar_type"})
 # The fixed time from a strategy's decision to the simulated exchange receiving the command, for
@@ -127,8 +134,11 @@ class RunSpec:
     Invariant: at least one instrument, no id twice, all on one venue (Known limit: one simulated venue per
     run -- upgrade path: one `BacktestVenueConfig` per venue with its own starting balance); a
     `data` kind of `"seconds"` (`DydxSecondSnapshot` + quotes derived from their top of book),
-    `"trades"` (`TradeTick`) or `"bars:<step>-<aggregation>"` (`TradeTick` aggregated by Nautilus
-    into `<iid>-<step>-<aggregation>-LAST-INTERNAL` bars, injected as the strategy's `bar_type`);
+    `"trades"` (`TradeTick`), `"liquidations"` (the `seconds` kind's derived quotes plus the
+    archived `kernel.liquidation.Liquidation` rows, only for ids with `has_liquidation_feed`, Story
+    33.14), `"seconds_liquidations"` (`seconds` plus those rows, same ids, Story 33.13) or
+    `"bars:<step>-<aggregation>"` (`TradeTick` aggregated by Nautilus into
+    `<iid>-<step>-<aggregation>-LAST-INTERNAL` bars, injected as the strategy's `bar_type`);
     a positive int starting balance; a non-negative int `latency_ms`; a window whose end is after
     its start; `params` never sets a key the runner owns (`RESERVED_PARAMS`).
     Execution models (all optional, None = the venue's defaults): `fill_model`
@@ -180,10 +190,7 @@ class RunSpec:
             raise ValueError(
                 f"one venue per run (Known limit), got {sorted(venues)} for {self.instrument_ids}"
             )
-        if self.data not in ("seconds", "trades") and not _BARS_DATA.fullmatch(self.data):
-            raise ValueError(
-                f"data must be 'seconds', 'trades' or 'bars:<step>-<aggregation>', got {self.data!r}"
-            )
+        _check_data(self.data, self.instrument_ids)
         balance = self.starting_balance
         if isinstance(balance, bool) or not isinstance(balance, int) or balance <= 0:
             raise ValueError(f"starting_balance must be a positive int, got {balance!r}")
@@ -209,6 +216,23 @@ class RunSpec:
     def bar_spec(self) -> str | None:
         """`1-MINUTE` for `data="bars:1-MINUTE"`, None for the tick kinds."""
         return self.data.removeprefix("bars:") if self.data.startswith("bars:") else None
+
+
+def _check_data(data: str, instrument_ids: Sequence[str]) -> None:
+    """
+    Refuse an unknown data kind, and a `LIQUIDATION_KINDS` run on an id with no liquidation feed.
+    """
+    if data not in DATA_KINDS and not _BARS_DATA.fullmatch(data):
+        raise ValueError(
+            f"data must be one of {DATA_KINDS} or 'bars:<step>-<aggregation>', got {data!r}"
+        )
+    if data not in LIQUIDATION_KINDS:
+        return
+    without = [iid for iid in instrument_ids if not has_liquidation_feed(iid)]
+    if without:
+        raise ValueError(
+            f"data={data!r} needs ids with a liquidation feed (Bybit LINEAR), got {without}"
+        )
 
 
 def check_params(params: Mapping[str, object]) -> None:
@@ -378,6 +402,13 @@ class MarketFrames(Protocol):
         """
         ...
 
+    def definition_precisions(self, instrument_id: str) -> tuple[int, int] | None:
+        """
+        Return the catalog's instrument definition's `(price_precision, size_precision)`, or None
+        without a definition (Story 33.13): the scale an exact sum over the instrument's rows takes.
+        """
+        ...
+
     def funding(self, instrument_id: str, *, start: str | int, end: str | int) -> pd.DataFrame: ...
 
     def open_interest(
@@ -387,6 +418,15 @@ class MarketFrames(Protocol):
     def mark_index(
         self, instrument_id: str, *, start: str | int, end: str | int
     ) -> pd.DataFrame: ...
+
+    def liquidations(self, instrument_id: str, *, start: str | int, end: str | int) -> pd.DataFrame:
+        """
+        Return the instrument's archived liquidations of `[start, end)` (Story 33.13,
+        `frames.LIQUIDATIONS_COLUMNS`): the stored integers with their precisions, `size`, `price`
+        and `notional` decoded once, and `price_kind` (always `"bankruptcy"`); read one UTC day at
+        a time. An id without a liquidation feed is the empty frame with every column, never rows.
+        """
+        ...
 
     def objects(
         self, data_cls: type, instrument_id: str, *, start: str | int, end: str | int

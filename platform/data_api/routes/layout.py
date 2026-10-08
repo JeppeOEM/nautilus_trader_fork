@@ -100,11 +100,27 @@ def _file_errors() -> Iterator[None]:
         ) from exc
 
 
-def _template(layouts: preferences.ChartLayouts) -> tuple[dict[str, Any], list[Any]]:
-    """Return the `[default]` layout and indicator list, or the built-in layout and none."""
+def _template(
+    layouts: preferences.ChartLayouts, instrument_id: str, *, drawings_hidden: bool = False
+) -> tuple[dict[str, Any], list[Any]]:
+    """
+    Return the `[default]` layout and indicator list, or the built-in layout and none, as a copy
+    for `instrument_id`: a template compare of that coin itself is dropped from the copy (the
+    template keeps it), so a seed or reset never stores a layout the coin's own PUT refuses.
+
+    Story 33.10: `drawings_hidden` is a per-coin view flag about the coin's own drawings, never the
+    template's: the copy carries the caller's value (off on a first open, the coin's own on a reset),
+    whatever a hand-edited `[default]` holds.
+    """
     if layouts.default is None:
-        return copy.deepcopy(preferences.BUILTIN_DEFAULT_LAYOUT), []
-    return copy.deepcopy(layouts.default), list(layouts.default_indicators)
+        layout = copy.deepcopy(preferences.BUILTIN_DEFAULT_LAYOUT)
+        layout["drawings_hidden"] = drawings_hidden
+        return layout, []
+    layout = copy.deepcopy(layouts.default)
+    compare = layout["compare"]
+    compare["symbols"] = [iid for iid in compare["symbols"] if iid != instrument_id]
+    layout["drawings_hidden"] = drawings_hidden
+    return layout, list(layouts.default_indicators)
 
 
 def _write_template_indicators(
@@ -154,7 +170,7 @@ def get_coin_layout(instrument_id: str) -> dict[str, Any]:
         layouts = preferences.load_chart_layouts(_path())
         if instrument_id in layouts.layouts:  # seeded by a concurrent first GET meanwhile
             return {"layout": layouts.layouts[instrument_id], "seeded": False}
-        layout, entries = _template(layouts)
+        layout, entries = _template(layouts, instrument_id)
         _write_template_indicators(instrument_id, entries, keep_existing=True)  # then the layout
         layouts.layouts[instrument_id] = layout
         preferences.save_chart_layouts(layouts, _path())
@@ -186,6 +202,13 @@ async def put_coin_layout(instrument_id: str, request: Request) -> dict[str, Any
         layout = preferences.validate_layout(payload["layout"])
     except preferences.LayoutError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if instrument_id in layout["compare"]["symbols"]:
+        # A coin compared with itself is a client bug, refused (DATA-07). Only the coin's own PUT
+        # knows its id: the `[default]` template keeps any id, and `_template` drops it from the
+        # copy a seed or reset stores.
+        raise HTTPException(
+            status_code=422, detail="compare.symbols: must not contain the coin's own instrument id"
+        )
     if await run_in_threadpool(_stored_layout, instrument_id) is None:
         await run_in_threadpool(_require_definition, instrument_id)
     await run_in_threadpool(_store_layout, instrument_id, layout)
@@ -213,6 +236,8 @@ def save_coin_layout_as_default(instrument_id: str) -> dict[str, Any]:
                 status_code=422, detail=f"the coin's indicators cannot be a default: {exc.detail}"
             ) from exc
         layouts.default_indicators = entries
+        # Story 33.10: Hide all is this coin's view of its own drawings, never a default.
+        layouts.default["drawings_hidden"] = False
         preferences.save_chart_layouts(layouts, _path())
         return {"default": layouts.default}
 
@@ -225,7 +250,9 @@ def reset_coin_layout_to_default(instrument_id: str) -> dict[str, Any]:
         _require_definition(instrument_id)
     with indicators_routes.PREFERENCES_LOCK, _file_errors():
         layouts = preferences.load_chart_layouts(_path())
-        layout, entries = _template(layouts)
+        # The coin keeps its own Hide all, as it keeps its drawings.
+        own = layouts.layouts.get(instrument_id, {}).get("drawings_hidden", False)
+        layout, entries = _template(layouts, instrument_id, drawings_hidden=own)
         _write_template_indicators(instrument_id, entries)
         layouts.layouts[instrument_id] = layout
         preferences.save_chart_layouts(layouts, _path())

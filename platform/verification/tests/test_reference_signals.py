@@ -15,7 +15,8 @@
 """
 The per-snapshot and per-bar derived signals against the independent reference (Story 31.3,
 `docs/DATA_DICTIONARY.md` §2.13): the two decoders, `kernel.indicators`, the chart's Lines mode
-and per-bar replay (`views.chart_series`) and the one seconds -> bars fold -- each on seeded
+(`views.chart_series`; its per-bar OFI/OBI replay, whose only callers were tests, was deleted in
+Story 33.11) and the one seconds -> bars fold -- each on seeded
 generators, on the committed real soak rows and on hand-computed golden cases, each with a planted
 defect the comparison must catch.
 
@@ -29,6 +30,7 @@ production code it compares, the reference (`verification.domain`) never does.
 """
 
 from collections.abc import Callable
+from dataclasses import replace
 from decimal import Decimal
 from itertools import pairwise
 from typing import Any
@@ -36,6 +38,7 @@ from typing import Any
 import pytest
 from candles.domain.candle import TIMEFRAMES
 from candles.domain.fold import BAR_SECONDS
+from candles.domain.fold import FoldedBucket
 from candles.domain.fold import fold_rows
 from kernel import indicators as kernel
 from kernel.indicators import OFI_GAP_NS
@@ -44,6 +47,7 @@ from kernel.indicators import MultiLevelOFI
 from kernel.second_snapshot import DydxSecondSnapshot
 from views import chart_series
 
+from verification.domain import liquidation_check
 from verification.domain import reference_signals as ref
 from verification.domain.reference_signals import RefBook
 from verification.domain.signal_compare import FAILING
@@ -56,7 +60,6 @@ from verification.tests.signal_cases import FIXTURE_IDS
 from verification.tests.signal_cases import BookCase
 from verification.tests.signal_cases import book_series
 from verification.tests.signal_cases import both
-from verification.tests.signal_cases import carried
 from verification.tests.signal_cases import load_fixture
 from verification.tests.signal_cases import pinned_zero
 from verification.tests.signal_cases import seeded
@@ -339,7 +342,7 @@ def test_depth_within_bps_matches_the_reference_nan_beyond_the_stored_depth() ->
     assert tally.count("depth_within_bps", Agreement.BOTH_UNDEFINED) > 0
 
 
-# --- §2.7 views: Lines mode and the per-bar replay ---------------------------------------------
+# --- §2.7 views: Lines mode ---------------------------------------------
 
 
 def test_price_series_rows_match_the_reference_mid_micro_and_cvd_weighted_price() -> None:
@@ -356,41 +359,6 @@ def test_price_series_rows_match_the_reference_mid_micro_and_cvd_weighted_price(
     assert tally.count("lines.micro", Agreement.BOTH_UNDEFINED) > 0  # no mid stands in
 
 
-def _ref_bars(books: list[RefBook], bar: int) -> dict[int, dict[str, Any]]:
-    ordered = sorted(books, key=lambda b: b.ts_event)
-    ofi = ref.rolling_ofi(ordered, 10, 50, False, OFI_GAP_NS)
-    obi = carried([ref.obi(b, 10) for b in ordered])
-    bars: dict[int, dict[str, Any]] = {}
-    for i, book in enumerate(ordered):
-        values = {"ofi": ofi[i], "obi": obi[i], "micro": ref.microprice(book)}
-        bars[ref.bucket_start(book.ts_event // 1_000_000, bar)] = {**values, "book": book}
-    return bars
-
-
-def _compare_bar(tally: Tally, got: dict[str, object], want: dict[str, object]) -> None:
-    book = want["book"]
-    assert isinstance(book, RefBook)
-    s, p = book.size_precision, book.price_precision
-    tally.record("replay.ofi", at_places(got["ofi"], want["ofi"], s))  # type: ignore[arg-type]
-    tally.record("replay.obi", relative(got["obi"], want["obi"]))  # type: ignore[arg-type]
-    tally.record("replay.microprice", relative(got["microprice"], want["micro"]))  # type: ignore[arg-type]
-    tally.record("replay.spread", at_places(got["spread"], ref.spread(book), p))  # type: ignore[arg-type]
-
-
-def test_the_per_bar_replay_matches_the_reference_ofi_obi_per_bucket() -> None:
-    tally = Tally()
-    for _, rows in _inputs():
-        prods, books = both(rows)
-        for bar in (1, 60, 300, 604_800):
-            got = chart_series.replay_bucket_samples(prods, bar)
-            want = _ref_bars(books, bar)
-            tally.record("replay.buckets", equal(sorted(got), sorted(want)))
-            # A bucket on one side only is already DIFFERENT above; the rest compare value by value.
-            for key in sorted(want.keys() & got.keys()):
-                _compare_bar(tally, got[key], want[key])
-    _assert_agrees(tally)
-
-
 # --- §2.5 candles -----------------------------------------------------------------------------
 
 
@@ -402,17 +370,19 @@ def _candle_rows() -> list[tuple[str, list[dict[str, Any]]]]:
     return sparse + _inputs()
 
 
-def _compare_candle(tally: Tally, got: list, want: ref.RefCandle, p: int, s: int) -> None:
-    o, h, low, c, v, n = got
+def _compare_candle(tally: Tally, got: FoldedBucket, want: ref.RefCandle, p: int, s: int) -> None:
     for name, value, expected in (
-        ("o", o, want.open),
-        ("h", h, want.high),
-        ("l", low, want.low),
-        ("c", c, want.close),
+        ("o", got.o, want.open),
+        ("h", got.h, want.high),
+        ("l", got.l, want.low),
+        ("c", got.c, want.close),
     ):
         tally.record(f"candle.{name}", at_places(value, expected, p))
-    tally.record("candle.v", at_places(v, want.volume, s))
-    tally.record("candle.seconds_observed", equal(n, want.seconds_observed))
+    tally.record("candle.v", at_places(got.v, want.volume, s))
+    tally.record("candle.seconds_observed", equal(got.seconds_observed, want.seconds_observed))
+    # §2.15 (Story 33.3): the integer order-flow columns, exactly, units and precisions alike.
+    for name in ref.AGGREGATE_FIELDS:
+        tally.record(f"candle.{name}", equal(getattr(got, name), getattr(want, name)))
 
 
 def _fold_tally(fold: Callable[[list[DydxSecondSnapshot], int], dict]) -> Tally:
@@ -448,12 +418,25 @@ def _first_close_fold(prods: list[DydxSecondSnapshot], width: int) -> dict:
         t = ref.bucket_start(prod.ts_event // 1_000_000, width)
         if prod.close_price is not None:
             firsts.setdefault(t, prod.close_price)
-    return {t: [*values[:3], firsts.get(t), *values[4:]] for t, values in folded.items()}
+    return {t: replace(bucket, c=firsts.get(t)) for t, bucket in folded.items()}
 
 
 def test_planted_fold_taking_the_first_close_is_caught() -> None:
     tally = _fold_tally(_first_close_fold)
     assert tally.count("candle.c", Agreement.DIFFERENT) > 0
+
+
+def _buy_count_off_by_one_fold(prods: list[DydxSecondSnapshot], width: int) -> dict:
+    """Fold with a planted §2.15 defect: every traded bucket counts one buy trade too many."""
+    return {
+        t: replace(bucket, buy_n=bucket.buy_n + 1) if bucket.o is not None else bucket
+        for t, bucket in _production_fold(prods, width).items()
+    }
+
+
+def test_planted_order_flow_defect_is_caught() -> None:
+    tally = _fold_tally(_buy_count_off_by_one_fold)
+    assert tally.count("candle.buy_n", Agreement.DIFFERENT) > 0
 
 
 # --- golden cases: hand-computed values ------------------------------------------------------
@@ -562,3 +545,49 @@ def test_the_compare_rules_judge_infinity_and_read_a_float_reference_as_written(
     assert at_places(float("-inf"), Decimal(1), 0) is Agreement.DIFFERENT
     assert relative(0.1, 0.1) is Agreement.EXACT
     assert at_places(0.30000000000000004, 0.3, 1) is Agreement.FLOAT_NOISE
+
+
+def _ref_second(s: int) -> ref.RefBook:
+    """Return a traded second `s`: buys 0.002 (2 units at precision 3) at a close of 100.0."""
+    price = Decimal("100.0")
+    return ref.RefBook(
+        s * 1_000_000_000, 1, 3, (), (), (), (), Decimal("0.002"), Decimal(0), 1, 0,
+        price, price, price, price,
+    )  # fmt: skip
+
+
+def test_buckets_before_the_known_start_fold_null_and_from_it_known() -> None:
+    """
+    §2.15 (audit D-160, review loop 2's rule): the feed starts at 125 s, the first archived
+    liquidation (4 units LONG). Minute 0 reads None; minute 2 [120, 180 s) starts before the start
+    it holds, so it is None too and its liquidation makes no count; minute 3 is a known 0; the
+    hour straddles the start: None.
+    """
+    liquidation = liquidation_check.StoredLiquidation("first", "long", 4, 3, 125 * 1_000_000_000)
+    known = ref.KnownLiquidations((liquidation,), 125 * 1_000_000_000)
+    folded = ref.fold_candles([_ref_second(s) for s in (10, 130, 190)], 60, known)
+    assert {t: (c.liq_long_v, c.liq_n) for t, c in sorted(folded.items())} == {
+        0: (None, None),
+        120_000: (None, None),
+        180_000: (0, 0),
+    }
+    assert ref.fold_candles([_ref_second(10)], 3600, known)[0].liq_n is None
+    assert folded[0].buy_v == 2  # the flow is known throughout
+
+
+def test_a_row_older_than_the_known_bound_moves_it_and_its_bucket_counts() -> None:
+    """Bound 125 s, an archived liquidation at 120 s: the start is 120 s, minute 2 counts it."""
+    liquidation = liquidation_check.StoredLiquidation("early", "short", 6, 3, 120 * 1_000_000_000)
+    known = ref.KnownLiquidations((liquidation,), 125 * 1_000_000_000)
+    folded = ref.fold_candles([_ref_second(130)], 60, known)
+    assert (folded[120_000].liq_short_v, folded[120_000].liq_n) == (6, 1)
+
+
+def test_disagreeing_copies_of_one_event_are_reported_never_resolved() -> None:
+    first = liquidation_check.StoredLiquidation("dup", "long", 4, 3, 120 * 1_000_000_000)
+    other = liquidation_check.StoredLiquidation("dup", "long", 5, 3, 120 * 1_000_000_000)
+    known = ref.KnownLiquidations((first, first, other), 120 * 1_000_000_000)
+    with pytest.raises(ValueError, match="dup"):
+        ref.fold_candles([_ref_second(130)], 60, known)
+    identical = ref.KnownLiquidations((first, first), 120 * 1_000_000_000)
+    assert ref.fold_candles([_ref_second(130)], 60, identical)[120_000].liq_n == 1

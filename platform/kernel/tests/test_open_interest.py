@@ -17,6 +17,9 @@
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
+from kernel.catalog_files import query_open_interest
 from kernel.open_interest import OpenInterest
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.identifiers import InstrumentId
@@ -49,3 +52,43 @@ def test_from_pyo3_maps_real_hyperliquid_object() -> None:
         7,
         7,
     )
+
+
+def _oi(value: str, ts_event: int, ts_init: int) -> OpenInterest:
+    return OpenInterest(InstrumentId.from_str(_IIDS[1]), Decimal(value), ts_event, ts_init)
+
+
+def test_query_open_interest_reads_the_inclusive_window_sorted(tmp_path: Path) -> None:
+    catalog = ParquetDataCatalog(str(tmp_path))
+    catalog.write_data([_oi("120", 10, 11), _oi("90", 20, 21)])
+    catalog.write_data([_oi("100", 30, 31), _oi("80", 40, 41)])
+    rows = query_open_interest(str(tmp_path), _IIDS[1], 10, 30)
+    assert [(r.ts_event, r.open_interest) for r in rows] == [
+        (10, Decimal(120)),
+        (20, Decimal(90)),
+        (30, Decimal(100)),
+    ]
+
+
+def test_query_open_interest_keeps_one_copy_of_a_row_stored_twice(tmp_path: Path) -> None:
+    """A minute file and its consolidated day file both hold the row (before the cleanup)."""
+    catalog = ParquetDataCatalog(str(tmp_path))
+    catalog.write_data([_oi("100", 10, 11)])
+    catalog.write_data([_oi("100", 10, 11), _oi("110", 12, 13)], skip_disjoint_check=True)
+    rows = query_open_interest(str(tmp_path), _IIDS[1], 0, 100)
+    assert [(r.ts_event, r.open_interest) for r in rows] == [
+        (10, Decimal(100)),
+        (12, Decimal(110)),
+    ]
+
+
+def test_query_open_interest_refuses_two_copies_that_disagree(tmp_path: Path) -> None:
+    catalog = ParquetDataCatalog(str(tmp_path))
+    catalog.write_data([_oi("100", 10, 11)])
+    catalog.write_data([_oi("101", 10, 11), _oi("110", 12, 13)], skip_disjoint_check=True)
+    with pytest.raises(ValueError, match="stored twice"):
+        query_open_interest(str(tmp_path), _IIDS[1], 0, 100)
+
+
+def test_query_open_interest_of_an_id_without_rows_is_empty(tmp_path: Path) -> None:
+    assert query_open_interest(str(tmp_path), "BTCUSDT-SPOT.BYBIT", 0, 100) == []

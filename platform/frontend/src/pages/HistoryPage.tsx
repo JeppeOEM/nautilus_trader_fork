@@ -23,6 +23,15 @@ const METRIC_COLUMNS: { key: MetricColumnKey; label: string }[] = [
   { key: "microprice", label: "Microprice" },
   { key: "spread", label: "Spread" },
   { key: "volume24h", label: "Volume 24h" },
+  // Story 33.5: the derivatives ranking fields `ranking` stores (Story 33.4, DATA_DICTIONARY §3.3),
+  // plotted as stored; the label names the unit (the chart's Funding legend prints the same rate as a
+  // percent). A spot or no-feed instrument's column is all null and skipped like any other.
+  { key: "open_interest", label: "Open interest (venue units)" },
+  { key: "funding_rate", label: "Funding rate (fraction per interval)" },
+  { key: "liq_notional_1h", label: "Liquidations 1h (quote notional)" },
+  // Story 33.7: the flow fields the Rankings page shows as Forced % and Rel vol, plotted as stored.
+  { key: "forced_share_1h", label: "Forced share 1h (fraction)" },
+  { key: "relative_volume", label: "Relative volume (×)" },
 ];
 
 // Stable empty-array identity (mirrors useSnapshotSeries.ts's own EMPTY_LINES precedent)

@@ -13,6 +13,7 @@ import { HttpError, fetchCandles } from "../api/client";
 import type { CandleItem } from "../api/schema";
 import type { InstrumentPrecision } from "../lib/drawings";
 import { gapRun } from "../lib/gaps";
+import type { VolumeBarFlow } from "../lib/volumeColor";
 import type { LiveBar } from "./useLiveCandle";
 
 // Mirrors dashboard.py:206's old defaults (_CANDLE_VISIBLE_BARS=120,
@@ -36,7 +37,10 @@ const RETRY_MAX_MS = 10_000;
 const TRANSIENT_HTTP = new Set([502, 503, 504]);
 
 export type ChartDatum = CandlestickData<Time> | WhitespaceData<Time>;
-export type VolumeDatum = HistogramData<Time> | WhitespaceData<Time>;
+// Story 33.6: a volume point keeps what its bar's colour is decided from (`lib/volumeColor.ts`): the
+// candle's open/close and the stored buy/sell volume (integer units, null = unknown). ChartPage maps
+// it to a plain coloured point before it reaches the chart.
+export type VolumeDatum = (HistogramData<Time> & VolumeBarFlow) | WhitespaceData<Time>;
 
 // Last line of defence behind the backend's `is_valid_candle`: a malformed candle is drawn as
 // a gap (and logged), never as a strangely-shaped bar. Exported for tests.
@@ -72,7 +76,8 @@ function toVolumeDatum(item: CandleItem): VolumeDatum {
   const malformed =
     item.o != null && item.h != null && item.l != null && item.c != null &&
     !isValidOhlc(item.o, item.h, item.l, item.c, item.v);
-  return item.v == null || malformed ? { time } : { time, value: item.v };
+  if (item.v == null || malformed) return { time };
+  return { time, value: item.v, o: item.o, c: item.c, buy_v: item.buy_v ?? null, sell_v: item.sell_v ?? null };
 }
 
 /**
@@ -289,10 +294,11 @@ export function useCandles(
 
   const appendBar = useCallback(
     (bar: LiveBar): void => {
-      const { volume, ...candle } = bar;
+      const { time, open, high, low, close, volume } = bar;
+      const point = { time, value: volume, o: open, c: close, buy_v: bar.buy_v ?? null, sell_v: bar.sell_v ?? null };
       setState((prev) => ({
-        candles: mergeByTime(prev.candles, [candle], barSeconds),
-        volume: mergeByTime(prev.volume, [{ time: bar.time, value: volume }], barSeconds),
+        candles: mergeByTime(prev.candles, [{ time, open, high, low, close }], barSeconds),
+        volume: mergeByTime(prev.volume, [point], barSeconds),
       }));
     },
     [barSeconds],

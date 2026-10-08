@@ -111,3 +111,33 @@ def test_closed_candles_drops_every_still_open_bucket_under_clock_skew() -> None
     # A capture clock more than a bar ahead of this host leaves two unclosed candles.
     candles = [{"t": 0}, {"t": 60_000}, {"t": 120_000}]
     assert ranking_columns._closed_candles(candles, 60, 100_000_000_000) == [{"t": 0}]
+
+
+def _technicals(tmp_path: Path, entries: list[_Entry]) -> dict[str, float | None]:
+    now_ns = _BASE_NS + (_MINUTES + 1) * _MINUTE_NS  # every seeded minute has closed
+    return ranking_columns.technicals_values(
+        _IID,
+        entries,
+        now_ns,
+        catalog_path=str(tmp_path / "cat"),
+        candles_dir=str(tmp_path / "no-candle-store"),
+    )
+
+
+def test_order_flow_entries_read_the_latest_closed_bar(tmp_path: Path) -> None:
+    """
+    Story 33.6: every minute bought 1.0 and sold 0.5 at its one close, so the latest closed bar's
+    delta is 0.5 and its own VWAP is its close. With no store, the session VWAP's prefix (the
+    minutes since UTC midnight before the first one read) is uncovered: None, never an error that
+    would fail every coin's column.
+    """
+    _seed(tmp_path / "cat")
+    values = _technicals(
+        tmp_path,
+        [
+            _Entry("VolumeDelta"),
+            _Entry("StoredVWAP", {"mode": "bar"}),
+            _Entry("StoredVWAP", {"mode": "session"}),
+        ],
+    )
+    assert values == {"0.value": 0.5, "1.value": _close(_MINUTES), "2.value": None}

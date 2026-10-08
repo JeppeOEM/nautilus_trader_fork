@@ -187,9 +187,13 @@ describe("useCandles live merge and retry rules", () => {
     const { result } = renderHook(() => useCandles("BTC-USD-PERP.DYDX", null));
     await waitFor(() => expect(result.current.candles).toHaveLength(1));
 
-    act(() => result.current.appendBar({ time: 120 as UTCTimestamp, open: 2, high: 3, low: 2, close: 3, volume: 5 }));
+    act(() =>
+      result.current.appendBar({ time: 120 as UTCTimestamp, open: 2, high: 3, low: 2, close: 3, volume: 5, buy_v: 3, sell_v: 2 }),
+    );
     expect(result.current.candles.map((c) => c.time)).toEqual([60, 120]);
-    expect(result.current.volume[1]).toEqual({ time: 120, value: 5 });
+    // Story 33.6: the candle stays a plain candle; the volume point keeps what its colour needs.
+    expect(result.current.candles[1]).toEqual({ time: 120, open: 2, high: 3, low: 2, close: 3 });
+    expect(result.current.volume[1]).toEqual({ time: 120, value: 5, o: 2, c: 3, buy_v: 3, sell_v: 2 });
 
     // Socket was down for two bars: the newest page overlaps t=120 and adds 180/240.
     fetchCandlesMock.mockResolvedValueOnce(
@@ -308,5 +312,26 @@ describe("useCandles live merge and retry rules", () => {
     expect(result.current.loadFailed).toBe(false);
     const [first, second] = fetchCandlesMock.mock.calls;
     expect(second[1] as number).toBeGreaterThanOrEqual(first[1] as number);
+  });
+});
+
+describe("the volume points' order flow (Story 33.6)", () => {
+  it("keeps each bar's open, close and stored buy/sell volume, null where the flow is unknown", async () => {
+    fetchCandlesMock.mockResolvedValueOnce(
+      page(
+        [
+          { t: 60_000, o: 1, h: 2, l: 1, c: 2, v: 10, buy_v: 7, sell_v: 3 },
+          { t: 120_000, o: 2, h: 2, l: 1, c: 1, v: 4 },
+        ],
+        false,
+      ),
+    );
+    const { result } = renderHook(() => useCandles("BTC-USD-PERP.DYDX", null));
+    await waitFor(() => expect(result.current.volume).toHaveLength(2));
+
+    expect(result.current.volume).toEqual([
+      { time: 60, value: 10, o: 1, c: 2, buy_v: 7, sell_v: 3 },
+      { time: 120, value: 4, o: 2, c: 1, buy_v: null, sell_v: null },
+    ]);
   });
 });

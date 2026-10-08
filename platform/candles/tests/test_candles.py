@@ -24,7 +24,6 @@ fold, so no path folds raw trades straight into a wide bar any more.
 """
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -32,6 +31,8 @@ from kernel.catalog_files import query_second_ohlc
 from kernel.clocks import READ_SPAN_MARGIN_NS
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import LegacySnapshotLayoutError
+from kernel.second_snapshot import SecondOHLC
+from kernel.tests.snapshot_factory import make_second
 from kernel.tests.snapshot_factory import make_snapshot
 
 from candles.application.forming import bars_from_rows
@@ -50,30 +51,24 @@ _SECOND = 1_000_000_000
 
 def _snap(
     ts_event: int, close_price: float | None, buy_volume: float = 1.0, sell_volume: float = 0.5
-) -> SimpleNamespace:
-    """Build a DydxSecondSnapshot-shaped stand-in (attribute access, as the real class has)."""
-    return SimpleNamespace(
-        ts_event=ts_event,
-        open_price=close_price,
-        high_price=close_price,
-        low_price=close_price,
-        close_price=close_price,
+) -> SecondOHLC:
+    """One second at one price (open = high = low = close), its units exact (`make_second`)."""
+    traded = close_price is not None
+    return make_second(
+        ts_event,
+        close_price,
         buy_volume=buy_volume,
         sell_volume=sell_volume,
+        buy_count=1 if traded else 0,
+        sell_count=1 if traded else 0,
     )
 
 
 def _ohlc_second(
     ts_event: int, o: float, h: float, low: float, c: float, volume: float
-) -> SimpleNamespace:
-    return SimpleNamespace(
-        ts_event=ts_event,
-        open_price=o,
-        high_price=h,
-        low_price=low,
-        close_price=c,
-        buy_volume=volume,
-        sell_volume=0.0,
+) -> SecondOHLC:
+    return make_second(
+        ts_event, c, open_price=o, high_price=h, low_price=low, buy_volume=volume, buy_count=1
     )
 
 
@@ -189,11 +184,32 @@ def test_a_bucket_where_nothing_traded_has_no_bar() -> None:
     assert forming_bar(snapshots, 60) is None
 
 
+# The frozen `/ws/live` bar: the six keys, then Story 33.3's ten appended (AD-D12, added keys only).
+_WIRE_KEYS = [
+    "t",
+    "o",
+    "h",
+    "l",
+    "c",
+    "v",
+    "buy_v",
+    "sell_v",
+    "buy_n",
+    "sell_n",
+    "pv",
+    "liq_long_v",
+    "liq_short_v",
+    "liq_n",
+    "price_precision",
+    "size_precision",
+]
+
+
 def test_forming_bar_is_the_newest_traded_bucket_and_only_the_wire_keys() -> None:
     rows = [_snap(0, 100.0), _snap(30 * _SECOND, 101.0), _snap(70 * _SECOND, 102.0)]
     bar = forming_bar(rows, 60)
     assert bar is not None
-    assert sorted(bar) == ["c", "h", "l", "o", "t", "v"]  # the frozen /ws/live payload
+    assert list(bar) == _WIRE_KEYS  # the frozen /ws/live payload, in order
     assert (bar["t"], bar["o"], bar["c"]) == (60_000, 102.0, 102.0)
 
 
@@ -210,6 +226,18 @@ def test_forming_bar_folds_a_width_the_store_never_keeps() -> None:
         "l": 100.0,
         "c": 108.0,
         "v": 3.0,
+        # Two seconds of 1.0 bought and 0.5 sold at precision 4; pv = 1_000_000 x 15_000
+        # + 1_080_000 x 15_000 (closes in 10^-4, volumes in 10^-4: 10^-8 of the quote).
+        "buy_v": 20_000,
+        "sell_v": 10_000,
+        "buy_n": 2,
+        "sell_n": 2,
+        "pv": 31_200_000_000,
+        "liq_long_v": None,
+        "liq_short_v": None,
+        "liq_n": None,
+        "price_precision": 4,
+        "size_precision": 4,
     }
 
 
@@ -233,10 +261,11 @@ def test_a_raw_1s_bar_is_partial_exactly_when_observed_under_90_percent() -> Non
 
 
 def test_the_forming_bar_payload_carries_no_partial_flag() -> None:
-    """The `/ws/live` forming bar `{t,o,h,l,c,v}` is frozen: the flag is the read path's only."""
+    """The `/ws/live` forming bar's keys are frozen: the flag is the read path's only."""
     bar = forming_bar([_snap(_SECOND, 100.0)], 60)
     assert bar is not None
-    assert list(bar) == ["t", "o", "h", "l", "c", "v"]
+    assert list(bar) == _WIRE_KEYS
+    assert "partial" not in bar
 
 
 def test_is_valid_candle_rejects_inverted_negative_and_nonfinite() -> None:

@@ -2,7 +2,10 @@ import { AUTO_ANCHOR_PRESETS, type AutoAnchorPreset, DEFAULT_AUTO_ANCHOR } from 
 import { DEFAULT_SESSION_COUNT, MAX_SESSIONS, SESSION_PERIODS } from "./sessionProfile";
 import { DEFAULT_IB_MINUTES, MAX_IB_MINUTES, MIN_IB_MINUTES } from "./tpo";
 import { DEFAULT_VOLUME_PROFILE_SETTINGS } from "./volumeProfile";
+import { type OutputStyle, LINE_STYLES } from "./indicatorStyle";
 import { TIMEFRAMES } from "../timeframes";
+import { CHART_TYPES, type ChartType, MAX_COMPARE_SYMBOLS, PRICE_SCALE_MODES, type PriceScaleModeName } from "./chartTypes";
+import { TIME_ZONES, type TimeZoneSetting } from "./time";
 
 // Story 32.6: one coin's chart layout, the shape of `GET/PUT /api/coin/{iid}/layout`
 // (`views.preferences.validate_layout`). The OpenAPI schema types the body as a free-form object,
@@ -48,6 +51,46 @@ export const FOOTPRINT_MODES: readonly FootprintMode[] = ["bid_ask", "delta", "v
 export const FOOTPRINT_DEFAULT_IMBALANCE_RATIO = 3;
 export const MAX_FOOTPRINT_ROW_TICKS = 1000000;
 
+// Story 33.6: how the Volume pane colours its bars, the optional `volume_color_by` key of the layout
+// (absent = `direction`). Mirrored by `views/preferences.py`'s `VOLUME_COLOR_MODES`
+// (`test_volume_color_modes_mirror_the_frontend`).
+export type VolumeColorMode = "direction" | "delta";
+export const VOLUME_COLOR_MODES: readonly VolumeColorMode[] = ["direction", "delta"];
+
+// Story 33.9: the price pane's right scale and compare symbols, the optional `price_scale` and
+// `compare` tables of the layout (plus the optional `chart_type` key, `lib/chartTypes.ts`). Mirrored by
+// `views/preferences.py` (`PRICE_SCALE_DEFAULTS`, `COMPARE_DEFAULTS`;
+// `test_chart_type_and_scale_settings_mirror_the_frontend` reads the two literals below, so keep each
+// on its one line).
+export interface PriceScaleLayout {
+  /** The operator's own pick; a compare present forces Percent on screen without changing it. */
+  mode: PriceScaleModeName;
+  /** Off = the vertical range the operator dragged to is kept through scrolls. */
+  auto_scale: boolean;
+  invert: boolean;
+}
+
+export interface CompareLayout {
+  /** Up to `MAX_COMPARE_SYMBOLS` distinct instrument ids, drawn as lines in the palette's order. */
+  symbols: string[];
+  /** The cross-venue Spread pane, drawn only with exactly one compare (kept as stored otherwise). */
+  spread: boolean;
+}
+
+// Story 33.12: the main series' last-price line and its axis label, the optional `last_price` table of
+// the layout. Mirrored by `views/preferences.py`'s `LAST_PRICE_DEFAULTS`
+// (`test_time_zone_and_last_price_settings_mirror_the_frontend` reads the literal below, so keep it on
+// its one line).
+export interface LastPriceLayout {
+  line: boolean;
+  label: boolean;
+}
+
+export const DEFAULT_LAST_PRICE: LastPriceLayout = { line: true, label: true };
+
+export const DEFAULT_PRICE_SCALE: PriceScaleLayout = { mode: "normal", auto_scale: true, invert: false };
+export const DEFAULT_COMPARE: CompareLayout = { symbols: [], spread: false };
+
 export interface FootprintSettings {
   on: boolean;
   /** Price ticks per row; 0 = auto (the server's smallest size giving at most 24 rows per bar). */
@@ -62,6 +105,51 @@ export interface FootprintSettings {
   sell_color?: string;
 }
 
+// Story 33.5: the chart's pinned Derivatives group, the optional `derivatives` table of the layout.
+// Mirrored by `views/preferences.py` (`DERIVATIVE_KEYS`, `DERIVATIVE_OUTPUTS`, `LIQUIDATION_MEASURES`;
+// `test_derivatives_settings_mirror_the_frontend` pins them, so keep the literal forms it reads).
+export type DerivativeKey = "oi" | "funding" | "basis" | "mark_index" | "liquidations";
+export const DERIVATIVE_KEYS: readonly DerivativeKey[] = ["oi", "funding", "basis", "mark_index", "liquidations"];
+/** Each entry's output labels: the keys of its `style` table (and its settings dialog's rows). */
+export const DERIVATIVE_OUTPUTS: Record<DerivativeKey, readonly string[]> = {
+  oi: ["oi"],
+  funding: ["rate"],
+  basis: ["mark_index", "mark_last"],
+  mark_index: ["mark", "index"],
+  liquidations: ["liquidations"],
+};
+/** The Indicators dialog's and the legend's name of each entry. */
+export const DERIVATIVE_LABELS: Record<DerivativeKey, string> = {
+  oi: "Open Interest",
+  funding: "Funding",
+  basis: "Basis",
+  mark_index: "Mark / Index",
+  liquidations: "Liquidations",
+};
+export type LiquidationMeasure = "size" | "notional";
+export const LIQUIDATION_MEASURES: readonly LiquidationMeasure[] = ["size", "notional"];
+
+export interface DerivativeEntry {
+  on: boolean;
+  /** Per output label; absent = the chart's token colours and the library's line defaults. */
+  style?: Record<string, OutputStyle>;
+}
+
+export interface LiquidationsEntry extends DerivativeEntry {
+  /** The bars plot the liquidated size (base units) or the notional (quote units). */
+  measure: LiquidationMeasure;
+  /** Series markers on the price pane at each liquidation's bankruptcy price. */
+  markers: boolean;
+}
+
+export interface DerivativesLayout {
+  oi: DerivativeEntry;
+  funding: DerivativeEntry;
+  basis: DerivativeEntry;
+  mark_index: DerivativeEntry;
+  liquidations: LiquidationsEntry;
+}
+
 export interface ChartLayout {
   bar_seconds: number;
   mode: LayoutMode;
@@ -73,6 +161,29 @@ export interface ChartLayout {
   visible_bars: number;
   volume_profile: VolumeProfileLayout;
   footprint: FootprintSettings;
+  /** Optional on the wire (absent = every entry off); always present once normalised. */
+  derivatives: DerivativesLayout;
+  /** Story 33.6: how the Volume pane colours its bars. Optional on the wire (absent = `direction`). */
+  volume_color_by: VolumeColorMode;
+  /** Story 33.9: the main series' chart type. Optional on the wire (absent = `candles`). */
+  chart_type: ChartType;
+  /** Story 33.9: optional on the wire (absent = `DEFAULT_PRICE_SCALE`). */
+  price_scale: PriceScaleLayout;
+  /** Story 33.9: optional on the wire (absent = `DEFAULT_COMPARE`). */
+  compare: CompareLayout;
+  /** Story 33.10: the rail's "Hide all drawings": none is drawn or hit-tested, and the drawing tools
+   * are off. Optional on the wire (absent = false); mirrored by `views.preferences`' layout key. */
+  drawings_hidden: boolean;
+  /** Story 33.12: how every time on the chart page prints (formatting only; a bar's time stays UTC).
+   * Optional on the wire (absent = `utc`). */
+  time_zone: TimeZoneSetting;
+  /** Story 33.12: a dashed line at the first bar of each UTC day. Optional on the wire (absent = off). */
+  session_breaks: boolean;
+  /** Story 33.12: the time to the last bar's close under the last-price label. Optional on the wire
+   * (absent = on). */
+  bar_countdown: boolean;
+  /** Story 33.12: optional on the wire (absent = `DEFAULT_LAST_PRICE`). */
+  last_price: LastPriceLayout;
 }
 
 export const BUILT_IN_LAYOUT: ChartLayout = {
@@ -106,6 +217,22 @@ export const BUILT_IN_LAYOUT: ChartLayout = {
     imbalance_ratio: FOOTPRINT_DEFAULT_IMBALANCE_RATIO,
     text: true,
   },
+  derivatives: {
+    oi: { on: false },
+    funding: { on: false },
+    basis: { on: false },
+    mark_index: { on: false },
+    liquidations: { on: false, measure: "size", markers: true },
+  },
+  volume_color_by: "direction",
+  chart_type: "candles",
+  price_scale: DEFAULT_PRICE_SCALE,
+  compare: DEFAULT_COMPARE,
+  drawings_hidden: false,
+  time_zone: "utc",
+  session_breaks: false,
+  bar_countdown: true,
+  last_price: DEFAULT_LAST_PRICE,
 };
 
 export const PROFILE_KINDS: readonly ProfileKind[] = ["off", "visible", "fixed", "session", "auto", "tpo"];
@@ -234,6 +361,198 @@ function footprintOf(raw: unknown, fallbacks: string[]): FootprintSettings {
   return out;
 }
 
+const STYLE_COLOR_KEYS = ["color", "up_color", "down_color"] as const;
+
+/** One output's stored style, each field kept when usable and otherwise named in `fallbacks`. */
+function outputStyleOf(raw: unknown, path: string, fallbacks: string[]): OutputStyle {
+  if (!isRecord(raw)) {
+    fallbacks.push(path);
+    return {};
+  }
+  const out: OutputStyle = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if ((STYLE_COLOR_KEYS as readonly string[]).includes(key) && isColor(value)) out[key as (typeof STYLE_COLOR_KEYS)[number]] = value;
+    else if (key === "line_width" && isInt(value, 1, 4)) out.line_width = value;
+    else if (key === "line_style" && LINE_STYLES.some((s) => s === value)) out.line_style = value as OutputStyle["line_style"];
+    else fallbacks.push(`${path}.${key}`);
+  }
+  return out;
+}
+
+function stylesOf(raw: unknown, key: DerivativeKey, path: string, fallbacks: string[]): Record<string, OutputStyle> | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) {
+    fallbacks.push(path);
+    return undefined;
+  }
+  const out: Record<string, OutputStyle> = {};
+  for (const [output, style] of Object.entries(raw)) {
+    if (DERIVATIVE_OUTPUTS[key].includes(output)) out[output] = outputStyleOf(style, `${path}.${output}`, fallbacks);
+    else fallbacks.push(`${path}.${output}`);
+  }
+  return out;
+}
+
+/** One entry: each unusable field falls back to the default by name. */
+function derivativeEntryOf(raw: unknown, key: DerivativeKey, fallbacks: string[]): DerivativeEntry & Partial<LiquidationsEntry> {
+  const base = BUILT_IN_LAYOUT.derivatives[key];
+  const path = `derivatives.${key}`;
+  if (!isRecord(raw)) {
+    fallbacks.push(path);
+    return { ...base };
+  }
+  const out: DerivativeEntry & Partial<LiquidationsEntry> = { ...base };
+  if (typeof raw.on === "boolean") out.on = raw.on;
+  else fallbacks.push(`${path}.on`);
+  if (key === "liquidations") {
+    if (LIQUIDATION_MEASURES.some((m) => m === raw.measure)) out.measure = raw.measure as LiquidationMeasure;
+    else fallbacks.push(`${path}.measure`);
+    if (typeof raw.markers === "boolean") out.markers = raw.markers;
+    else fallbacks.push(`${path}.markers`);
+  }
+  const style = stylesOf(raw.style, key, `${path}.style`, fallbacks);
+  if (style !== undefined) out.style = style;
+  return out;
+}
+
+/**
+ * The derivatives table: absent (a layout saved before Story 33.5) is every entry off, silently; a
+ * present table's unusable entries and fields fall back one by one, each named in `fallbacks`.
+ */
+export function derivativesOf(raw: unknown, fallbacks: string[]): DerivativesLayout {
+  const base = BUILT_IN_LAYOUT.derivatives;
+  if (raw === undefined) return structuredClone(base);
+  if (!isRecord(raw)) {
+    fallbacks.push("derivatives");
+    return structuredClone(base);
+  }
+  for (const key of Object.keys(raw)) {
+    if (!DERIVATIVE_KEYS.some((k) => k === key)) fallbacks.push(`derivatives.${key}`);
+  }
+  return {
+    oi: derivativeEntryOf(raw.oi, "oi", fallbacks),
+    funding: derivativeEntryOf(raw.funding, "funding", fallbacks),
+    basis: derivativeEntryOf(raw.basis, "basis", fallbacks),
+    mark_index: derivativeEntryOf(raw.mark_index, "mark_index", fallbacks),
+    liquidations: derivativeEntryOf(raw.liquidations, "liquidations", fallbacks) as LiquidationsEntry,
+  };
+}
+
+/** The Volume colour mode: absent (a layout saved before Story 33.6) is `direction`, silently; an
+ * unknown value falls back to it by name. */
+function volumeColorByOf(raw: unknown, present: boolean, fallbacks: string[]): VolumeColorMode {
+  if (!present) return BUILT_IN_LAYOUT.volume_color_by;
+  const mode = VOLUME_COLOR_MODES.find((m) => m === raw);
+  if (mode === undefined) fallbacks.push("volume_color_by");
+  return mode ?? BUILT_IN_LAYOUT.volume_color_by;
+}
+
+/** The chart type: absent (a layout saved before Story 33.9) is `candles`, silently; an unknown value
+ * falls back to it by name. */
+function chartTypeOf(raw: unknown, present: boolean, fallbacks: string[]): ChartType {
+  if (!present) return BUILT_IN_LAYOUT.chart_type;
+  const type = CHART_TYPES.find((t) => t === raw);
+  if (type === undefined) fallbacks.push("chart_type");
+  return type ?? BUILT_IN_LAYOUT.chart_type;
+}
+
+/** Story 33.10: Hide all drawings: absent (a layout saved before it) is off, silently; a non-boolean
+ * falls back to off by name. */
+function drawingsHiddenOf(raw: unknown, present: boolean, fallbacks: string[]): boolean {
+  if (!present) return BUILT_IN_LAYOUT.drawings_hidden;
+  if (typeof raw === "boolean") return raw;
+  fallbacks.push("drawings_hidden");
+  return BUILT_IN_LAYOUT.drawings_hidden;
+}
+
+/** Story 33.12: an optional boolean key (`session_breaks`, `bar_countdown`): absent (a layout saved
+ * before it) is the default, silently; a non-boolean falls back to it by name. */
+function flagOf(raw: Raw, key: "session_breaks" | "bar_countdown", fallbacks: string[]): boolean {
+  if (!(key in raw)) return BUILT_IN_LAYOUT[key];
+  if (typeof raw[key] === "boolean") return raw[key];
+  fallbacks.push(key);
+  return BUILT_IN_LAYOUT[key];
+}
+
+/** Story 33.12: the time zone: absent is `utc`, silently; an unknown zone falls back to it by name. */
+function timeZoneOf(raw: unknown, present: boolean, fallbacks: string[]): TimeZoneSetting {
+  if (!present) return BUILT_IN_LAYOUT.time_zone;
+  const zone = TIME_ZONES.find((z) => z === raw);
+  if (zone === undefined) fallbacks.push("time_zone");
+  return zone ?? BUILT_IN_LAYOUT.time_zone;
+}
+
+/** Story 33.12: the last-price table: absent is the default, silently; an unknown key or a non-boolean
+ * part falls back by name. */
+function lastPriceOf(raw: unknown, present: boolean, fallbacks: string[]): LastPriceLayout {
+  if (!present) return { ...DEFAULT_LAST_PRICE };
+  if (!isRecord(raw)) {
+    fallbacks.push("last_price");
+    return { ...DEFAULT_LAST_PRICE };
+  }
+  for (const key of Object.keys(raw)) {
+    if (!Object.hasOwn(DEFAULT_LAST_PRICE, key)) fallbacks.push(`last_price.${key}`);
+  }
+  const part = (key: "line" | "label"): boolean => {
+    if (typeof raw[key] === "boolean") return raw[key];
+    fallbacks.push(`last_price.${key}`);
+    return DEFAULT_LAST_PRICE[key];
+  };
+  return { line: part("line"), label: part("label") };
+}
+
+/** The price scale table: absent is the default, silently; each unusable field falls back by name. */
+function priceScaleOf(raw: unknown, present: boolean, fallbacks: string[]): PriceScaleLayout {
+  if (!present) return { ...DEFAULT_PRICE_SCALE };
+  if (!isRecord(raw)) {
+    fallbacks.push("price_scale");
+    return { ...DEFAULT_PRICE_SCALE };
+  }
+  for (const key of Object.keys(raw)) {
+    if (!(key in DEFAULT_PRICE_SCALE)) fallbacks.push(`price_scale.${key}`);
+  }
+  const mode = PRICE_SCALE_MODES.find((m) => m === raw.mode);
+  if (mode === undefined) fallbacks.push("price_scale.mode");
+  const flag = (key: "auto_scale" | "invert"): boolean => {
+    if (typeof raw[key] === "boolean") return raw[key];
+    fallbacks.push(`price_scale.${key}`);
+    return DEFAULT_PRICE_SCALE[key];
+  };
+  return { mode: mode ?? DEFAULT_PRICE_SCALE.mode, auto_scale: flag("auto_scale"), invert: flag("invert") };
+}
+
+/** A stored compare id this client can draw: a non-empty string with a `.VENUE` suffix. */
+const isCompareId = (value: unknown): value is string =>
+  typeof value === "string" && value.lastIndexOf(".") > 0 && !value.endsWith(".");
+
+/**
+ * The compare table: absent is the default, silently; an unusable, repeated or surplus symbol is
+ * dropped by name (a fallback), like an unusable `spread`. `instrumentId` (the coin being opened):
+ * a symbol equal to it -- a template saved on another coin that compared this one -- is left out
+ * quietly, never a fallback, and the stored template is not touched.
+ */
+function compareOf(raw: unknown, present: boolean, fallbacks: string[], instrumentId: string | undefined): CompareLayout {
+  if (!present) return { symbols: [], spread: DEFAULT_COMPARE.spread };
+  if (!isRecord(raw)) {
+    fallbacks.push("compare");
+    return { symbols: [], spread: DEFAULT_COMPARE.spread };
+  }
+  for (const key of Object.keys(raw)) {
+    if (!(key in DEFAULT_COMPARE)) fallbacks.push(`compare.${key}`);
+  }
+  const symbols: string[] = [];
+  const listed = Array.isArray(raw.symbols) ? (raw.symbols as unknown[]) : null;
+  if (listed === null) fallbacks.push("compare.symbols");
+  (listed ?? []).forEach((symbol, i) => {
+    if (!isCompareId(symbol) || symbols.includes(symbol) || symbols.length >= MAX_COMPARE_SYMBOLS) {
+      fallbacks.push(`compare.symbols.${i}`);
+    } else if (symbol !== instrumentId) symbols.push(symbol);
+  });
+  const spread = typeof raw.spread === "boolean" ? raw.spread : DEFAULT_COMPARE.spread;
+  if (typeof raw.spread !== "boolean") fallbacks.push("compare.spread");
+  return { symbols, spread };
+}
+
 /**
  * The layout the server returned, made safe to render: any field this client cannot use (a
  * `bar_seconds` outside `TIMEFRAMES`, an unknown `mode`, a malformed number) falls back to the
@@ -241,7 +560,7 @@ function footprintOf(raw: unknown, fallbacks: string[]): FootprintSettings {
  * `console.error` (visible in the ErrorBar) and reported in `fallbacks`, so the caller saves the
  * corrected layout back instead of failing the same way on every open.
  */
-export function normalizeLayout(raw: unknown): { layout: ChartLayout; fallbacks: string[] } {
+export function normalizeLayout(raw: unknown, instrumentId?: string): { layout: ChartLayout; fallbacks: string[] } {
   const fallbacks: string[] = [];
   const source: Raw = isRecord(raw) ? raw : {};
   if (!isRecord(raw)) fallbacks.push("layout");
@@ -263,6 +582,16 @@ export function normalizeLayout(raw: unknown): { layout: ChartLayout; fallbacks:
     visible_bars: barsOk ? bars : BUILT_IN_LAYOUT.visible_bars,
     volume_profile: profileOf(source.volume_profile, fallbacks),
     footprint: footprintOf(source.footprint, fallbacks),
+    derivatives: derivativesOf(source.derivatives, fallbacks),
+    volume_color_by: volumeColorByOf(source.volume_color_by, "volume_color_by" in source, fallbacks),
+    chart_type: chartTypeOf(source.chart_type, "chart_type" in source, fallbacks),
+    price_scale: priceScaleOf(source.price_scale, "price_scale" in source, fallbacks),
+    compare: compareOf(source.compare, "compare" in source, fallbacks, instrumentId),
+    drawings_hidden: drawingsHiddenOf(source.drawings_hidden, "drawings_hidden" in source, fallbacks),
+    time_zone: timeZoneOf(source.time_zone, "time_zone" in source, fallbacks),
+    session_breaks: flagOf(source, "session_breaks", fallbacks),
+    bar_countdown: flagOf(source, "bar_countdown", fallbacks),
+    last_price: lastPriceOf(source.last_price, "last_price" in source, fallbacks),
   };
   if (fallbacks.length > 0) {
     console.error(
@@ -274,7 +603,8 @@ export function normalizeLayout(raw: unknown): { layout: ChartLayout; fallbacks:
 }
 
 /** The PUT body's layout: `start`/`end` are omitted while null and the footprint colours while unset
- * (the table cannot store a null, and the server refuses an empty colour). */
+ * (the table cannot store a null, and the server refuses an empty colour). The derivatives table is
+ * always written whole (the server refuses a present table missing an entry). */
 export function layoutForSave(layout: ChartLayout): Record<string, unknown> {
   const { start, end, ...profile } = layout.volume_profile;
   const { buy_color, sell_color, ...footprint } = layout.footprint;

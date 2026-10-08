@@ -15,7 +15,9 @@
 """
 Architecture AD-8 inside the bots context: `bots` is the one sanctioned `TradingNode`/`Strategy`
 runtime, and within it the runtime stays behind the anti-corruption layer -- only
-`infrastructure/nautilus_host.py` imports `TradingNode`/`TradingNodeConfig`/`nautilus_trader.live`,
+`infrastructure/nautilus_host.py` imports `TradingNode`/`TradingNodeConfig`/`nautilus_trader.live`
+(and `infrastructure/liquidation_data_client.py`, Story 33.14, only the live data-client base class
+and its factory: a custom data client is a `LiveMarketDataClient` subclass by Nautilus's design),
 no module imports `DataEngine`, and a `Strategy` is imported only by the infrastructure (the ACL)
 and `strategies/` (framework code), never by `domain/` or `application/`. Reads the import
 statements with `ast` (a docstring may name any of them). The platform-wide rule is
@@ -28,6 +30,9 @@ from pathlib import Path
 
 _BOTS_DIR = Path(__file__).resolve().parent.parent
 _HOST = _BOTS_DIR / "infrastructure" / "nautilus_host.py"
+_BRIDGE = _BOTS_DIR / "infrastructure" / "liquidation_data_client.py"
+# What the liquidation bridge may import of the live runtime: the client base and its factory.
+_BRIDGE_LIVE = frozenset({"nautilus_trader.live.data_client", "nautilus_trader.live.factories"})
 
 
 def _imported(path: Path) -> set[str]:
@@ -48,6 +53,7 @@ def _sources() -> list[Path]:
 def test_only_the_nautilus_host_imports_the_live_runtime() -> None:
     sources = _sources()
     assert _HOST in sources, "the Nautilus host module was not found"
+    assert _BRIDGE in sources, "the liquidation bridge module was not found"
     assert len(sources) > 10, "the bots modules were not found"
     runtime = {"TradingNode", "TradingNodeConfig", "DataEngine"}
     offenders = {
@@ -60,6 +66,8 @@ def test_only_the_nautilus_host_imports_the_live_runtime() -> None:
             }
         )
     }
+    assert set(offenders) == {"infrastructure/liquidation_data_client.py"}
+    assert set(offenders.pop("infrastructure/liquidation_data_client.py")) == _BRIDGE_LIVE
     assert offenders == {}
     assert "DataEngine" not in _imported(_HOST)
 

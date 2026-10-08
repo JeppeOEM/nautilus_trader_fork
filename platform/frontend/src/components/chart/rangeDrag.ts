@@ -1,5 +1,6 @@
 import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
 
+import type { MainSeriesKind } from "../../lib/chartTypes";
 import type { BarGrid } from "./primitives/drawingPrimitive";
 import type { TrendlineAnchor } from "./primitives/TrendlinePrimitive";
 
@@ -62,7 +63,7 @@ export function timeAtX(chart: IChartApi, grid: BarGrid, x: number): Time | null
 export function attachRangeDrag(
   container: HTMLElement,
   chart: IChartApi,
-  host: ISeriesApi<"Candlestick" | "Line">,
+  host: ISeriesApi<MainSeriesKind, Time>,
   grid: BarGrid,
   handlers: RangeDragHandlers,
 ): () => void {

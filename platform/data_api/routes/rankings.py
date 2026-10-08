@@ -30,6 +30,10 @@ failed read -> that coin's `errors` entry).
 web-only: it publishes the message `ranking_engine` reads on `ranking:control`, byte-identical to
 what the retired TUI `m` key sent, and never touches the mode itself -- the page shows the new
 mode only once `rankings:live` carries it (publish-and-wait, last write wins).
+
+`GET`/`PUT /api/rankings/filter-presets` (Story 33.7) are the page's named filter presets, one
+server-side list (`views.preferences`' `screener_filter_presets.toml`), so a preset follows the
+operator to another browser.
 """
 
 import json
@@ -45,6 +49,7 @@ import redis.asyncio as aioredis
 from fastapi import APIRouter
 from fastapi import HTTPException
 from fastapi import Request
+from fastapi.concurrency import run_in_threadpool
 from observability import error_ledger
 from pydantic import BaseModel
 from pydantic import ConfigDict
@@ -53,6 +58,7 @@ from views import preferences
 from views import ranking_columns
 
 from data_api import buses
+from data_api import settings
 from data_api.routes import indicators as _indicators
 from data_api.settings import CANDLES_DB_DIR
 from data_api.settings import CATALOG_PATH
@@ -309,3 +315,111 @@ def get_technicals_values(entries: str) -> TechnicalsValuesResponse:
         _technicals_cache.clear()  # one live key at a time; bounded (MEM-01)
         _technicals_cache[cache_key] = (time.monotonic(), result)
     return TechnicalsValuesResponse(values=result, errors=errors)
+
+
+# ---------------------------------------------------------------------------------------------
+# Story 33.7: saved filter presets
+# ---------------------------------------------------------------------------------------------
+
+
+class FilterPresetConditionItem(BaseModel):
+    """One stored condition; its display precision is re-derived by the page on recall."""
+
+    field: str
+    op: Literal[">", "<", ">=", "<=", "="]
+    value: float | str
+
+
+class FilterPresetItem(BaseModel):
+    name: str
+    conditions: list[FilterPresetConditionItem]
+
+
+class FilterPresetsResponse(BaseModel):
+    presets: list[FilterPresetItem]
+
+
+def _filter_presets_path() -> Path:
+    # Read per call (not bound at import) so a test or an operator override is honoured.
+    return Path(settings.SCREENER_FILTER_PRESETS_PATH)
+
+
+def _presets_response(presets: list[preferences.FilterPreset]) -> FilterPresetsResponse:
+    return FilterPresetsResponse(
+        presets=[
+            FilterPresetItem(
+                name=p.name,
+                conditions=[
+                    FilterPresetConditionItem.model_validate(vars(c)) for c in p.conditions
+                ],
+            )
+            for p in presets
+        ]
+    )
+
+
+def _load_presets_or_500() -> list[preferences.FilterPreset]:
+    try:
+        return preferences.load_filter_presets(_filter_presets_path())
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError, preferences.FilterPresetError) as exc:
+        # Fail loud (DATA-02): a hand-edited file that no longer parses is never shown as "none".
+        raise HTTPException(
+            status_code=500, detail=f"screener_filter_presets.toml is corrupt: {exc}"
+        ) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"failed to read screener_filter_presets.toml: {exc}"
+        ) from exc
+
+
+@router.get("/api/rankings/filter-presets")
+def get_filter_presets() -> FilterPresetsResponse:
+    """Return every saved preset; none saved yet is `[]`, a corrupt file a 500."""
+    return _presets_response(_load_presets_or_500())
+
+
+def _store_presets(presets: list[preferences.FilterPreset]) -> None:
+    with _indicators.PREFERENCES_LOCK:
+        try:
+            preferences.save_filter_presets(presets, _filter_presets_path())
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"failed to write screener_filter_presets.toml: {exc}"
+            ) from exc
+
+
+@router.put(
+    "/api/rankings/filter-presets",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {"$ref": "#/components/schemas/FilterPresetsResponse"}
+                }
+            },
+        }
+    },
+)
+async def put_filter_presets(request: Request) -> FilterPresetsResponse:
+    """
+    Replace the whole preset list with the body's `{"presets": [...]}` and return what is stored.
+
+    Invalid JSON is a 400; a body that is not a storable preset list a 422 naming the field
+    (`presets[1].conditions[0].value: ...`), and nothing is written unless all of it passes. The
+    write is a full rewrite under `PREFERENCES_LOCK`, published atomically.
+
+    Known limit: whole-list last-write-wins with no version, so two tabs or browsers saving presets
+    at once overwrite each other (the later save wins), and the lock is in-process only. Upgrade
+    path: a `version` returned by the GET and sent back by the PUT, a 409 on a mismatch.
+    """
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid presets payload: {exc}") from exc
+    try:
+        presets = preferences.validate_filter_presets(payload)
+    except preferences.FilterPresetError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await run_in_threadpool(_store_presets, presets)
+    return _presets_response(presets)

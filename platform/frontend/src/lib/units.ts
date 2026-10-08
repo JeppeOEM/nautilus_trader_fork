@@ -103,3 +103,74 @@ export function decodeBookPrices(encoded: readonly number[], side: "bid" | "ask"
   }
   return out;
 }
+
+// Story 33.5: exact decimal *text* (a funding rate, an open interest, a mark or index price, as
+// `views/derivatives.py` and the live `derivs:` frames send them: `kernel.derivs_wire.exact_text`,
+// plain positional digits) printed without ever becoming a float. Parsed into a BigInt and a scale,
+// rounded (half away from zero) or padded only when asked, and written back digit by digit.
+
+const DECIMAL_TEXT = /^(-?)(\d+)(?:\.(\d+))?$/;
+
+interface DecimalParts {
+  negative: boolean;
+  /** The digits without the point, as one integer. */
+  units: bigint;
+  /** How many of them are after the point. */
+  scale: number;
+}
+
+function parseDecimalText(text: string): DecimalParts {
+  const match = DECIMAL_TEXT.exec(text);
+  if (match === null) throw new RangeError(`"${text}" is not decimal text`);
+  const [, sign, whole, fraction = ""] = match;
+  return { negative: sign === "-", units: BigInt(whole + fraction), scale: fraction.length };
+}
+
+function writeDecimal({ negative, units, scale }: DecimalParts): string {
+  const digits = units.toString().padStart(scale + 1, "0");
+  const whole = digits.slice(0, digits.length - scale);
+  const text = scale === 0 ? whole : `${whole}.${digits.slice(digits.length - scale)}`;
+  return negative && units !== 0n ? `-${text}` : text;
+}
+
+/**
+ * Exact decimal text, canonical (no leading zeros, a "-0" read as "0"), at its own decimals or, with
+ * `places`, padded or rounded half away from zero to exactly that many: `("0.012345", 4)` is
+ * `"0.0123"`, `("90", 2)` is `"90.00"`. Anything that is not plain decimal text (a float's `1e-7`,
+ * an empty string, `NaN`) throws a `RangeError`, never a guess.
+ */
+export function formatDecimalText(text: string, places?: number): string {
+  const parts = parseDecimalText(text);
+  if (places === undefined || places === parts.scale) return writeDecimal(parts);
+  checkPrecision(places);
+  if (places > parts.scale) {
+    return writeDecimal({ ...parts, units: parts.units * 10n ** BigInt(places - parts.scale), scale: places });
+  }
+  const divisor = 10n ** BigInt(parts.scale - places);
+  const quotient = parts.units / divisor;
+  const rounded = (parts.units % divisor) * 2n >= divisor ? quotient + 1n : quotient;
+  return writeDecimal({ ...parts, units: rounded, scale: places });
+}
+
+/** Exact decimal text times `10^digits` (`digits` may be negative): a rate as a percent is
+ * `shiftDecimalText(rate, 2)`, moved in the digits, never multiplied as a float. */
+export function shiftDecimalText(text: string, digits: number): string {
+  if (!Number.isInteger(digits)) throw new RangeError(`${digits} is not an integer shift`);
+  const parts = parseDecimalText(text);
+  if (digits <= parts.scale) return writeDecimal({ ...parts, scale: parts.scale - digits });
+  return writeDecimal({ ...parts, units: parts.units * 10n ** BigInt(digits - parts.scale), scale: 0 });
+}
+
+/** A float ratio the server computed (an annualised funding rate) as a percent at `places`, through
+ * the exact text path: the value is cut to `places + 2` decimals once, then the point moves. */
+export function formatPercent(value: number, places: number): string {
+  return formatDecimalText(shiftDecimalText(formatDecimal(value, places + 2), 2), places);
+}
+
+/** Milliseconds as `HH:MM:SS` (hours unbounded), whole seconds, clamped at 0: a countdown that has
+ * run out reads `00:00:00`, never a negative time. */
+export function formatCountdown(ms: number): string {
+  const total = Number.isFinite(ms) ? Math.max(0, Math.floor(ms / 1000)) : 0;
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return `${pad(Math.floor(total / 3600))}:${pad(Math.floor((total % 3600) / 60))}:${pad(total % 60)}`;
+}

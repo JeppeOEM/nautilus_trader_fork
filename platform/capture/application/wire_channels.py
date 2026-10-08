@@ -99,6 +99,16 @@ class WireChannels:
             if key in self._held:
                 await self._call(send, undo, lambda: self._held.discard(key))
 
+    def forget(self, key: ChannelKey) -> None:
+        """
+        Unmark `key` without a wire call or a pacing wait: for a channel the venue itself ended
+        (it refused the subscribe, or the request was lost), whose next `hold` must send again.
+        Only for a socket with no Rust-side topic bookkeeping to mirror (the generic
+        `WebSocketClient` of `capture.venues.bybit.liquidations`): an adapter client's channel is
+        released through `release`, which sends its inverse.
+        """
+        self._held.discard(key)
+
     async def _call(self, send: Send, undo: Send | None, record: Callable[[], None]) -> None:
         """Run one paced wire call and `record` it when it went out (see class)."""
         await self._pace()  # a cancellation here: nothing sent, nothing to record

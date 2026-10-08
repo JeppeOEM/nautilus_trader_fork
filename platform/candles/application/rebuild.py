@@ -28,7 +28,10 @@ from pathlib import Path
 from kernel.catalog_files import SNAPSHOT_DIRNAME
 from kernel.catalog_files import data_file_ranges
 from kernel.catalog_files import files_by_day
+from kernel.catalog_files import liquidation_feed_since_ns
+from kernel.catalog_files import query_liquidations
 from kernel.catalog_files import second_ohlc_arrays
+from kernel.liquidation import has_liquidation_feed
 from kernel.venues import has_venue
 from observability import error_ledger
 
@@ -85,18 +88,35 @@ def rebuild_instrument(
     the day outside it, with that one file only, so that day is skipped: rebuilding it would
     replace its bars with the few seconds the crossing file holds (audit D-145: a nightly
     `--day D` emptied D-1).
+
+    An instrument with a liquidation feed (`has_liquidation_feed`) folds each day's archived
+    liquidations too (`query_liquidations`, the whole day, each venue event once), bounded by the
+    feed start: the id's first archived liquidation (`liquidation_feed_since_ns`, read once per
+    instrument), lowered by the store to its persisted start and the day's rows. A bucket that
+    does not start at or after it -- a day archived before the feed existed, or the bucket
+    straddling the start, at every width -- stays null, never 0, and with no start known every
+    bucket does (audit D-160). One without the feed passes None and its `liq_*` columns stay null
+    (Story 33.3).
     """
     store = CandleStore(db_path)
     seconds = 0
     first_day, last_day = start_ns // DAY_NS, end_ns // DAY_NS
     window = (first_day * DAY_NS, (last_day + 1) * DAY_NS - 1)
+    feed = has_liquidation_feed(iid)
+    since_ns = liquidation_feed_since_ns(catalog_path, iid) if feed else None
     try:
         days = files_by_day(catalog_path, iid, *window, on_foreign=error_ledger.record)
         for day, paths in sorted(days.items()):
             if not first_day <= day <= last_day:
                 continue
             cols = second_ohlc_arrays(paths)
-            seconds += store.rebuild_day(iid, cols, day * DAY_MS, allow_open_day)
+            liquidations = None
+            if feed:
+                day_ns = day * DAY_NS
+                liquidations = query_liquidations(catalog_path, iid, day_ns, day_ns + DAY_NS - 1)
+            seconds += store.rebuild_day(
+                iid, cols, day * DAY_MS, allow_open_day, liquidations, since_ns
+            )
     finally:
         # A pool worker outlives the job that raised (`pool.map` surfaces the error only when the
         # result is consumed), so an unclosed read-write handle per failed instrument would pile up

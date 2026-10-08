@@ -43,11 +43,14 @@ from typing import Protocol
 
 from candles.application import queries
 from candles.application.forming import bars_from_rows
+from candles.domain.fold import archive_liquidations
 from kernel import catalog_files
+from kernel.liquidation import has_liquidation_feed
 from kernel.venues import venue_of
 from observability import error_ledger
 
 from views import indicator_picker
+from views.catalog_reads import liquidation_feed_start
 
 
 # Each entry: (store_key, header_label, format_fn).
@@ -72,6 +75,28 @@ from views import indicator_picker
 # mid pct returns over the last hour (`ranking.domain.volatility.VolatilityTracker`, the
 # volatility-mode sort key), and "volatility_fast" (coin page only, not a column here) the sample
 # stdev of mid pct returns over the last 300 snapshots.
+#
+# Story 33.7's columns (ranking's Story 33.4 fields plus its 33.7 OI percent changes, each shown as
+# published -- the page only scales a value for display, it computes none):
+# - "open_interest": the venue's own open-interest units (contracts or base tokens, per venue).
+#   Known limit: those units differ per coin, so sorting or filtering OI across rows orders
+#   incomparable numbers (1,000,000 DOGE above 50,000 BTC); the filter label says "venue units".
+#   Upgrade path: `ranking` publishes an OI notional (OI x mark, SSOT-02) as its own column;
+# - "oi_change_1h_pct"/"oi_change_24h_pct": percent (ranking computes them in `Decimal`);
+# - "funding_rate": a fraction per funding interval, shown x100 as a percent (4 decimals);
+# - "basis_mi_bps": mark minus index in bps, signed;
+# - "liq_notional_1h": quote currency (size x bankruptcy price), shown in thousands (`K`);
+# - "liq_ratio_1h" (long share of the liquidated size) and "forced_share_1h" (liquidated size
+#   over traded size): fractions shown x100 as a percent;
+# - "relative_volume": a ratio (last hour over the mean hourly volume), shown with a `x`;
+# - "range_position_24h": a fraction (0 = the 24 h low, 1 = the high) shown x100 as a percent with
+#   a small inline bar.
+# A filter value is typed in the row's raw units (a fraction for funding, never the shown percent).
+# Spot dash: the web page applies it, not this module -- on a row whose `market` is "spot" the page
+# shows the dash in every `DERIVATIVE_COLUMN_KEYS` cell whatever its value (spot has no
+# derivatives), and its sort and filters read it as missing. Relative volume and the 24 h range are
+# not derivatives: spot shows them. Each Story 33.7 `format_fn` is only the recorded text format of
+# a present value: no code calls it, and None (a missing value, shown as the dash) is never passed.
 RANKING_COLS: list[tuple[str, str, Callable[[Any], str]]] = [
     ("ofi_10_z", "OFI10z", lambda v: f"{v:+.2f}"),
     ("obi_10", "OBI10", lambda v: f"{v:.3f}"),
@@ -88,7 +113,33 @@ RANKING_COLS: list[tuple[str, str, Callable[[Any], str]]] = [
     ("volatility", "Vol 24h \u03c3 (trade closes)", lambda v: f"{v:.6f}"),
     ("volatility_score", "Vol 1h \u03c3 (mids)", lambda v: f"{v:.6f}" if v is not None else "—"),
     ("volume24h", "Vol24h", lambda v: f"{v / 1e6:.3f}M"),
+    ("open_interest", "OI", lambda v: f"{v:.2f}"),
+    ("oi_change_1h_pct", "OI \u03941h %", lambda v: f"{v:+.2f}%"),
+    ("oi_change_24h_pct", "OI \u039424h %", lambda v: f"{v:+.2f}%"),
+    ("funding_rate", "Funding", lambda v: f"{v * 100:.4f}%"),
+    ("basis_mi_bps", "Basis (bps)", lambda v: f"{v:+.2f}"),
+    ("liq_notional_1h", "Liq 1h", lambda v: f"{v / 1e3:.1f}K"),
+    ("liq_ratio_1h", "Liq L/S", lambda v: f"{v * 100:.1f}%"),
+    ("forced_share_1h", "Forced %", lambda v: f"{v * 100:.1f}%"),
+    ("relative_volume", "Rel vol", lambda v: f"{v:.2f}\u00d7"),
+    ("range_position_24h", "24h range", lambda v: f"{v * 100:.0f}%"),
 ]
+
+# The derivatives columns (Story 33.7): the page shows a spot row's dash in each, whatever its value,
+# and sorts and filters it as missing. The page's `DERIVATIVE_COLUMNS` mirrors this set
+# (`data_api/tests/test_ranking_columns_mirror.py`).
+DERIVATIVE_COLUMN_KEYS: frozenset[str] = frozenset(
+    {
+        "open_interest",
+        "oi_change_1h_pct",
+        "oi_change_24h_pct",
+        "funding_rate",
+        "basis_mi_bps",
+        "liq_notional_1h",
+        "liq_ratio_1h",
+        "forced_share_1h",
+    }
+)
 
 # History-only columns (store_key, header_label): plotted on /history/{id}'s per-coin
 # 31-day charts from metrics_store rows, but deliberately NOT in RANKING_COLS -- that
@@ -158,25 +209,38 @@ def _recent_candles(
                     return stored
     except Exception as exc:
         raise CatalogReadError(str(exc)) from exc
-    return _read_candles(instrument_id, bar_seconds, now_ns, catalog_path)
+    return _read_candles(instrument_id, bar_seconds, now_ns, catalog_path, candles_dir)
 
 
 def _read_candles(
-    instrument_id: str, bar_seconds: int, now_ns: int, catalog_path: str
+    instrument_id: str, bar_seconds: int, now_ns: int, catalog_path: str, candles_dir: str
 ) -> list[dict]:
     """
     Read candles the slow way, for a coin the candle store does not hold.
 
     Raw 1s columns aggregated to `bar_seconds`, over at most a week (MEM-01), so 4H+ columns may get
-    fewer bars than the store gives.
+    fewer bars than the store gives. An instrument with a liquidation feed folds the window's
+    archived liquidations too, bounded by the feed's start -- the candle store's persisted one,
+    else the archive's first (`views.catalog_reads.liquidation_feed_start`), lowered to the rows read
+    (`archive_liquidations`) -- so its bars carry the same `liq_*` the store and the `raw_1s` page
+    would (null before or straddling the start, or throughout with none known; audit D-160).
     """
     bars = _TECHNICALS_BARS if bar_seconds <= 3600 else _TECHNICALS_WIDE_BARS
     span_ns = min((bars + 5) * bar_seconds, _FALLBACK_MAX_SPAN_S) * 1_000_000_000
+    start_ns = now_ns - span_ns
     try:
         rows = catalog_files.query_second_ohlc(
-            catalog_path, instrument_id, now_ns - span_ns, now_ns, on_foreign=error_ledger.record
+            catalog_path, instrument_id, start_ns, now_ns, on_foreign=error_ledger.record
         )
-        return bars_from_rows(rows, bar_seconds)[-bars:]
+        liquidations, since_ns = None, None
+        if has_liquidation_feed(instrument_id):
+            liquidations, since_ns = archive_liquidations(
+                catalog_files.query_liquidations(catalog_path, instrument_id, start_ns, now_ns),
+                liquidation_feed_start(catalog_path, candles_dir, instrument_id),
+            )
+        return bars_from_rows(rows, bar_seconds, liquidations, liquidations_since_ns=since_ns)[
+            -bars:
+        ]
     except Exception as exc:
         raise CatalogReadError(str(exc)) from exc
 
@@ -222,7 +286,7 @@ def technicals_values(
         if not candles or now_ns // 1_000_000 - candles[-1]["t"] > max_age_ms:
             continue  # no data / stopped: an honest gap, never a stale value shown as current (DATA-01)
         group = [(i, e) for i, e in enumerate(entries) if e.bar_seconds == bar_seconds]
-        keyed.update(_latest_of_group(instrument_id, bar_seconds, candles, group))
+        keyed.update(_latest_of_group(instrument_id, bar_seconds, candles, group, candles_dir))
     return keyed
 
 
@@ -243,6 +307,7 @@ def _latest_of_group(
     bar_seconds: int,
     candles: list[dict],
     group: list[tuple[int, TechnicalsEntry]],
+    candles_dir: str,
 ) -> dict[str, float | None]:
     """Return the newest candle's value of every entry of one timeframe, keyed by entry index."""
     window = indicator_picker.ReplayWindow(
@@ -250,6 +315,7 @@ def _latest_of_group(
         bar_seconds=bar_seconds,
         start_ms=candles[0]["t"],
         end_ms=candles[-1]["t"] + bar_seconds * 1000,
+        candles_dir=candles_dir,
     )
     by_time, errors = indicator_picker.values_by_time(candles, [e for _, e in group], window)
     if (

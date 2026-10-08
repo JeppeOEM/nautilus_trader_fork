@@ -145,7 +145,7 @@ export class AnchoredVwapPrimitive implements DrawingPrimitive {
     const { bands, color, band_color: bandColor } = this.drawing;
     const lineColor = color ?? chartVar("--chart-drawing");
     const anchor = this.anchorHandle;
-    const handles = this.handlesVisible;
+    const handles = this.handlesVisible && !this.drawing.locked;
     const bg = chartVar("--chart-bg");
     return {
       draw: (target: CanvasRenderingTarget2D): void => {

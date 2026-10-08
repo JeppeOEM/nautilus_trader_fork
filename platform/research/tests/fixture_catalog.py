@@ -45,6 +45,10 @@ would:
 - **leading venue** -- `BTCUSDT-LINEAR.BYBIT` reads the shared wiggle `LEAD_SECONDS` (2 s) ahead of
   every other instrument, so its 1 s returns lead dYdX's and Hyperliquid's BTC by exactly 2 s
   (Story 27.4);
+- **liquidation cascade** -- `BTCUSDT-LINEAR.BYBIT` (the one fixture id with a liquidation feed)
+  archives a `Liquidation` background (one LONG every 5 s, `LIQUIDATION_BACKGROUND`), then a 30 s
+  LONG burst (one a second, `LIQUIDATION_BURST`), then nothing: the decay; each at the second's mid
+  as its bankruptcy price, received 50 ms after its venue time (Story 33.14);
 - **ledger** -- hand-written 23.3-format lines (`observability.error_ledger`'s field set): a
   restart and two `collector.crossed_book` lines (one carrying `suppressed: 3`) for `collector`, a
   `collector.book_sequence` line for `bybit_collector`, and one line before the window.
@@ -68,6 +72,8 @@ from candles.infrastructure.sqlite_store import db_path_for_venue
 from kernel.clocks import NS_PER_MS
 from kernel.clocks import NS_PER_S
 from kernel.fold import fold_trades
+from kernel.liquidation import LiquidatedSide
+from kernel.liquidation import Liquidation
 from kernel.open_interest import OpenInterest
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.venues import venue_of
@@ -110,6 +116,9 @@ DUPLICATE_INSTRUMENT = "BTCUSDT-LINEAR.BYBIT"
 DUPLICATE_SECOND = 100
 LEAD_INSTRUMENT = "BTCUSDT-LINEAR.BYBIT"
 LEAD_SECONDS = 2
+CASCADE_INSTRUMENT = "BTCUSDT-LINEAR.BYBIT"
+LIQUIDATION_BACKGROUND = range(0, 400, 5)
+LIQUIDATION_BURST = range(400, 430)
 FUNDING_INTERVALS = {"DYDX": 60, "BYBIT": 480, "HYPERLIQUID": 60}  # minutes, as the venues publish
 # The shared mid wiggle (price ticks), one entry per second plus the lead's look-ahead; a fixed
 # seed, so every session builds the same archive.
@@ -325,6 +334,30 @@ class _Rows:
     indexes: list[IndexPriceUpdate] = field(default_factory=list)
     funding: list[FundingRateUpdate] = field(default_factory=list)
     open_interest: list[OpenInterest] = field(default_factory=list)
+    liquidations: list[Liquidation] = field(default_factory=list)
+
+
+def _liquidation(spec: _Spec, second: int) -> Liquidation:
+    """One LONG liquidation of 0.001 to 0.003 base at the second's mid, received 50 ms later."""
+    ts_event = _second_ns(second) + 300 * NS_PER_MS
+    return Liquidation(
+        instrument_id=InstrumentId.from_str(spec.iid),
+        side=LiquidatedSide.LONG,
+        size_units=(1 + second % 3) * 10 ** (spec.size_precision - 3),
+        price_units=_mid(spec, second),
+        price_precision=spec.price_precision,
+        size_precision=spec.size_precision,
+        venue_event_id=f"fixture-{second}",
+        ts_event=ts_event,
+        ts_init=ts_event + 50 * NS_PER_MS,
+    )
+
+
+def _liquidations(spec: _Spec) -> list[Liquidation]:
+    if spec.iid != CASCADE_INSTRUMENT:
+        return []
+    seconds = (*LIQUIDATION_BACKGROUND, *LIQUIDATION_BURST)
+    return [_liquidation(spec, second) for second in seconds]
 
 
 def _rows(spec: _Spec) -> _Rows:
@@ -350,6 +383,7 @@ def _rows(spec: _Spec) -> _Rows:
             )
             rows.open_interest.append(OpenInterest(iid, Decimal(f"{1_000 + second}.5"), at, at))
     rows.trades.sort(key=lambda t: t.ts_init)
+    rows.liquidations = _liquidations(spec)
     return rows
 
 
@@ -363,6 +397,8 @@ def _write(catalog: ParquetDataCatalog, rows: _Rows) -> None:
             catalog.write_data(chunk)
     for data in (rows.trades, rows.marks, rows.indexes, rows.funding, rows.open_interest):
         catalog.write_data(data)
+    if rows.liquidations:
+        catalog.write_data(rows.liquidations)
 
 
 def _gap_around(stamps: list[int], lo: int, hi: int) -> tuple[int, int]:

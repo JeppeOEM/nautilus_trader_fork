@@ -46,7 +46,9 @@ router = APIRouter()
 
 
 class DrawingsResponse(BaseModel):
-    # Tagged items (`kind` = hline | trendline | fib | position); their per-kind fields are
+    # Tagged items (`kind` = hline | trendline | fib | position | anchored_vp | anchored_vwap | ray |
+    # extended | vline | rect | channel | text | arrow | fib_extension | price_range | date_range,
+    # `views.preferences.DRAWING_KINDS`); their per-kind fields are
     # `views.preferences.validate_drawing`'s, mirrored by the frontend's `lib/drawings.ts`.
     items: list[dict[str, Any]]
 

@@ -49,6 +49,14 @@ Verified against crates/adapters/bybit (Story 19.3 Task 1) -- what is NOT ported
     collector); upgrade path: batch several topics per request (Bybit linear accepts at least
     50 args, spot 10), which needs a batched Rust subscribe.
 
+Liquidations (Story 33.1): an optional `BybitLiquidationFeed` (`capture.venues.bybit.liquidations`,
+a second, generic socket the composition root builds) rides along: connected and closed with the
+client, and given the `allLiquidation` topic of every LINEAR id `subscribe` holds. Spot has no
+liquidation stream and an inverse id is never planned (`_ws_for` refuses it), so both are refused,
+the reason logged once per id. A failed liquidation subscribe is ledgered
+(`collector.liquidation_feed`) and raised as `ChannelRetry` after the id's required channels are
+held: capture keeps the id applied with its book and its retry loop resends the topic only.
+
 Feeds (story 22.14): every message is tagged with its socket -- `linear` / `spot`, and with
 `trade_feeds = 2` the trades-only twins `linear-trades` / `spot-trades` (same feed group), whose
 copies the core unions through its trade_id dedup. `feed_states()` exposes each socket's
@@ -58,10 +66,14 @@ copies the core unions through its trade_id dedup. `feed_states()` exposes each 
 import asyncio
 import contextlib
 import functools
+import logging
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 from typing import Any
 
+from capture.application import sites
 from capture.application.book_check import BookSnapshot
+from capture.application.feed import ChannelRetry
 from capture.application.feed import Feed
 from capture.application.feed import OptionalStepFailed
 from capture.application.feed import optional_feed_send
@@ -79,6 +91,12 @@ from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import capsule_to_data
 
+
+if TYPE_CHECKING:
+    from capture.venues.bybit.liquidations import BybitLiquidationFeed
+
+
+logger = logging.getLogger(__name__)
 
 # Bybit linear order books stream depth 1/50/200/1000; 50 comfortably covers BOOK_DEPTH=20.
 ORDERBOOK_DEPTH = 50
@@ -122,8 +140,11 @@ class BybitClient:
         trade_feeds: int = 1,
         *,
         ledger: Ledger,
+        liquidations: "BybitLiquidationFeed | None" = None,
     ) -> None:
         self._on_data = on_data
+        self._liquidations = liquidations
+        self._liquidation_refused: set[str] = set()  # non-LINEAR ids whose refusal was logged
         self._ledger = ledger  # the collector's: a failed trades-only socket is ledgered there
         self._rest_environment = "testnet" if environment == BybitEnvironment.TESTNET else "mainnet"
         self._http = nautilus_pyo3.BybitHttpClient(  # type: ignore[attr-defined]
@@ -165,6 +186,15 @@ class BybitClient:
     def feed_states(self) -> dict[Feed, bool]:
         return {feed: ws.is_active() for feed, ws in self._sockets().items()}
 
+    def liquidation_state(self) -> str | None:
+        """Return the liquidation socket's `connected`/`reconnecting`/`down`; None without it."""
+        return None if self._liquidations is None else self._liquidations.state()
+
+    def note_liquidation_restart(self, instrument_id: str, from_ns: int, to_ns: int) -> None:
+        """Hand a restart's `restart` span to the liquidation feed (its `not_running` window)."""
+        if self._liquidations is not None:
+            self._liquidations.note_restart(instrument_id, from_ns, to_ns)
+
     def _product_type(self, instrument_id: str) -> BybitProductType:
         return nautilus_pyo3.bybit_product_type_from_symbol(  # type: ignore[attr-defined]
             instrument_id.split(".")[0],
@@ -201,6 +231,8 @@ class BybitClient:
                     self._drop_trade_ws(feed)
             else:
                 await connecting
+        if self._liquidations is not None:
+            await self._liquidations.connect(loop, instruments)  # ledgers its own failure
 
     def _drop_trade_ws(self, feed: Feed) -> None:
         if feed == LINEAR_TRADES_FEED:
@@ -215,6 +247,11 @@ class BybitClient:
             try:
                 if not ws.is_closed():
                     await ws.close()
+            except Exception as e:
+                failure = failure or e
+        if self._liquidations is not None:
+            try:
+                await self._liquidations.disconnect()
             except Exception as e:
                 failure = failure or e
         if failure is not None:
@@ -243,19 +280,25 @@ class BybitClient:
         """
         Hold every channel of the id not already held: a retry sends only the missing ones. Each
         failed subscribe is undone by its unsubscribe, which drops the Rust topic reference the
-        failed call took, so the retry subscribes it afresh.
+        failed call took, so the retry subscribes it afresh. Then the optional ones: the
+        trades-only twin and the liquidation topic (`ChannelRetry` when it fails).
         """
         for name, sub, unsub in self._channels(instrument_id):
             await self._wire.hold((name, instrument_id), sub, undo=unsub)
         product_type = self._product_type(instrument_id)
+        await self._subscribe_twin(instrument_id, product_type)
+        await self._subscribe_liquidations(instrument_id, product_type)
+
+    async def _subscribe_twin(self, instrument_id: str, product_type: BybitProductType) -> None:
         trade_ws = self._trade_ws_for(product_type)
         if trade_ws is None:
             return
         iid = nautilus_pyo3.InstrumentId.from_str(instrument_id)
         feed = _trade_feed(product_type)
         # Optional: a failure is ledgered (`collector.trade_feed`) and undone, never fatal. The id
-        # still counts as applied, so capture's retry loop does not retry it: only the next
-        # `subscribe` of the id does (a re-add, a restart), and meanwhile the id has one feed.
+        # still counts as applied and capture's retry loop is not fed this failure: the next
+        # `subscribe` of the id resends it -- a re-add, a restart, or a retry queued by a failed
+        # liquidation topic (`ChannelRetry`) -- and meanwhile the id has one feed.
         with contextlib.suppress(OptionalStepFailed):
             await self._wire.hold(
                 ("twin-trades", instrument_id),
@@ -264,6 +307,31 @@ class BybitClient:
                 ),
                 undo=lambda: trade_ws.unsubscribe_trades(iid),
             )
+
+    async def _subscribe_liquidations(
+        self, instrument_id: str, product_type: BybitProductType
+    ) -> None:
+        if self._liquidations is None:
+            return
+        if product_type != BybitProductType.LINEAR:
+            if instrument_id not in self._liquidation_refused:
+                self._liquidation_refused.add(instrument_id)
+                logger.info(
+                    f"{instrument_id}: no liquidation topic ({product_type}: Bybit publishes "
+                    "allLiquidation on the linear and inverse streams only, and only linear is "
+                    "collected)"
+                )
+            return
+        try:
+            await self._liquidations.subscribe(instrument_id)
+        except Exception as e:
+            self._ledger(
+                sites.LIQUIDATION_FEED,
+                f"{instrument_id}: liquidation subscribe failed; the id stays collected and the "
+                "topic is retried by capture",
+                e,
+            )
+            raise ChannelRetry(f"{instrument_id}: liquidation topic") from e
 
     async def unsubscribe(self, instrument_id: str) -> None:
         """
@@ -275,6 +343,15 @@ class BybitClient:
         streams, and the topic has left the Rust client's set, so no reconnect replays it. The
         `undo` is kept for the `WireChannels` contract, not because it can run here.
         """
+        try:
+            await self._release_channels(instrument_id)
+        finally:
+            # Even when a main-channel release raised: the liquidation topic is released (and its
+            # gap written) now, not only on capture's retry. A no-op for a non-LINEAR id.
+            if self._liquidations is not None:
+                await self._liquidations.unsubscribe(instrument_id)
+
+    async def _release_channels(self, instrument_id: str) -> None:
         for name, sub, unsub in self._channels(instrument_id):
             await self._wire.release((name, instrument_id), unsub, undo=sub)
         trade_ws = self._trade_ws_for(self._product_type(instrument_id))

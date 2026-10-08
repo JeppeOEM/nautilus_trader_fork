@@ -122,6 +122,7 @@ def get_footprint(
             catalog_path=CATALOG_PATH,
             candles_dir=CANDLES_DB_DIR,
             recent_rows=buses.live_candle_bus.recent_rows,
+            recent_liquidations=buses.live_candle_bus.recent_liquidations,
             price_precision=precision.price_precision,
             size_precision=precision.size_precision,
             now_ns=time.time_ns(),

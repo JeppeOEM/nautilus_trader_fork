@@ -18,7 +18,8 @@ Read-only FastAPI service exposing catalog/metrics data over the network.
 A thin network-reachable wrapper around the catalog/metrics reads -- no reimplemented
 query/aggregation logic here (NAUT-02). The bare `/metrics/*` and `/catalog/*` routes were the
 remote-mode targets of the old `dashboard.py` (retired by Story 15.10) and have no caller left
-in this repo; they are kept as legacy read routes beside their `/api/*` successors. Their inputs
+in this repo; they are kept as legacy read routes beside their `/api/*` successors (Story 33.4
+deleted the legacy book-feature series route, which nothing drew any more). Their inputs
 are bounded (a `/catalog` window is under `/api/snapshots`' row cap, rejected rather than
 clamped; `days` is metrics.db's retention), and a failed catalog read is ledgered and answered
 500 with its cause.
@@ -55,7 +56,6 @@ from kernel.venues import MalformedInstrumentId
 from kernel.venues import venue_of
 from observability import error_ledger
 from pydantic import BaseModel
-from views import chart_series
 from views import coin_detail
 
 from data_api import alert_wiring
@@ -63,14 +63,16 @@ from data_api import buses
 from data_api.routes import alerts as alerts_routes
 from data_api.routes import archive as archive_routes
 from data_api.routes import candles as candles_routes
+from data_api.routes import derivatives as derivatives_routes
 from data_api.routes import drawings as drawings_routes
 from data_api.routes import footprint as footprint_routes
-from data_api.routes import indicator_series as indicator_series_routes
 from data_api.routes import indicators as indicators_routes
 from data_api.routes import layout as layout_routes
+from data_api.routes import markets as markets_routes
 from data_api.routes import metrics as metrics_routes
 from data_api.routes import rankings as rankings_routes
 from data_api.routes import snapshots as snapshots_routes
+from data_api.routes import watchlist as watchlist_routes
 from data_api.routes.snapshots import MAX_SNAPSHOTS_LIMIT
 from data_api.settings import CATALOG_PATH
 from data_api.settings import ERROR_LEDGER_DIR
@@ -79,8 +81,8 @@ from data_api.settings import REDIS_URL
 from data_api.ws import live as live_ws
 
 
-# Both legacy /catalog routes materialise one dict per archived second of the window, so they take
-# the same per-request bound as `/api/snapshots` (MEM-01): the closed window `[start_ns, end_ns]`
+# The legacy /catalog/snapshots route materialises one dict per archived second of the window, so
+# it takes the same per-request bound as `/api/snapshots` (MEM-01): the closed window `[start_ns, end_ns]`
 # must be shorter than the cap, so it holds at most `MAX_SNAPSHOTS_LIMIT` whole seconds. A wider
 # window is rejected, never clamped: a truncated answer would be passed off as the complete window.
 # Known limit: `views.catalog_reads.query_second_snapshots` widens the read's both ends by
@@ -106,8 +108,9 @@ FRONTEND_DIST_PATH: str = os.environ.get("FRONTEND_DIST_PATH", "frontend_dist")
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
-    Start the three shared Redis subscribers for the app's whole lifetime: `RankingsBus`
-    (Story 15.2), `LiveCandleBus` (Story 15.5) and `ArchiveStatusBus` (Story 25.1b). Every
+    Start the five shared Redis subscribers for the app's whole lifetime: `RankingsBus`
+    (Story 15.2), `LiveCandleBus` (Story 15.5), `ArchiveStatusBus` (Story 25.1b),
+    `LiveDerivsBus` (Story 33.4, `derivs:raw`) and `MarketsBus` (Story 33.9, `markets:live`). Every
     `GET /api/rankings`/`GET /api/archive/status` request and every `/ws/live` connection
     read/subscribe against these same `buses.bus` / `buses.live_candle_bus` /
     `buses.archive_bus` instances, never opening a per-request or per-websocket Redis
@@ -115,23 +118,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     It is also the one place the alert engine is wired to the candle bus (Story 24.3): attached as
     a `BarObserver` before the bus task starts, so no batch is folded without it, and detached on
-    shutdown.
+    shutdown. The derivs bus is attached the same way as the candle bus's liquidation listener
+    (Story 33.4): the candle bus stays the one `liquidations:raw` subscriber. The engine is also
+    the derivs bus's `DerivsObserver` (Story 33.8), attached and detached with the rest, so a
+    funding, open-interest or liquidation alert fires with no `/ws/live` listener open.
     """
     error_ledger.start()
     # Bound once so shutdown detaches exactly what startup attached, even if a test swaps them.
     live_candle_bus, alert_engine = buses.live_candle_bus, alert_wiring.engine
+    live_derivs_bus = buses.live_derivs_bus
     live_candle_bus.attach(alert_engine)
+    live_candle_bus.attach_liquidations(live_derivs_bus)
+    live_derivs_bus.attach(alert_engine)
+    alert_engine.bind_loop()  # a `forget` before the first batch runs on this loop too
     rankings_task = asyncio.create_task(buses.bus.run(REDIS_URL))
     live_candles_task = asyncio.create_task(live_candle_bus.run(REDIS_URL))
+    live_derivs_task = asyncio.create_task(live_derivs_bus.run(REDIS_URL))
     archive_status_task = asyncio.create_task(buses.archive_bus.run(REDIS_URL))
+    markets_task = asyncio.create_task(buses.markets_bus.run(REDIS_URL))
+    tasks = (rankings_task, live_candles_task, live_derivs_task, archive_status_task, markets_task)
     try:
         yield
     finally:
         live_candle_bus.detach(alert_engine)
-        rankings_task.cancel()
-        live_candles_task.cancel()
-        archive_status_task.cancel()
-        for task in (rankings_task, live_candles_task, archive_status_task):
+        live_candle_bus.detach_liquidations(live_derivs_bus)
+        live_derivs_bus.detach(alert_engine)
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
@@ -171,15 +185,12 @@ def _check_catalog_window(instrument_id: str, start_ns: int, end_ns: int) -> Non
 
 def _read_catalog[T](route: str, instrument_id: str, read: Callable[[], T]) -> T:
     """
-    Run one views catalog read, mapping its failures to HTTP. `EmptyTopOfBook` is views' own
-    ledgered malfunction (500 with its message, unchanged); anything else unexpected -- an Arrow
+    Run one views catalog read, mapping its failures to HTTP: anything unexpected -- an Arrow
     schema/precision conflict, an I/O error -- is ledgered here (DATA-07) and answered 500 with its
     cause, never a detail-less 500.
     """
     try:
         return read()
-    except chart_series.EmptyTopOfBook as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
         error_ledger.record(
             "data_api.catalog_read", f"{route} read failed for {instrument_id}", exc
@@ -187,18 +198,6 @@ def _read_catalog[T](route: str, instrument_id: str, read: Callable[[], T]) -> T
         raise HTTPException(
             status_code=500, detail=f"failed to read catalog: {type(exc).__name__}: {exc}"
         ) from exc
-
-
-@app.get("/catalog/chart-series/{symbol}")
-def catalog_chart_series(
-    symbol: str, start_ns: _Timestamp, end_ns: _Timestamp
-) -> dict[str, list[dict]]:
-    _check_catalog_window(symbol, start_ns, end_ns)
-    return _read_catalog(
-        "/catalog/chart-series",
-        symbol,
-        lambda: chart_series.compute_chart_series(CATALOG_PATH, symbol, start_ns, end_ns),
-    )
 
 
 @app.get("/catalog/snapshots/{iid}")
@@ -263,9 +262,11 @@ def errors(since_ns: int | None = None) -> ErrorsResponse:
     )
 
 
-# Story 15.2: rankings REST + WS relay. Story 15.3: candles REST. Story 15.7: snapshots
+# Story 15.2: rankings REST + WS relay. Story 15.3: candles REST. Story 33.4: the derivatives
+# and liquidations read models (`routes/derivatives.py`). Story 15.7: snapshots
 # (Lines mode) REST. Story 17.2/15.8: metrics history/nearest REST. Story 25.1b: archive
-# maintenance status + run-now. All must register
+# maintenance status + run-now. Story 33.9: the markets list (Compare picker). Story 33.12: the
+# chart watchlist (`routes/watchlist.py`). All must register
 # above the /api/* catch-all below -- a route registered after it would silently 404
 # (confirmed failure mode from Story 15.1's own SPA-fallback investigation; the same
 # "declared routes win over the catch-all" rule applies here).
@@ -292,12 +293,14 @@ app.include_router(alerts_routes.router)
 app.include_router(archive_routes.router)
 app.include_router(rankings_routes.router)
 app.include_router(candles_routes.router)
+app.include_router(derivatives_routes.router)
 app.include_router(footprint_routes.router)
-app.include_router(indicator_series_routes.router)
 app.include_router(drawings_routes.router)
 app.include_router(indicators_routes.router)
 app.include_router(layout_routes.router)
+app.include_router(markets_routes.router)
 app.include_router(snapshots_routes.router)
+app.include_router(watchlist_routes.router)
 app.include_router(metrics_routes.router)
 app.include_router(live_ws.router)
 

@@ -44,7 +44,7 @@ def _sink(tmp_path: Path) -> Iterator[tuple[CandleSink, CandleStore]]:
         sink.close()
 
 
-def test_the_sink_offers_exactly_the_ports_three_methods(tmp_path: Path) -> None:
+def test_the_sink_offers_exactly_the_ports_methods(tmp_path: Path) -> None:
     """
     `CandleSink` never imports `capture.application.ports.SecondSink` -- candles imports no context but
     kernel and observability, so the port is satisfied structurally (spine AD-D2). The typed
@@ -53,13 +53,13 @@ def test_the_sink_offers_exactly_the_ports_three_methods(tmp_path: Path) -> None
     """
     with _sink(tmp_path) as (sink, _):
         public = {n for n in dir(sink) if not n.startswith("_") and callable(getattr(sink, n))}
-        assert public == {"apply", "watermarks", "close"}
+        assert public == {"apply", "apply_liquidations", "watermarks", "close"}
         assert sink.apply(_IID, [_second(0, 100.0)]) == 1
         assert dict(sink.watermarks()) == {_IID: _second(0, 100.0).ts_event}
 
 
 def test_closing_the_sink_closes_its_store(tmp_path: Path) -> None:
-    """`close` is the port's third method: capture's `run()` calls it once, when it ends."""
+    """`close` releases the store: capture's `run()` calls it once, when it ends."""
     store = CandleStore(str(tmp_path / "candles_dydx.db"))
     CandleSink(store).close()
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
@@ -75,7 +75,7 @@ def test_applied_seconds_become_bars_and_a_watermark(tmp_path: Path) -> None:
 
 
 def test_a_replayed_batch_applies_nothing_and_changes_no_volume(tmp_path: Path) -> None:
-    """The `_UPSERT` accumulates `v`, so only the watermark keeps a second from counting twice."""
+    """The merge accumulates `v`, so only the watermark keeps a second from counting twice."""
     with _sink(tmp_path) as (sink, store):
         rows = [_second(s, 100.0 + s) for s in range(60)]
         sink.apply(_IID, rows)
