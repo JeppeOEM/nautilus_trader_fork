@@ -1085,11 +1085,12 @@ interface LastBar {
 }
 
 /**
- * Story 33.12: the newest bar as the main series draws it -- the forming one when it is newer than
- * history -- for the last-price line's colour and the countdown's place, so both sit on the drawn
- * last-price label. Under Heikin Ashi that is the HA row, not the real bar; a close-only type (Line,
- * Area, Baseline) draws the real close, so its direction is the real bar's. Indicators and every
- * other reader keep the real OHLC (AD-F6).
+ * Story 33.12: the newest bar -- the forming one when it is newer than history -- for the last-price
+ * line's colour and the countdown's place, so both sit on the last-price label. Under Heikin Ashi
+ * that is the real bar, never the HA row: an HA close is (O+H+L+C)/4, not a price, so the last price
+ * must not jump when the chart type changes (AD-F6; the label itself is a price line at the real
+ * close, see the last-price effect). Hollow candles colour by the drawn row; a close-only type
+ * (Line, Area, Baseline) draws the real close, so its direction is the real bar's.
  */
 function drawnLastBar(
   type: ChartType,
@@ -1105,7 +1106,7 @@ function drawnLastBar(
   const real = live ?? history;
   if (real === null) return null;
   const row = live ? liveSeriesRow(type, data, rows, live, colors) : rows[index];
-  const drawn = row !== undefined && "open" in row ? row : real;
+  const drawn = type !== "heikin_ashi" && row !== undefined && "open" in row ? row : real;
   return { time: real.time as number, open: drawn.open, close: drawn.close };
 }
 
@@ -1409,8 +1410,8 @@ export default function LightweightChart({
   // a close-only line) exists; read by its `setData`/`update` and the Baseline's base value only.
   const upDown = useMemo<UpDownColors>(() => ({ up: chartVar("--chart-up"), down: chartVar("--chart-down") }), []);
   const mainRows = useMemo<MainRow[]>(() => seriesRows(chartType, data, upDown), [chartType, data, upDown]);
-  // Story 33.12: the newest bar as the main series draws it (the Heikin Ashi row under Heikin Ashi),
-  // whose close the last-price line is coloured by and the countdown sits at (null with no bars).
+  // Story 33.12: the newest bar (the real one under Heikin Ashi), whose close the last-price line is
+  // coloured by and the countdown sits at (null with no bars).
   const lastBar = useMemo(
     () => (mode === "candles" ? drawnLastBar(chartType, data, mainRows, liveBar ?? null, upDown) : null),
     [mode, chartType, data, mainRows, liveBar, upDown],
@@ -1806,19 +1807,50 @@ export default function LightweightChart({
     // `mainRows` changes with `data` and `chartType`; `mainKind` re-runs it on a fresh series.
   }, [data, mainRows, mode, mainKind, showSavedZoomAfterModeSwitch]);
 
+  // The real last price's line under Heikin Ashi, with the series it was created on: a series the
+  // library replaced took its price lines with it, so a stale host is dropped, never removed from.
+  const realLastLineRef = useRef<{ host: MainSeriesApi; line: IPriceLine } | null>(null);
   useEffect(() => {
     // Story 33.12: the last-price line and label of the main series (Lines mode: the `price` line), the
-    // line in the up / down colour of the last bar (close against open), as the candle is drawn.
-    // Declared before the Baseline's base-value effect, so a new series takes these first and the
-    // base value stays its latest option.
+    // line in the up / down colour of the last bar (close against open). Under Heikin Ashi the
+    // library's own last value would be the HA close, (O+H+L+C)/4, so the price would jump on a switch
+    // from candles: the native line and label are off and a price line at the real close takes their
+    // place (AD-F6). Declared before the Baseline's base-value effect, so a new series takes these
+    // first and the base value stays its latest option.
     const host = mode === "candles" ? seriesRef.current : (lineSeriesRef.current?.price ?? null);
     if (!host) return;
-    const wanted: Record<string, unknown> = { priceLineVisible: lastPrice.line, lastValueVisible: lastPrice.label };
-    if (mode === "candles" && lastBar !== null) wanted.priceLineColor = lastBar.close >= lastBar.open ? upDown.up : upDown.down;
+    const realLine = mode === "candles" && chartType === "heikin_ashi" && lastBar !== null;
+    const color = lastBar !== null && lastBar.close >= lastBar.open ? upDown.up : upDown.down;
+    const wanted: Record<string, unknown> = {
+      priceLineVisible: lastPrice.line && !realLine,
+      lastValueVisible: lastPrice.label && !realLine,
+    };
+    if (mode === "candles" && lastBar !== null) wanted.priceLineColor = color;
     const current = host.options() as unknown as Record<string, unknown>;
     const changed = Object.fromEntries(Object.entries(wanted).filter(([key, value]) => current[key] !== value));
     if (Object.keys(changed).length > 0) host.applyOptions(changed);
-  }, [lastPrice.line, lastPrice.label, lastBar, mode, mainKind, upDown]);
+
+    const held = realLastLineRef.current;
+    if (held !== null && (!realLine || held.host !== host)) {
+      if (held.host === seriesRef.current) held.host.removePriceLine(held.line);
+      realLastLineRef.current = null;
+    }
+    if (!realLine || lastBar === null) return;
+    const options = {
+      price: lastBar.close,
+      color,
+      lineWidth: 1 as LineWidth,
+      lineStyle: LineStyle.Dashed,
+      lineVisible: lastPrice.line,
+      axisLabelVisible: lastPrice.label,
+      title: "",
+    };
+    if (realLastLineRef.current === null) {
+      realLastLineRef.current = { host: host as MainSeriesApi, line: host.createPriceLine(options) };
+    } else {
+      realLastLineRef.current.line.applyOptions(options);
+    }
+  }, [lastPrice.line, lastPrice.label, lastBar, mode, chartType, mainKind, upDown]);
 
   // Story 33.9: the Baseline's base value is the close of the first visible bar, re-applied whenever
   // the visible range moves (TradingView's baseline follows the left edge the same way).

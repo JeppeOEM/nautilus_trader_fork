@@ -3649,18 +3649,26 @@ describe("time zone, session breaks, countdown, last price and fullscreen (Story
     expect(localization()!.localization!.timeFormatter(DAY)).toBe(formatChartTime(DAY, "local"));
   });
 
-  it("colours the last-price line and places the countdown by the drawn Heikin Ashi bar, not the real one", () => {
+  it("keeps the last price at the real close under Heikin Ashi, never the HA close (AD-F6)", () => {
     vi.useFakeTimers();
     vi.setSystemTime((26 * HOUR + 15 * 60) * 1000);
     // The real last bar closes up (100 -> 100.5); its Heikin Ashi bar opens at the previous HA body's
-    // middle and closes at the bar's OHLC mean, below that open: drawn down.
+    // middle and closes at the bar's OHLC mean, below that open: drawn down. The last price is still
+    // the real 100.5, in the real bar's up colour, so switching chart type never moves it.
     const rising = [
       { time: (24 * HOUR) as Time, open: 110, high: 111, low: 109, close: 110 },
       { time: (25 * HOUR) as Time, open: 100, high: 101, low: 99, close: 100.5 },
     ];
-    render(<LightweightChart data={rising} onChartApi={() => {}} chartType="heikin_ashi" countdown={{ barSeconds: HOUR, enabled: true }} />);
+    const { rerender } = render(
+      <LightweightChart data={rising} onChartApi={() => {}} chartType="heikin_ashi" countdown={{ barSeconds: HOUR, enabled: true }} />,
+    );
     const series = addSeriesMock.mock.results.at(-1)!.value as ReturnType<typeof makeSeriesMock>;
-    expect(series.options()).toMatchObject({ priceLineColor: CHART_TOKENS["--chart-down"] });
+    // The library's own last value would be the HA close: off, a price line at the real close instead.
+    expect(series.options()).toMatchObject({ priceLineVisible: false, lastValueVisible: false });
+    expect(createPriceLineMock).toHaveBeenCalledTimes(1);
+    expect(createPriceLineMock).toHaveBeenCalledWith(
+      expect.objectContaining({ price: 100.5, color: CHART_TOKENS["--chart-up"], lineVisible: true, axisLabelVisible: true }),
+    );
 
     const [primitive] = attached(CountdownPrimitive);
     const asked: number[] = [];
@@ -3670,7 +3678,13 @@ describe("time zone, session breaks, countdown, last price and fullscreen (Story
     };
     primitive.attached({ series: { priceToCoordinate }, requestUpdate: () => {} } as never);
     primitive.updateAllViews();
-    expect(asked.at(-1)).toBe((100 + 101 + 99 + 100.5) / 4); // the HA close, not the real 100.5
+    expect(asked.at(-1)).toBe(100.5);
+
+    // Back to candles: the line goes and the library's own last value (the same real close) returns.
+    const line = createPriceLineMock.mock.results[0].value;
+    rerender(<LightweightChart data={rising} onChartApi={() => {}} chartType="candles" countdown={{ barSeconds: HOUR, enabled: true }} />);
+    expect(removePriceLineMock).toHaveBeenCalledWith(line);
+    expect(series.options()).toMatchObject({ priceLineVisible: true, lastValueVisible: true, priceLineColor: CHART_TOKENS["--chart-up"] });
   });
 
   it("counts down to the forming bar's close under the last price, by the viewer's clock, in Candles mode only", () => {
