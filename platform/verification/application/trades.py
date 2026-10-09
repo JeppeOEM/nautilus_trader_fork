@@ -80,6 +80,7 @@ from verification.domain.conservation import wire_index
 from verification.domain.plan_file import RecordingPlan
 from verification.domain.trade_check import FAILING_IDS
 from verification.domain.trade_check import FAILING_SECONDS
+from verification.domain.trade_check import KNOWN_CAUSES
 from verification.domain.trade_check import SECOND_CLASSES
 from verification.domain.trade_check import STAGES
 from verification.domain.trade_check import ArchivedTrade
@@ -246,6 +247,7 @@ def _judge_hour(
             rebuild_exempt=any(subject.exempt(row.ts_event) for row in second_rows),
             run_covers=subject.runs.contains(second),
             discrepancy=ids.discrepancy(second),
+            tick_rounded=second in ids.rounded_seconds,
         )
         judged.append((second, classify_second(facts, stage)))
     return tally_seconds(judged)
@@ -318,6 +320,9 @@ def _instrument_json(report: InstrumentTrades) -> dict[str, Any]:
         "ids": asdict(report.ids),
         "seconds": {"classes": classes, "examples": [list(e) for e in report.seconds.examples]},
         "latency_ms": report.latency.summary(),
+        "known": {
+            name: {"count": n, "reason": KNOWN_CAUSES[name]} for name, n in report.known.items()
+        },
     }
 
 
@@ -376,11 +381,25 @@ def _instrument_text(report: InstrumentTrades) -> list[str]:
         f"  latency  ts_init - recv_ns ms: {_pairs(latency, latency)}",
         f"  wire     no_aggressor={report.ids.wire_no_aggressor} tokens: {tokens}",
     ]
+    lines += _known_lines(report)
     if report.ids.examples:
         lines.append(f"  failing ids: {', '.join(report.ids.examples)}")
     if report.seconds.examples:
         seconds = ", ".join(f"{second}:{verdict}" for second, verdict in report.seconds.examples)
         lines.append(f"  failing seconds (epoch s): {seconds}")
+    return lines
+
+
+def _known_lines(report: InstrumentTrades) -> list[str]:
+    """Render the known causes: lower severity, reported with their reason, never failing."""
+    known = report.known
+    if not known:
+        return []
+    reasons = dict.fromkeys(KNOWN_CAUSES[name] for name in known)
+    lines = [f"  known    {_pairs(known, known)} (not failing)"]
+    lines += [f"    reason: {reason}" for reason in reasons]
+    if report.ids.known_examples:
+        lines += [f"    {example}" for example in report.ids.known_examples]
     return lines
 
 
@@ -415,6 +434,7 @@ def render_text(report: TradesDayReport) -> str:
         _missing_line(report.missing_raw_files),
         f"neighbour files read truncated: {', '.join(report.truncated_neighbour_files) or 'none'}",
         f"failing: ids {', '.join(FAILING_IDS)}; seconds {', '.join(sorted(FAILING_SECONDS))}",
+        f"known (reported, not failing): {', '.join(KNOWN_CAUSES)}",
         "",
     ]
     for instrument in report.instruments:

@@ -9,7 +9,7 @@ Every "error ledger" site named below (`collector.late_trade`, `collector.trade_
 (Story 23.1; formerly `ml_signals.error_ledger`, whose shim Story 24.1 deleted). The sites, their
 names and what they count are unchanged `[re-cited 2026-09-21: Story 23.1]`, with one addition:
 `archive_gaps.inverted_span` counts a gap marker whose `from_ns > to_ns` — a backward wall-clock
-step between a lost trade's arrival and the flush. Since Story 26.1 every capture site is a constant in `capture/application/sites.py` and `CaptureService._ledger` is capture's only `record` call; it added `collector.empty_top` (a book with no best bid or ask: seconds skipped, one WARNING and one ledger line per instrument per minute) `[amended 2026-09-26: Story 26.1]`, and Story 30.2 `collector.unencodable` (a second whose row cannot be stored exactly at the instrument definition's precisions: skipped, one ERROR and one ledger line per instrument per minute). Story 31.2 ledgered every site that only logged or skipped before. Per flush: `collector.stale_trade` (§1.1) and `collector.second_rejected` (gate rejections per instrument and reason, `not_collected` excluded). Per event: `collector.skipped_seconds`, `collector.restart_gap` and `collector.coverage_write` (§1.16), `collector.ohlc_outside_book` (every occurrence, the row kept), `collector.snapshot_publish` (a failed `snapshots:raw` publish, Parquet unaffected), `collector.crash` (`run()` raised, or a restart attempt's `build()` did; restarted with backoff) `[amended 2026-10-05: DW-241]`, `collector.ingest_abandoned` (messages still queued when the 2 s shutdown/crash drain budget ran out, abandoned unprocessed; named with their count) `[amended 2026-10-05: DW-267]`, `collector.unknown_message` (a client message no branch decodes, repr bounded to 300 chars; dYdX's `block_height` and `new_instrument_discovered` dicts are ignored by name), `collector.candle_store_behind` and `collector.book_crosscheck_unconfirmed`. A REST poll's unparseable rows (a missing symbol or `openInterest`, a non-decimal value) go to its own poll site, `collector.open_interest_poll` `[amended 2026-09-29: Story 31.2]`. Story 28.1 added one per-flush site, `collector.hotpath_publish` (a failed `capture:hotpath` publish of the flush's hot-path figures, §1.25: once per failed publish, after a periodic flush or the final flush of a stop or crash, Parquet unaffected) `[amended 2026-09-30: Story 28.1]`. Story 33.1 added two Bybit liquidation sites (§1.26): `collector.liquidation_feed` (a liquidation subscribe that failed or Bybit refused, the liquidation socket that did not open, went `down`, or whose monitor round raised) and `collector.liquidation_publish` (a failed `liquidations:raw` publish, the rows archived regardless); an inexact liquidation entry is `collector.unencodable` and a malformed liquidation frame `collector.unknown_message` `[amended 2026-10-05: Story 33.1]`. Story 33.4 added `collector.derivs_publish` (a failed `derivs:raw` publish, with its row count, or the rows the 20,000-row pending cap turned away, counted at the next drain; Parquet unaffected, §1.27) `[amended 2026-10-06: Story 33.4]`. The marker is written as the ordered span and
+step between a lost trade's arrival and the flush. Since Story 26.1 every capture site is a constant in `capture/application/sites.py` and `CaptureService._ledger` is capture's only `record` call; it added `collector.empty_top` (a book with no best bid or ask: seconds skipped, one WARNING and one ledger line per instrument per minute) `[amended 2026-09-26: Story 26.1]`, and Story 30.2 `collector.unencodable` (a second whose row cannot be stored exactly at the instrument definition's precisions: skipped, one ERROR and one ledger line per instrument per minute). Story 31.2 ledgered every site that only logged or skipped before. Per flush: `collector.stale_trade` (§1.1) and `collector.second_rejected` (gate rejections per instrument and reason, `not_collected` excluded). Per event: `collector.skipped_seconds`, `collector.restart_gap` and `collector.coverage_write` (§1.16), `collector.ohlc_outside_book` (every occurrence, the row kept), `collector.snapshot_publish` (a failed `snapshots:raw` publish, Parquet unaffected), `collector.crash` (`run()` raised, or a restart attempt's `build()` did; restarted with backoff) `[amended 2026-10-05: DW-241]`, `collector.ingest_abandoned` (messages still queued when the 2 s shutdown/crash drain budget ran out, abandoned unprocessed; named with their count) `[amended 2026-10-05: DW-267]`, `collector.unknown_message` (a client message no branch decodes, repr bounded to 300 chars; dYdX's `block_height` and `new_instrument_discovered` dicts are ignored by name), `collector.candle_store_behind` and `collector.book_crosscheck_unconfirmed`. A REST poll's unparseable rows (a missing symbol or `openInterest`, a non-decimal value) go to its own poll site, `collector.open_interest_poll` `[amended 2026-09-29: Story 31.2]`. Story 28.1 added one per-flush site, `collector.hotpath_publish` (a failed `capture:hotpath` publish of the flush's hot-path figures, §1.25: once per failed publish, after a periodic flush or the final flush of a stop or crash, Parquet unaffected) `[amended 2026-09-30: Story 28.1]`. Story 33.1 added two Bybit liquidation sites (§1.26): `collector.liquidation_feed` (a liquidation subscribe that failed or Bybit refused, the liquidation socket that did not open, went `down`, or whose monitor round raised) and `collector.liquidation_publish` (a failed `liquidations:raw` publish, the rows archived regardless); an inexact liquidation entry is `collector.unencodable` and a malformed liquidation frame `collector.unknown_message` `[amended 2026-10-05: Story 33.1]`. Story 33.4 added `collector.derivs_publish` (a failed `derivs:raw` publish, with its row count, or the rows the 20,000-row pending cap turned away, counted at the next drain; Parquet unaffected, §1.27) `[amended 2026-10-06: Story 33.4]`. DW-266 added `collector.memory_pressure` (the flush-time memory canary: the container's cgroup `memory.current` crossing 90% of `memory.max`, once per crossing -- re-armed below 80% -- one ERROR and, with it, one notification push: Telegram when the collector's compose environment sets `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`, else the OPERATOR channel; §1.25) `[amended 2026-10-09: DW-266]`. The marker is written as the ordered span and
 still protects its rows, so the count is the only signal that the clock stepped back
 `[added 2026-09-22: Story 23.2]`.
 
@@ -1159,6 +1159,17 @@ recorder connection gap of its trade channel); `duplicated` (ids stored more tha
 precision); `implausible_latency`. `backfilled` and `wire_no_aggressor` are evidence only. There is
 no tolerance anywhere.
 
+**Known causes** (lower severity: counted and reported with their reason, never failing;
+`trade_check.KNOWN_CAUSES`) `[amended 2026-10-09: DW-263]`. `price_tick_rounded`: a matched id whose
+venue price is not a whole unit at the archived file's `price_precision`, whose stored price is, and
+the two are at most half a unit apart (either neighbour of an exact half) -- the adapter's rounding
+of a sub-tick print to the published tick, audit D-91, accepted. It replaces that id's
+`mismatch_price`; any other price difference, including one further than half a tick, stays
+`mismatch_price`. The JSON carries `ids.price_tick_rounded`, `ids.known_examples` (each the difference
+found: `<id> @ <second> s: venue <price> -> stored <price>`) and a per-instrument `known` map
+(`{name: {count, reason}}`); the text report prints a `known` line with the reason, then the
+differences. `verification.candles` reports the same seconds as its known `tick_rounded` (§1.21).
+
 **Recorder connection gap.** Built from the trade channel's own lines (which carry every
 `connection` line of their endpoint, §1.15), read from the start of hour H-1 of the window's first
 hour to the end of the hour after its last: `close`/`error` to the next `open`; an `open` with no
@@ -1206,7 +1217,8 @@ second passes only when its row is arc's fold.
 | `missing_row` | ref or the archive has trades, no row, no coverage `seconds` run | yes |
 | `missing_row_explained` | ref or the archive has trades, no row, a coverage `seconds` run covers it | no |
 | `duplicate_row` | two rows in one second | yes |
-| `off_grid` | the reference or archive fold cannot be held at the row's precisions | yes |
+| `off_grid` | the reference or archive fold cannot be held at the row's precisions, and not `tick_rounded` | yes |
+| `tick_rounded` | the reference fold cannot be held at the row's precisions, the second holds a `price_tick_rounded` id and no other id discrepancy (every id matched, no failing field), and row == arc: the row is the archive's own fold of the tick-rounded prices (D-91, a known cause). With row != arc it is judged like any trusted second (`live_provisional`, `rebuild_mismatch`, `live_kept`) | no |
 
 **Stage.** `archive.rebuild_seconds` rewrites rows in place and leaves no marker (`state.json` is a
 scheduler cursor, not a verdict), so the stage is an explicit flag, never inferred (audit D-94). The
@@ -1217,7 +1229,7 @@ guarantee; a wrong `rebuilt` can only false-fail. Story 31.11's nightly `verify_
 
 **Verdict and exit.** An instrument passes with every failing id count (`missing_unexplained`,
 `extra_unexplained`, `duplicated`, the four `mismatch_*`, `reference_conflict`, `off_precision`,
-`implausible_latency`) and every failing second class at 0; the day passes when every instrument
+`implausible_latency`) and every failing second class at 0 (a known cause never fails); the day passes when every instrument
 does, the coverage record exists and no raw reference hour of the day is missing. Exit 0 pass, 1
 fail, 2 usage. Refusals exit 1 with their message, ledgered at `verification.trades.refused`: an
 unknown `--stage`, a day not closed, no raw root or catalog, an unreadable or empty plan, a
@@ -1762,7 +1774,8 @@ of the nine widths dividing a day (`DAY_BAR_SECONDS`): the six stored `(60, 300,
 | reference `exact` / `both_undefined` | the masked reference fold equals the catalog fold | no |
 | `ref_recorder_gap` | every differing second lies in a recorder gap of one of the instrument's WS trade channels (the reference itself was blind) | no |
 | `ref_explained` | every differing second lies in a coverage trade window (`trades_dropped`, `trades_unrecoverable`) or an archive-gap marker span (live values kept) | no |
-| `ref_different` | a differing second none of those explains (a second the reference cannot fold at the row's precision -- `off_grid` -- always differs) | yes |
+| `tick_rounded` | the bucket equals the masked reference, and one of its seconds the reference folded only by rounding the venue's sub-tick prints to the row's tick, the rounded fold being exactly the row (`RoundedFold`: the known cause D-91, the same rule as `verification.trades`' `price_tick_rounded`; an exact half tries both neighbours, at most `MAX_TICK_TIES` = 6 per second, past which the second stays off grid). Reported per instrument under `known` with each second's difference (`<second> s: venue <price> -> stored <price>`) `[amended 2026-10-09: DW-263]` | no |
+| `ref_different` | a differing second none of those explains (a second the reference cannot fold at the row's precision -- `off_grid` -- always differs, unless it is `tick_rounded`) | yes |
 | `unknown_width` | a stored row of a width the store does not keep | yes |
 
 The **reference** is the fold (`fold_second`, at that second's row precisions) of the reference
@@ -2337,8 +2350,12 @@ ingest-queue backlog (D-07) can be told apart from host contention (D-146)
   `capture.application.hotpath_metrics.HotPathWindow` and restart from zero after every report.
   The same figures go to the collector's log as one INFO line,
   `hotpath: window_s=60.001 queue_depth_max=37 messages_processed=500 wakes=60 lag_max_ms=3200.0
-  lag_p99_ms=3200.0 writes=3 write_data_ms=4.5 write_data_max_ms=12.0` (Dozzle), with or without
-  Redis.
+  lag_p99_ms=3200.0 writes=3 write_data_ms=4.5 write_data_max_ms=12.0 mem_current_mib=220.3
+  mem_limit_mib=345.2` (Dozzle), with or without Redis -- the two `mem_*` figures appended by
+  the DW-266 memory canary (2026-10-09): the flush's point sample of the container's cgroup
+  `memory.current`/`memory.max` (`capture.application.cgroup`), `None` with no cgroup limit
+  (the dev box outside Docker), the same read that feeds the canary's
+  `_check_memory_pressure` below.
 - **Carrier:** `RedisLiveStream.publish_hotpath` (`capture/infrastructure/redis_stream.py`) sends
   one pipeline (no MULTI) on the collector's existing Redis client: `PUBLISH capture:hotpath <json>`
   and `SET capture:hotpath:<venue> <json>`, `<venue>` the lower-case `kernel.venues` token
@@ -2377,6 +2394,14 @@ ingest-queue backlog (D-07) can be told apart from host contention (D-146)
     its slowest successful `ArchiveWriter.write` call (`ParquetDataCatalog.write_data` of one
     batch), timed with `perf_counter_ns` inside the worker thread; `null` when no batch was
     written. A failed write never counts (it is `collector.flush_write`).
+  - `mem_current_mib`, `mem_limit_mib` — MiB (1 decimal) point sample of the container's cgroup
+    `memory.current`/`memory.max` taken at the report (the DW-266 memory canary's read), `null`
+    with no cgroup limit (the dev box outside Docker); a point sample, not a window figure
+    `[added 2026-10-09: DW-266]`. Above 90% of the limit — once per crossing, re-armed below
+    80% — the same read ledgers `collector.memory_pressure` (§the sites register) and pushes
+    one notification (`observability.notify`: Telegram when the collector's compose
+    environment sets `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`, else the OPERATOR channel), the
+    warning before the cgroup OOM-kill the `mem_limit` makes.
 - **Consumers:** none yet -- read it with `redis-cli GET capture:hotpath:bybit` or
   `redis-cli SUBSCRIBE capture:hotpath` (`docs/DEPLOY_CHECKLIST.md` §7). No HTTP endpoint serves it.
 - **Deviation, recorded:** the epic asked for these figures "on the existing per-flush Redis

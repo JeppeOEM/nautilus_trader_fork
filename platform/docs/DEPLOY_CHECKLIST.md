@@ -516,6 +516,19 @@ Upgrade path: re-measure (`docker stats --no-stream` and the container's
 `/sys/fs/cgroup/memory.peak`, x 1.5) and raise `mem_limit` **before** growing a plan; Story 28.2's
 scale burst gives per-instrument figures.
 
+Since 2026-10-09 (DW-266, operator decision 2026-10-05) the memory canary warns before that kill:
+each flush reads the container's cgroup `memory.current`/`memory.max` (`capture.application.cgroup`;
+the pair rides the `hotpath:` log line and the `capture:hotpath` record as
+`mem_current_mib`/`mem_limit_mib`), and above 90% of the limit — once per crossing, re-armed below
+80% — ledgers `collector.memory_pressure` (`GET /api/errors`, the frontend `ErrorBar`) and pushes
+one notification: Telegram when the collector's compose environment sets
+`TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` (the same vars the alert engine's alerts deliver on; set
+them in `.env` beside the compose file), else the OPERATOR channel (`WATCHDOG_NTFY_URL`, else a
+CRITICAL log). A warned pressure is answered the §7 way: re-measure and raise `mem_limit` before
+growing the plan — the canary only warns, it never refuses a plan change (the declined
+alternative). Off without a cgroup limit (the dev box outside Docker), a `Known limit:` in
+`capture/application/cgroup.py`.
+
 **Redeploy, in this order** (from `platform/`):
 
 1. `make build-base` only if `nautilus_trader` core or its dependencies changed since the last base

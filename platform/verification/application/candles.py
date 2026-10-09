@@ -91,6 +91,7 @@ from verification.domain.candle_check import CandlesDayReport
 from verification.domain.candle_check import Causes
 from verification.domain.candle_check import InstrumentCandles
 from verification.domain.candle_check import PreparedDay
+from verification.domain.candle_check import RoundedFold
 from verification.domain.candle_check import ServedBar
 from verification.domain.candle_check import ServedPage
 from verification.domain.candle_check import WeekFacts
@@ -109,6 +110,7 @@ from verification.domain.catalog_check import STORE_BAR_SECONDS
 from verification.domain.catalog_check import UNKNOWN_WIDTH
 from verification.domain.catalog_check import StoredBar
 from verification.domain.catalog_check import TradeRow
+from verification.domain.conservation import EXAMPLES
 from verification.domain.conservation import NS_PER_HOUR
 from verification.domain.conservation import NS_PER_S
 from verification.domain.conservation import SECONDS_PER_DAY
@@ -127,6 +129,8 @@ from verification.domain.reference_signals import WEEK_SECONDS
 from verification.domain.reference_signals import KnownLiquidations
 from verification.domain.reference_signals import RefCandle
 from verification.domain.reference_signals import fold_candles
+from verification.domain.trade_check import KNOWN_CAUSES
+from verification.domain.trade_check import TICK_ROUNDED
 from verification.domain.trade_check import TradeColumns
 from verification.domain.trade_check import merge_reference
 
@@ -229,10 +233,10 @@ def _instrument_channels(instrument_id: str, run: _Run) -> tuple[TradeChannel, .
 
 def _reference(
     instrument_id: str, rows: Mapping[int, TradeRow], reason_of: Mapping[int, str], run: _Run
-) -> tuple[dict[int, TradeColumns | None], Counter[str]]:
+) -> tuple[dict[int, TradeColumns | RoundedFold | None], Counter[str]]:
     """Fold the day's reference hour by hour (MEM-01: one hour of trades in memory)."""
     channels = _instrument_channels(instrument_id, run)
-    folded: dict[int, TradeColumns | None] = {}
+    folded: dict[int, TradeColumns | RoundedFold | None] = {}
     unobserved: Counter[str] = Counter()
     for hour in run.hours:
         by_second: dict[int, list[ReferenceTrade]] = {}
@@ -400,6 +404,7 @@ def _instrument(instrument_id: str, coverage: InstrumentCoverage, run: _Run) -> 
         widths=tuple(_width(instrument_id, day, w, bars, run) for w in DAY_BAR_SECONDS),
         unknown_width=unknown,
         week=week,
+        rounded=day.rounded,
     )
 
 
@@ -469,6 +474,25 @@ def _instrument_json(report: InstrumentCandles) -> dict[str, Any]:
         UNKNOWN_WIDTH: report.unknown_width,
         "widths": {str(w.bar_seconds): _width_json(w) for w in report.widths},
         "week": _week_json(report.week),
+        "known": _known_json(report),
+    }
+
+
+def _rounded_examples(report: InstrumentCandles) -> list[str]:
+    """Return the first rounded seconds with their differences (`<second> s: venue -> stored`)."""
+    seconds = sorted(report.rounded)[:EXAMPLES]
+    return [f"{second} s: {', '.join(report.rounded[second])}" for second in seconds]
+
+
+def _known_json(report: InstrumentCandles) -> dict[str, Any]:
+    if not report.rounded:
+        return {}
+    return {
+        TICK_ROUNDED: {
+            "seconds": len(report.rounded),
+            "reason": KNOWN_CAUSES[TICK_ROUNDED],
+            "examples": _rounded_examples(report),
+        }
     }
 
 
@@ -529,6 +553,12 @@ def _instrument_text(report: InstrumentCandles) -> list[str]:
     ]
     if seconds.examples_unexplained:
         lines.append(f"  unexplained seconds (epoch s): {list(seconds.examples_unexplained)}")
+    if report.rounded:
+        lines += [
+            f"  known    {TICK_ROUNDED} seconds={len(report.rounded)} (not failing)",
+            f"    reason: {KNOWN_CAUSES[TICK_ROUNDED]}",
+            *(f"    {example}" for example in _rounded_examples(report)),
+        ]
     for width in report.widths:
         lines += _width_line(width)
     return lines + _week_lines(report.week)
@@ -537,7 +567,8 @@ def _instrument_text(report: InstrumentCandles) -> list[str]:
 _FAILING = (
     f"failing: unexplained seconds, {UNKNOWN_WIDTH}, missing raw reference files; catalog "
     f"{', '.join(sorted(FAILING_CANDLES))}; served {', '.join(sorted(FAILING_SERVED))}; "
-    f"reference {', '.join(sorted(FAILING_REFERENCE))}"
+    f"reference {', '.join(sorted(FAILING_REFERENCE))}\n"
+    f"known (reported, not failing): reference {TICK_ROUNDED}"
 )
 
 

@@ -96,7 +96,7 @@ def test_take_starts_a_new_window() -> None:
 
 
 def test_the_record_and_the_log_line_carry_the_same_figures() -> None:
-    report = HotPathReport(60.001, 37, 500, 60, 3200.0, 1.25, 0, None, None)
+    report = HotPathReport(60.001, 37, 500, 60, 3200.0, 1.25, 0, None, None, 100.0, 200.0)
     assert report.to_dict() == {
         "window_s": 60.001,
         "queue_depth_max": 37,
@@ -107,8 +107,21 @@ def test_the_record_and_the_log_line_carry_the_same_figures() -> None:
         "writes": 0,
         "write_data_ms": None,
         "write_data_max_ms": None,
+        "mem_current_mib": 100.0,
+        "mem_limit_mib": 200.0,
     }
     assert report.log_text() == (
         "window_s=60.001 queue_depth_max=37 messages_processed=500 wakes=60 lag_max_ms=3200.0 "
-        "lag_p99_ms=1.25 writes=0 write_data_ms=None write_data_max_ms=None"
+        "lag_p99_ms=1.25 writes=0 write_data_ms=None write_data_max_ms=None "
+        "mem_current_mib=100.0 mem_limit_mib=200.0"
     )
+
+
+def test_take_carries_the_cgroup_memory_point_sample() -> None:
+    report = HotPathWindow().take(0, 0, 0, (104_857_600, 209_715_200))
+    assert (report.mem_current_mib, report.mem_limit_mib) == (100.0, 200.0)
+
+
+def test_take_without_a_cgroup_reports_no_memory() -> None:
+    report = HotPathWindow().take(0, 0, 0)
+    assert (report.mem_current_mib, report.mem_limit_mib) == (None, None)

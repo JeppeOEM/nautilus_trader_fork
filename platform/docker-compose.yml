@@ -39,6 +39,12 @@ x-logging: &default-logging
 # `restart: always` restarts it: a visible gap and `OOMKilled=true`, never a silent one. Upgrade
 # path: re-measure and raise `mem_limit` before growing a plan; Story 28.2's scale burst gives
 # per-instrument figures.
+# Since 2026-10-09 (DW-266) the memory canary warns before that kill: each flush reads the
+# container's cgroup `memory.current`/`memory.max` (the `hotpath:` line and the `capture:hotpath`
+# record carry the pair), and above 90% of the limit -- once per crossing, re-armed below 80% --
+# ledgers `collector.memory_pressure` and pushes one notification: Telegram when
+# TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are set on the collector (below), else the OPERATOR channel
+# (`WATCHDOG_NTFY_URL`, or a CRITICAL log).
 services:
   redis:
     container_name: dydx-redis
@@ -95,6 +101,11 @@ services:
       # appends a JSON line to <ERROR_LEDGER_DIR>/<ERROR_LEDGER_SERVICE>.jsonl.
       ERROR_LEDGER_DIR: "/app/errors_dir"
       ERROR_LEDGER_SERVICE: "collector"
+      # The DW-266 memory canary's push: Telegram when both are set -- the same transport and
+      # vars the alert engine's alerts deliver on; unset falls back to the OPERATOR channel
+      # (WATCHDOG_NTFY_URL, or a CRITICAL log).
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
     # Known limit: hardcoded to host uid/gid (single-user box), so ./catalog
     # writes land owned by you, not root. Switch to ${UID}:${GID} if shared.
     user: "1000:1000"
@@ -144,6 +155,11 @@ services:
       # WATCHDOG_NTFY_URL: "https://ntfy.sh/your-private-topic-here"
       ERROR_LEDGER_DIR: "/app/errors_dir"
       ERROR_LEDGER_SERVICE: "bybit_collector"
+      # The DW-266 memory canary's push: Telegram when both are set -- the same transport and
+      # vars the alert engine's alerts deliver on; unset falls back to the OPERATOR channel
+      # (WATCHDOG_NTFY_URL, or a CRITICAL log).
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
     user: "1000:1000"
     volumes:
       # rw: the plan store writes it back -- a collector:control command addressed to this
@@ -180,6 +196,11 @@ services:
       # WATCHDOG_NTFY_URL: "https://ntfy.sh/your-private-topic-here"
       ERROR_LEDGER_DIR: "/app/errors_dir"
       ERROR_LEDGER_SERVICE: "hyperliquid_collector"
+      # The DW-266 memory canary's push: Telegram when both are set -- the same transport and
+      # vars the alert engine's alerts deliver on; unset falls back to the OPERATOR channel
+      # (WATCHDOG_NTFY_URL, or a CRITICAL log).
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
     user: "1000:1000"
     volumes:
       # rw: the plan store writes it back -- a collector:control command addressed to this

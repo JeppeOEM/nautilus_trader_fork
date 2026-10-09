@@ -26,7 +26,10 @@ Invariants:
   makes any rounding raise; nothing compares within a tolerance (latency is the one bounded
   quantity, and it is reported, not absorbed);
 - a failing count is never folded into a passing class: `passed` is false while any of them is
-  non-zero.
+  non-zero;
+- a known cause is reported, never hidden, and never stretched: a finding is counted under a
+  `KNOWN_CAUSES` name (with its reason, below failing severity) only when the evidence proves that
+  exact mechanism; anything else of the same shape stays a failing count.
 """
 
 from collections import Counter
@@ -90,6 +93,7 @@ MISSING_ROW = "missing_row"
 MISSING_ROW_EXPLAINED = "missing_row_explained"
 DUPLICATE_ROW = "duplicate_row"
 OFF_GRID = "off_grid"
+TICK_ROUNDED = "tick_rounded"
 SECOND_CLASSES = (
     EXACT,
     LIVE_PROVISIONAL,
@@ -101,9 +105,23 @@ SECOND_CLASSES = (
     MISSING_ROW_EXPLAINED,
     DUPLICATE_ROW,
     OFF_GRID,
+    TICK_ROUNDED,
 )
 FAILING_SECONDS = frozenset(
     {REBUILD_MISMATCH, ARCHIVE_DIFFERS, MISSING_ROW, DUPLICATE_ROW, OFF_GRID}
+)
+
+# Known causes (lower severity than a failing count): a mechanism identified and accepted, so its
+# findings are counted and reported with the reason but never fail the check. Each name is an id
+# count (`IdCounts`) or a second class, and only exact evidence of the mechanism is counted under it.
+PRICE_TICK_ROUNDED = "price_tick_rounded"
+TICK_ROUNDED_REASON = (
+    "D-91: the venue printed a price finer than the instrument's published tick; the Nautilus "
+    "adapter parses every price at the tick's precision and rounds it (by at most half a tick). "
+    "Accepted, not fixable outside crates/ (FORK-01): DW-263"
+)
+KNOWN_CAUSES = MappingProxyType(
+    {PRICE_TICK_ROUNDED: TICK_ROUNDED_REASON, TICK_ROUNDED: TICK_ROUNDED_REASON}
 )
 
 # What a second's id discrepancies amount to (`SecondFacts.discrepancy`).
@@ -148,12 +166,36 @@ def units(value: Decimal, precision: int) -> int:
     return int(scaled)
 
 
+def tick_rounded(venue: Decimal, stored: Decimal, precision: int) -> bool:
+    """
+    Whether `stored` is the venue's price rounded to `precision` (D-91): the venue's value is not
+    a whole unit there, the stored one is, and they are at most half a unit apart. Either
+    neighbour of an exact half counts: the adapter's float rounding of a tie is not restated.
+
+    Example: venue 84528.67, stored 84528.7 at precision 1 -> True; stored 84528.8 -> False.
+    """
+    if not (whole(stored, precision) and not whole(venue, precision)):
+        return False
+    half_unit = Decimal(5).scaleb(-(precision + 1), context=_exact())
+    return abs(_exact().subtract(venue, stored)) <= half_unit
+
+
+def whole(value: Decimal, precision: int) -> bool:
+    """Whether `value` is a whole number of 10^-precision."""
+    try:
+        units(value, precision)
+    except OffGrid:
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class ArchivedTrade:
     """
     One archived trade, decoded. `on_grid`: price and size are whole units at their file's
     precisions. `order` is its fold position, `(ts_event, ts_init, row position)`, replaced by
-    the reference's own order when the reference saw the id.
+    the reference's own order when the reference saw the id. `price_precision`: its file's (None
+    when unknown, e.g. a hand-built trade: then no price difference is a known tick rounding).
     """
 
     trade_id: str
@@ -164,6 +206,7 @@ class ArchivedTrade:
     ts_init: int
     on_grid: bool
     order: tuple[int, ...]
+    price_precision: int | None = None
 
 
 @dataclass(frozen=True)
@@ -193,6 +236,7 @@ def archived_trade(stored: StoredTrade, position: int) -> ArchivedTrade:
         ts_init=stored.ts_init,
         on_grid=on_grid,
         order=(stored.ts_event, stored.ts_init, position),
+        price_precision=stored.price_precision,
     )
 
 
@@ -397,6 +441,9 @@ class IdCounts:
     ids the reference did not see; `mismatch_*` compare matched ids field by field;
     `backfilled` (matched ids on a `trades_backfilled` line) and `wire_no_aggressor` (reference
     ids whose wire side was no known token, `no_aggressor_tokens` the tokens) are evidence only.
+    `price_tick_rounded` is a known cause (`KNOWN_CAUSES`): a matched id whose stored price is the
+    venue's rounded to the tick (`tick_rounded`), never a `mismatch_price`; `known_examples` shows
+    the first such ids with the difference (`<id> @ <second> s: venue <price> -> stored <price>`).
     """
 
     seen: int = 0
@@ -408,6 +455,7 @@ class IdCounts:
     extra_unexplained: int = 0
     duplicated: int = 0
     mismatch_price: int = 0
+    price_tick_rounded: int = 0
     mismatch_size: int = 0
     mismatch_side: int = 0
     mismatch_ts_event: int = 0
@@ -417,12 +465,16 @@ class IdCounts:
     wire_no_aggressor: int = 0
     no_aggressor_tokens: tuple[str, ...] = ()
     examples: tuple[str, ...] = ()
+    known_examples: tuple[str, ...] = ()
 
     def plus(self, other: "IdCounts") -> "IdCounts":
         sums = {name: getattr(self, name) + getattr(other, name) for name in _ID_SUMS}
         tokens = tuple(sorted(set(self.no_aggressor_tokens) | set(other.no_aggressor_tokens)))
         examples = (self.examples + other.examples)[:EXAMPLES]
-        return replace(self, **sums, no_aggressor_tokens=tokens, examples=examples)
+        known = (self.known_examples + other.known_examples)[:EXAMPLES]
+        return replace(
+            self, **sums, no_aggressor_tokens=tokens, examples=examples, known_examples=known
+        )
 
     @property
     def failing(self) -> int:
@@ -430,7 +482,9 @@ class IdCounts:
 
 
 _ID_SUMS = frozenset(
-    f.name for f in fields(IdCounts) if f.name not in ("no_aggressor_tokens", "examples")
+    f.name
+    for f in fields(IdCounts)
+    if f.name not in ("no_aggressor_tokens", "examples", "known_examples")
 )
 FAILING_IDS = (
     "missing_unexplained",
@@ -464,12 +518,21 @@ class _HourTally:
         self.failed: set[int] = set()
         self.latency: Counter[int] = Counter()
         self.folded: list[ArchivedTrade] = []
+        self.rounded: set[int] = set()
+        self.known_examples: list[str] = []
 
     def fail(self, name: str, trade_id: str, *ts_ns: int) -> None:
         self.counts[name] += 1
         self.failed.update(ts // NS_PER_S for ts in ts_ns)
         if len(self.examples) < EXAMPLES:
             self.examples.append(f"{name}:{trade_id}")
+
+    def known(self, name: str, ts_ns: int, difference: str) -> None:
+        """Count a known-cause finding: reported with its reason, its second never failed."""
+        self.counts[name] += 1
+        self.rounded.add(ts_ns // NS_PER_S)
+        if len(self.known_examples) < EXAMPLES:
+            self.known_examples.append(difference)
 
 
 @dataclass(frozen=True)
@@ -478,6 +541,7 @@ class HourIds:
     One hour's id comparison: the counts, the latency samples, the explanations left for the
     next hour, the archive's trades as the second fold takes them (each id once, a seen id in
     the reference's order) and, per second, whether its id discrepancies were all explained.
+    `rounded_seconds`: the seconds holding a `price_tick_rounded` id.
     """
 
     counts: IdCounts
@@ -486,6 +550,7 @@ class HourIds:
     folded: tuple[ArchivedTrade, ...]
     explained_seconds: frozenset[int]
     failed_seconds: frozenset[int]
+    rounded_seconds: frozenset[int] = frozenset()
 
     def discrepancy(self, second: int) -> str:
         if second in self.failed_seconds:
@@ -493,11 +558,28 @@ class HourIds:
         return EXPLAINED_ONLY if second in self.explained_seconds else NO_DISCREPANCY
 
 
+def _price_rounded(ref: ReferenceId, archived: ArchivedTrade) -> bool:
+    precision = archived.price_precision
+    return precision is not None and tick_rounded(ref.trade.price, archived.price, precision)
+
+
+def _rounding(ref: ReferenceId, archived: ArchivedTrade) -> str:
+    """Spell one tick rounding: the id, its venue second, the venue's and the stored price."""
+    unit = Decimal(1).scaleb(-(archived.price_precision or 0))
+    stored = archived.price.quantize(unit, context=_exact())
+    second = ref.trade.ts_ns // NS_PER_S
+    return f"{ref.trade.trade_id} @ {second} s: venue {ref.trade.price} -> stored {stored}"
+
+
 def _compare_fields(ref: ReferenceId, archived: ArchivedTrade, tally: _HourTally) -> None:
     trade = ref.trade
     both = (trade.ts_ns, archived.ts_event)
+    price_equal = trade.price == archived.price
+    if not price_equal and _price_rounded(ref, archived):
+        tally.known(PRICE_TICK_ROUNDED, trade.ts_ns, _rounding(ref, archived))
+        price_equal = True
     checks = (
-        ("mismatch_price", trade.price == archived.price),
+        ("mismatch_price", price_equal),
         ("mismatch_size", trade.size == archived.size),
         ("mismatch_side", trade.side == archived.side),
         ("mismatch_ts_event", trade.ts_ns == archived.ts_event),
@@ -607,7 +689,11 @@ def compare_ids(
     for trade_id in extra:
         _extra(first[trade_id], ctx, tally)
     tokens = _wire_sides(reference, tally)
-    base = IdCounts(no_aggressor_tokens=tokens, examples=tuple(tally.examples))
+    base = IdCounts(
+        no_aggressor_tokens=tokens,
+        examples=tuple(tally.examples),
+        known_examples=tuple(tally.known_examples),
+    )
     counts = replace(base, **cast(dict[str, Any], tally.counts))  # every key an int field
     return HourIds(
         counts=counts,
@@ -616,6 +702,7 @@ def compare_ids(
         folded=tuple(tally.folded),
         explained_seconds=frozenset(tally.explained),
         failed_seconds=frozenset(tally.failed),
+        rounded_seconds=frozenset(tally.rounded),
     )
 
 
@@ -625,8 +712,9 @@ class SecondFacts:
     Everything one second is judged on: its stored rows, the reference's trades and the
     archive's (`HourIds.folded`) with venue time in it, whether the rebuild keeps its live
     values by design (`rebuild_exempt`: inside an archive-gap marker span, or before the
-    instrument's first archived trade), whether a coverage `seconds` run covers it, and what its
-    id discrepancies amount to (`HourIds.discrepancy`).
+    instrument's first archived trade), whether a coverage `seconds` run covers it, what its
+    id discrepancies amount to (`HourIds.discrepancy`) and whether it holds a `price_tick_rounded`
+    id (`tick_rounded`).
     """
 
     rows: Sequence[StoredRow]
@@ -635,6 +723,7 @@ class SecondFacts:
     rebuild_exempt: bool
     run_covers: bool
     discrepancy: str
+    tick_rounded: bool = False
 
 
 def _row_differs(stage: str, rebuild_exempt: bool) -> str:
@@ -674,10 +763,28 @@ def classify_second(facts: SecondFacts, stage: str) -> str:
         ref = fold_second(facts.reference, row.price_precision, row.size_precision)
         arc = fold_second(facts.archived, row.price_precision, row.size_precision)
     except OffGrid:
-        return OFF_GRID
+        return _off_grid(row, facts, stage)
     if row.columns == ref:
         return EXACT
     return _judge_row(row.columns, ref, arc, facts, stage)
+
+
+def _off_grid(row: StoredRow, facts: SecondFacts, stage: str) -> str:
+    """
+    Classify a second the row's precision cannot fold. It is the known `tick_rounded` only when
+    every id of the second matched with no failing field, at least one of them a tick rounding (so
+    the reference's off-grid value is that venue price), and the row is the archive's own fold; a
+    row the rebuild must still correct is judged as any other. Anything else stays `off_grid`.
+    """
+    if not facts.tick_rounded or facts.discrepancy != NO_DISCREPANCY:
+        return OFF_GRID
+    try:
+        arc = fold_second(facts.archived, row.price_precision, row.size_precision)
+    except OffGrid:
+        return OFF_GRID
+    if row.columns == arc:
+        return TICK_ROUNDED
+    return _row_differs(stage, facts.rebuild_exempt)
 
 
 @dataclass(frozen=True)
@@ -719,6 +826,15 @@ class InstrumentTrades:
     @property
     def failing(self) -> int:
         return self.ids.failing + self.seconds.failing
+
+    @property
+    def known(self) -> dict[str, int]:
+        """Each known cause's count (`KNOWN_CAUSES`), only those that occurred."""
+        counts = {
+            PRICE_TICK_ROUNDED: self.ids.price_tick_rounded,
+            TICK_ROUNDED: self.seconds.classes.get(TICK_ROUNDED, 0),
+        }
+        return {name: count for name, count in counts.items() if count}
 
     @property
     def passed(self) -> bool:

@@ -34,7 +34,10 @@ Classes, per width and bucket of the day:
   not traded), and `partial_ok` / `partial_mismatch` (the flag absent or not the restated rule);
 - reference: `exact` / `both_undefined` when the masked reference fold equals the catalog fold,
   else every differing second is in a recorder gap (`ref_recorder_gap`), a coverage trade window
-  or an archive-gap marker span (`ref_explained`), or the bucket is `ref_different` (failing).
+  or an archive-gap marker span (`ref_explained`), or the bucket is `ref_different` (failing);
+  `tick_rounded` (a known cause, not failing, `trade_check.KNOWN_CAUSES`): the buckets equal, and
+  one of its seconds the reference could fold only by rounding the venue's sub-tick prints to the
+  row's tick (`RoundedFold`, audit D-91) -- the same rule as `verification.trades`.
 
 The reference is compared with the catalog fold; the stored and served bars are proven equal to
 that same fold above, so by transitivity each of them equals the masked reference exactly when
@@ -50,9 +53,11 @@ from collections.abc import Sequence
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import replace
+from decimal import ROUND_FLOOR
 from decimal import Decimal
 from decimal import localcontext
 from fractions import Fraction
+from itertools import product
 from types import MappingProxyType
 
 from verification.domain.catalog_check import BOTH_UNDEFINED
@@ -82,10 +87,13 @@ from verification.domain.reference_signals import units_exactly
 from verification.domain.signal_compare import FAILING
 from verification.domain.signal_compare import Agreement
 from verification.domain.signal_compare import at_places
+from verification.domain.trade_check import TICK_ROUNDED
 from verification.domain.trade_check import Foldable
 from verification.domain.trade_check import OffGrid
 from verification.domain.trade_check import TradeColumns
 from verification.domain.trade_check import fold_second
+from verification.domain.trade_check import tick_rounded
+from verification.domain.trade_check import whole
 
 
 # The widths `data_api` folds at read time from the raw 1 s rows (`docs/DATA_DICTIONARY.md` section
@@ -132,8 +140,18 @@ FAILING_SERVED = frozenset({SERVED_DIFFERS, SERVED_MISSING, SERVED_EXTRA, PARTIA
 REF_RECORDER_GAP = "ref_recorder_gap"
 REF_EXPLAINED = "ref_explained"
 REF_DIFFERENT = "ref_different"
-REFERENCE_CLASSES = (EXACT, BOTH_UNDEFINED, REF_RECORDER_GAP, REF_EXPLAINED, REF_DIFFERENT)
+REFERENCE_CLASSES = (
+    EXACT,
+    BOTH_UNDEFINED,
+    TICK_ROUNDED,
+    REF_RECORDER_GAP,
+    REF_EXPLAINED,
+    REF_DIFFERENT,
+)
 FAILING_REFERENCE = frozenset({REF_DIFFERENT})
+# How many exact-half sub-tick prints one second may hold before the tick-rounded fold stops trying
+# both neighbours of each (2^n folds): a second past it stays off grid, failing, never guessed.
+MAX_TICK_TIES = 6
 
 # --- 1W -------------------------------------------------------------------------------------------
 WEEK_OPEN = "week_open"
@@ -204,25 +222,81 @@ def row_columns(row: TradeRow) -> TradeColumns:
     )
 
 
-def fold_reference_second(trades: Sequence[Foldable], row: TradeRow) -> TradeColumns | None:
-    """Fold one observed second's reference trades at its row's precisions; None off grid."""
+@dataclass(frozen=True)
+class RoundedFold:
+    """
+    A second the reference can fold only by rounding its sub-tick prices to the row's tick, and
+    whose rounded fold is exactly the row (the known cause D-91, `TICK_ROUNDED`). `differences`
+    names each rounded print as `venue <price> -> stored <price>`, in fold order.
+    """
+
+    columns: TradeColumns
+    differences: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _Print:
+    """A reference trade with its price replaced by a tick candidate (`Foldable`)."""
+
+    price: Decimal
+    size: Decimal
+    side: int
+    order: tuple[int, ...]
+
+
+def fold_reference_second(
+    trades: Sequence[Foldable], row: TradeRow
+) -> TradeColumns | RoundedFold | None:
+    """
+    Fold one observed second's reference trades at its row's precisions. Off grid: the
+    `RoundedFold` when rounding its sub-tick prices to the tick reproduces the row, else None.
+    """
     try:
         return fold_second(trades, row.price_precision, row.size_precision)
     except OffGrid:
+        return _tick_rounded_fold(trades, row)
+
+
+def _tick_candidates(price: Decimal, precision: int) -> tuple[Decimal, ...]:
+    """Return the tick prices `price` rounds to (two for an exact half), or itself on the tick."""
+    if whole(price, precision):
+        return (price,)
+    unit = Decimal(1).scaleb(-precision)
+    low = price.quantize(unit, rounding=ROUND_FLOOR)
+    return tuple(c for c in (low, low + unit) if tick_rounded(price, c, precision))
+
+
+def _tick_rounded_fold(trades: Sequence[Foldable], row: TradeRow) -> RoundedFold | None:
+    ordered = sorted(trades, key=lambda trade: trade.order)
+    if not all(whole(trade.size, row.size_precision) for trade in ordered):
+        return None  # a size off grid is no tick rounding
+    options = [_tick_candidates(trade.price, row.price_precision) for trade in ordered]
+    if sum(len(option) > 1 for option in options) > MAX_TICK_TIES:
         return None
+    want = row_columns(row)
+    for prices in product(*options):
+        prints = [_Print(p, t.size, t.side, t.order) for p, t in zip(prices, ordered, strict=True)]
+        if fold_second(prints, row.price_precision, row.size_precision) == want:
+            differences = tuple(
+                f"venue {trade.price} -> stored {price}"
+                for trade, price in zip(ordered, prices, strict=True)
+                if price != trade.price
+            )
+            return RoundedFold(want, differences)
+    return None
 
 
 def fold_reference(
     by_second: Mapping[int, Sequence[Foldable]],
     rows: Mapping[int, TradeRow],
     reason_of: Mapping[int, str],
-) -> tuple[dict[int, TradeColumns | None], Counter[str]]:
+) -> tuple[dict[int, TradeColumns | RoundedFold | None], Counter[str]]:
     """
     Fold the reference trades of each second that has a row (keyed by epoch second); count the
     trades of every other second under that second's coverage reason (`NO_REASON` without one):
     `trades_unobserved`, which the bars understate by design.
     """
-    folded: dict[int, TradeColumns | None] = {}
+    folded: dict[int, TradeColumns | RoundedFold | None] = {}
     unobserved: Counter[str] = Counter()
     for second, trades in by_second.items():
         row = rows.get(second)
@@ -269,8 +343,10 @@ class PreparedDay:
     """
     One instrument's day, ready to judge: the rows (`ts_event` in the day, in order), their
     decoded books, the masked reference books (each row's trade columns replaced by the reference
-    fold of its second), the seconds whose row differs from the reference (sorted) and those the
-    reference could not fold at the row's precisions (off grid: always differing).
+    fold of its second), the seconds whose row differs from the reference (sorted), those the
+    reference could not fold at the row's precisions (off grid: always differing), and those it
+    folded only by rounding sub-tick prints to the tick (`rounded`, each with its differences;
+    their rows equal that fold, so they are never differing).
     """
 
     day_start_s: int
@@ -283,6 +359,11 @@ class PreparedDay:
     # The day's archived liquidations and their known start; None for an instrument without the
     # feed, or with nothing archived (§2.15).
     liquidations: KnownLiquidations | None = None
+    rounded: Mapping[int, tuple[str, ...]] = MappingProxyType({})
+
+    @property
+    def rounded_seconds(self) -> tuple[int, ...]:
+        return tuple(sorted(self.rounded))
 
 
 def _masked_row(row: TradeRow, folded: TradeColumns | None) -> TradeRow:
@@ -292,7 +373,7 @@ def _masked_row(row: TradeRow, folded: TradeColumns | None) -> TradeRow:
 def prepare_day(
     day_start_s: int,
     rows: Sequence[TradeRow],
-    reference: Mapping[int, TradeColumns | None],
+    reference: Mapping[int, TradeColumns | RoundedFold | None],
     causes: Causes,
     liquidations: KnownLiquidations | None = None,
 ) -> PreparedDay:
@@ -308,11 +389,16 @@ def prepare_day(
     masked: list[TradeRow] = []
     differing: set[int] = set()
     off_grid: set[int] = set()
+    rounded: dict[int, tuple[str, ...]] = {}
     seen: set[int] = set()
     for row in rows:
         second = row.ts_event // NS_PER_S
-        folded = reference.get(second, TradeColumns()) if second not in seen else TradeColumns()
+        found = reference.get(second, TradeColumns()) if second not in seen else TradeColumns()
         seen.add(second)
+        folded = found
+        if isinstance(found, RoundedFold):
+            rounded[second] = found.differences
+            folded = found.columns
         masked.append(_masked_row(row, folded))
         if folded is None:
             off_grid.add(second)
@@ -327,6 +413,7 @@ def prepare_day(
         off_grid=frozenset(off_grid),
         causes=causes,
         liquidations=liquidations,
+        rounded=MappingProxyType(rounded),
     )
 
 
@@ -375,14 +462,20 @@ def judge_served_bucket(
 
 
 def judge_reference(
-    catalog: RefCandle, masked: RefCandle, differing: Sequence[int], day: PreparedDay
+    catalog: RefCandle,
+    masked: RefCandle,
+    differing: Sequence[int],
+    day: PreparedDay,
+    rounded: Sequence[int] = (),
 ) -> str:
     """
     Judge the masked reference against the catalog fold of one bucket with rows: equal (and
-    nothing off grid) is `exact`/`both_undefined`; otherwise every differing second's cause
-    decides.
+    nothing off grid) is `exact`/`both_undefined`, or the known `tick_rounded` when the bucket
+    holds a `rounded` second; otherwise every differing second's cause decides.
     """
     if catalog == masked and not day.off_grid.intersection(differing):
+        if rounded:
+            return TICK_ROUNDED
         return BOTH_UNDEFINED if catalog.close is None else EXACT
     causes = {day.causes.of(second) for second in differing}
     for verdict in (REF_DIFFERENT, REF_RECORDER_GAP, REF_EXPLAINED):
@@ -478,11 +571,21 @@ def _reference_classes(
         low = bisect_left(day.differing, t // MS_PER_S)
         high = bisect_left(day.differing, (t + width_ms) // MS_PER_S)
         seconds = day.differing[low:high]
-        verdict = judge_reference(catalog, folds.masked[t], seconds, day)
+        rounded = _within(day.rounded_seconds, t, width_ms)
+        verdict = judge_reference(catalog, folds.masked[t], seconds, day, rounded)
         counts[verdict] += 1
-        if verdict != EXACT and verdict != BOTH_UNDEFINED and len(examples) < EXAMPLES:
+        if (
+            verdict in FAILING_REFERENCE | {REF_RECORDER_GAP, REF_EXPLAINED}
+            and len(examples) < EXAMPLES
+        ):
             examples.append(f"{bar_seconds} s t={t}: {verdict} seconds {list(seconds[:5])}")
     return counts, examples
+
+
+def _within(seconds: Sequence[int], t: int, width_ms: int) -> Sequence[int]:
+    """Return the sorted `seconds` inside the bucket starting at `t` ms."""
+    low = bisect_left(seconds, t // MS_PER_S)
+    return seconds[low : bisect_left(seconds, (t + width_ms) // MS_PER_S)]
 
 
 def _counts(counter: Counter[str], names: Sequence[str]) -> Mapping[str, int]:
@@ -669,7 +772,8 @@ class InstrumentCandles:
     """
     One instrument's day: its rows, second accounting (`tally_seconds`: only `unexplained` fails
     here -- duplicates are the catalog tool's), the reference trades of unobserved seconds by
-    reason, each day width, stored rows of an unknown width, and the week.
+    reason, each day width, stored rows of an unknown width, and the week. `rounded`: the seconds
+    of the known cause `tick_rounded` (D-91) with their differences, reported, never failing.
     """
 
     instrument_id: str
@@ -679,6 +783,7 @@ class InstrumentCandles:
     widths: tuple[WidthReport, ...]
     unknown_width: int
     week: WeekReport
+    rounded: Mapping[int, tuple[str, ...]] = MappingProxyType({})
 
     @property
     def failing(self) -> int:

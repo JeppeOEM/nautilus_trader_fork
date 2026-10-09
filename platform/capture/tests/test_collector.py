@@ -1799,6 +1799,9 @@ def test_an_idle_window_reports_zeros_and_no_write(tmp_path: Path) -> None:
     _report(c, stream)
     ((_, record),) = stream.records
     assert record.pop("window_s") >= 0
+    # The cgroup point sample (DW-266) is host-dependent -- None with no limit -- so only its
+    # pairing is asserted, never its values; the window figures below are the claim.
+    assert (record.pop("mem_current_mib") is None) == (record.pop("mem_limit_mib") is None)
     assert record == {
         "queue_depth_max": 0,
         "messages_processed": 0,
@@ -1992,10 +1995,13 @@ def test_one_hotpath_info_line_per_report_even_without_a_live_stream(
     lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("hotpath:")]
     assert len(lines) == 1
     assert lines[0].startswith("hotpath: window_s=")
-    assert lines[0].endswith(
+    # The mem point sample (DW-266) ends the line, host-dependent values: the fixed fields end
+    # at the mem pair, whose values are never asserted here (the host may have a limit).
+    assert (
         " queue_depth_max=0 messages_processed=0 wakes=0 lag_max_ms=None lag_p99_ms=None "
-        "writes=0 write_data_ms=None write_data_max_ms=None"
+        "writes=0 write_data_ms=None write_data_max_ms=None mem_current_mib=" in lines[0]
     )
+    assert lines[0].split(" ")[-1].startswith("mem_limit_mib=")
 
 
 def test_a_failed_hotpath_publish_is_ledgered_once_and_the_next_one_goes_out(

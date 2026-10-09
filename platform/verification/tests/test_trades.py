@@ -58,6 +58,7 @@ from verification.domain.conservation import MalformedLine
 from verification.domain.conservation import ReferenceTrade
 from verification.domain.trade_check import EXPLAINED_ONLY
 from verification.domain.trade_check import MAX_PLAUSIBLE_LATENCY_NS
+from verification.domain.trade_check import NO_DISCREPANCY
 from verification.domain.trade_check import RECORDER_GAP_MARGIN_NS
 from verification.domain.trade_check import ArchivedTrade
 from verification.domain.trade_check import IdContext
@@ -74,6 +75,7 @@ from verification.domain.trade_check import fixed_raw
 from verification.domain.trade_check import fold_second
 from verification.domain.trade_check import merge_reference
 from verification.domain.trade_check import recorder_gaps
+from verification.domain.trade_check import tick_rounded
 from verification.domain.trade_check import whole_at
 from verification.infrastructure.catalog_reader import ParquetArchive
 from verification.infrastructure.raw_store import channel_file
@@ -670,6 +672,72 @@ def test_a_clean_hyperliquid_day_matches_tid_side_and_millisecond_time(
 # --- the pure pieces ---------------------------------------------------------------------------
 
 
+def _sub_tick(venue_price: str) -> _Scenario:
+    """`_T4` printed at `venue_price` by the WS and the REST poll alike; the archive keeps 84001.00."""
+    printed = replace(_T4, price=venue_price)
+    return _Scenario(wire=(_T1, _T2, _T3, printed), poll=(_T1, printed))
+
+
+def test_a_venue_price_rounded_to_the_tick_is_a_known_cause_reported_not_failing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D-91: the wire printed 84001.004, the adapter stored it at precision 2 as 84001.00."""
+    scenario = _sub_tick("84001.004")
+    status, report, ids, classes = _day(tmp_path, monkeypatch, capsys, scenario)
+    known = _only(report)["known"]
+    assert status == 0
+    assert (ids["mismatch_price"], ids["price_tick_rounded"]) == (0, 1)
+    assert classes == {"exact": 2, "tick_rounded": 1}
+    assert {name: entry["count"] for name, entry in known.items()} == {
+        "price_tick_rounded": 1,
+        "tick_rounded": 1,
+    }
+    assert "D-91" in known["price_tick_rounded"]["reason"]
+    assert ids["known_examples"] == [f"t4 @ {_S2} s: venue 84001.004 -> stored 84001.00"]
+
+
+def test_a_stored_price_further_than_half_a_tick_from_the_venues_still_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """84001.006 rounds to 84001.01, so a stored 84001.00 is a wrong price, not a tick rounding."""
+    scenario = _sub_tick("84001.006")
+    status, _, ids, classes = _day(tmp_path, monkeypatch, capsys, scenario)
+    assert status == 1
+    assert (ids["mismatch_price"], ids["price_tick_rounded"]) == (1, 0)
+    assert classes.get("tick_rounded", 0) == 0
+    assert classes["off_grid"] == 1
+
+
+def test_the_text_report_names_a_known_cause_with_its_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_day(tmp_path, monkeypatch, _sub_tick("84001.004"))
+    argv = ["--venue", "BYBIT", "--day", _DAY.isoformat(), "--stage", "live"]
+    assert trades.main(argv, clock=lambda: _NOW) == 0
+    text = capsys.readouterr().out
+    assert "known    price_tick_rounded=1 tick_rounded=1 (not failing)" in text
+    assert "reason: D-91:" in text
+    assert f"t4 @ {_S2} s: venue 84001.004 -> stored 84001.00" in text
+
+
+@pytest.mark.parametrize(
+    ("venue", "stored", "precision", "rounded"),
+    [
+        ("84528.67", "84528.7", 1, True),  # the audit's own example
+        ("84536.95", "84537.0", 1, True),  # an exact half: either neighbour is the tick rounding
+        ("84536.95", "84536.9", 1, True),
+        ("84528.67", "84528.8", 1, False),  # more than half a tick away
+        ("84528.7", "84528.8", 1, False),  # the venue's price fits the tick: a plain mismatch
+        ("84528.67", "84528.67", 2, False),  # equal at a precision that holds it
+        ("84528.674", "84528.67", 1, False),  # the stored value is not on the row's tick
+    ],
+)
+def test_a_tick_rounding_is_only_the_nearest_tick_of_an_off_tick_venue_price(
+    venue: str, stored: str, precision: int, rounded: bool
+) -> None:
+    assert tick_rounded(Decimal(venue), Decimal(stored), precision) is rounded
+
+
 def _ref(
     order: tuple[int, ...], price: str, size: str, side: int, via_rest: bool = False
 ) -> ReferenceTrade:
@@ -833,6 +901,74 @@ def test_an_explained_second_passes_only_when_its_row_is_the_archives_fold(
 
 def test_an_unexplained_archive_difference_fails_whatever_the_row() -> None:
     assert classify_second(_second(_EMPTY, [], "unexplained"), "live") == "archive_differs"
+
+
+def _rounded_second(row: TradeColumns, discrepancy: str, rounded: bool) -> SecondFacts:
+    """Build a second whose venue price 10.05 the archive holds rounded to the tick, 10.1."""
+    reference = [_ref((5, 30, 0), "10.05", "1", BUYER)]
+    archived = [_ref((5, 30, 0), "10.1", "1", BUYER)]
+    return SecondFacts(
+        rows=[StoredRow(1, 0, row, 0)],
+        reference=reference,
+        archived=archived,
+        rebuild_exempt=False,
+        run_covers=False,
+        discrepancy=discrepancy,
+        tick_rounded=rounded,
+    )
+
+
+_ROUNDED_ROW = TradeColumns(101, 101, 101, 101, 1, 0, 1, 0)
+
+
+@pytest.mark.parametrize(
+    ("row", "discrepancy", "rounded", "stage", "verdict"),
+    [
+        (_ROUNDED_ROW, NO_DISCREPANCY, True, "rebuilt", "tick_rounded"),
+        (_ROUNDED_ROW, NO_DISCREPANCY, False, "rebuilt", "off_grid"),  # no rounding proven
+        (_ROUNDED_ROW, "unexplained", True, "rebuilt", "off_grid"),  # another failure too
+        (_ROUNDED_ROW, EXPLAINED_ONLY, True, "rebuilt", "off_grid"),  # not every id matched
+        (_EMPTY, NO_DISCREPANCY, True, "rebuilt", "rebuild_mismatch"),  # row is not arc's fold
+        (_EMPTY, NO_DISCREPANCY, True, "live", "live_provisional"),
+    ],
+)
+def test_an_off_grid_second_is_tick_rounded_only_with_every_id_proven_and_the_archives_row(
+    row: TradeColumns, discrepancy: str, rounded: bool, stage: str, verdict: str
+) -> None:
+    assert classify_second(_rounded_second(row, discrepancy, rounded), stage) == verdict
+
+
+def test_a_rounded_price_is_counted_known_and_its_second_is_not_failed() -> None:
+    ts = _S1 * _NS
+    ref = ReferenceId(
+        ReferenceTrade(
+            _BTC, "r", ts, False, Decimal("10.05"), Decimal(1), BUYER, "Buy", (ts, ts, 0)
+        ),
+        ts,
+        False,
+    )
+    archived = replace(_archived("r", ts, ts), price=Decimal("10.1"), price_precision=1)
+    ids = compare_ids({"r": ref}, [archived], _NO_CONTEXT, Explanations.of([]))
+    assert (ids.counts.price_tick_rounded, ids.counts.mismatch_price, ids.counts.failing) == (
+        1,
+        0,
+        0,
+    )
+    assert (ids.rounded_seconds, ids.failed_seconds) == (frozenset({_S1}), frozenset())
+
+
+def test_a_price_difference_without_the_files_precision_stays_a_mismatch() -> None:
+    ts = _S1 * _NS
+    ref = ReferenceId(
+        ReferenceTrade(
+            _BTC, "r", ts, False, Decimal("10.05"), Decimal(1), BUYER, "Buy", (ts, ts, 0)
+        ),
+        ts,
+        False,
+    )
+    archived = replace(_archived("r", ts, ts), price=Decimal("10.1"))
+    ids = compare_ids({"r": ref}, [archived], _NO_CONTEXT, Explanations.of([]))
+    assert (ids.counts.price_tick_rounded, ids.counts.mismatch_price) == (0, 1)
 
 
 def _ref_id(trade_id: str, ts_ns: int) -> ReferenceId:

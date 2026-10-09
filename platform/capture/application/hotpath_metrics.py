@@ -17,14 +17,18 @@ The capture hot path's per-flush figures (Story 28.1, audit D-07/D-10/D-146): th
 length, the ingest queue's peak depth, the messages processed, the sample loop's wake-up lag (max
 and nearest-rank p99) and the catalog writes (count, the last one's wall time and the slowest's).
 `CaptureService` feeds the window and reports it once per periodic flush (a `hotpath:` INFO
-line and the `capture:hotpath` record, `docs/DATA_DICTIONARY.md` §1.25). Pure arithmetic, no clock
-and no I/O, so it is tested apart from the service.
+line and the `capture:hotpath` record, `docs/DATA_DICTIONARY.md` §1.25). Since DW-266
+(2026-10-09) the report also carries the flush's cgroup memory point sample
+(`mem_current_mib`/`mem_limit_mib`), read by the caller and passed to `take` -- the I/O stays
+out of this module. Pure arithmetic, no clock and no I/O, so it is tested apart from the
+service.
 """
 
 from dataclasses import dataclass
 
 
 _NS_PER_MS = 1_000_000
+_MIB = 1024 * 1024
 
 
 def nearest_rank_p99(samples: list[int]) -> int | None:
@@ -39,6 +43,10 @@ def _ms(ns: int | None) -> float | None:
     return None if ns is None else round(ns / _NS_PER_MS, 3)
 
 
+def _mib(b: int) -> float:
+    return round(b / _MIB, 1)
+
+
 @dataclass(frozen=True, slots=True)
 class HotPathReport:
     """
@@ -46,6 +54,9 @@ class HotPathReport:
     None when unmeasured. At the 60 s flush a window holds ~60 wakes, and the nearest-rank p99 of
     60 samples is their maximum: `lag_p99_ms` departs from `lag_max_ms` only from 100 wakes on
     (`ceil(0.99 * 100)` = 99, the second largest).
+
+    The two `mem_*` fields are the exception to the window figures: point samples of the
+    container's cgroup memory taken at `take` (DW-266), None with no cgroup limit.
     """
 
     window_s: float
@@ -57,6 +68,8 @@ class HotPathReport:
     writes: int
     write_data_ms: float | None
     write_data_max_ms: float | None
+    mem_current_mib: float | None = None
+    mem_limit_mib: float | None = None
 
     def to_dict(self) -> dict[str, int | float | None]:
         return {
@@ -69,6 +82,8 @@ class HotPathReport:
             "writes": self.writes,
             "write_data_ms": self.write_data_ms,
             "write_data_max_ms": self.write_data_max_ms,
+            "mem_current_mib": self.mem_current_mib,
+            "mem_limit_mib": self.mem_limit_mib,
         }
 
     def log_text(self) -> str:
@@ -99,7 +114,13 @@ class HotPathWindow:
         """Note one successful catalog write's wall time (one per batch, a few per flush)."""
         self._writes_ns.append(elapsed_ns)
 
-    def take(self, window_ns: int, queue_depth_max: int, messages_processed: int) -> HotPathReport:
+    def take(
+        self,
+        window_ns: int,
+        queue_depth_max: int,
+        messages_processed: int,
+        mem_usage: tuple[int, int] | None = None,
+    ) -> HotPathReport:
         """Return the report of a window `window_ns` long and start a new, empty window."""
         lags, self._lags_ns = self._lags_ns, []
         writes, self._writes_ns = self._writes_ns, []
@@ -113,4 +134,6 @@ class HotPathWindow:
             writes=len(writes),
             write_data_ms=_ms(writes[-1]) if writes else None,
             write_data_max_ms=_ms(max(writes)) if writes else None,
+            mem_current_mib=_mib(mem_usage[0]) if mem_usage else None,
+            mem_limit_mib=_mib(mem_usage[1]) if mem_usage else None,
         )

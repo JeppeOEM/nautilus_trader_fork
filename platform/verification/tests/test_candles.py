@@ -35,6 +35,7 @@ from collections.abc import Iterator
 from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
 from datetime import date
 from datetime import timedelta
 from decimal import Decimal
@@ -91,6 +92,7 @@ from verification.domain.candle_check import WEEK_JUDGED
 from verification.domain.candle_check import WEEK_OPEN
 from verification.domain.candle_check import Causes
 from verification.domain.candle_check import PreparedDay
+from verification.domain.candle_check import RoundedFold
 from verification.domain.candle_check import ServedBar
 from verification.domain.candle_check import WeekFacts
 from verification.domain.candle_check import bucket_kind
@@ -110,6 +112,7 @@ from verification.domain.conservation import Intervals
 from verification.domain.conservation import ReferenceTrade
 from verification.domain.reference_signals import RefCandle
 from verification.domain.reference_signals import fold_candles
+from verification.domain.trade_check import TICK_ROUNDED
 from verification.domain.trade_check import TradeColumns
 from verification.infrastructure.liquidation_reader import LiquidationCatalog
 from verification.infrastructure.raw_store import channel_file
@@ -353,6 +356,13 @@ class _Scenario:
     other_day: date | None = None
     duplicated: tuple[int, ...] = ()  # offsets from 10:00 whose row the catalog holds twice
     liquidations: tuple[Liquidation, ...] = ()  # archived before the store is rebuilt
+    wire_price: Mapping[int, str] = field(default_factory=dict)  # offset -> the wire's price
+
+
+def _printed(trade: _Trade, scenario: _Scenario) -> _Trade:
+    """Return the trade as the wire printed it: the scenario's `wire_price`, else as archived."""
+    k = trade.ts_ns // _NS - _s0(scenario.day)
+    return replace(trade, price=Decimal(scenario.wire_price.get(k, trade.price)))
 
 
 def _write_day(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: _Scenario) -> Path:
@@ -373,7 +383,8 @@ def _write_day(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: _Scena
     if scenario.other_day is not None:
         _write_catalog(catalog, scenario.other_day, _day_trades(scenario.other_day, "85000.00"))
         last = _d0(scenario.other_day) + _DAY_S * _NS - 1
-    frames = [_frame([t]) for t in (*trades, *scenario.ws_extra)]
+    printed = [_printed(t, scenario) for t in trades]
+    frames = [_frame([t]) for t in (*printed, *scenario.ws_extra)]
     ws = [*_every_hour(scenario.day, ws=True), *frames, *scenario.connections]
     _write_raw(raw, "linear.publicTrade", ws)
     polls = [_poll([t], t.ts_ns + 20 * _NS) for t in scenario.poll_extra]
@@ -462,6 +473,34 @@ def _minute_ms(day: date, minute: int) -> int:
 # --- end to end -----------------------------------------------------------------------------------
 
 
+def test_a_sub_tick_print_rounded_to_the_tick_is_reported_with_its_difference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D-91: the wire printed 84000.004 at 10:00:00; the archive holds it at the tick, 84000.00."""
+    scenario = _Scenario(wire_price={0: "84000.004"})
+    status, report = _run(tmp_path, monkeypatch, capsys, scenario)
+
+    assert (status, report["verdict"], report["failing"]) == (0, "PASS", 0)
+    minute = _width(report, 60)
+    assert (minute["reference"][TICK_ROUNDED], minute["reference"][EXACT]) == (1, 1)
+    known = _instrument(report)["known"][TICK_ROUNDED]
+    assert known["seconds"] == 1
+    assert "D-91" in known["reason"]
+    assert known["examples"] == [f"{_s0(_DAY)} s: venue 84000.004 -> stored 84000.00"]
+
+
+def test_a_stored_price_that_is_not_the_venues_tick_rounding_still_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """84000.006 rounds to 84000.01, so the archived 84000.00 is a difference, not D-91."""
+    status, report = _run(tmp_path, monkeypatch, capsys, _Scenario(wire_price={0: "84000.006"}))
+
+    assert (status, report["verdict"]) == (1, "FAIL")
+    minute = _width(report, 60)
+    assert (minute["reference"][TICK_ROUNDED], minute["reference"][REF_DIFFERENT]) == (0, 1)
+    assert _instrument(report)["known"] == {}
+
+
 def test_a_clean_day_passes_on_every_width(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -480,6 +519,7 @@ def test_a_clean_day_passes_on_every_width(
     assert minute["reference"] == {
         EXACT: 2,
         BOTH_UNDEFINED: 1,
+        TICK_ROUNDED: 0,
         REF_RECORDER_GAP: 0,
         REF_EXPLAINED: 0,
         REF_DIFFERENT: 0,
@@ -1101,7 +1141,7 @@ def _ref_trade(second: int, price: str, side: int = BUYER, tid: str = "r") -> Re
 
 
 def _prepared(
-    reference: Mapping[int, TradeColumns | None], causes: Causes | None = None
+    reference: Mapping[int, TradeColumns | RoundedFold | None], causes: Causes | None = None
 ) -> PreparedDay:
     rows = [_row(1000, _TRADED_COLUMNS), _row(1001, TradeColumns())]
     empty = Intervals.of([])
@@ -1162,8 +1202,31 @@ def test_fold_reference_masks_unobserved_seconds_and_counts_them_by_reason() -> 
 
     assert folded == {1000: _TRADED_COLUMNS}
     assert unobserved == {"crossed": 2, "unexplained": 1}
-    off_grid, _ = fold_reference({1000: [_ref_trade(1000, "84000.105")]}, rows, {})
-    assert off_grid == {1000: None}
+    tie, _ = fold_reference({1000: [_ref_trade(1000, "84000.105")]}, rows, {})
+    assert tie == {1000: RoundedFold(_TRADED_COLUMNS, ("venue 84000.105 -> stored 84000.10",))}
+    off_grid, _ = fold_reference({1000: [_ref_trade(1000, "84000.115")]}, rows, {})
+    assert off_grid == {1000: None}  # its tick neighbours 84000.11/.12 are not the row's .10
+
+
+def test_a_sub_tick_second_is_tick_rounded_only_when_its_rounding_is_the_row() -> None:
+    rows = {1000: _row(1000, _TRADED_COLUMNS)}
+    folded, _ = fold_reference({1000: [_ref_trade(1000, "84000.104")]}, rows, {})
+    assert folded == {1000: RoundedFold(_TRADED_COLUMNS, ("venue 84000.104 -> stored 84000.10",))}
+    beyond, _ = fold_reference({1000: [_ref_trade(1000, "84000.106")]}, rows, {})
+    assert beyond == {1000: None}  # nearest tick .11: the row's .10 is not its rounding
+    sold, _ = fold_reference({1000: [_ref_trade(1000, "84000.104", SELLER)]}, rows, {})
+    assert sold == {1000: None}  # rounded right but the side differs: never a known cause
+
+
+def test_a_bucket_whose_only_difference_is_a_tick_rounding_is_known_not_failing() -> None:
+    rounded = RoundedFold(_TRADED_COLUMNS, ("venue 84000.104 -> stored 84000.10",))
+    day = _prepared({1000: rounded})
+    catalog = fold_candles(day.books, 60)
+    masked = fold_candles(day.masked, 60)
+    (t,) = catalog
+    assert day.differing == ()
+    assert day.rounded == {1000: ("venue 84000.104 -> stored 84000.10",)}
+    assert judge_reference(catalog[t], masked[t], (), day, day.rounded_seconds) == TICK_ROUNDED
 
 
 def test_causes_meet_a_second_by_any_of_its_nanoseconds() -> None:

@@ -180,6 +180,7 @@ from observability import error_ledger
 from observability import notify
 from observability import watchdog
 
+from capture.application import cgroup
 from capture.application import sites
 from capture.application.book_check import EXACT_PRICE_TOLERANCE_LEVELS
 from capture.application.book_check import EXACT_SIZE_REL_TOLERANCE
@@ -408,6 +409,8 @@ def _one_sided_texts(
 # minute that just closed is in the archive -- and, right after it, in the second sink -- ~2 s later.
 _FLUSH_PHASE_S = 2.0
 _CATCH_UP_MAX_NS = 86_400 * 1_000_000_000
+# The MiB the memory canary's message and report are denominated in (compose mem_limit units).
+_MIB = 1024 * 1024
 
 
 def _latest(*seconds: int | None) -> int | None:
@@ -750,6 +753,8 @@ class CaptureService:
         self._instruments: dict[str, Instrument] = {}  # Cython instruments, kept by run()
         self._feed_state_error_ns: int = 0
         self._one_sided_state: dict[str, tuple[int | None, int]] = {}
+        # DW-266: the once-per-crossing memory canary state (checked each flush)
+        self._memory_canary = cgroup.MemoryCanary()
 
     # -- the one ledger caller -----------------------------------------------------------------
 
@@ -1524,6 +1529,7 @@ class CaptureService:
                 await self._report_hotpath()
                 raise
             await self._report_hotpath()
+            await self._check_memory_pressure()
 
     async def _report_hotpath(self) -> None:
         """
@@ -1531,13 +1537,17 @@ class CaptureService:
         with a live stream, one `capture:hotpath` record. Every counter restarts from zero. A
         failed publish is ledgered (`collector.hotpath_publish`) and never leaves the flush loop.
         The queue is also sampled here: an ingest loop starved for the whole window never runs
-        `_process_data`, and its backlog must still show.
+        `_process_data`, and its backlog must still show. The flush's cgroup memory point sample
+        rides the same report (DW-266, `mem_current_mib`/`mem_limit_mib`): one read, both figures.
 
         """
         now_ns = perf_counter_ns()
         depth_max = max(self._queue_depth_max, self._ingest_backlog())
         report = self._hotpath.take(
-            now_ns - self._hotpath_since_ns, depth_max, next(self._processed)
+            now_ns - self._hotpath_since_ns,
+            depth_max,
+            next(self._processed),
+            cgroup.memory_usage(cgroup.CGROUP_BASE),
         )
         self._hotpath_since_ns = now_ns
         self._queue_depth_max = 0
@@ -1553,6 +1563,32 @@ class CaptureService:
                 f"hot-path metrics publish failed ({report.log_text()}; Parquet unaffected)",
                 e,
             )
+
+    async def _check_memory_pressure(self) -> None:
+        """
+        Check the container's cgroup memory each flush -- the DW-266 memory canary (operator
+        decision 2026-10-05; the push added by the operator, 2026-10-09). When usage crosses the
+        fire level, ledger once per crossing (DATA-07) and push one notification: Telegram when
+        the environment configures it, the OPERATOR channel (ntfy, or a CRITICAL log) otherwise,
+        the one transport the alert engine and the watchdog deliver on. Blocking network I/O:
+        `asyncio.to_thread`, as the watchdog's push. A failed send is ledgered by the notifier
+        itself (`observability.notify.<transport>`); an unreadable cgroup is an environment
+        property (no canary that host), never a fault.
+        """
+        usage = cgroup.memory_usage(cgroup.CGROUP_BASE)
+        if usage is None or not self._memory_canary.check(usage):
+            return
+        current, limit = usage
+        message = (
+            f"{self._venue} collector at {current // _MIB} MiB of its {limit // _MIB} MiB "
+            f"mem_limit ({100 * current // limit}%): the plan may have grown past what the "
+            "limit was measured for -- re-measure and raise mem_limit before growing it "
+            "further (DEPLOY_CHECKLIST section 7)"
+        )
+        self._ledger(sites.MEMORY_PRESSURE, message)
+        title = "collector memory pressure"
+        channel = notify.TELEGRAM if notify.telegram_configured() else notify.OPERATOR
+        await asyncio.to_thread(self._notifier.notify, channel, title, message)
 
     # -- sample ------------------------------------------------------------------------------
 

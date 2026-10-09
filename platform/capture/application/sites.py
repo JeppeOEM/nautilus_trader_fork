@@ -82,3 +82,6 @@ LIQUIDATION_FEED = "collector.liquidation_feed"
 LIQUIDATION_PUBLISH = "collector.liquidation_publish"
 # a failed `derivs:raw` publish, or rows the pending cap turned away (Story 33.4)
 DERIVS_PUBLISH = "collector.derivs_publish"
+# the DW-266 memory canary: the container's cgroup memory crossing its fire level, once per
+# crossing, a notification with it (`capture.application.cgroup`)
+MEMORY_PRESSURE = "collector.memory_pressure"
