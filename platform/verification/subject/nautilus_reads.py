@@ -43,6 +43,7 @@ from types import MappingProxyType
 from types import ModuleType
 from typing import Any
 
+import kernel.liquidation
 import kernel.open_interest
 import kernel.second_snapshot
 import pyarrow as pa
@@ -63,8 +64,14 @@ from verification.domain.catalog_check import Leg
 
 # Objects re-encoded per serializer call (the backtest actor flushes at the same size).
 ENCODE_CHUNK = 10_000
-# The platform's two custom types, beside every Nautilus data and instrument class.
-_CUSTOM = (kernel.second_snapshot.DydxSecondSnapshot, kernel.open_interest.OpenInterest)
+# The platform's three custom types, beside every Nautilus data and instrument class: the
+# second snapshot, open interest and liquidation (DW-295: without `Liquidation` here the
+# structure check flags a real Bybit day's `custom_liquidation` files as an unknown type).
+_CUSTOM = (
+    kernel.second_snapshot.DydxSecondSnapshot,
+    kernel.open_interest.OpenInterest,
+    kernel.liquidation.Liquidation,
+)
 
 
 def _classes_of(module: ModuleType, base: type) -> list[type]:

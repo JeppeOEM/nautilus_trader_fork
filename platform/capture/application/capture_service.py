@@ -2942,21 +2942,31 @@ class CaptureService:
 
         await self._ensure_coverage()
         await self._connect(list(by_id.values()))
-        if hasattr(self._client, "subscribe_global"):
-            await self._client.subscribe_global()
-        self._listed = frozenset(by_id)
-        unknown = self._plan_ids - self._listed
-        if unknown:
-            logger.warning(
-                "Configured instruments not found on the venue, skipping: %s", sorted(unknown)
+        # DW-290: anything raising between `_connect` and the loops leaves the client connected
+        # and feeding a run whose ingest loop was never started -- so a failure here ends the
+        # run the same way one inside the loops does (`_finish_run`: disconnect, drain the
+        # queue's residue, final flush), then re-raises for `run_forever`'s restart. `_connect`
+        # cleans up after itself; before it nothing is connected to clean up.
+        try:
+            if hasattr(self._client, "subscribe_global"):
+                await self._client.subscribe_global()
+            self._listed = frozenset(by_id)
+            unknown = self._plan_ids - self._listed
+            if unknown:
+                logger.warning(
+                    "Configured instruments not found on the venue, skipping: %s", sorted(unknown)
+                )
+            self._catch_up_candle_store()
+            applied = await self.apply(
+                PlanChange(added=frozenset(self._plan_ids), store_deltas=self._store_deltas())
             )
-        self._catch_up_candle_store()
-        applied = await self.apply(
-            PlanChange(added=frozenset(self._plan_ids), store_deltas=self._store_deltas())
-        )
-        logger.info(f"Started: {len(applied.subscribed)} subscribed")
-        # A failed subscribe is retried (`_subscription_retry_loop`): its gap is the restart's too.
-        self._arm_restart_backfill(applied.subscribed | applied.failed)
+            logger.info(f"Started: {len(applied.subscribed)} subscribed")
+            # A failed subscribe is retried (`_subscription_retry_loop`): its gap is the restart's
+            # too.
+            self._arm_restart_backfill(applied.subscribed | applied.failed)
+        except Exception:
+            await self._finish_run(asyncio.get_running_loop().time() + _INGEST_DRAIN_S)
+            raise
 
         loops: tuple[Callable[[], Awaitable[None]], ...] = (
             self._flush_loop,
@@ -3009,12 +3019,24 @@ class CaptureService:
             await self._end_run(tasks, deadline)
 
     async def _end_run(self, tasks: list[asyncio.Future[Any]], deadline: float) -> None:
-        """Cancel and gather every loop, disconnect, drain the residue, then the final flush."""
+        """Cancel and gather every loop, then finish the run (`_finish_run`)."""
         for task in tasks:
             task.cancel()
         # Let every loop unwind first: an interrupted backfill ledgers itself and leaves what
         # it archived in the buffer, which the final flush below then writes.
         await asyncio.gather(*tasks, return_exceptions=True)
+        await self._finish_run(deadline)
+
+    async def _finish_run(self, deadline: float) -> None:
+        """
+        End a run whose loops are already gone: the disconnect, the drain of whatever the
+        client pushed, then the final flush, the derivs publish and the live-stream close.
+        Also the ending of a run that failed before its loops started (DW-290): the client is
+        connected and may already have pushed messages into `_ingest_queue` -- the ingest
+        loop that would have processed them was never started -- so the same disconnect,
+        drain and final flush applies, on the same `_INGEST_DRAIN_S` budget, before the
+        failure re-raises for `run_forever`'s restart (`collector.crash`).
+        """
         await self._disconnect()
         # One pass of the loop first: a Rust callback scheduled (`call_soon_threadsafe`) before
         # the disconnect returned runs only at an await, and must land before the drain counts.

@@ -1441,6 +1441,10 @@ def _newest_ts_event_before(
                 path, columns=["ts_event"], filters=[("ts_event", "<", before_ns)]
             ).column("ts_event")
         if len(column):
-            newest = int(pc.max(column).as_py())
+            # `max` over the column's Python list, not `pc.max`: pyarrow's stubs do not
+            # declare the compute functions, so mypy fails the module (`Module has no
+            # attribute "max"`). The column is already read into memory and filtered to
+            # this file's rows below `before_ns`, one bounded pass.
+            newest = max(column.to_pylist())
             best = newest if best is None else max(best, newest)
     return best

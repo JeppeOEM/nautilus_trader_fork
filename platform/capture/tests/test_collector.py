@@ -47,6 +47,7 @@ from capture.application.capture_service import _next_sample_at
 from capture.application.config import CoreConfig
 from capture.application.feed import MAIN_FEED
 from capture.application.feed import Feed
+from capture.application.ports import OnData
 from capture.application.trade_backfill import BackfillReport as _BackfillReport
 from capture.domain.trade_history import Fetched
 from capture.domain.trade_intake import DEDUP_HORIZON_NS
@@ -1894,6 +1895,55 @@ def test_a_stop_before_run_unwinds_it(tmp_path: Path, monkeypatch: pytest.Monkey
     c.stop()
     asyncio.run(asyncio.wait_for(c.run(), timeout=5.0))
     assert events[-1] == "disconnect"
+
+
+def test_a_setup_failure_after_connect_unwinds_like_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    DW-290: a step raising between `_connect` and the loops leaves the client connected and
+    its queued messages unprocessed (the ingest loop was never started) -- the run disconnects,
+    drains and final-flushes before re-raising for `run_forever`'s restart, never dropping a
+    queued message silently.
+    """
+    error_ledger.reset()
+    events: list[str] = []
+    queued = _deltas([(100.0, 1.0)], [(100.5, 1.0)])
+
+    class _FailingSetupClient(_LifecycleClient):
+        def __init__(self, events: list[str], on_data: OnData) -> None:
+            super().__init__(events)
+            self._push = on_data
+
+        async def subscribe_global(self) -> None:
+            self.events.append("subscribe_global")
+            self._push(queued)  # a venue's first push: queued before any loop runs
+            raise OSError("subscribe_global exploded")
+
+    monkeypatch.setattr(collector_mod, "instruments_from_pyo3", lambda pyo3: [])
+    cfg = CoreConfig(environment="mainnet", catalog_path=str(tmp_path))
+    c = CaptureService(
+        cfg,
+        lambda on_data, ledger: _FailingSetupClient(events, on_data),
+        venue=_BYBIT.rsplit(".", 1)[1],
+        plan=(_BYBIT,),
+        archive=ParquetArchiveWriter(cfg.catalog_path),
+        live_stream=None,
+    )
+    c._applied.clear()  # `run()` applies the plan itself
+    processed: list[object] = []
+    # A plain recorder, not `_recording_ingest`: its `data == "bad"` comparison is a TypeError
+    # against a Cython `OrderBookDeltas`, and a processing failure during the drain is
+    # (correctly) ledgered, not raised.
+    monkeypatch.setattr(c, "_process_data", lambda data, feed=MAIN_FEED: processed.append(data))
+
+    with pytest.raises(OSError, match="subscribe_global exploded"):
+        asyncio.run(asyncio.wait_for(c.run(), timeout=5.0))
+
+    assert events == ["connect", "subscribe_global", "disconnect"]
+    assert processed == [queued]  # drained through `_process_data`, not dropped
+    assert (c._ingest_backlog(), c._ingest_queue.qsize()) == (0, 0)
+    assert error_ledger.counts() == {}  # nothing abandoned, nothing late
 
 
 def test_a_backlog_behind_a_starved_ingest_loop_is_still_reported(tmp_path: Path) -> None:

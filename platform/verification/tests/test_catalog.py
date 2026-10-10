@@ -47,6 +47,8 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from kernel.liquidation import LiquidatedSide
+from kernel.liquidation import Liquidation
 from kernel.second_snapshot import DydxSecondSnapshot
 from observability import error_ledger
 
@@ -101,7 +103,6 @@ from verification.domain.catalog_check import row_digest
 from verification.domain.catalog_check import schema_signature
 from verification.domain.reference_signals import RefCandle
 from verification.infrastructure.catalog_scan import CatalogScan
-from verification.infrastructure.liquidation_reader import LiquidationCatalog
 from verification.subject.consolidation import maintenance_writer
 from verification.subject.nautilus_reads import digest_encoded
 
@@ -201,6 +202,33 @@ def _mark(row: _Second, iid: str = _BTC) -> MarkPriceUpdate:
     )
 
 
+@dataclass(frozen=True)
+class _Liq:
+    """One archived liquidation: its liquidated side and size in units at precision 3."""
+
+    second: int
+    side: str
+    size_units: int
+
+    @property
+    def ts_event(self) -> int:
+        return self.second * _NS + _NS // 2
+
+
+def _liquidation(row: _Liq, iid: str = _BTC) -> Liquidation:
+    return Liquidation(
+        InstrumentId.from_str(iid),
+        LiquidatedSide(row.side),
+        row.size_units,
+        8_400_000,  # price units at precision 2: unused by the fold, kept a realistic row
+        2,
+        3,
+        f"l{row.second}-{row.side}",
+        row.ts_event,
+        row.ts_event + _NS,
+    )
+
+
 def _perpetual(iid: str = _BTC) -> CryptoPerpetual:
     quote = USDT if iid == _BTC else USDC
     return CryptoPerpetual(
@@ -237,24 +265,34 @@ def _units(units: int, places: int) -> float:
     return float(Decimal(units).scaleb(-places))
 
 
-def _flow(rows: list[_Second], iid: str) -> tuple[Any, ...]:
+def _flow(rows: list[_Second], iid: str, liqs: Sequence[_Liq] = ()) -> tuple[Any, ...]:
     """
     Section 2.15's ten columns of the fixture's rows, by hand: a traded second buys
     `1_000 + second % 3` and sells 500 units (precision 3) in one trade each and closes at
-    `price + 1` (precision 2); Bybit linear has the liquidation feed, known since the day before
-    (`_write_day`) and none this day: 0; Hyperliquid has none (null).
+    `price + 1` (precision 2); the bucket's liquidated volume per side and its count, a feed
+    instrument's known bucket without a liquidation reading 0 (Hyperliquid has no feed: null).
     """
     traded = [r for r in rows if r.price is not None]
     buy = sum(1_000 + r.second % 3 for r in traded)
     pv = sum(((r.price or 0) + 1) * (1_000 + r.second % 3 + 500) for r in traded)
-    liquidations = (0, 0, 0) if iid == _BTC else (None, None, None)
+    liquidations = (
+        (
+            sum(r.size_units for r in liqs if r.side == "long"),
+            sum(r.size_units for r in liqs if r.side == "short"),
+            len(liqs),
+        )
+        if iid == _BTC
+        else (None, None, None)
+    )
     return (buy, 500 * len(traded), len(traded), len(traded), pv, *liquidations, 2, 3)
 
 
-def _bar(width: int, t: int, rows: list[_Second], iid: str) -> tuple[Any, ...]:
+def _bar(
+    width: int, t: int, rows: list[_Second], iid: str, liqs: Sequence[_Liq] = ()
+) -> tuple[Any, ...]:
     traded = [r for r in rows if r.price is not None]
     if not traded:
-        return (iid, width, t, None, None, None, None, 0.0, len(rows), *_flow(rows, iid))
+        return (iid, width, t, None, None, None, None, 0.0, len(rows), *_flow(rows, iid, liqs))
     volume = sum(1_000 + r.second % 3 + 500 for r in traded)
     return (
         iid,
@@ -266,18 +304,27 @@ def _bar(width: int, t: int, rows: list[_Second], iid: str) -> tuple[Any, ...]:
         _units((traded[-1].price or 0) + 1, 2),
         _units(volume, 3),
         len(rows),
-        *_flow(rows, iid),
+        *_flow(rows, iid, liqs),
     )
 
 
-def _bars(rows: list[_Second], iid: str = _BTC) -> list[tuple[Any, ...]]:
+def _bars(
+    rows: list[_Second], iid: str = _BTC, liquidations: tuple[_Liq, ...] = ()
+) -> list[tuple[Any, ...]]:
     found = []
     for width in _WIDTHS:
         buckets: dict[int, list[_Second]] = {}
         for row in rows:
             ms = row.ts_event // _MS
             buckets.setdefault(ms // (width * 1000) * width * 1000, []).append(row)
-        found += [_bar(width, t, members, iid) for t, members in sorted(buckets.items())]
+        liq_buckets: dict[int, list[_Liq]] = {}
+        for liq in liquidations:
+            ms = liq.ts_event // _MS
+            liq_buckets.setdefault(ms // (width * 1000) * width * 1000, []).append(liq)
+        found += [
+            _bar(width, t, members, iid, liq_buckets.get(t, []))
+            for t, members in sorted(buckets.items())
+        ]
     return found
 
 
@@ -302,6 +349,7 @@ class _Day:
     rows: tuple[_Second, ...] = field(default_factory=lambda: tuple(_seconds()))
     per_minute: bool = True
     extra_snapshots: tuple[_Second, ...] = ()
+    liquidations: tuple[_Liq, ...] = ()
     iid: str = _BTC
 
     @property
@@ -321,6 +369,14 @@ def _minutes(rows: tuple[_Second, ...], per_minute: bool) -> list[list[_Second]]
 def _write_catalog(root: Path, day: _Day) -> None:
     writer = ParquetDataCatalog(str(root))
     writer.write_data([_perpetual(day.iid)])
+    # The feed's first archived liquidation, a day before any judged one, so every bucket of a
+    # feed instrument is known (0 without a liquidation), never null (section 2.15, audit
+    # D-160). Written through the real catalog (DW-295), never monkeypatched into the oracle's
+    # source: only the fixture's feed instrument (`_BTC`) gets one.
+    if day.iid == _BTC:
+        writer.write_data([_liquidation(_Liq(_D0 // _NS - 86_400, "short", 4_000), day.iid)])
+    if day.liquidations:
+        writer.write_data([_liquidation(row, day.iid) for row in day.liquidations])
     for group in _minutes(day.rows, day.per_minute):
         batches = (
             [_snapshot(r, day.iid) for r in group],
@@ -351,14 +407,8 @@ def _write_day(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, day: _Day = _Day
     catalog = tmp_path / "catalog"
     _write_catalog(catalog, day)
     store = tmp_path / "candles" / f"candles_{day.venue.lower()}.db"
-    _write_store(store, _bars([*day.rows, *day.extra_snapshots], day.iid))
+    _write_store(store, _bars([*day.rows, *day.extra_snapshots], day.iid, day.liquidations))
     _env(monkeypatch, tmp_path, day.venue, day.iid)
-    # The feed's first archived liquidation, a day before the judged one, so every bucket of the
-    # day is known (0 without a liquidation), never null (section 2.15, audit D-160). Given as the
-    # oracle source's answer rather than written: the catalog tool's structure check does not
-    # know the `custom_liquidation` type (`NautilusReads.known`), which this test does not judge.
-    feed_start_ns = (_START_S - 86_400) * _NS
-    monkeypatch.setattr(LiquidationCatalog, "first_ts_event", lambda _self, _iid: feed_start_ns)
     return catalog
 
 
@@ -430,9 +480,13 @@ def test_a_clean_day_passes_with_every_count_zero_and_every_reader_agreeing(
     _write_day(tmp_path, monkeypatch)
     status, report = _run(capsys)
     assert (status, report["passed"], report["failing"]) == (0, True, 0)
+    # `custom_liquidation` is listed with the feed-start file the day before (DW-295: the type
+    # dir exists on disk, so the structure check reports it -- known, no file this day) and the
+    # rehearsal does not stage liquidation files (not exercised).
     assert [t["data_type"] for t in report["structure"]] == [
         "crypto_perpetual",
         "custom_dydx_second_snapshot",
+        "custom_liquidation",
         "mark_price_update",
         "trade_tick",
     ]
@@ -443,6 +497,7 @@ def test_a_clean_day_passes_with_every_count_zero_and_every_reader_agreeing(
     assert _rehearsal(report) == {
         "crypto_perpetual": NOT_EXERCISED,
         "custom_dydx_second_snapshot": IDENTICAL,
+        "custom_liquidation": NOT_EXERCISED,
         "mark_price_update": IDENTICAL,
         "trade_tick": IDENTICAL,
     }
@@ -454,6 +509,45 @@ def test_a_clean_day_passes_with_every_count_zero_and_every_reader_agreeing(
     entries = [*report["parity"], *report["candles"]]
     assert {entry["failing"] for entry in entries} == {0}  # Story 31.11: the per-entry counts
     assert _candle_counts(report) == {EXACT: 7, BOTH_UNDEFINED: 1}  # 3 minutes + 5 wider buckets
+
+
+@pytest.mark.usefixtures("nautilus_log_guard")
+def test_a_day_with_on_disk_liquidations_is_known_to_the_structure_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """
+    DW-295: a real Bybit day holding `custom_liquidation` files is never flagged unknown -- the
+    structure check knows the type and opens its files, the rehearsal treats them like any other
+    day file, and the candles judge folds the archived liquidations into the store's liq columns
+    (the feed start read from the archive, not monkeypatched into the oracle's source).
+    """
+    _write_day(
+        tmp_path,
+        monkeypatch,
+        _Day(
+            liquidations=(
+                _Liq(_START_S + 10, "long", 1_500),
+                _Liq(_START_S + 70, "short", 2_500),
+            )
+        ),
+    )
+    status, report = _run(capsys)
+    assert (status, report["passed"], report["failing"]) == (0, True, 0)
+    assert [t["data_type"] for t in report["structure"]] == [
+        "crypto_perpetual",
+        "custom_dydx_second_snapshot",
+        "custom_liquidation",
+        "mark_price_update",
+        "trade_tick",
+    ]
+    liquidations = _structure(report, "custom_liquidation")
+    assert liquidations["known"] is True
+    assert liquidations["failing"] == 0
+    # The rehearsal's maintenance stages do not consolidate liquidation files: not exercised.
+    assert _rehearsal(report)["custom_liquidation"] == NOT_EXERCISED
+    # The two liquidations land in traded minutes, so the liq columns fold into the very bars
+    # the clean day already passes: the feed-start is a day before, every bucket known.
+    assert _candle_counts(report) == {EXACT: 7, BOTH_UNDEFINED: 1}
 
 
 @pytest.mark.usefixtures("nautilus_log_guard")
