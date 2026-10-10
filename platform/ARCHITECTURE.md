@@ -271,7 +271,7 @@ one array per sample tick of mark, index, funding and open-interest rows, `kerne
 Story 19.2) and `data/candles/candles_{dydx,bybit,hyperliquid}.db`.
 
 **Known benign WARN log lines** (from `nautilus_network::websocket::client`, seen via
-`troll-logs`/Dozzle):
+`platform-logs`/Dozzle):
 - `Connection closed by peer (no close frame), terminating` — dYdX's socket hung up
   without a WS close handshake (server restart, LB cycling the connection, network
   blip). The read loop breaks and the client's normal reconnect/resubscribe logic

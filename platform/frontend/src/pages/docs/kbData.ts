@@ -123,7 +123,7 @@ docker exec dydx-redis redis-cli PUBLISH bots:control '{"bot_id":"bot-01","actio
 <div class="sec"><h2>Viewing it remotely</h2><table><tr><th>Command</th><th>What it does</th></tr>
 <tr><td><code>make tui</code></td><td>Builds and runs bot_tui interactively, on the VPS over SSH with a real TTY or on the desktop against tunnelled Redis</td></tr>
 <tr><td><code>make frontend-remote</code></td><td>Tunnels the VPS's <code>data_api</code> (port 9100) and runs the web UI's dev server against it</td></tr>
-<tr><td><code>ssh -L 6379:127.0.0.1:6379 &lt;vps&gt;</code></td><td>Tunnels Redis to localhost so a GUI client can connect as if local (the desktop's <code>troll-tui</code> shell function opens this tunnel)</td></tr>
+<tr><td><code>ssh -L 6379:127.0.0.1:6379 &lt;vps&gt;</code></td><td>Tunnels Redis to localhost so a GUI client can connect as if local (the desktop's <code>platform-tui</code> shell function opens this tunnel)</td></tr>
 </table><p>The two SQLite files and the Parquet catalog have no server to tunnel to — <code>rsync</code> a copy down instead.</p></div>`,
     refs: ["platform/docs/DATABASE_SETUP.md"],
   },

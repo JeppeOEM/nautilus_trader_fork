@@ -142,9 +142,10 @@ service names, env vars, container paths and the catalog layout are identical.
    Ownership stays uid 1000 (the collectors' `user:`); `chown -R 1000:1000 platform/data` if in doubt.
 3. Crontab: change the nightly line's working directory from `.../troll` to `.../platform`
    (`make nightly VENUE=...`, `make consolidate`, `make backup-catalog`).
-4. `~/.zshrc` on the desktop: the `troll-web`/`troll-tui`/`troll-logs`/`troll-down`/
-   `troll-redeploy` helpers keep their names but any `cd .../troll` or `make -C .../troll`
-   inside them becomes `platform`.
+4. `~/.zshrc` on the desktop: the helpers kept their `troll-*` names but any
+   `cd .../troll` or `make -C .../troll` inside them became `platform`. (Superseded
+   2026-10-10: the helpers were renamed `platform-*` — see `platform/CLAUDE.md`'s
+   "Desktop ↔ VPS Connection".)
 5. `cd platform && make build && make up`, then the usual 10-minute Dozzle check on all three
    collectors and `GET /api/errors`.
 6. `platform/` must never gain an `__init__.py` (`platform` is a stdlib module);
@@ -616,7 +617,7 @@ the comparison clips to.
 
 Run the checks in order, from `platform/` on the VPS. Stop at the first one that fails and fix
 its cause (DATA-02); dYdX keeps running until check 6. URLs are the VPS's `data_api`
-(`127.0.0.1:9100`; from the desktop, through the `troll-web` tunnel).
+(`127.0.0.1:9100`; from the desktop, through the `platform-web` tunnel).
 
 1. **Redeploy the new configs, dYdX still running.** Before it, note the time for check 4:
    `date +%s%N` (the redeploy's `since_ns`). Then `git pull` and `make redeploy-all`.
@@ -2126,15 +2127,20 @@ hand-off chain (`scripts/open_listener.go`, `BOT_TUI_OPEN_URL_PORT`, `DASHBOARD_
 removed. Nothing changes on the VPS except the next `make tui` image; the cleanup is the desktop's
 `~/.zshrc` (see `platform/CLAUDE.md` "Desktop ↔ VPS Connection").
 
-- [ ] In `~/.zshrc`, make `troll-tui` stop starting `open_listener.go` (the `pgrep`/`go run` block),
+- [x] In `~/.zshrc`, make `troll-tui` stop starting `open_listener.go` (the `pgrep`/`go run` block),
       drop its `-R` reverse tunnel (only the `-R` flag: keep the `-L` Redis/`data_api` forwards
       on the same `ssh` command, `bot_tui` needs them) and the `BOT_TUI_OPEN_URL_PORT` export,
       delete the `TROLL_OPEN_LISTENER_*` variables, and make `troll-down` stop `pkill`-ing
       `open_listener`. Run `pkill -f open_listener` once, since the edited `troll-down` will no
       longer stop a listener already running. Then `source ~/.zshrc`, run `troll-tui` and check
       the TUI opens with no `open_listener` error and `pgrep -f open_listener` prints nothing.
-- [ ] Remove `DASHBOARD_BASE_URL` and `BOT_TUI_OPEN_URL_PORT` from `platform/.env` on the desktop
-      and the VPS if present (nothing reads them any more).
+      (Done 2026-10-10, with the whole helper family renamed `troll-*` → `platform-*`: the new
+      `platform-tui` keeps only the tunnel + `make tui REDIS_PORT=6379`, no `open_listener`
+      process is left, and the Story 15.10 dead dashboard machinery was dropped with it.)
+- [x] Remove `DASHBOARD_BASE_URL` and `BOT_TUI_OPEN_URL_PORT` from `platform/.env` on the desktop
+      (done 2026-10-10: neither was present, and the dead dashboard `WEB_PORT` was removed too).
+- [x] Same removal on the VPS if present (nothing reads them any more). (Checked 2026-10-10:
+      neither was present.)
 
 ### DW-78 bot_id ownership lease `bots:owner:{bot_id}` (commit: this change's)
 

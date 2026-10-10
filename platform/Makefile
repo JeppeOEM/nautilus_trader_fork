@@ -11,7 +11,7 @@ BASE_IMAGE := nautilus-trader-base:1.229.0
 # LOCAL_DEV=true (set in platform/.env, or `LOCAL_DEV=true make up`) shifts every port
 # this stack publishes off its production defaults, onto ones that don't collide with
 # the SSH-tunnel-forwarded ports (6379/9100/8080) that
-# troll-web/troll-tui/troll-logs (~/.zshrc) use to reach the real VPS instance -- see
+# platform-web/platform-tui/platform-logs (~/.zshrc) use to reach the real VPS instance -- see
 # platform/CLAUDE.md's "Desktop <-> VPS Connection" section. Never set on the VPS itself,
 # so its .env needs no changes; `?=` still lets an explicit port in .env win over either
 # default. Four explicit vars rather than a generic port-offset scheme -- add one if a
@@ -34,6 +34,19 @@ export REDIS_PORT DATA_API_PORT DOZZLE_PORT
 # that does not exist would be created by dockerd as an empty root-owned directory.
 RCLONE_CONFIG_DIR ?= $(HOME)/.config/rclone
 export RCLONE_CONFIG_DIR
+
+# Every bind-mount source under data/ that git does not track (only alerts/ and
+# preferences/ keep a .gitkeep; dydx_config.toml is committed): mkdir'd as the invoking
+# user by up/redeploy*/up-dydx/up-live-paper/frontend-dev BEFORE compose ever sees
+# them. dockerd creates a missing bind-mount source root-owned, and every service
+# runs as uid 1000 -- a fresh checkout's first `make up` on nifelheim (2026-10-10)
+# left data/{candles,catalog,errors,metrics} root-owned: the collectors' candle
+# stores could not open ("sqlite3.OperationalError: unable to open database file"),
+# and every error-ledger / Parquet / metrics / coverage write was PermissionError-
+# denied. Same pattern as `tui`'s bot_tui_logs mkdir. verify-up keeps its own richer
+# list (its recorders run as uid 1001 and need group-write), and bot_tui_logs is
+# `tui`'s alone.
+DATA_DIRS := $(PLATFORM_DIR)data/archive $(PLATFORM_DIR)data/candles $(PLATFORM_DIR)data/catalog $(PLATFORM_DIR)data/coverage $(PLATFORM_DIR)data/errors $(PLATFORM_DIR)data/incident_reports $(PLATFORM_DIR)data/live_paper $(PLATFORM_DIR)data/metrics
 
 ## Build the base nautilus image (~15 min, only needed once or after core changes)
 ## On networks with TLS inspection (e.g. Zscaler), export your root CA to
@@ -78,17 +91,16 @@ build-base-vps:
 ## the base image). Run `make build-base` once beforehand for the base image itself. Use this only for first
 ## bring-up or when capture/ itself changed -- otherwise use `make redeploy` so
 ## the collector's live WS connection/book state is never disturbed. Starts the `archive`
-## service too (the nightly maintenance schedule, Story 25.1b; no profile). data/archive (its
-## state), data/coverage (the collectors' coverage record, Story 31.2; they run as uid 1000) and
-## the rclone config directory are created first, as the invoking user, for the same
-## root-owned-bind-mount reason as `tui`'s mkdir.
+## service too (the nightly maintenance schedule, Story 25.1b; no profile). Every untracked
+## data/ bind-mount source (`DATA_DIRS`, above) and the rclone config directory are created
+## first, as the invoking user, for the same root-owned-bind-mount reason as `tui`'s mkdir.
 ## Also builds -- never starts -- dYdX's `collector` image: compose tags one image per service, and
 ## `make test`/`nightly`/`consolidate`/`prune`/`build-candles`/`hotpath-baseline` all `run` that
 ## one, so without this build they would run a stale image once `up` stopped naming `collector`.
 ## Built first, so a failed build stops the target before any running service is replaced.
 up:
 	@$(STACK_SINGLE_WRITER)
-	mkdir -p $(PLATFORM_DIR)data/archive $(PLATFORM_DIR)data/coverage $(RCLONE_CONFIG_DIR)
+	mkdir -p $(DATA_DIRS) $(RCLONE_CONFIG_DIR)
 	$(COMPOSE) build collector
 	$(COMPOSE) up -d --build
 	@docker image prune -f
@@ -105,7 +117,7 @@ up:
 ## the scheduler repeats that venue-day on its next run (archive/application/scheduler.py).
 redeploy:
 	@$(STACK_SINGLE_WRITER)
-	mkdir -p $(PLATFORM_DIR)data/archive $(RCLONE_CONFIG_DIR)
+	mkdir -p $(DATA_DIRS) $(RCLONE_CONFIG_DIR)
 	$(COMPOSE) up -d --build archive ranking_engine data_api
 	$(COMPOSE) --profile live-paper up -d --build live-paper
 	$(COMPOSE) --profile tui build bot_tui
@@ -122,7 +134,7 @@ redeploy:
 ## that `run` it, as in `up`). Restart a running dYdX on the new image with `make up-dydx`.
 redeploy-all:
 	@$(STACK_SINGLE_WRITER)
-	mkdir -p $(PLATFORM_DIR)data/archive $(PLATFORM_DIR)data/coverage $(RCLONE_CONFIG_DIR)
+	mkdir -p $(DATA_DIRS) $(RCLONE_CONFIG_DIR)
 	$(COMPOSE) build collector
 	$(COMPOSE) up -d --build bybit_collector hyperliquid_collector archive ranking_engine data_api
 	$(COMPOSE) --profile live-paper up -d --build live-paper
@@ -131,12 +143,12 @@ redeploy-all:
 	@echo "Dashboard: http://localhost:$(DATA_API_PORT)"
 
 ## Same as `redeploy` but never touches live-paper -- for iterating on
-## ranking_engine, data_api, bot_tui (e.g. the VPS-side half of
-## troll-redeploy in ~/.zshrc) without disturbing a running paper-trading bot's
-## position/order state.
+## ranking_engine, data_api, bot_tui (e.g. the VPS-side half of a desktop
+## redeploy helper in ~/.zshrc, ssh'd to the VPS) without disturbing a running
+## paper-trading bot's position/order state.
 redeploy-no-paper:
 	@$(STACK_SINGLE_WRITER)
-	mkdir -p $(PLATFORM_DIR)data/archive $(RCLONE_CONFIG_DIR)
+	mkdir -p $(DATA_DIRS) $(RCLONE_CONFIG_DIR)
 	$(COMPOSE) up -d --build archive ranking_engine data_api
 	$(COMPOSE) --profile tui build bot_tui
 	@docker image prune -f
@@ -148,6 +160,7 @@ redeploy-no-paper:
 ## wallet/private key) -- see platform/bots/infrastructure/config.py for how real-money mode is
 ## separately gated.
 up-live-paper:
+	mkdir -p $(DATA_DIRS)
 	$(COMPOSE) --profile live-paper up -d --build live-paper
 	@docker image prune -f
 
@@ -156,7 +169,7 @@ up-live-paper:
 ## `up-live-paper`. Runbook: docs/DEPLOY_CHECKLIST.md §8.
 up-dydx:
 	@$(STACK_SINGLE_WRITER)
-	mkdir -p $(PLATFORM_DIR)data/coverage
+	mkdir -p $(DATA_DIRS)
 	$(COMPOSE) --profile dydx up -d --build collector
 	@docker image prune -f
 
@@ -525,21 +538,22 @@ prune-dry:
 ## backend containers keep running (restart: always); `make down` stops those too.
 frontend-dev:
 	@$(STACK_SINGLE_WRITER)
+	mkdir -p $(DATA_DIRS)
 	$(COMPOSE) up -d --build redis data_api bybit_collector hyperliquid_collector ranking_engine
 	cd $(PLATFORM_DIR)frontend && npm run dev
 
 ## Local frontend dev against the VPS's real, already-running data instead --
 ## collector and ranking_engine stay on the VPS, nothing heavy runs locally. Opens one SSH
-## tunnel to $(TROLL_VPS_HOST) forwarding its data_api port (9100 -- the VPS's own
+## tunnel to $(PLATFORM_VPS_HOST) forwarding its data_api port (9100 -- the VPS's own
 ## default, NOT $(DATA_API_PORT), which is LOCAL_DEV's shifted port for the
 ## locally-run containers `frontend-dev` starts above) to the same local port,
-## idempotent via fuser -- same pattern as ~/.zshrc's `_troll_tunnel_ensure`
+## idempotent via fuser -- same pattern as ~/.zshrc's `_platform_tunnel_ensure`
 ## (platform/CLAUDE.md's "Desktop <-> VPS Connection"), self-contained here since that
 ## shell function lives outside this repo. Then runs Vite with DATA_API_PORT
 ## overridden to the tunnel's local end. Only the data_api tunnel is needed --
 ## data_api is the sole thing the frontend talks to; it owns its own redis
 ## subscription on the VPS side.
-TROLL_VPS_HOST ?= nifelheim
+PLATFORM_VPS_HOST ?= nifelheim
 ## A listener on 9100 is NOT proof the tunnel works -- a stale `ssh -f` keeps the local
 ## port open after its connection dies, and every /api call then fails while Vite still
 ## looks fine (blank chart). So health-check THROUGH the tunnel, and recycle it if it
@@ -548,7 +562,7 @@ frontend-remote:
 	curl -sf -m 5 http://127.0.0.1:9100/api/health >/dev/null 2>&1 || { \
 		pkill -f "^ssh .*-L 9100:127.0.0.1:9100" || true; sleep 1; \
 		ssh -f -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-			-L 9100:127.0.0.1:9100 $(TROLL_VPS_HOST); }
+			-L 9100:127.0.0.1:9100 $(PLATFORM_VPS_HOST); }
 	curl -sf -m 10 http://127.0.0.1:9100/api/health >/dev/null || { \
 		echo "data_api unreachable via tunnel on 9100 (VPS data_api down/restarting?)"; exit 1; }
 	cd $(PLATFORM_DIR)frontend && DATA_API_PORT=9100 npm run dev

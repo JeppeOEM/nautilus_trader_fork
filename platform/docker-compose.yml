@@ -55,7 +55,7 @@ services:
     ports:
       # Host-side port only -- redis inside the container always listens on 6379
       # regardless. LOCAL_DEV shifts this (see Makefile) so a local dev stack doesn't
-      # steal the port troll-web's SSH tunnel forwards from the VPS's real redis.
+      # steal the port platform-web's SSH tunnel forwards from the VPS's real redis.
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     restart: always
     logging: *default-logging
